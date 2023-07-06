@@ -19,7 +19,6 @@
 
 #include "memory/cache_manager.h"
 #include "util/container/array/ordered_resizeable_array_with_multi_word_key.h"
-#include "util/container/list/bidirectional_linked_list.h"
 #include "definitions_cxx.hpp"
 
 struct EmptySpaceRecord {
@@ -42,7 +41,7 @@ struct NeighbouringMemoryGrabAttemptResult {
 
 class MemoryRegion {
 public:
-	MemoryRegion();
+	MemoryRegion() : emptySpaces(sizeof(EmptySpaceRecord)) {}
 	void setup(void* emptySpacesMemory, int emptySpacesMemorySize, uint32_t regionBegin, uint32_t regionEnd);
 	void* alloc(uint32_t requiredSize, uint32_t* getAllocatedSize, bool makeStealable, void* thingNotToStealFrom,
 	            bool getBiggestAllocationPossible);
@@ -55,7 +54,6 @@ public:
 	void verifyMemoryNotFree(void* address, uint32_t spaceSize);
 
 	OrderedResizeableArrayWithMultiWordKey emptySpaces;
-	int numAllocations;
 
 	CacheManager& cache_manager() { return cache_manager_; }
 

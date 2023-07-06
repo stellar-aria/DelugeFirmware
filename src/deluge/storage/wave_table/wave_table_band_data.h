@@ -23,11 +23,11 @@ class WaveTable;
 
 class WaveTableBandData final : public Stealable {
 public:
-	WaveTableBandData(WaveTable* newWaveTable);
+	WaveTableBandData(WaveTable* newWaveTable) : waveTable(newWaveTable) {}
 
-	bool mayBeStolen(void* thingNotToStealFrom = NULL);
-	void steal(char const* errorCode);
-	int getAppropriateQueue();
+	bool mayBeStolen(void* thingNotToStealFrom = nullptr) override;
+	void steal(char const* errorCode) override;
+	int getAppropriateQueue() override;
 
 	WaveTable* waveTable;
 };

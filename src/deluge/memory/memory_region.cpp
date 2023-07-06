@@ -24,10 +24,6 @@
 #include "util/functions.h"
 #include "hid/display/numeric_driver.h"
 
-MemoryRegion::MemoryRegion() : emptySpaces(sizeof(EmptySpaceRecord)) {
-	numAllocations = 0;
-}
-
 void MemoryRegion::setup(void* emptySpacesMemory, int emptySpacesMemorySize, uint32_t regionBegin, uint32_t regionEnd) {
 	emptySpaces.setStaticMemory(emptySpacesMemory, emptySpacesMemorySize);
 
@@ -40,7 +36,7 @@ void MemoryRegion::setup(void* emptySpacesMemory, int emptySpacesMemorySize, uin
 	*(uint32_t*)(regionEnd - 4) = SPACE_HEADER_ALLOCATED;
 
 	emptySpaces.insertAtIndex(0);
-	EmptySpaceRecord* firstRecord = (EmptySpaceRecord*)emptySpaces.getElementAddress(0);
+	auto* firstRecord = static_cast<EmptySpaceRecord*>(emptySpaces.getElementAddress(0));
 	firstRecord->length = memorySizeWithoutHeaders;
 	firstRecord->address = regionBegin + 8;
 }

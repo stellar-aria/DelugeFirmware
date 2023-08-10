@@ -18,6 +18,8 @@
 #pragma once
 
 #include "gui/ui/keyboard/layout.h"
+#include <limits>
+#include <stdint.h>
 
 namespace deluge::gui::ui::keyboard::layout {
 
@@ -71,7 +73,7 @@ private:
 		}
 		int32_t octave = (((note + kOctaveSize) - rootNote) / kOctaveSize) - 1;
 		// Make sure we don't go into negative because our root note is lower than C-2
-		return std::max<uint16_t>(0, octave * scaleNoteCount + padScaleOffset);
+		return std::max<int32_t>(octave * scaleNoteCount + padScaleOffset, std::numeric_limits<uint16_t>::min());
 	}
 
 	// inline uint16_t padIndexFromNote(uint16_t note) {

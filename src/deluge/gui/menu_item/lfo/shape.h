@@ -17,10 +17,11 @@
 #pragma once
 #include "definitions_cxx.hpp"
 #include "gui/menu_item/selection.h"
+#include <string>
 
 namespace deluge::gui::menu_item::lfo {
 
-class Shape : public Selection<kNumLFOTypes> {
+class Shape : public Selection<kNumLFOTypes + 1> {
 public:
 	using Selection::Selection;
 

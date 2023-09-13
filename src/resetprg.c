@@ -60,6 +60,7 @@
 #include "RZA1/uart/sio_char.h"
 #include "definitions.h"
 #include "deluge/deluge.h"
+#include <stdio.h>
 #include <string.h> //memset
 
 #if defined(__thumb2__) || (defined(__thumb__) && defined(__ARM_ARCH_6M__))
@@ -85,6 +86,14 @@ void _init(void) {
 void _fini(void) {
 	// empty
 }
+
+void _exit(int status) {
+	while (1) {
+		;
+	}
+}
+
+FILE *const stderr = NULL;
 
 /*******************************************************************************
  * Function Name: resetprg

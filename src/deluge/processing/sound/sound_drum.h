@@ -33,6 +33,8 @@ public:
 	ArpeggiatorSettings arpSettings;
 
 	SoundDrum();
+	~SoundDrum() override = default;
+
 	bool isDrum() { return true; }
 	bool allowNoteTails(ModelStackWithSoundFlags* modelStack, bool disregardSampleLoop = false);
 	bool anyNoteIsOn();

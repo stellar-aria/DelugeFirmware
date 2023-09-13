@@ -26,8 +26,7 @@ public:
 	};
 
 	/** @brief Builder-style constructor for creating localization language maps (compile-time only) */
-	consteval Language(char const* name, std::initializer_list<entry_type> stringmaps,
-	                   const Language* fallback = nullptr)
+	Language(char const* name, std::initializer_list<entry_type> stringmaps, const Language* fallback = nullptr)
 	    : name_(name), fallback_(fallback) {
 
 		// Replace with stringmap values for valid entries

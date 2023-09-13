@@ -4,7 +4,7 @@
 
 namespace deluge::l10n::built_in {
 using enum String;
-constexpr Language english{
+Language english{
     "English",
     {
         {EMPTY_STRING, ""},

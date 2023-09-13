@@ -322,7 +322,7 @@ extensionNotSupported:
 					goto nonNumericFile;
 				}
 
-				char* dotAddress = strrchr(storedFilenameChars, '.');
+				char const* dotAddress = strrchr(storedFilenameChars, '.');
 				if (!dotAddress) {
 					goto nonNumericFile; // Shouldn't happen?
 				}

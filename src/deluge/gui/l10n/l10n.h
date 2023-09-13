@@ -1,7 +1,5 @@
 #pragma once
-#include "gui/l10n/english.h"
 #include "gui/l10n/language.h"
-#include "gui/l10n/seven_segment.h"
 #include "util/misc.h"
 #include <array>
 #include <cstddef>
@@ -9,6 +7,12 @@
 #include <optional>
 
 namespace deluge::l10n {
+
+namespace built_in {
+extern Language english;
+extern Language seven_segment;
+} // namespace built_in
+
 constexpr std::string_view getView(const Language& language, l10n::String string) {
 	auto string_opt = language.get(string);
 	if (string_opt.has_value()) {

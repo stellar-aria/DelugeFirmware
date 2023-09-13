@@ -19,11 +19,10 @@
 
 #include "definitions_cxx.hpp"
 #include <cstdint>
+#include <arm_neon.h>
 
 #define REASSESSMENT_ACTION_STOP_OR_LOOP 0
 #define REASSESSMENT_ACTION_NEXT_CLUSTER 1
-
-typedef __simd64_int16_t int16x4_t;
 
 class VoiceSamplePlaybackGuide;
 class Voice;

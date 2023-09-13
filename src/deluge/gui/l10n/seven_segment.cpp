@@ -1,11 +1,11 @@
 #pragma once
-#include "gui/l10n/english.h"
 #include "gui/l10n/language.h"
 #include "gui/l10n/strings.h"
 
 namespace deluge::l10n::built_in {
+extern Language english;
 using enum String;
-constexpr Language seven_segment{
+Language seven_segment{
     "Seven Segment",
     {
         //Errors

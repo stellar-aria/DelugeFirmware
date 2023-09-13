@@ -31,7 +31,7 @@
 /*******************************************************************************
 * History       : DD.MM.YYYY Version Description
 *               : 21.10.2014 1.00
-/*******************************************************************************/
+********************************************************************************/
 
 /* Standard definitions of mode bits and interrupt (I & F) flags in PSRs */
     .equ    SYS_MODE          , 0x1F
@@ -71,7 +71,6 @@ fiq_handler_end:
 /* ================================================================== */
 /* Entry point for the IRQ handler */
 /* ================================================================== */
-    .func irq_handler
 irq_handler:
     SUB        lr, lr, #4
     SRSDB    sp!, #SYS_MODE
@@ -95,5 +94,4 @@ irq_handler:
 
 Literals3:
 
-    .endfunc
     .end

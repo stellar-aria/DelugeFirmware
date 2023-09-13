@@ -106,7 +106,7 @@ extern const uint8_t rxDmaChannels[];
 extern char const timingCaptureItems[];
 extern uint16_t const timingCaptureBufferSizes[];
 extern uint32_t* const timingCaptureBuffers[];
-extern const void (*txInterruptFunctions[])(uint32_t);
+extern void (*txInterruptFunctions[])(uint32_t);
 extern const uint8_t txInterruptPriorities[];
 extern const uint32_t* const uartRxLinkDescriptors[];
 extern uint8_t const timingCaptureDMAChannels[];

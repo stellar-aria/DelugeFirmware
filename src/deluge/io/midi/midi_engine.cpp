@@ -796,7 +796,7 @@ void MidiEngine::checkIncomingUsbMidi() {
 
 					connectedUSBMIDIDevices[ip][d].numBytesReceived = 0;
 
-					__restrict__ uint8_t const* readPos = connectedUSBMIDIDevices[ip][d].receiveData;
+					uint8_t const* __restrict__ readPos = connectedUSBMIDIDevices[ip][d].receiveData;
 					const uint8_t* const stopAt = readPos + bytesReceivedHere;
 
 					// Receive all the stuff from this device

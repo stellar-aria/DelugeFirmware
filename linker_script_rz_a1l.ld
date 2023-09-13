@@ -185,6 +185,21 @@ SECTIONS
 		. = ALIGN(0x4);
 	} > RAM012L
 	
+	.data : 
+	{
+		. = ALIGN(0x8);
+		address_start_data_ROM = .;
+		_data = .;
+		_sdata = .;
+		*(.data)
+		*(.data*)
+		*(.igot.plt)
+		*(.got.plt) 
+		*(.got)
+		.	= ALIGN(0x8);
+		address_end_data_ROM = .;
+		_edata = .;
+	} > RAM012L
 	
 	.preinit_array :
 	{
@@ -215,23 +230,6 @@ SECTIONS
 		 *(.ARM.exidx*) 
 		 *(.gnu.linkonce.armexidx.*)
 		PROVIDE_HIDDEN(__exidx_end = .);
-	} > RAM012L
-
-	
-	.data : 
-	{
-		. = ALIGN(0x8);
-		address_start_data_ROM = .;
-		_data = .;
-		_sdata = .;
-		*(.data)
-		*(.data*)
-		*(.igot.plt)
-		*(.got.plt) 
-		*(.got)
-		.	= ALIGN(0x8);
-		address_end_data_ROM = .;
-		_edata = .;
 	} > RAM012L
 
 	.tors :

@@ -18,8 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
-
-typedef __simd64_int16_t int16x4_t;
+#include <arm_neon.h>
 
 #define PLAY_HEAD_MODE_REPITCHED_BUFFER 0
 #define PLAY_HEAD_MODE_RAW_REPITCHING 1

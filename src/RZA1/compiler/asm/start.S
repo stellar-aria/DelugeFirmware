@@ -46,7 +46,6 @@
     .code 32
 
     .global start
-    .func   start
 
 start:
     LDR pc, =reset_handler                 /* Reset Vector                                  */

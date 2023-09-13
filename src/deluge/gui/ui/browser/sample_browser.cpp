@@ -1929,7 +1929,7 @@ getOut:
 
 				range = source->getOrCreateFirstRange();
 				if (!range) {
-					drum->~Drum();
+					drum->~SoundDrum();
 					GeneralMemoryAllocator::get().dealloc(drumMemory);
 					goto getOut;
 				}

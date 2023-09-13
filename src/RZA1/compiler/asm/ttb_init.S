@@ -64,9 +64,8 @@
 * This code provides basic global enable for Cortex-A9 cache. 
 * It also enables branch prediction 
 * This code must be run from a privileged mode 
-/******************************************************************************/
+*******************************************************************************/
     .global    init_TTB
-    .func init_TTB
 
 init_TTB:
 /*******************************************************************************
@@ -231,6 +230,5 @@ write_ttb:
     BPL  set_mem_accsess            
 
     BX   lr
-    .endfunc
     .end
     .align 4

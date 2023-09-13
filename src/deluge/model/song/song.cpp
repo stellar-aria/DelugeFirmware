@@ -4025,7 +4025,7 @@ void Song::setHibernatingMIDIInstrument(MIDIInstrument* newInstrument) {
 void Song::deleteHibernatingMIDIInstrument() {
 	if (hibernatingMIDIInstrument) {
 		void* toDealloc = dynamic_cast<void*>(hibernatingMIDIInstrument);
-		hibernatingMIDIInstrument->~Instrument();
+		hibernatingMIDIInstrument->~MIDIInstrument();
 		GeneralMemoryAllocator::get().dealloc(toDealloc);
 		hibernatingMIDIInstrument = NULL;
 	}

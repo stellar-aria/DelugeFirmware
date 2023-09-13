@@ -37,7 +37,6 @@
     .code 32
     .global initsct
 
-    .func   initsct
 initsct:
 /*
     LDR  r0, = address_start_data_RAM
@@ -63,5 +62,4 @@ bss_clear_memory:
 bss_finished:
     ISB
     BX     lr
-    .endfunc
     .end

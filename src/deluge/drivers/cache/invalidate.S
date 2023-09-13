@@ -27,8 +27,6 @@
 
 	.global v7_dma_inv_range
 
-	.func v7_dma_inv_range
-
 v7_dma_inv_range:
          dcache_line_size r2, r3
          sub     r3, r2, #1
@@ -50,11 +48,8 @@ v7_dma_inv_range:
          blo     1b
          dsb     st
          bx     lr
-	.endfunc
 
 	.global v7_dma_flush_range
-
-	.func v7_dma_flush_range
 
 v7_dma_flush_range:
 		dcache_line_size r2, r3
@@ -71,7 +66,6 @@ v7_dma_flush_range:
 		blo     1b
 		dsb
 		mov     pc, lr
-	.endfunc
 
 	.align 4
 	.end

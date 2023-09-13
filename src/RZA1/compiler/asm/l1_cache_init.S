@@ -40,7 +40,6 @@
 
 	.global R_CACHE_L1Init
 
-	.func R_CACHE_L1Init
 R_CACHE_L1Init:
 
 /******************************************************************************/
@@ -72,6 +71,5 @@ R_CACHE_L1Init:
 
 	BX   lr
 
-	.endfunc
 	.align 4
 	.end

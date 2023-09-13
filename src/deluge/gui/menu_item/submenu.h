@@ -99,7 +99,8 @@ void Submenu<n>::drawPixelsForOled() {
 
 	// This finds the next relevant submenu item
 	static_vector<std::string_view, kOLEDMenuNumOptionsVisible> nextItemNames = {};
-	for (auto it = current_item_, idx = selectedRow; it != this->items.end() && idx < kOLEDMenuNumOptionsVisible;
+	int32_t idx = selectedRow;
+	for (auto *it = current_item_; it != this->items.end() && idx < kOLEDMenuNumOptionsVisible;
 	     it++) {
 		if ((*it)->isRelevant(soundEditor.currentSound, soundEditor.currentSourceIndex)) {
 			nextItemNames.push_back((*it)->getName());
@@ -108,7 +109,8 @@ void Submenu<n>::drawPixelsForOled() {
 	}
 
 	static_vector<std::string_view, kOLEDMenuNumOptionsVisible> prevItemNames = {};
-	for (auto it = current_item_ - 1, idx = selectedRow - 1; it != this->items.begin() - 1 && idx >= 0; it--) {
+	idx = selectedRow - 1;
+	for (auto *it = current_item_ - 1; it != this->items.begin() - 1 && idx >= 0; it--) {
 		if ((*it)->isRelevant(soundEditor.currentSound, soundEditor.currentSourceIndex)) {
 			prevItemNames.push_back((*it)->getName());
 			idx--;

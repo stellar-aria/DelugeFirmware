@@ -31,6 +31,7 @@ class MIDIDevice;
 class MelodicInstrument : public Instrument {
 public:
 	MelodicInstrument(InstrumentType newType) : Instrument(newType) {}
+	~MelodicInstrument() override = default;
 
 	// Check activeClip before you call!
 	// mpeValues must be provided for a note-on (can be 0s). Otherwise, can be NULL pointer

@@ -17,10 +17,8 @@
 
 #pragma once
 
-#include "gui/l10n/english.h"
-#include "gui/l10n/language.h"
-#include "gui/l10n/seven_segment.h"
 #ifdef __cplusplus
+#include "gui/l10n/l10n.h"
 #include "definitions_cxx.hpp"
 #include "display.h"
 #include <string>

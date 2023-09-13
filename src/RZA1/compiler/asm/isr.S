@@ -41,32 +41,24 @@
     .global __enable_fiq
     .global __disable_fiq
 
-    .func   __enable_irq
 __enable_irq:
     CPSIE   i
     ISB
     BX        lr
-    .endfunc
 
-    .func   __disable_irq
 __disable_irq:
     CPSID   i
     ISB
     BX        lr
-    .endfunc
 
-    .func   __enable_fiq
 __enable_fiq:
     CPSIE   f
     ISB
     BX        lr
-    .endfunc
 
-    .func   __disable_fiq
 __disable_fiq:
     CPSID   f
     ISB
     BX        lr
-    .endfunc
     .end
     .align 4

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/scripts/cmake/CMakeToolchainDeluge.cmake)
+set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/scripts/cmake/DelugeToolchainLLVM.cmake)
 
 project(Deluge
     LANGUAGES CXX C ASM
@@ -91,7 +91,6 @@ add_compile_options(
     $<$<CONFIG:DEBUG>:-g> # Include
     $<$<CONFIG:DEBUG>:-ggdb> # Include
     $<$<CONFIG:RELWITHDEBINFO>:-g> # Include
-    $<$<CONFIG:RELEASE>:-s> # Strip
 
     # Optimization level
     $<$<CONFIG:DEBUG>:-Og>
@@ -119,7 +118,6 @@ add_link_options(
     -T ${PROJECT_SOURCE_DIR}/linker_script_rz_a1l.ld
     LINKER:--gc-sections
 
-    -nostartfiles # Don't emit startfiles
     -estart # Set the entrypoint to 'start' (see RZA1/compiler/asm/start.S)
 )
 
@@ -135,8 +133,10 @@ if(FORCE_COLORED_OUTPUT)
         message(STATUS "Forcing colors for GCC")
         add_compile_options(-fdiagnostics-color=always)
         add_link_options(-fdiagnostics-color=always)
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    elseif(./ STREQUAL "Clang")
         message(STATUS "Forcing colors for Clang")
+        add_compile_options(-fdiagnostics-color=always)
+        add_link_options(-fdiagnostics-color=always)
         add_compile_options(-fcolor-diagnostics)
     endif()
 endif(FORCE_COLORED_OUTPUT)
@@ -204,6 +204,7 @@ target_compile_options(deluge PUBLIC
     # $<$<CONFIG:DEBUG>:-Wpedantic> # TODO: Enable when ready
     $<$<CONFIG:DEBUG>:-Wnull-dereference>
     $<$<CONFIG:DEBUG>:-Wno-psabi>
+    -Wno-inconsistent-missing-override
 
     $<$<CONFIG:DEBUG>:-Werror=write-strings>
 
@@ -213,9 +214,9 @@ target_compile_options(deluge PUBLIC
     # Stack usage
     # tracked for diagnostic usage. We have a 32k stack so it's not that important
     # primarily concerned with unbounded stack use
-    $<$<CONFIG:DEBUG>:-Wstack-usage=2000>
-    $<$<CONFIG:RELWITHDEBINFO>:-Wstack-usage=2000>
-    $<$<CONFIG:RELEASE>:-Wstack-usage=2000>
+    #$<$<CONFIG:DEBUG>:-Wstack-usage=2000>
+    #$<$<CONFIG:RELWITHDEBINFO>:-Wstack-usage=2000>
+    #$<$<CONFIG:RELEASE>:-Wstack-usage=2000>
 )
 
 set_target_properties(deluge
@@ -234,6 +235,7 @@ set(MAP_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.map)
 
 # add link options to generate memory map
 target_link_options(deluge PUBLIC
+    $<$<CONFIG:RELEASE>:-s> # Strip
     LINKER:-Map=${MAP_FILE}
     LINKER:--cref
 )

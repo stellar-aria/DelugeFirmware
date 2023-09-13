@@ -2094,7 +2094,7 @@ void Song::renderAudio(StereoSample* outputBuffer, int32_t numSamples, int32_t* 
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, this);
 
-	for (Output* output = firstOutput; output; output = output->next) {
+	for (Output* output = firstOutput; output != nullptr; output = output->next) {
 		if (!output->inValidState) {
 			continue;
 		}

@@ -270,7 +270,7 @@ SECTIONS
 		PROVIDE(_nl_heap_end = .);
 	} > RAM012L
 
-	.program_stack (INTERNAL_RAM_END - PROGRAM_STACK_SIZE) :
+	.program_stack (INTERNAL_RAM_END - PROGRAM_STACK_SIZE) (NOLOAD):
 	{
 		program_stack_start = .;
 		.  += PROGRAM_STACK_SIZE;

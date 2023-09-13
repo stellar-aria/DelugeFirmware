@@ -587,7 +587,7 @@ startAgain:
 	uint16_t startTime = MTU2.TCNT_0;
 #endif
 
-	if (sideChainHitPending) {
+	if (sideChainHitPending != 0) {
 		timeLastSideChainHit = audioSampleTimer;
 		sizeLastSideChainHit = sideChainHitPending;
 	}
@@ -595,7 +595,7 @@ startAgain:
 	numHopsEndedThisRoutineCall = 0;
 
 	// Render audio for song
-	if (currentSong) {
+	if (currentSong != nullptr) {
 		currentSong->renderAudio(renderingBuffer, numSamples, reverbBuffer, sideChainHitPending);
 	}
 
@@ -705,7 +705,7 @@ startAgain:
 	masterVolumeAdjustmentR = 167763968; //getParamNeutralValue(Param::Global::VOLUME_POST_FX);
 	// 167763968 is 134217728 made a bit bigger so that default filter resonance doesn't reduce volume overall
 
-	if (currentSong) {
+	if (currentSong != nullptr) {
 		currentSong->globalEffectable.setupFilterSetConfig(&masterVolumeAdjustmentL, &currentSong->paramManager);
 		currentSong->globalEffectable.processFilters(renderingBuffer, numSamples);
 		currentSong->globalEffectable.processSRRAndBitcrushing(renderingBuffer, numSamples, &masterVolumeAdjustmentL,

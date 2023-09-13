@@ -950,10 +950,10 @@ void InstrumentClip::toggleNoteRowMute(ModelStackWithNoteRow* modelStack) {
 
 // May set noteRow to NULL, of course.
 ModelStackWithNoteRow* InstrumentClip::getNoteRowOnScreen(int32_t yDisplay, ModelStackWithTimelineCounter* modelStack) {
-	int32_t noteRowIndex;
+	int32_t noteRowIndex = 0;
 	NoteRow* noteRow = getNoteRowOnScreen(yDisplay, modelStack->song, &noteRowIndex);
-	int32_t noteRowId;
-	if (noteRow) {
+	int32_t noteRowId = 0;
+	if (noteRow != nullptr) {
 		noteRowId = getNoteRowId(noteRow, noteRowIndex);
 	}
 	return modelStack->addNoteRow(noteRowId, noteRow);
@@ -964,9 +964,9 @@ NoteRow* InstrumentClip::getNoteRowOnScreen(int32_t yDisplay, Song* song, int32_
 	if (output->type == InstrumentType::KIT) {
 		int32_t i = yDisplay + yScroll;
 		if (i < 0 || i >= noteRows.getNumElements()) {
-			return NULL;
+			return nullptr;
 		}
-		if (getIndex) {
+		if (getIndex != nullptr) {
 			*getIndex = i;
 		}
 		return noteRows.getElement(i);

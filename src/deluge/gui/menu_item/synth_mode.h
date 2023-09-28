@@ -38,6 +38,7 @@ public:
 		    l10n::getView(l10n::String::STRING_FOR_SUBTRACTIVE),
 		    l10n::getView(l10n::String::STRING_FOR_FM),
 		    l10n::getView(l10n::String::STRING_FOR_RINGMOD),
+			l10n::getView(l10n::String::STRING_FOR_DRUM),
 		};
 	}
 

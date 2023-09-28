@@ -604,6 +604,7 @@ enum class SynthMode {
 	SUBTRACTIVE,
 	FM,
 	RINGMOD,
+	DRUM
 };
 constexpr int kNumSynthModes = util::to_underlying(::SynthMode::RINGMOD) + 1;
 

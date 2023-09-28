@@ -382,6 +382,7 @@ PLACE_SDRAM_DATA Language seven_segment{
 
         {STRING_FOR_PAD_SELECTION_OFF, "OFF"},
         {STRING_FOR_PAD_SELECTION_ON, "ON"},
+		{STRING_FOR_DRUM, "DRUM"}
 
     },
     &built_in::english,

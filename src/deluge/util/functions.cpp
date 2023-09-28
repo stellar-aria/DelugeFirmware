@@ -1264,6 +1264,9 @@ char const* synthModeToString(SynthMode synthMode) {
 	case SynthMode::RINGMOD:
 		return "ringmod";
 
+	case SynthMode::DRUM:
+		return "drum";
+
 	default:
 		return "subtractive";
 	}
@@ -1273,12 +1276,14 @@ SynthMode stringToSynthMode(char const* string) {
 	if (!strcmp(string, "fm")) {
 		return SynthMode::FM;
 	}
-	else if (!strcmp(string, "ringmod")) {
+	if (!strcmp(string, "ringmod")) {
 		return SynthMode::RINGMOD;
 	}
-	else {
-		return SynthMode::SUBTRACTIVE;
+	if (!strcmp(string, "drum")) {
+		return SynthMode::DRUM;
 	}
+
+	return SynthMode::SUBTRACTIVE;
 }
 
 char const* polyphonyModeToString(PolyphonyMode synthMode) {

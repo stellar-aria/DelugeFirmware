@@ -770,6 +770,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_FILL, "Fill"},
         {STRING_FOR_PAD_SELECTION_OFF, "Pad Selection Off"},
         {STRING_FOR_PAD_SELECTION_ON, "Pad Selection On"},
+		{STRING_FOR_DRUM, "DRUM"}
     },
 };
 } // namespace deluge::l10n::built_in

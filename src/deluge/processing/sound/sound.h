@@ -198,7 +198,7 @@ public:
 	int16_t getMaxOscTranspose(InstrumentClip* clip);
 	int16_t getMinOscTranspose();
 	void setSynthMode(SynthMode value, Song* song);
-	inline SynthMode getSynthMode() { return synthMode; }
+	[[nodiscard]] constexpr SynthMode getSynthMode() const { return synthMode; }
 	bool anyNoteIsOn();
 	virtual bool isDrum() { return false; }
 	void setupAsSample(ParamManagerForTimeline* paramManager);

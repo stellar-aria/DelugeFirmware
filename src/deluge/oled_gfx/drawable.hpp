@@ -4,8 +4,7 @@ namespace gfx {
 
 class Canvas; // forward declaration
 
-class Drawable {
-public:
+struct Drawable {
 	virtual void drawTo(Canvas& canvas, bool on) const = 0;
 };
 } // namespace gfx

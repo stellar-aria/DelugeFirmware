@@ -8,6 +8,9 @@ struct Circle : Drawable {
 	Point origin;
 	int radius;
 
+	Circle(Point origin, int radius) : origin(origin), radius(radius) {};
+	virtual ~Circle() = default;
+
 	void drawTo(Canvas &canvas, bool on) const override;
 };
 } // namespace gfx

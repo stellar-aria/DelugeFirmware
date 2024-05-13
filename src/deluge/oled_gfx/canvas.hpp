@@ -98,7 +98,7 @@ public:
 	 * @return true
 	 * @return false
 	 */
-	bool needs_update() { return needs_update_; }
+	[[nodiscard]] bool needsUpdate() const { return needs_update_; }
 
 	/**
 	 * @brief Mark the canvas as dirty so that it will be written the next time write() is called
@@ -107,7 +107,7 @@ public:
 	void dirty() { needs_update_ = true; }
 
 private:
-	std::array<pixel_repr_t, length> buffer_{0};
-	bool needs_update_ = false;
+	alignas(int32_t) std::array<pixel_repr_t, length> buffer_{0};
+	bool needs_update_ = true;
 };
 } // namespace gfx

@@ -19,17 +19,17 @@ void Circle::drawTo(Canvas& canvas, bool on) const {
 	int x = 0;
 	int y = radius;
 	int d = 3 - 2 * radius;
+	drawCircleSegments(this->origin, Point{x, y}, canvas, on);
 	while (x <= y) {
-		drawCircleSegments(this->origin, Point{x, y}, canvas, on);
-
 		if (d > 0) {
 			--y;
-			d = d + 4 * (x - y) + 10;
+			d = d + (4 * x) - (4 * y) + 10;
 		}
 		else {
-			d = d + 4 * x + 6;
+			d = d + (4 * x) + 6;
 		}
 		++x;
+		drawCircleSegments(this->origin, Point{x, y}, canvas, on);
 	}
 }
 

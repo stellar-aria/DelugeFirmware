@@ -37,6 +37,7 @@
 #include "gui/views/view.h"
 #include "hid/buttons.h"
 #include "hid/display/display.h"
+#include "hid/display/dummy.h"
 #include "hid/display/oled.h"
 #include "hid/display/seven_segment.h"
 #include "hid/encoders.h"
@@ -55,6 +56,10 @@
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/params/param_manager.h"
+#include "oled_gfx/canvas.hpp"
+#include "oled_gfx/primitives/circle.hpp"
+#include "oled_gfx/primitives/line_segment.hpp"
+#include "oled_gfx/primitives/rect.hpp"
 #include "playback/mode/arrangement.h"
 #include "playback/mode/session.h"
 #include "processing/engines/audio_engine.h"
@@ -65,6 +70,7 @@
 #include "task_scheduler.h"
 #include "util/misc.h"
 #include "util/pack.h"
+#include <stdalign.h>
 #include <stdlib.h>
 
 #if AUTOMATED_TESTER_ENABLED
@@ -107,6 +113,8 @@ int32_t voltageReadingLastTime = 65535 * 3300;
 uint8_t batteryCurrentRegion = 2;
 uint16_t batteryMV;
 bool batteryLEDState = false;
+
+alignas(int32_t) gfx::Canvas canvas;
 
 void batteryLEDBlink() {
 	setOutputState(BATTERY_LED.port, BATTERY_LED.pin, batteryLEDState);
@@ -690,12 +698,13 @@ extern "C" int32_t deluge_main(void) {
 		setupSPIInterrupts();
 		oledDMAInit();
 		setupOLED(); // Set up OLED now
-		display = new deluge::hid::display::OLED;
+		             // display = new deluge::hid::display::OLED;
 	}
 	else {
 		setPinMux(SPI_SSL.port, SPI_SSL.pin, 3); // SSL
-		display = new deluge::hid::display::SevenSegment;
+		                                         // display = new deluge::hid::display::SevenSegment;
 	}
+	display = new deluge::hid::display::Dummy;
 	// remember the physical display type
 	deluge::hid::display::have_oled_screen = have_oled;
 
@@ -900,6 +909,25 @@ extern "C" int32_t deluge_main(void) {
 
 	D_PRINTLN("going into main loop");
 	sdRoutineLock = false; // Allow SD routine to start happening
+
+	gfx::Rect rect{{50, 10}, {20, 20}};
+	// gfx::LineSegment lineseg{{5,5}, {25, 25}};
+	gfx::Circle circle{{25, 25}, 5};
+	gfx::Circle circle1{{25, 25}, 7};
+	gfx::Circle circle2{{25, 25}, 9};
+	gfx::Circle circle3{{25, 25}, 11};
+	gfx::Circle circle4{{25, 25}, 3};
+	gfx::Circle circle5{{25, 25}, 1};
+
+	canvas.clear();
+	canvas.draw(circle);
+	canvas.draw(circle1);
+	canvas.draw(circle2);
+	canvas.draw(circle3);
+	canvas.draw(circle4);
+	canvas.draw(circle5);
+	canvas.draw(rect);
+	canvas.write();
 
 #ifdef USE_TASK_MANAGER
 	registerTasks();

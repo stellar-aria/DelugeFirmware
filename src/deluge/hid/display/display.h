@@ -10,7 +10,7 @@ extern "C" {
 class NumericLayer;
 class NumericLayerScrollingText;
 
-enum DisplayPopupType {
+enum class DisplayPopupType {
 	NONE,
 	/// Default popup type, if not specified.
 	GENERAL,
@@ -23,7 +23,7 @@ enum DisplayPopupType {
 
 namespace deluge::hid {
 
-enum struct DisplayType { OLED, SEVENSEG };
+enum struct DisplayType { OLED, SEVENSEG, DUMMY };
 
 class Display {
 public:
@@ -96,14 +96,13 @@ private:
 	DisplayType displayType;
 };
 
-} // namespace deluge::hid
-
-extern deluge::hid::Display* display;
-
-namespace deluge::hid::display {
+namespace display {
 void swapDisplayType();
 // physical screen is oled
 extern bool have_oled_screen;
-} // namespace deluge::hid::display
+} // namespace display
+} // namespace deluge::hid
+
+extern deluge::hid::Display* display;
 
 extern "C" void consoleTextIfAllBootedUp(char const* text);

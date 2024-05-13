@@ -7,6 +7,9 @@ namespace gfx {
 		Point start;
 		Point end;
 
+		LineSegment(Point start, Point end) : start(start), end(end) {};
+		virtual ~LineSegment() = default;
+
 		void drawTo(Canvas &canvas, bool on) const override;
 	};
 }

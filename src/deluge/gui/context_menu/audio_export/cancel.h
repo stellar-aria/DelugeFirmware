@@ -19,10 +19,10 @@
 
 #include "gui/context_menu/context_menu.h"
 
-namespace deluge::gui::context_menu {
-class CancelStemExport final : public ContextMenu {
+namespace deluge::gui::context_menu::audio_export {
+class Cancel final : public ContextMenu {
 public:
-	CancelStemExport() = default;
+	Cancel() = default;
 
 	Sized<char const**> getOptions() override;
 	bool acceptCurrentOption() override;
@@ -31,5 +31,5 @@ public:
 	char const* getTitle() override;
 };
 
-extern CancelStemExport cancelStemExport;
-} // namespace deluge::gui::context_menu
+extern Cancel cancel;
+} // namespace deluge::gui::context_menu::audio_export

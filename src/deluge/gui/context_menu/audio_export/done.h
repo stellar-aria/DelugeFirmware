@@ -19,10 +19,10 @@
 
 #include "gui/context_menu/context_menu.h"
 
-namespace deluge::gui::context_menu {
-class DoneStemExport final : public ContextMenu {
+namespace deluge::gui::context_menu::audio_export {
+class Done final : public ContextMenu {
 public:
-	DoneStemExport() = default;
+	Done() = default;
 
 	Sized<char const**> getOptions() override;
 	bool acceptCurrentOption() override;
@@ -31,5 +31,5 @@ public:
 	char const* getTitle() override;
 };
 
-extern DoneStemExport doneStemExport;
-} // namespace deluge::gui::context_menu
+extern Done done;
+} // namespace deluge::gui::context_menu::audio_export

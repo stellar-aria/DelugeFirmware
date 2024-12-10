@@ -18,8 +18,8 @@
 #include "processing/stem_export/stem_export.h"
 #include "definitions_cxx.hpp"
 #include "extern.h"
-#include "gui/context_menu/stem_export/cancel_stem_export.h"
-#include "gui/context_menu/stem_export/done_stem_export.h"
+#include "gui/context_menu/audio_export/cancel.h"
+#include "gui/context_menu/audio_export/done.h"
 #include "gui/l10n/l10n.h"
 #include "gui/ui/audio_recorder.h"
 #include "gui/views/arranger_view.h"
@@ -593,10 +593,10 @@ void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t 
 	}
 
 	// display stem export completed context menu
-	bool available = context_menu::doneStemExport.setupAndCheckAvailability();
+	bool available = context_menu::audio_export::done.setupAndCheckAvailability();
 	if (available) {
 		display->setNextTransitionDirection(1);
-		openUI(&context_menu::doneStemExport);
+		openUI(&context_menu::audio_export::done);
 	}
 
 	// exit out of the stem export UI mode

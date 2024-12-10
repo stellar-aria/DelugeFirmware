@@ -26,7 +26,7 @@
 #include "gui/context_menu/clip_settings/new_clip_type.h"
 #include "gui/context_menu/context_menu.h"
 #include "gui/context_menu/midi_learn_mode.h"
-#include "gui/context_menu/stem_export/cancel_stem_export.h"
+#include "gui/context_menu/audio_export/cancel.h"
 #include "gui/menu_item/colour.h"
 #include "gui/ui/keyboard/keyboard_screen.h"
 #include "gui/ui/load/load_instrument_preset_ui.h"
@@ -421,11 +421,11 @@ moveAfterClipInstance:
 	// cancel stem export process
 	else if (b == BACK && isUIModeActive(UI_MODE_STEM_EXPORT)) {
 		if (on) {
-			bool available = context_menu::cancelStemExport.setupAndCheckAvailability();
+			bool available = context_menu::audio_export::cancel.setupAndCheckAvailability();
 
 			if (available) {
 				display->setNextTransitionDirection(1);
-				openUI(&context_menu::cancelStemExport);
+				openUI(&context_menu::audio_export::cancel);
 			}
 		}
 	}

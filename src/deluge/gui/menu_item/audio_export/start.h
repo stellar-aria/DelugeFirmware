@@ -22,7 +22,7 @@
 #include "gui/views/session_view.h"
 #include "processing/stem_export/stem_export.h"
 
-namespace deluge::gui::menu_item::stem_export {
+namespace deluge::gui::menu_item::audio_export {
 class Start final : public MenuItem {
 public:
 	using MenuItem::MenuItem;
@@ -46,4 +46,4 @@ public:
 
 	bool shouldEnterSubmenu() override { return false; }
 };
-} // namespace deluge::gui::menu_item::stem_export
+} // namespace deluge::gui::menu_item::audio_export

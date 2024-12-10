@@ -167,7 +167,7 @@
 #include "gui/menu_item/song/configure_macros.h"
 #include "gui/menu_item/song/midi_learn.h"
 #include "gui/menu_item/source/patched_param/fm.h"
-#include "gui/menu_item/stem_export/start.h"
+#include "gui/menu_item/audio_export/start.h"
 #include "gui/menu_item/submenu.h"
 #include "gui/menu_item/submenu/MPE.h"
 #include "gui/menu_item/submenu/actual_source.h"
@@ -1398,7 +1398,7 @@ menu_item::Submenu soundEditorRootMenuPerformanceView{
 };
 
 // Sub menu for Stem Export
-menu_item::stem_export::Start startStemExportMenu{STRING_FOR_START_EXPORT};
+menu_item::audio_export::Start startStemExportMenu{STRING_FOR_START_EXPORT};
 
 ToggleBool configureNormalizationMenu{STRING_FOR_CONFIGURE_EXPORT_STEMS_NORMALIZATION,
                                       STRING_FOR_CONFIGURE_EXPORT_STEMS_NORMALIZATION, stemExport.allowNormalization};

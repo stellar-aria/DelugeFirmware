@@ -67,7 +67,7 @@ void MatrixDriver::noPressesHappening(bool inCardRoutine) {
 }
 
 ActionResult MatrixDriver::padAction(int32_t x, int32_t y, int32_t velocity) {
-	// do not interpret pad actions when stem export is underway
+	// do not interpret pad actions when audio export is underway
 	if (stemExport.processStarted) {
 		return ActionResult::DEALT_WITH;
 	}

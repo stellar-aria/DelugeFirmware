@@ -2339,7 +2339,7 @@ void Session::doTickForward(int32_t posIncrement) {
 	// we want to export up to length of the longest sequence in the clip (clip or note row loop length)
 	// when we reach longest loop length, we stop playback and allow recording to continue until silence
 	if (stemExport.checkForLoopEnd()) [[unlikely]] {
-		// if true, then stem export is running, we've already processed the full sequence,
+		// if true, then audio export is running, we've already processed the full sequence,
 		// and we've stopped playback
 		// return as there is nothing else to process
 		return;

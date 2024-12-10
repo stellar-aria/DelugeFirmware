@@ -186,7 +186,7 @@ void ArrangerView::goToSongView() {
 ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	using namespace deluge::hid::button;
 
-	// when stem export process has started,
+	// when audio export process has started,
 	// do not action anybutton presses except BACK to cancel the process
 	if (b != BACK && stemExport.processStarted) {
 		return ActionResult::DEALT_WITH;
@@ -248,7 +248,7 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 	// Record button - adds to what MatrixDriver does with it
 	else if (b == RECORD) {
 		if (on) {
-			// trigger stem export when pressing record while holding save
+			// trigger audio export when pressing record while holding save
 			if (isUIModeActive(UI_MODE_HOLDING_SAVE_BUTTON)) {
 				if (playbackHandler.isEitherClockActive() || playbackHandler.recording != RecordingMode::OFF) {
 					display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_CANT_EXPORT_STEMS));
@@ -282,7 +282,7 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 		return ActionResult::NOT_DEALT_WITH; // Make the MatrixDriver do its normal thing with it too
 	}
 
-	// cancel stem export process
+	// cancel audio export process
 	else if (b == BACK && isUIModeActive(UI_MODE_STEM_EXPORT)) {
 		if (on) {
 			bool available = context_menu::audio_export::cancel.setupAndCheckAvailability();

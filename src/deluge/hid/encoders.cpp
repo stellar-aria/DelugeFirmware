@@ -68,7 +68,7 @@ void readEncoders() {
 }
 
 bool interpretEncoders(bool skipActioning) {
-	// do not interpret encoders when stem export is underway
+	// do not interpret encoders when audio export is underway
 	if (stemExport.processStarted) {
 		return false;
 	}

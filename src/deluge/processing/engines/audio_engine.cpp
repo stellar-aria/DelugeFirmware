@@ -731,7 +731,7 @@ void renderAudioForStemExport(size_t numSamples) {
 		renderSongFX(numSamples);
 	}
 
-	// If we're recording final output for offline stem export with song FX
+	// If we're recording final output for offline audio export with song FX
 	// Check if we have a recorder
 	SampleRecorder* recorder = audioRecorder.recorder;
 	if (recorder && recorder->mode == AudioInputChannel::OFFLINE_OUTPUT) {

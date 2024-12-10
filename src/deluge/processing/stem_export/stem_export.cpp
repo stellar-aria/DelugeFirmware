@@ -76,7 +76,7 @@ StemExport::StemExport() {
 	lastFolderNameForStemExport.clear();
 }
 
-/// starts stem export process which includes setting up UI mode, timer, and preparing
+/// starts audio export process which includes setting up UI mode, timer, and preparing
 /// instruments / clips for exporting
 void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	currentStemExportType = stemExportType;
@@ -89,8 +89,8 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	// sets up the recording mode
 	playbackHandler.recordButtonPressed();
 
-	// enter stem export UI mode to prevent other actions from taking place while exporting stems
-	// restart file numbering for stem export
+	// enter audio export UI mode to prevent other actions from taking place while exporting stems
+	// restart file numbering for audio export
 	audioFileManager.highestUsedAudioRecordingNumber[util::to_underlying(AudioRecordingFolder::STEMS)] = -1;
 	enterUIMode(UI_MODE_STEM_EXPORT);
 	indicator_leds::blinkLed(IndicatorLED::BACK);
@@ -138,7 +138,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	}
 }
 
-/// Stop stem export process
+/// Stop audio export process
 void StemExport::stopStemExportProcess() {
 	exitUIMode(UI_MODE_STEM_EXPORT);
 	stopPlayback();
@@ -186,7 +186,7 @@ void StemExport::stopOutputRecording() {
 	if (!playbackHandler.isEitherClockActive() && playbackHandler.recording == RecordingMode::OFF) {
 		// if silence is found and you are currently resampling, stop recording soon
 		// if not exporting to silence, stop recording soon
-		// if you cancelled stem export and exited out of UI mode, stop recording soon
+		// if you cancelled audio export and exited out of UI mode, stop recording soon
 		if (!isUIModeActive(UI_MODE_STEM_EXPORT) || !exportToSilence || (exportToSilence && checkForSilence())) {
 			audioRecorder.endRecordingSoon();
 			stopRecording = false;
@@ -253,10 +253,10 @@ bool StemExport::checkForSilence() {
 
 /// disarms and prepares all the instruments so that they can be exported
 int32_t StemExport::disarmAllInstrumentsForStemExport(StemExportType stemExportType) {
-	// when we begin stem export, we haven't exported any instruments yet, so initialize these variables
+	// when we begin audio export, we haven't exported any instruments yet, so initialize these variables
 	numStemsExported = 0;
 	totalNumStemsToExport = 0;
-	// when we trigger stem export, we don't know how many instruments there are yet
+	// when we trigger audio export, we don't know how many instruments there are yet
 	// so get the number and store it so we only need to ping getNumElements once
 	int32_t totalNumOutputs = currentSong->getNumOutputs();
 
@@ -316,7 +316,7 @@ void StemExport::restoreAllInstrumentMutes(int32_t totalNumOutputs) {
 /// simulates the button combo action of pressing record + play twice to enable resample
 /// and stop recording at the end of the arrangement
 int32_t StemExport::exportInstrumentStems(StemExportType stemExportType) {
-	// prepare all the instruments for stem export
+	// prepare all the instruments for audio export
 	int32_t totalNumOutputs = disarmAllInstrumentsForStemExport(stemExportType);
 
 	if (totalNumOutputs && totalNumStemsToExport) {
@@ -363,7 +363,7 @@ int32_t StemExport::exportInstrumentStems(StemExportType stemExportType) {
 /// simulates the button combo action of pressing record + play twice to enable resample
 /// and stop recording at the end of the arrangement
 int32_t StemExport::exportMasterArrangementStem(StemExportType stemExportType) {
-	// prepare all the instruments for stem export
+	// prepare all the instruments for audio export
 	int32_t totalNumOutputs = disarmAllInstrumentsForStemExport(stemExportType);
 
 	if (totalNumOutputs && totalNumStemsToExport) {
@@ -396,12 +396,12 @@ int32_t StemExport::exportMasterArrangementStem(StemExportType stemExportType) {
 
 /// disarms and prepares all the clips so that they can be exported
 int32_t StemExport::disarmAllClipsForStemExport() {
-	// when we begin stem export, we haven't exported any clips yet, so initialize these variables
+	// when we begin audio export, we haven't exported any clips yet, so initialize these variables
 	numStemsExported = 0;
 	totalNumStemsToExport = 0;
 	currentSong->xScroll[NAVIGATION_CLIP] = 0;
 
-	// when we trigger stem export, we don't know how many clips there are yet
+	// when we trigger audio export, we don't know how many clips there are yet
 	// so get the number and store it so we only need to ping getNumElements once
 	int32_t totalNumClips = currentSong->sessionClips.getNumElements();
 
@@ -485,7 +485,7 @@ bool StemExport::writeLoopEndPos() {
 /// simulates the button combo action of pressing record + play twice to enable resample
 /// and stop recording at the end of the clip's loop length
 int32_t StemExport::exportClipStems(StemExportType stemExportType) {
-	// prepare all the clips for stem export
+	// prepare all the clips for audio export
 	int32_t totalNumClips = disarmAllClipsForStemExport();
 
 	if (totalNumClips && totalNumStemsToExport) {
@@ -584,7 +584,7 @@ void StemExport::finishCurrentStemExport(StemExportType stemExportType, bool& mu
 }
 
 // if we know how many stems to export, we can check if we've already exported all the
-// stems and are therefore done and should exit out of the stem export UI mode
+// stems and are therefore done and should exit out of the audio export UI mode
 void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t elementsProcessed) {
 	// the only other UI we could be in is the context menu, so let's get out of that
 	if (inContextMenu()) {
@@ -592,14 +592,14 @@ void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t 
 		getCurrentUI()->close();
 	}
 
-	// display stem export completed context menu
+	// display audio export completed context menu
 	bool available = context_menu::audio_export::done.setupAndCheckAvailability();
 	if (available) {
 		display->setNextTransitionDirection(1);
 		openUI(&context_menu::audio_export::done);
 	}
 
-	// exit out of the stem export UI mode
+	// exit out of the audio export UI mode
 	exitUIMode(UI_MODE_STEM_EXPORT);
 
 	// update folder number in case this same song is exported again
@@ -643,7 +643,7 @@ void StemExport::displayStemExportProgress(StemExportType stemExportType) {
 }
 
 void StemExport::displayStemExportProgressOLED(StemExportType stemExportType) {
-	// if we're in the context menu for cancelling stem export, we don't want to show pop-ups
+	// if we're in the context menu for cancelling audio export, we don't want to show pop-ups
 	if (inContextMenu()) {
 		return;
 	}
@@ -664,7 +664,7 @@ void StemExport::displayStemExportProgressOLED(StemExportType stemExportType) {
 }
 
 void StemExport::displayStemExportProgress7SEG() {
-	// if we're in the context menu for cancelling stem export, we don't want to show pop-ups
+	// if we're in the context menu for cancelling audio export, we don't want to show pop-ups
 	if (inContextMenu()) {
 		return;
 	}
@@ -687,7 +687,7 @@ Error StemExport::getUnusedStemRecordingFilePath(String* filePath, AudioRecordin
 		return error;
 	}
 
-	// wavFileName is uniquely set for each stem export
+	// wavFileName is uniquely set for each audio export
 	// when this flag is true, there is a valid wavFileName that has been set for stem exporting
 	if (wavFileNameForStemExportSet) {
 		// reset flag to false to ensure that next stem exported is valid
@@ -779,7 +779,7 @@ Error StemExport::getUnusedStemRecordingFolderPath(String* filePath, AudioRecord
 	}
 
 	RootUI* rootUI = getRootUI();
-	// concatenate stem export type to folder path
+	// concatenate audio export type to folder path
 	if (rootUI == &arrangerView) {
 		// tempPath =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS
 		error = tempPath.concatenate("/TRACKS");
@@ -858,10 +858,10 @@ Error StemExport::getUnusedStemRecordingFolderPath(String* filePath, AudioRecord
 		}
 	}
 	else {
-		// if folder number is -1, it means this is the first time we're running the stem export
+		// if folder number is -1, it means this is the first time we're running the audio export
 		// process for this song and the folder didn't previously exist so no number is being appended to it
 
-		// if folder number is not -1, it means this is the second we're running the stem export process
+		// if folder number is not -1, it means this is the second we're running the audio export process
 		// for this song, so we need to append a folder number to the SONG name
 		if (highestUsedStemFolderNumber != -1) {
 			// tempPath =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS-

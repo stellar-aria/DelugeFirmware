@@ -94,8 +94,8 @@ public:
 	Output* next;
 	const OutputType type;
 	bool mutedInArrangementMode;
-	bool mutedInArrangementModeBeforeStemExport; // Used by stem export to restore previous state
-	bool exportStem;                             // Used by stem export to flag if this output should be exported
+	bool mutedInArrangementModeBeforeStemExport; // Used by audio export to restore previous state
+	bool exportStem;                             // Used by audio export to flag if this output should be exported
 	bool soloingInArrangementMode;
 	bool inValidState;
 	bool wasCreatedForAutoOverdub;

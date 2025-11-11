@@ -113,4 +113,14 @@ static volatile uint16_t* const TGRA[] = {&MTU2.TGRA_0, &MTU2.TGRA_1, &MTU2.TGRA
 
 static uint16_t const INTC_ID_TGIA[] = {INTC_ID_TGI0A, INTC_ID_TGI1A, INTC_ID_TGI2A, INTC_ID_TGI3A, INTC_ID_TGI4A};
 
+static inline void timerEnableInterruptsTGRA(int32_t timerNo)
+{
+    *TIER[timerNo] = 1;
+}
+
+static inline void timerDisableInterruptsTGRA(int32_t timerNo)
+{
+    *TIER[timerNo] = 0;
+}
+
 #endif /* DRIVERS_RZA1_MTU_MTU_H_ */

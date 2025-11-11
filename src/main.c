@@ -17,11 +17,11 @@
 
 #include "OSLikeStuff/timers_interrupts/timers_interrupts.h"
 #include "RZA1/gpio/gpio.h"
+#include "RZA1/mtu/mtu.h"
 #include "RZA1/system/r_typedefs.h"
 #include "RZA1/uart/sio_char.h"
+#include "controller/controller.h"
 #include "definitions.h"
-#include "deluge/deluge.h"
-#include "deluge/drivers/mtu/mtu.h"
 #include "scheduler_api.h"
 
 static void midiAndGateOutputTimerInterrupt(uint32_t int_sense) {
@@ -114,7 +114,11 @@ int main(void) {
 	setPinMux(3, 15, 5); // TX
 	setPinMux(1, 9, 3);  // RX
 
-	initUartDMA();
+	// Weak declaration for UART DMA init (not used in controller mode)
+	extern void initUartDMA(void) __attribute__((weak));
+	if (initUartDMA != NULL) {
+		initUartDMA();
+	}
 
 	// Pin mux for SD
 	setPinMux(7, 0, 3); // CD
@@ -132,7 +136,7 @@ int main(void) {
 	// this is the same priority as the midi/gate interrupt despite the comment saying they need to be different
 	setupAndEnableInterrupt(triggerClockInputHandler, IRQ_INTERRUPT_0 + 6, 5);
 	ENABLE_INTERRUPTS();
-	deluge_main();
+	controller_main();
 
 	while (1) {
 		;

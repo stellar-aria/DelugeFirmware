@@ -20,7 +20,11 @@
 #include "OSLikeStuff/scheduler_api.h"
 #include "resource_checker.h"
 
-#include <io/debug/log.h>
+// Controller mode: Stub out debug logging
+#ifndef D_PRINTLN
+#define D_PRINTLN(...) ((void)0)
+#endif
+
 #define SCHEDULER_DETAILED_STATS (0 && ENABLE_TEXT_OUTPUT)
 
 // internal to the scheduler - do not include from anywhere else

@@ -1,12 +1,12 @@
 CompileFlags:
-  #BuiltinHeaders: QueryDriver
-  Add: 
+  BuiltinHeaders: QueryDriver
+  Add:
     - -Wno-unknown-argument
     - -Wno-unknown-warning-option
     - -xc++
     - -std=c++23
 
-  Remove: 
+  Remove:
     - -mthumb-interwork
     - -fanalyzer
     - -fdevirtualize-at-ltrans

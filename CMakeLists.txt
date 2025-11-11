@@ -111,7 +111,7 @@ if(DOXYGEN_FOUND)
     set(DOXYGEN_HTML_EXTRA_STYLESHEET "${doxygen-awesome-css_SOURCE_DIR}/doxygen-awesome.css")
 
     set(DOXYGEN_CREATE_SUBDIRS YES)
-    set(DOXYGEN_CREATE_SUBDIRS_LEVEL 1) # 32 subdirectories w/~200 files each. 
+    set(DOXYGEN_CREATE_SUBDIRS_LEVEL 1) # 32 subdirectories w/~200 files each.
     set(DOXYGEN_EXTRACT_PRIVATE YES)
     set(DOXYGEN_INTERNAL_DOCS NO)
     set(DOXYGEN_SOURCE_BROWSER NO)
@@ -127,7 +127,7 @@ if(DOXYGEN_FOUND)
 
     # README.md files in source directories are
     # revealed in their directory detail page instead
-    # of in 'Related Pages'.  Added in doxygen version 1.13. 
+    # of in 'Related Pages'.  Added in doxygen version 1.13.
     set(DOXYGEN_IMPLICIT_DIR_DOCS YES)
 
     # set(DOXYGEN_CLANG_ASSISTED_PARSING YES)
@@ -140,7 +140,7 @@ if(DOXYGEN_FOUND)
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/assets
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/html/)
 
-    # 1) Removed 'docs' directory to exclude files 
+    # 1) Removed 'docs' directory to exclude files
     # with relative links to GitHub repository
     # leaving doxygen to generate just the API documentation.
     # 2) removed build/src/deluge so completion does not depends on build release
@@ -197,8 +197,10 @@ add_executable(deluge)
 
 # Link external libraries
 target_link_libraries(deluge PUBLIC
-        argon
-        etl::etl
+        controller
+        -Wl,--whole-archive
+        RTT
+        -Wl,--no-whole-archive
 )
 
 option(MAINTAINER_MODE "Enables all warnings and errors" OFF)

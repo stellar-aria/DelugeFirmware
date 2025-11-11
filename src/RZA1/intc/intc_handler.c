@@ -35,7 +35,10 @@ Includes   <System Includes> , "Project Includes"
 #include "RZA1/intc/devdrv_intc.h" /* INTC Driver Header */
 #include "RZA1/system/iodefine.h"
 #include "RZA1/system/r_typedefs.h"
-#include "deluge/drivers/uart/uart.h"
+#include "drivers/uart/uart.h"
+
+// Weak declaration for uartPrintln (not available in controller mode)
+extern void uartPrintln(char const*) __attribute__((weak));
 
 #ifdef __ICCARM__
 #include <intrinsics.h>
@@ -109,7 +112,10 @@ void INTC_Handler_Interrupt(uint32_t icciar)
     {
         // Insane thing that keeps happening - we get here somehow, with int_id 1023.
         // FREEZE_WITH_ERROR("i029");
-        uartPrintln("i029 ----------------------------------------------------!!");
+        if (uartPrintln != NULL)
+        {
+            uartPrintln("i029 ----------------------------------------------------!!");
+        }
         return; // Just keep running - it seems to work at least most of the time?
         // Userdef_INTC_UndefId(int_id); // Previously, it'd just go in here and freeze.
     }

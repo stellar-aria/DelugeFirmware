@@ -54,12 +54,24 @@
 #include "fault_handler.h"
 #include "RTT/SEGGER_RTT.h"
 #include "RZA1/compiler/asm/inc/asm.h"
+#include "RZA1/ssi/ssi.h"
 #include "RZA1/system/iodefines/dmac_iodefine.h"
 #include "RZA1/uart/sio_char.h"
 #include "definitions.h"
-#include "drivers/ssi/ssi.h"
-#include "drivers/uart/uart.h"
-#include <version.h>
+
+// Controller mode: No version info available
+#define kCommitShort "controller"
+
+// Weak declarations for optional functions (may not be available in controller mode)
+extern struct UartItem uartItems[] __attribute__((weak));
+extern void uartFlushIfNotSending(int32_t) __attribute__((weak));
+extern void freezeWithError(char const*) __attribute__((weak));
+extern void uartPrintln(char const*) __attribute__((weak));
+
+// Stub for controller mode (audio buffer functions not available)
+static inline void clearTxBuffer() {
+	// No-op in controller mode
+}
 
 extern uint32_t program_stack_start;
 extern uint32_t program_stack_end;
@@ -67,11 +79,13 @@ extern uint32_t program_code_start;
 extern uint32_t program_code_end;
 
 [[gnu::always_inline]] inline void sendToPIC(uint8_t msg) {
-	intptr_t writePos = uartItems[UART_ITEM_PIC].txBufferWritePos;
-	volatile char* uncached_tx_buf = (volatile char*)(picTxBuffer + UNCACHED_MIRROR_OFFSET);
-	uncached_tx_buf[writePos] = msg;
-	uartItems[UART_ITEM_PIC].txBufferWritePos += 1;
-	uartItems[UART_ITEM_PIC].txBufferWritePos &= (PIC_TX_BUFFER_SIZE - 1);
+	if (uartItems != NULL) {
+		intptr_t writePos = uartItems[UART_ITEM_PIC].txBufferWritePos;
+		volatile char* uncached_tx_buf = (volatile char*)(picTxBuffer + UNCACHED_MIRROR_OFFSET);
+		uncached_tx_buf[writePos] = msg;
+		uartItems[UART_ITEM_PIC].txBufferWritePos += 1;
+		uartItems[UART_ITEM_PIC].txBufferWritePos &= (PIC_TX_BUFFER_SIZE - 1);
+	}
 }
 
 [[gnu::always_inline]] inline void sendColor(uint8_t r, uint8_t g, uint8_t b) {

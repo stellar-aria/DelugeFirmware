@@ -1,0 +1,4 @@
+[submodule "lib/tinyusb"]
+	path = lib/tinyusb
+	url = https://github.com/stellar-aria/tinyusb
+	branch = feature/rza1

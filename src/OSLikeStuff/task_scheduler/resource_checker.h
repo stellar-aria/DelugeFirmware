@@ -18,11 +18,9 @@
 #define RESOURCE_CHECKER_H
 #include <OSLikeStuff/scheduler_api.h>
 #include <bitset>
-#include <extern.h>
 
-#include "io/usb/usb_state.h"
-
-extern uint8_t currentlyAccessingCard;
+// Forward declarations to avoid including deluge-specific headers
+// extern uint8_t currentlyAccessingCard;
 // this is basically a bitset however the enums need to be exposed to C code and this is easier to keep synced
 class ResourceChecker {
 	uint32_t resources_{0};
@@ -36,17 +34,22 @@ public:
 		if (resources_ == RESOURCE_NONE) {
 			return true;
 		}
-		bool anythingLocked = false;
-		if ((resources_ & RESOURCE_SD) != 0u) {
-			anythingLocked |= currentlyAccessingCard;
-		}
-		if ((resources_ & RESOURCE_USB) != 0u) {
-			anythingLocked |= deluge::io::usb::usbLock;
-		}
-		if ((resources_ & RESOURCE_SD_ROUTINE) != 0u) {
-			anythingLocked |= sdRoutineLock;
-		}
-		return !anythingLocked;
+		// Controller mode: No resource locking needed (deluge-specific functionality)
+		// In controller mode, we don't have SD card or USB host functionality
+		return true;
+
+		// Original deluge code (disabled for controller):
+		// bool anythingLocked = false;
+		// if ((resources_ & RESOURCE_SD) != 0u) {
+		// 	anythingLocked |= currentlyAccessingCard;
+		// }
+		// if ((resources_ & RESOURCE_USB) != 0u) {
+		// 	anythingLocked |= deluge::io::usb::usbLock;
+		// }
+		// if ((resources_ & RESOURCE_SD_ROUTINE) != 0u) {
+		// 	anythingLocked |= sdRoutineLock;
+		// }
+		// return !anythingLocked;
 	}
 };
 

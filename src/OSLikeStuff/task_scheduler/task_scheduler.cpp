@@ -17,11 +17,16 @@
 
 #include "OSLikeStuff/task_scheduler/task_scheduler.h"
 
-#include "io/debug/log.h"
+// Controller mode: Stub out debug logging
+#ifndef D_PRINTLN
+#define D_PRINTLN(...) ((void)0)
+#endif
+
 #include "resource_checker.h"
 #include <algorithm>
 #if !IN_UNIT_TESTS
-#include "memory/general_memory_allocator.h"
+// Controller mode: Memory allocator not available
+// #include "memory/general_memory_allocator.h"
 #endif
 
 extern "C" {
@@ -257,7 +262,8 @@ bool TaskManager::yield(RunCondition until, Time timeout, bool returnOnIdle) {
 		startClock();
 	}
 #if !IN_UNIT_TESTS
-	GeneralMemoryAllocator::get().checkStack("ensure resizeable space");
+	// Controller mode: Memory allocator not available
+	// GeneralMemoryAllocator::get().checkStack("ensure resizeable space");
 #endif
 	Task* yielding_task = &list[currentID];
 	yielding_task->yielded = true;

@@ -1,3 +1,4 @@
+#include "RTT/SEGGER_RTT.h"
 #include "definitions.h"
 #include <sys/stat.h>
 
@@ -8,14 +9,12 @@
 // this stub fails to allocate - needed for libc malloc
 // Take advantage of that to ensure anything which allocates will fail to link
 void* _sbrk(int incr) {
-	FREEZE_WITH_ERROR("SBRK");
 	return (void*)-1;
 }
 
 // needed for libc abort, raise, return from main
 void _exit(int status) {
 	// halt execution
-	FREEZE_WITH_ERROR("EXIT");
 	__builtin_unreachable();
 }
 
@@ -48,9 +47,13 @@ int _isatty(int file) {
 int _lseek(int file, int ptr, int dir) {
 	return 0;
 }
-// write nothing - note these will loop infinitely with newlib
+// Redirect to RTT for TinyUSB debug output
 int _write(int file, char* ptr, int len) {
-	return 0;
+	(void)file;
+	if (len > 0) {
+		SEGGER_RTT_Write(0, ptr, len);
+	}
+	return len;
 }
 // read nothing
 int _read(int file, char* ptr, int len) {

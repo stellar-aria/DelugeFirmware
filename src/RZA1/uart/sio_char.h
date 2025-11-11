@@ -42,7 +42,7 @@ Includes   <System Includes> , "Project Includes"
 ******************************************************************************/
 
 #include "RZA1/intc/devdrv_intc.h"
-#include "deluge/drivers/uart/uart.h"
+#include "drivers/uart/uart.h"
 
 #define SCIF_UART_MODE_W  (1)
 #define SCIF_UART_MODE_R  (2)

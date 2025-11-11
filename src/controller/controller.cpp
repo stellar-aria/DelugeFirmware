@@ -334,13 +334,13 @@ int32_t controller_main(void) {
 		hardware_events_scan();
 
 		// Send any pending events over USB serial
-		// usb_serial_task();  // Disabled for audio-only testing
+		usb_serial_task();
 
 		// Handle USB audio streaming
 		usb_audio_task();
 
 		// Handle USB MIDI I/O
-		// usb_midi_task();  // Disabled for audio-only testing
+		usb_midi_task();
 	}
 
 	return 0;
@@ -350,9 +350,9 @@ void controller_task(void) {
 	// This can be called from main loop if needed
 	tud_task();
 	hardware_events_scan();
-	// usb_serial_task();  // Disabled for audio-only testing
+	usb_serial_task(); // Disabled for audio-only testing
 	usb_audio_task();
-	// usb_midi_task();  // Disabled for audio-only testing
+	usb_midi_task(); // Disabled for audio-only testing
 }
 
 void midiAndGateTimerGoneOff(void) {

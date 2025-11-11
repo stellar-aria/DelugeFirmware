@@ -16,6 +16,8 @@
  */
 
 #include "usb_descriptors.h"
+#include "class/cdc/cdc.h"
+#include "class/midi/midi.h"
 #include "tusb.h"
 #include "tusb_config.h"
 
@@ -50,36 +52,36 @@ uint8_t const* tud_descriptor_device_cb(void) {
 // Configuration Descriptor
 //--------------------------------------------------------------------+
 
-// Audio-only device for testing (CDC + MIDI temporarily disabled)
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO_FUNC_1_DESC_LEN)
+// Composite device: Audio + CDC + MIDI
+#define CONFIG_TOTAL_LEN                                                                                               \
+	(TUD_CONFIG_DESC_LEN + TUD_AUDIO_SPEAKER_STEREO_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MIDI_DESC_LEN)
 
-// CDC endpoints - DISABLED
-// #define EPNUM_CDC_NOTIF 0x81
-// #define EPNUM_CDC_OUT 0x02
-// #define EPNUM_CDC_IN 0x82
+// CDC endpoints
+#define EPNUM_CDC_NOTIF 0x81
+#define EPNUM_CDC_OUT 0x02
+#define EPNUM_CDC_IN 0x82
 
 // Audio endpoints
 #define EPNUM_AUDIO_INT 0x83 // Audio control interrupt (required by UAC2)
 #define EPNUM_AUDIO_OUT 0x03
 #define EPNUM_AUDIO_IN 0x04
 
-// MIDI endpoints - DISABLED
-// #define EPNUM_MIDI_OUT 0x05
-// #define EPNUM_MIDI_IN 0x85
+// MIDI endpoints - 512 bytes for High-Speed BULK
+#define EPNUM_MIDI_OUT 0x05
+#define EPNUM_MIDI_IN 0x85
 
 uint8_t const desc_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 500),
 
-    // Audio Interface - UAC2 headset (stereo speaker output + mono mic input)
-    // Testing audio-only to verify Windows UAC2 driver works without CDC/MIDI
-    TUD_AUDIO_HEADSET_STEREO_DESCRIPTOR(4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_IN, EPNUM_AUDIO_INT),
+    // Audio Interface - UAC2 speaker only (stereo output)
+    TUD_AUDIO_SPEAKER_STEREO_DESCRIPTOR(4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_INT),
 
-    // CDC Interface - TEMPORARILY DISABLED FOR TESTING
-    // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+    // CDC Interface - Serial port
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
 
-    // MIDI Interface - TEMPORARILY DISABLED FOR TESTING
-    // TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 6, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 64),
+    // MIDI Interface - 512 bytes for High-Speed BULK
+    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 6, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 512),
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR

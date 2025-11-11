@@ -68,9 +68,9 @@ extern "C" {
 #define BOARD_TUD_RHPORT 0
 #endif
 
-// RHPort max operational speed
+// RHPort max operational speed - CHANGED TO HIGH-SPEED FOR UAC2
 #ifndef BOARD_TUD_MAX_SPEED
-#define BOARD_TUD_MAX_SPEED OPT_MODE_FULL_SPEED
+#define BOARD_TUD_MAX_SPEED OPT_MODE_HIGH_SPEED
 #endif
 
 #define CFG_TUD_MAX_SPEED BOARD_TUD_MAX_SPEED
@@ -99,11 +99,11 @@ extern "C" {
 #endif
 
 //------------- CLASS -------------//
-#define CFG_TUD_CDC 1
+#define CFG_TUD_CDC 0 // Disabled for audio-only testing
 #define CFG_TUD_MSC 0
 #define CFG_TUD_HID 0
-#define CFG_TUD_MIDI 0  // Disabled temporarily to test CDC only
-#define CFG_TUD_AUDIO 0 // Disabled temporarily to simplify enumeration
+#define CFG_TUD_MIDI 0 // Disabled for audio-only testing
+#define CFG_TUD_AUDIO 1
 #define CFG_TUD_VENDOR 0
 
 // CDC FIFO size of TX and RX
@@ -130,34 +130,55 @@ extern "C" {
 // Size of control request buffer
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ 64
 
-// Number of formats
-#define CFG_TUD_AUDIO_FUNC_1_N_FORMATS 1
+// Number of formats - Windows UAC2 driver requires multiple formats
+#define CFG_TUD_AUDIO_FUNC_1_N_FORMATS 2
 
-// Audio format type I specifications - 44.1kHz, 16-bit stereo
-#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE 44100
-#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX 2 // Stereo input (mic/line in)
+// Audio format type I specifications - 48kHz (USB Audio Class 2.0 standard rate)
+#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE 48000
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX 1 // Mono input (mic) - matching TinyUSB headset example
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX 2 // Stereo output
 
-// 16bit in 16bit slots
+// Format 1: 16bit in 16bit slots
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_TX 2
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_TX 16
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_RX 2
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_RX 16
 
+// Format 2: 24bit in 32bit slots
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_TX 4
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_RESOLUTION_TX 24
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_RX 4
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_RESOLUTION_RX 24
+
 // EP and buffer size - for isochronous EP's, the buffer and EP size are equal
+#define CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP 1 // Enable AC interrupt endpoint
 #define CFG_TUD_AUDIO_ENABLE_EP_IN 1
+
+// Calculate EP sizes for both formats
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN                                                                         \
 	TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_TX,       \
 	                  CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
-#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ (CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN * 4)
-#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_IN                                                                         \
+	TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_TX,       \
+	                  CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
+
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ                                                                           \
+	(TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_IN) * 4)
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX                                                                              \
+	TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_IN)
 
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT 1
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT                                                                        \
 	TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_RX,       \
 	                  CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
-#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT * 2)
-#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_OUT                                                                        \
+	TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_RX,       \
+	                  CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
+
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ                                                                          \
+	(TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_OUT) * 2)
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX                                                                             \
+	TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_OUT)
 
 #ifdef __cplusplus
 }

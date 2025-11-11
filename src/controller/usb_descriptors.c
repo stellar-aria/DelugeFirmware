@@ -17,6 +17,7 @@
 
 #include "usb_descriptors.h"
 #include "tusb.h"
+#include "tusb_config.h"
 
 //--------------------------------------------------------------------+
 // Device Descriptors
@@ -49,19 +50,36 @@ uint8_t const* tud_descriptor_device_cb(void) {
 // Configuration Descriptor
 //--------------------------------------------------------------------+
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN) // CDC only for now
+// Audio-only device for testing (CDC + MIDI temporarily disabled)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO_FUNC_1_DESC_LEN)
 
-#define EPNUM_CDC_NOTIF 0x81
-#define EPNUM_CDC_OUT 0x02
-#define EPNUM_CDC_IN 0x82
+// CDC endpoints - DISABLED
+// #define EPNUM_CDC_NOTIF 0x81
+// #define EPNUM_CDC_OUT 0x02
+// #define EPNUM_CDC_IN 0x82
+
+// Audio endpoints
+#define EPNUM_AUDIO_INT 0x83 // Audio control interrupt (required by UAC2)
+#define EPNUM_AUDIO_OUT 0x03
+#define EPNUM_AUDIO_IN 0x04
+
+// MIDI endpoints - DISABLED
+// #define EPNUM_MIDI_OUT 0x05
+// #define EPNUM_MIDI_IN 0x85
 
 uint8_t const desc_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 500),
 
-    // CDC Interface - for controller events (buttons, encoders, pads)
-    // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+    // Audio Interface - UAC2 headset (stereo speaker output + mono mic input)
+    // Testing audio-only to verify Windows UAC2 driver works without CDC/MIDI
+    TUD_AUDIO_HEADSET_STEREO_DESCRIPTOR(4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_IN, EPNUM_AUDIO_INT),
+
+    // CDC Interface - TEMPORARILY DISABLED FOR TESTING
+    // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+
+    // MIDI Interface - TEMPORARILY DISABLED FOR TESTING
+    // TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 6, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 64),
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -82,8 +100,8 @@ char const* string_desc_arr[] = {
     "Synthstrom Audible",       // 1: Manufacturer
     "Deluge USB Controller",    // 2: Product
     "123456",                   // 3: Serials, should use chip ID
-    "Deluge Control Port",      // 4: CDC Interface
-    "Deluge Audio",             // 5: Audio Interface
+    "Deluge Audio",             // 4: Audio Interface
+    "Deluge Control Port",      // 5: CDC Interface
     "Deluge MIDI",              // 6: MIDI Interface
 };
 

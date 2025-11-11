@@ -37,6 +37,7 @@ extern "C" {
 #include "definitions.h"
 #include "drivers/ssi/ssi.h"
 #include "drivers/uart/uart.h"
+#include "portable/renesas/rusb1/dcd_rusb1.h"
 
 // TinyUSB interrupt handler (from tinyusb)
 void dcd_int_handler(uint8_t rhport);
@@ -178,6 +179,9 @@ int32_t controller_main(void) {
 	// Initialize USB device stack (this will configure SUSPMODE, clocks, and USB registers)
 	tusb_init();
 
+	// NOTE: Pipe configuration is now handled automatically by the DCD driver
+	// in dcd_edpt_open() when the host issues Set Configuration
+
 	// CRITICAL: Register the interrupt handler AFTER hardware initialization (like Deluge does)
 	// TinyUSB's dcd_int_enable() only enables the GIC interrupt, but doesn't
 	// register the C function handler. Without this, the GIC will set pending
@@ -204,14 +208,6 @@ int32_t controller_main(void) {
 	// USB PHY needs ~10ms to power up and stabilize
 	delayMs(50);
 
-	// Force a disconnect/reconnect cycle to ensure host detection
-	SEGGER_RTT_WriteString(0, "Disconnecting USB to trigger re-enumeration...\n");
-	tud_disconnect();
-	delayMs(250); // Wait for host to recognize disconnect
-
-	SEGGER_RTT_WriteString(0, "Reconnecting USB device...\n");
-	// Manually connect USB device (required when VBUS detect pin not used)
-	tud_connect(); // WORKAROUND: TinyUSB's interrupt enable registers aren't sticking - manually set them
 	USB200.INTENB0 = 0x0000 | (1 << 15) // VBSE - VBus interrupt
 	                 | (1 << 9)         // BRDYE - Buffer Ready
 	                 | (1 << 8)         // BEMPE - Buffer Empty
@@ -259,13 +255,13 @@ int32_t controller_main(void) {
 
 	SEGGER_RTT_WriteString(0, "Initializing USB subsystems...\n");
 	// Initialize USB serial protocol
-	usb_serial_init();
+	// usb_serial_init();  // Disabled for audio-only testing
 
 	// Initialize USB audio for audio I/O
 	usb_audio_init();
 
 	// Initialize USB MIDI for MIDI I/O
-	usb_midi_init();
+	// usb_midi_init();  // Disabled for audio-only testing
 
 	SEGGER_RTT_WriteString(0, "Clearing all LEDs and display...\n");
 
@@ -338,13 +334,13 @@ int32_t controller_main(void) {
 		hardware_events_scan();
 
 		// Send any pending events over USB serial
-		usb_serial_task();
+		// usb_serial_task();  // Disabled for audio-only testing
 
 		// Handle USB audio streaming
 		usb_audio_task();
 
 		// Handle USB MIDI I/O
-		usb_midi_task();
+		// usb_midi_task();  // Disabled for audio-only testing
 	}
 
 	return 0;
@@ -354,9 +350,9 @@ void controller_task(void) {
 	// This can be called from main loop if needed
 	tud_task();
 	hardware_events_scan();
-	usb_serial_task();
+	// usb_serial_task();  // Disabled for audio-only testing
 	usb_audio_task();
-	usb_midi_task();
+	// usb_midi_task();  // Disabled for audio-only testing
 }
 
 void midiAndGateTimerGoneOff(void) {

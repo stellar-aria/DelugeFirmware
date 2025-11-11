@@ -18,6 +18,7 @@
 #include "usb_audio.h"
 #include "drivers/ssi/ssi.h"
 #include "tusb.h"
+#include "usb_descriptors.h"
 #include <string.h>
 
 #if CFG_TUD_AUDIO
@@ -159,9 +160,28 @@ bool tud_audio_set_req_itf_cb(uint8_t rhport, tusb_control_request_t const* p_re
 
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const* p_request, uint8_t* pBuff) {
 	(void)rhport;
-	(void)p_request;
-	(void)pBuff;
-	return true;
+	audio_control_request_t const* request = (audio_control_request_t const*)p_request;
+
+	// Feature unit set requests (volume/mute)
+	if (request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT && request->bRequest == AUDIO_CS_REQ_CUR) {
+		if (request->bControlSelector == AUDIO_FU_CTRL_MUTE) {
+			// Accept mute changes but don't actually do anything yet
+			return true;
+		}
+		else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
+			// Accept volume changes but don't actually do anything yet
+			return true;
+		}
+	}
+	// Clock source set requests
+	else if (request->bEntityID == UAC2_ENTITY_CLOCK && request->bRequest == AUDIO_CS_REQ_CUR) {
+		if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ) {
+			// Accept sample rate changes but we only support 44.1kHz
+			return true;
+		}
+	}
+
+	return false; // Request not handled
 }
 
 bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const* p_request) {
@@ -177,9 +197,56 @@ bool tud_audio_get_req_itf_cb(uint8_t rhport, tusb_control_request_t const* p_re
 }
 
 bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const* p_request) {
-	(void)rhport;
-	(void)p_request;
-	return true;
+	audio_control_request_t const* request = (audio_control_request_t const*)p_request;
+
+	TU_LOG2("  AUDIO get_req_entity: entity=%u, selector=%u, request=%u\r\n", request->bEntityID,
+	        request->bControlSelector, request->bRequest);
+
+	// Clock source requests
+	if (request->bEntityID == UAC2_ENTITY_CLOCK) {
+		if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ && request->bRequest == AUDIO_CS_REQ_CUR) {
+			// Return current sample rate (44.1kHz)
+			audio_control_cur_4_t sample_rate = {.bCur = 44100};
+			return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &sample_rate, sizeof(sample_rate));
+		}
+		else if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ && request->bRequest == AUDIO_CS_REQ_RANGE) {
+			// Return supported sample rate range (only 44.1kHz)
+			audio_control_range_4_n_t(1) sample_rate_range = {.wNumSubRanges = 1, .subrange[0] = {44100, 44100, 0}};
+			return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &sample_rate_range,
+			                                                  sizeof(sample_rate_range));
+		}
+		else if (request->bControlSelector == AUDIO_CS_CTRL_CLK_VALID && request->bRequest == AUDIO_CS_REQ_CUR) {
+			// Clock is always valid
+			audio_control_cur_1_t clock_valid = {.bCur = 1};
+			return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &clock_valid, sizeof(clock_valid));
+		}
+	}
+	// Feature unit requests (volume/mute)
+	else if (request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT) {
+		if (request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR) {
+			// Return mute state (not muted)
+			audio_control_cur_1_t mute = {.bCur = 0};
+			return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &mute, sizeof(mute));
+		}
+		else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
+			if (request->bRequest == AUDIO_CS_REQ_RANGE) {
+				// Volume range: -50dB to 0dB, 1dB steps
+				audio_control_range_2_n_t(1)
+				    volume_range = {.wNumSubRanges = 1, .subrange[0] = {.bMin = -50 * 256, .bMax = 0, .bRes = 256}};
+				return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &volume_range,
+				                                                  sizeof(volume_range));
+			}
+			else if (request->bRequest == AUDIO_CS_REQ_CUR) {
+				// Current volume: 0dB (max)
+				audio_control_cur_2_t volume = {.bCur = 0};
+				return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &volume, sizeof(volume));
+			}
+		}
+	}
+
+	TU_LOG1("  AUDIO get_req_entity NOT HANDLED: entity=%u, selector=%u, request=%u\r\n", request->bEntityID,
+	        request->bControlSelector, request->bRequest);
+	return false; // Request not handled
 }
 
 #else // CFG_TUD_AUDIO == 0

@@ -53,8 +53,7 @@ uint8_t const* tud_descriptor_device_cb(void) {
 //--------------------------------------------------------------------+
 
 // Composite device: Audio + CDC + MIDI
-#define CONFIG_TOTAL_LEN                                                                                               \
-	(TUD_CONFIG_DESC_LEN + TUD_AUDIO_SPEAKER_STEREO_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MIDI_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_AUDIO_HEADSET_STEREO_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MIDI_DESC_LEN)
 
 // CDC endpoints
 #define EPNUM_CDC_NOTIF 0x81
@@ -63,8 +62,8 @@ uint8_t const* tud_descriptor_device_cb(void) {
 
 // Audio endpoints
 #define EPNUM_AUDIO_INT 0x83 // Audio control interrupt (required by UAC2)
-#define EPNUM_AUDIO_OUT 0x03
-#define EPNUM_AUDIO_IN 0x04
+#define EPNUM_AUDIO_OUT 0x03 // Speaker output (PC to Deluge)
+#define EPNUM_AUDIO_IN 0x84  // Microphone input (Deluge to PC)
 
 // MIDI endpoints - 512 bytes for High-Speed BULK
 #define EPNUM_MIDI_OUT 0x05
@@ -74,14 +73,14 @@ uint8_t const desc_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 500),
 
-    // Audio Interface - UAC2 speaker only (stereo output)
-    TUD_AUDIO_SPEAKER_STEREO_DESCRIPTOR(4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_INT),
+    // Audio Interface - UAC2 full headset (stereo output + stereo input)
+    TUD_AUDIO_HEADSET_STEREO_DESCRIPTOR(4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_IN, EPNUM_AUDIO_INT),
 
     // CDC Interface - Serial port
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 7, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
 
     // MIDI Interface - 512 bytes for High-Speed BULK
-    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 6, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 512),
+    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 8, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 512),
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -103,8 +102,10 @@ char const* string_desc_arr[] = {
     "Deluge USB Controller",    // 2: Product
     "123456",                   // 3: Serials, should use chip ID
     "Deluge Audio",             // 4: Audio Interface
-    "Deluge Control Port",      // 5: CDC Interface
-    "Deluge MIDI",              // 6: MIDI Interface
+    "Deluge Speaker",           // 5: Audio Speaker Interface
+    "Deluge Microphone",        // 6: Audio Microphone Interface
+    "Deluge Control Port",      // 7: CDC Interface
+    "Deluge MIDI",              // 8: MIDI Interface
 };
 
 static uint16_t _desc_str[32];

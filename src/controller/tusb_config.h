@@ -122,11 +122,11 @@ extern "C" {
 // AUDIO CLASS DRIVER CONFIGURATION
 //--------------------------------------------------------------------
 
-// Audio descriptor length
-#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN TUD_AUDIO_SPEAKER_STEREO_DESC_LEN
+// Audio descriptor length - now includes both speaker and microphone
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN TUD_AUDIO_HEADSET_STEREO_DESC_LEN
 
-// Number of Standard AS Interface Descriptors - 1 (speaker only, but with 2 format alternates)
-#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT 2
+// Number of Standard AS Interface Descriptors - 2 (speaker + microphone, each with 2 format alternates)
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT 3
 
 // Size of control request buffer
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ 64
@@ -136,21 +136,31 @@ extern "C" {
 
 // Audio format type I specifications - 44.1kHz stereo
 #define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE 44100
-#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX 2 // Stereo output
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX 2 // Stereo output (PC to Deluge)
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX 2 // Stereo input (Deluge to PC)
 
-// Format 1: 16-bit (2 bytes per sample) - best Windows compatibility
+// RX (output from PC): Format 1 - 16-bit (2 bytes per sample)
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_RX 2
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_RX 16
 
-// Format 2: 24-bit in 32-bit slots (4 bytes per sample) - matches Deluge codec
+// RX (output from PC): Format 2 - 24-bit in 32-bit slots (4 bytes per sample)
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_RX 4
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_RESOLUTION_RX 24
 
-// EP and buffer size - for isochronous EP's, the buffer and EP size are equal
-#define CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP 1 // Enable AC interrupt endpoint
+// TX (input to PC): Format 1 - 16-bit (2 bytes per sample)
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_TX 2
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_TX 16
 
-// Calculate EP size for both formats (use larger of the two)
-#define CFG_TUD_AUDIO_ENABLE_EP_OUT 1
+// TX (input to PC): Format 2 - 24-bit in 32-bit slots (4 bytes per sample)
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_TX 4
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_RESOLUTION_TX 24
+
+// Enable endpoints
+#define CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP 1 // Enable AC interrupt endpoint
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT 1 // Speaker output (PC to Deluge)
+#define CFG_TUD_AUDIO_ENABLE_EP_IN 1  // Microphone input (Deluge to PC)
+
+// Calculate EP sizes for output (speaker) - use larger of the two formats
 #define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT                                                                        \
 	TUD_AUDIO_EP_SIZE(TUD_OPT_HIGH_SPEED, CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE,                                        \
 	                  CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_RX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
@@ -160,10 +170,21 @@ extern "C" {
 #define CFG_TUD_AUDIO_FUNC_1_EP_SZ_OUT                                                                                 \
 	TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_OUT, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_OUT)
 
-// Rx flow control needs buffer size >= 4* EP size to work correctly
-// For High-Speed, buffer should be 32x EP size (read FIFO every 1ms = 8 HS frames)
+// Calculate EP sizes for input (microphone) - use larger of the two formats
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN                                                                         \
+	TUD_AUDIO_EP_SIZE(TUD_OPT_HIGH_SPEED, CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE,                                        \
+	                  CFG_TUD_AUDIO_FUNC_1_FORMAT_1_N_BYTES_PER_SAMPLE_TX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
+#define CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_IN                                                                         \
+	TUD_AUDIO_EP_SIZE(TUD_OPT_HIGH_SPEED, CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE,                                        \
+	                  CFG_TUD_AUDIO_FUNC_1_FORMAT_2_N_BYTES_PER_SAMPLE_TX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
+#define CFG_TUD_AUDIO_FUNC_1_EP_SZ_IN                                                                                  \
+	TU_MAX(CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN, CFG_TUD_AUDIO_FUNC_1_FORMAT_2_EP_SZ_IN)
+
+// Software buffers for High-Speed operation (32x EP size for 1ms = 8 HS frames)
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (32 * CFG_TUD_AUDIO_FUNC_1_EP_SZ_OUT)
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX CFG_TUD_AUDIO_FUNC_1_EP_SZ_OUT
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ (32 * CFG_TUD_AUDIO_FUNC_1_EP_SZ_IN)
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX CFG_TUD_AUDIO_FUNC_1_EP_SZ_IN
 
 #ifdef __cplusplus
 }

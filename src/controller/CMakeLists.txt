@@ -4,11 +4,11 @@
 set(CONTROLLER_SOURCES
     controller.cpp
     hardware_events.cpp
-    # usb_serial.cpp  # Disabled for audio-only testing
+    usb_serial.cpp  # Disabled for audio-only testing
     display_control.cpp
     usb_descriptors.c
     usb_audio.c
-    # usb_midi.c  # Disabled for audio-only testing
+    usb_midi.c  # Disabled for audio-only testing
     oled_init.c
     oled_stubs.c
     # UART driver for PIC32 and MIDI communication

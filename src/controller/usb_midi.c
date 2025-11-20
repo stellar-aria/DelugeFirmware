@@ -21,8 +21,6 @@
 #include "drivers/uart/uart.h"
 #include "tusb.h"
 
-#if CFG_TUD_MIDI
-
 void usb_midi_init(void) {
 	// MIDI UART is already initialized in main (uartInit(UART_ITEM_MIDI, 31250))
 	// No additional initialization needed
@@ -152,16 +150,3 @@ void tud_midi_rx_cb(uint8_t itf) {
 	(void)itf;
 	// MIDI data received from host - will be processed in usb_midi_task()
 }
-
-#else // CFG_TUD_MIDI == 0
-
-// Stub implementations when MIDI is disabled
-void usb_midi_init(void) {
-	// Do nothing
-}
-
-void usb_midi_task(void) {
-	// Do nothing
-}
-
-#endif // CFG_TUD_MIDI

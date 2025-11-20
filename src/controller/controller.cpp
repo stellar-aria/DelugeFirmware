@@ -32,6 +32,7 @@ extern "C" {
 #include "RZA1/oled/oled_low_level.h"
 #include "RZA1/rspi/rspi.h"
 #include "RZA1/ssi/ssi.h"
+#include "RZA1/system/iobitmasks/usb_iobitmask.h"
 #include "RZA1/system/iodefine.h"
 #include "RZA1/uart/sio_char.h"
 #include "definitions.h"
@@ -45,8 +46,6 @@ void dcd_int_handler(uint8_t rhport);
 // USB interrupt handler wrapper
 void usb_interrupt_handler(uint32_t int_sense) {
 	(void)int_sense;
-	uint16_t intsts = USB200.INTSTS0;
-	SEGGER_RTT_printf(0, "[USB_IRQ] INTSTS0=0x%04X\n", intsts);
 	dcd_int_handler(0); // rhport 0
 }
 
@@ -164,8 +163,6 @@ int32_t controller_main(void) {
 	SEGGER_RTT_printf(0, "Drained %d OLED responses\n", oled_drain);
 
 	SEGGER_RTT_WriteString(0, "Setting up SSI audio...\n");
-
-	SEGGER_RTT_WriteString(0, "Setting up SSI audio...\n");
 	// Setup audio output on SSI0 (44.1kHz, stereo)
 	ssiInit(0, 1);
 
@@ -175,79 +172,41 @@ int32_t controller_main(void) {
 	volatile uint8_t dummy_read = CPG.STBCR7; // Dummy read for write completion
 	(void)dummy_read;
 
-	SEGGER_RTT_WriteString(0, "Initializing TinyUSB...\n");
-	// Initialize USB device stack (this will configure SUSPMODE, clocks, and USB registers)
-	tusb_init();
-
-	// NOTE: Pipe configuration is now handled automatically by the DCD driver
-	// in dcd_edpt_open() when the host issues Set Configuration
-
-	// CRITICAL: Register the interrupt handler AFTER hardware initialization (like Deluge does)
-	// TinyUSB's dcd_int_enable() only enables the GIC interrupt, but doesn't
-	// register the C function handler. Without this, the GIC will set pending
-	// bits but there's no handler to call!
+	// Register USB interrupt handler BEFORE initializing TinyUSB
+	// TinyUSB will enable the interrupt via dcd_int_enable(), so we just register and set priority
 	SEGGER_RTT_WriteString(0, "Registering USB interrupt handler...\n");
-
-	// Note: We're NOT clearing DMARS here because it would break OLED DMA transfers
-	// The USB interrupt (ID 73) should not be configured as a DMA source by default
-
-	R_INTC_Disable(INTC_ID_USBI0); // Disable first to clear any stale state
+	R_INTC_Disable(INTC_ID_USBI0);
 	R_INTC_RegistIntFunc(INTC_ID_USBI0, usb_interrupt_handler);
-	R_INTC_SetPriority(INTC_ID_USBI0, 5);
+	R_INTC_SetPriority(INTC_ID_USBI0, 9);
+	// Note: TinyUSB's tud_init() will call dcd_int_enable() to enable the interrupt
+	SEGGER_RTT_WriteString(0, "USB interrupt handler registered (will be enabled by TinyUSB)\n");
 
-	// CRITICAL: Clear any pending interrupt status BEFORE enabling GIC interrupt
-	// The USB module may have pending DVST from initialization, and if the interrupt
-	// line is already asserted, enabling the GIC won't help (level-sensitive)
-	USB200.INTSTS0 = 0; // Clear all interrupt status bits
-	delayMs(1);         // Give hardware time to de-assert interrupt line
+	// Initialize TinyUSB device stack
+	SEGGER_RTT_WriteString(0, "Initializing TinyUSB...\n");
+	tud_init(0);
 
-	R_INTC_Enable(INTC_ID_USBI0);
-	SEGGER_RTT_WriteString(0, "USB interrupt handler registered and enabled\n");
+	// Connect to host (enables D+ pull-up)
+	SEGGER_RTT_WriteString(0, "Connecting to USB host...\n");
+	tud_connect();
 
-	// Give USB hardware time to stabilize (critical for enumeration)
-	// USB PHY needs ~10ms to power up and stabilize
-	delayMs(50);
-
-	USB200.INTENB0 = 0x0000 | (1 << 15) // VBSE - VBus interrupt
-	                 | (1 << 9)         // BRDYE - Buffer Ready
-	                 | (1 << 8)         // BEMPE - Buffer Empty
-	                 | (1 << 4)         // DVSE - Device State change
-	                 | (1 << 0);        // CTRE - Control Transfer Stage Transition
-	USB200.BEMPENB = 1;                 // Enable buffer empty interrupt for pipe 0
-	USB200.BRDYENB = 1;                 // Enable buffer ready interrupt for pipe 0
-	SEGGER_RTT_WriteString(0, "USB device connected and interrupts enabled\n");
-
-	// Debug: Check USB register states after initialization
-	SEGGER_RTT_printf(0, "Post-init USB registers:\n");
-	SEGGER_RTT_printf(0, "  SYSCFG0  = 0x%04X\n", USB200.SYSCFG0);
-	SEGGER_RTT_printf(0, "  INTSTS0  = 0x%04X (DVST pending!)\n", USB200.INTSTS0);
-	SEGGER_RTT_printf(0, "  INTENB0  = 0x%04X\n", USB200.INTENB0);
-	SEGGER_RTT_printf(0, "  BEMPENB  = 0x%04X\n", USB200.BEMPENB);
-	SEGGER_RTT_printf(0, "  BRDYENB  = 0x%04X\n", USB200.BRDYENB);
-	SEGGER_RTT_printf(0, "  DVSTCTR0 = 0x%04X\n", USB200.DVSTCTR0);
-
-	// Manually trigger USB interrupt handler to process pending DVST
-	SEGGER_RTT_WriteString(0, "Manually calling USB interrupt handler to clear pending DVST...\n");
-	usb_interrupt_handler(0);
-
-	// Call tud_task a few times to let TinyUSB process any events
-	SEGGER_RTT_WriteString(0, "Polling USB stack...\n");
+	// CRITICAL: RZA1L quirk - interrupt enable registers only become writable after
+	// VBUS detection and device state changes. Call tud_task() to process USB events,
+	// then enable interrupts.
 	for (int i = 0; i < 10; i++) {
 		tud_task();
 		delayMs(10);
 	}
-	SEGGER_RTT_printf(0, "After polling - INTSTS0 = 0x%04X\n", USB200.INTSTS0);
 
-	// Debug: Check if GIC interrupt is actually enabled
-	volatile uint32_t* icdiser = (volatile uint32_t*)&INTC.ICDISER0;
-	uint32_t gic_enabled = icdiser[73 >> 5] & (1u << (73 & 0x1F));
-	SEGGER_RTT_printf(0, "GIC ICDISER for IRQ73: 0x%08lX (bit %d = %lu)\n", icdiser[73 >> 5], (73 & 0x1F),
-	                  gic_enabled ? 1UL : 0UL);
-
-	// Check if interrupt is pending
-	volatile uint32_t* icdispr = (volatile uint32_t*)&INTC.ICDISPR0;
-	uint32_t gic_pending = icdispr[73 >> 5] & (1u << (73 & 0x1F));
-	SEGGER_RTT_printf(0, "GIC ICDISPR for IRQ73: 0x%08lX (pending = %lu)\n", icdispr[73 >> 5], gic_pending ? 1UL : 0UL);
+	// Now enable USB interrupts (registers are writable after VBUS detection)
+	USB200.INTSTS0 = 0;
+	USB200.INTENB0 = 0 | USB_INTENB0_VBSE // VBus interrupt
+	                 | USB_INTENB0_BRDYE  // Buffer Ready
+	                 | USB_INTENB0_BEMPE  // Buffer Empty
+	                 | USB_INTENB0_DVSE   // Device State change
+	                 | USB_INTENB0_CTRE   // Control Transfer Stage Transition
+	                 | USB_INTENB0_RSME;  // Resume
+	USB200.BEMPENB = 1;
+	USB200.BRDYENB = 1;
 
 	SEGGER_RTT_WriteString(0, "Initializing hardware event scanning...\n");
 	// Initialize hardware event scanning (will configure PIC for pad reading)
@@ -255,13 +214,13 @@ int32_t controller_main(void) {
 
 	SEGGER_RTT_WriteString(0, "Initializing USB subsystems...\n");
 	// Initialize USB serial protocol
-	// usb_serial_init();  // Disabled for audio-only testing
+	usb_serial_init(); // Disabled for audio-only testing
 
 	// Initialize USB audio for audio I/O
 	usb_audio_init();
 
 	// Initialize USB MIDI for MIDI I/O
-	// usb_midi_init();  // Disabled for audio-only testing
+	usb_midi_init(); // Disabled for audio-only testing
 
 	SEGGER_RTT_WriteString(0, "Clearing all LEDs and display...\n");
 
@@ -284,51 +243,16 @@ int32_t controller_main(void) {
 
 	SEGGER_RTT_WriteString(0, "=== Controller initialization complete, entering main loop ===\n");
 
-	uint32_t loop_count = 0;
-	uint32_t last_printed_intsts = USB200.INTSTS0;
 	// Main loop
 	while (true) {
-		// Debug: Print loop count every 100000 iterations or when INTSTS0 changes significantly
-		// Ignore DVST bit (0x2000) changes as they're too frequent
-		uint16_t current_intsts = USB200.INTSTS0;
-		uint16_t current_intsts_masked = current_intsts & ~0x2000; // Ignore DVST bit
-		uint16_t last_intsts_masked = last_printed_intsts & ~0x2000;
-
-		if ((loop_count % 100000) == 0 || current_intsts_masked != last_intsts_masked) {
-			SEGGER_RTT_printf(0, "Loop %lu, INTSTS0=0x%04X\n", loop_count, current_intsts);
-			last_printed_intsts = current_intsts;
-		}
-		loop_count++;
-
 		// Process OLED transfer queue (handles select/deselect/DMA)
 		oledRoutine();
 
 		// Flush PIC UART if needed
 		uartFlushIfNotSending(UART_ITEM_PIC);
 
-		// Process USB tasks - this should handle events but it's not working
+		// Process USB tasks (handles non-interrupt USB events)
 		tud_task();
-
-		// WORKAROUND: Manually check for USB interrupts and call handler
-		// This is needed because interrupts aren't working and tud_task() doesn't poll the hardware
-		// Check INTSTS0 against INTENB0, BRDYENB, and BEMPENB
-		uint16_t intsts = USB200.INTSTS0;
-		uint16_t intenb = USB200.INTENB0;
-		uint16_t brdyenb = USB200.BRDYENB;
-		uint16_t bempenb = USB200.BEMPENB;
-
-		// Check if any enabled interrupt is pending
-		bool has_interrupt = false;
-		if (intsts & intenb)
-			has_interrupt = true; // Standard interrupts
-		if ((intsts & 0x0080) && brdyenb)
-			has_interrupt = true; // BRDY (bit 7)
-		if ((intsts & 0x0010) && bempenb)
-			has_interrupt = true; // BEMP (bit 4)
-
-		if (has_interrupt) {
-			dcd_int_handler(0);
-		}
 
 		// Scan hardware for events
 		hardware_events_scan();
@@ -350,9 +274,9 @@ void controller_task(void) {
 	// This can be called from main loop if needed
 	tud_task();
 	hardware_events_scan();
-	usb_serial_task(); // Disabled for audio-only testing
+	usb_serial_task();
 	usb_audio_task();
-	usb_midi_task(); // Disabled for audio-only testing
+	usb_midi_task();
 }
 
 void midiAndGateTimerGoneOff(void) {

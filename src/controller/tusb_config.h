@@ -51,9 +51,9 @@ extern "C" {
 #define CFG_TUSB_OS OPT_OS_NONE
 #endif
 
-// Debug level (2 = more verbose, 3 = most verbose)
+// Debug level (0 = no debug, 1 = errors only, 2 = warnings, 3 = verbose)
 #ifndef CFG_TUSB_DEBUG
-#define CFG_TUSB_DEBUG 2 // Re-enable to debug enumeration failure
+#define CFG_TUSB_DEBUG 1 // Reduced verbosity - only show errors
 #endif
 
 // Enable Device stack

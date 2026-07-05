@@ -87,7 +87,13 @@ def argparser():
 def host_triple():
     """The Rust host target triple (the simulator GUI must be built for it — the SDK's
     default target is armv7a, so we always pass --target)."""
-    out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True).stdout
+    # dbt routes cargo/rustc through the bundled rustup, which has no default
+    # toolchain (rust-toolchain.toml is the selector). We run from the git root,
+    # which has no such file, so name the channel explicitly. Both in-tree tomls
+    # pin nightly, so +nightly stays consistent.
+    out = subprocess.run(
+        ["rustc", "+nightly", "-vV"], capture_output=True, text=True
+    ).stdout
     for line in out.splitlines():
         if line.startswith("host:"):
             return line.split(":", 1)[1].strip()
@@ -125,6 +131,9 @@ def build_sim(triple, release, no_build):
         return 0
     cmd = [
         "cargo",
+        # See host_triple(): the bundled rustup has no default toolchain and the
+        # git root carries no rust-toolchain.toml, so pin the channel explicitly.
+        "+nightly",
         "install",
         "--git",
         SIM_GIT_URL,

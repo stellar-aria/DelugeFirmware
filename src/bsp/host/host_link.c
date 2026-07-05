@@ -21,6 +21,8 @@
 
 #include "host_link.h"
 
+#include "host_ws.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -43,6 +45,7 @@ static int link_listen_fd = -1;  // listening socket (server)
 static int link_conn_fd = -1;    // accepted client (the GUI)
 static char link_path[108];      // bound AF_UNIX path, so we can unlink() on teardown
 static bool link_is_tcp = false; // transport: TCP loopback vs. AF_UNIX
+static bool link_is_ws = false;  // WebSocket framing atop TCP (browser panel)
 static bool link_inited = false;
 
 // Inbound byte accumulator: bytes arrive in arbitrary chunks; we parse whole frames.
@@ -168,8 +171,18 @@ bool host_link_init(void) {
 		return false; // headless: no link, offline harness behaviour
 	}
 
+	// A `ws://[host:]port` target is a WebSocket listener for the browser panel
+	// (which cannot open a raw socket). WebSocket is HTTP-over-TCP, so it binds
+	// TCP loopback like any other TCP target — only the framing differs.
+	link_is_ws = (strncmp(target, "ws://", 5) == 0);
+	const char* tcp_target = link_is_ws ? target + 5 : target;
+
 	uint16_t port = 0;
-	link_is_tcp = link_parse_tcp(target, &port);
+	link_is_tcp = link_parse_tcp(tcp_target, &port);
+	if (link_is_ws && !link_is_tcp) {
+		fprintf(stderr, "host_link: malformed ws:// target '%s'\n", target);
+		return false;
+	}
 	link_listen_fd = link_is_tcp ? link_listen_tcp(port) : link_listen_unix(target);
 	if (link_listen_fd < 0) {
 		return false;
@@ -179,6 +192,14 @@ bool host_link_init(void) {
 	link_conn_fd = accept(link_listen_fd, NULL, NULL); // block until the GUI attaches
 	if (link_conn_fd < 0) {
 		perror("host_link: accept");
+		return false;
+	}
+
+	// The WebSocket handshake reads the HTTP upgrade request while the socket is
+	// still blocking (before O_NONBLOCK below), so it can wait for the full request.
+	if (link_is_ws && host_ws_accept(link_conn_fd) != 0) {
+		fprintf(stderr, "host_link: WebSocket handshake failed\n");
+		link_close();
 		return false;
 	}
 
@@ -227,6 +248,22 @@ void host_link_send(uint8_t type, const uint8_t* data, uint16_t n) {
 	if (link_conn_fd < 0) {
 		return;
 	}
+	if (link_is_ws) {
+		// One WebSocket binary frame carries the deluge-protocol body [type][data]
+		// (no length prefix — WebSocket delimits messages). Largest is the 768-byte
+		// display blit + type byte.
+		uint8_t body[1 + 768];
+		body[0] = type;
+		if (n > 0) {
+			memcpy(body + 1, data, n);
+		}
+		uint8_t frame[4 + 1 + 768];
+		size_t fl = host_ws_encode(frame, sizeof(frame), HOST_WS_OP_BINARY, body, (size_t)(1u + n));
+		if (fl > 0) {
+			link_write_all(frame, (uint32_t)fl);
+		}
+		return;
+	}
 	uint16_t len = (uint16_t)(1u + n); // type byte + data
 	uint8_t header[3] = {(uint8_t)(len & 0xFF), (uint8_t)(len >> 8), type};
 	link_write_all(header, 3);
@@ -262,8 +299,55 @@ static void link_fill(void) {
 	}
 }
 
+// Deframe one deluge-protocol body out of the accumulated WebSocket bytes.
+// Control frames are handled in-place (ping → pong, close → go headless) and we
+// keep scanning; a data frame's body is delivered to the caller. Returns false
+// when no complete data frame is buffered yet.
+static bool ws_recv(uint8_t* type, uint8_t* data, uint16_t* inout_len) {
+	for (;;) {
+		uint8_t payload[1 + 768];
+		size_t plen = 0;
+		int is_ping = 0;
+		ssize_t consumed = host_ws_decode(rx_buf, rx_len, payload, sizeof(payload), &plen, &is_ping);
+		if (consumed < 0) {
+			fprintf(stderr, "host_link: WebSocket closed; going headless\n");
+			link_close();
+			return false;
+		}
+		if (consumed == 0) {
+			return false; // frame not fully arrived yet
+		}
+		rx_len -= (uint32_t)consumed;
+		memmove(rx_buf, rx_buf + consumed, rx_len);
+
+		if (is_ping) {
+			size_t pn = (plen < 125) ? plen : 125; // control-frame payloads are ≤125
+			uint8_t pong[2 + 125];
+			size_t fl = host_ws_encode(pong, sizeof(pong), HOST_WS_OP_PONG, payload, pn);
+			if (fl > 0) {
+				link_write_all(pong, (uint32_t)fl);
+			}
+			continue;
+		}
+		if (plen == 0) {
+			continue; // pong or empty frame — nothing to deliver
+		}
+		*type = payload[0];
+		uint16_t data_len = (uint16_t)(plen - 1);
+		uint16_t copy = (data_len < *inout_len) ? data_len : *inout_len;
+		if (copy > 0) {
+			memcpy(data, payload + 1, copy);
+		}
+		*inout_len = data_len;
+		return true;
+	}
+}
+
 bool host_link_recv(uint8_t* type, uint8_t* data, uint16_t* inout_len) {
 	link_fill();
+	if (link_is_ws) {
+		return ws_recv(type, data, inout_len);
+	}
 	if (rx_len < 3) {
 		return false; // need length header (2) + at least a type byte (1)
 	}

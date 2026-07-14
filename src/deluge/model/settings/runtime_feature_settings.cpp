@@ -18,6 +18,7 @@
 #include "runtime_feature_settings.h"
 #include "gui/l10n/l10n.h"
 #include "hid/display/display.h"
+#include "io/file.hpp"
 #include "model/song/song.h"
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
@@ -204,10 +205,10 @@ void RuntimeFeatureSettings::readSettingsFromFile() {
 		// since we changed the file path for the CommunityFeatures.XML in c1.3, it's possible
 		// that a CommunityFeatures file may exists in the root of the SD card
 		// if so, let's move it to the new SETTINGS folder (but first make sure folder exists)
-		FRESULT result = f_mkdir(SETTINGS_FOLDER);
-		if (result == FR_OK || result == FR_EXIST) {
-			result = f_rename("CommunityFeatures.XML", RUNTIME_FEATURE_SETTINGS_FILE);
-			if (result == FR_OK) {
+		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
+		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
+			auto renamed = deluge::io::rename("CommunityFeatures.XML", RUNTIME_FEATURE_SETTINGS_FILE);
+			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
 				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE, &fp);
@@ -275,7 +276,7 @@ void RuntimeFeatureSettings::readSettingsFromFile() {
 }
 
 void RuntimeFeatureSettings::writeSettingsToFile() {
-	f_unlink(RUNTIME_FEATURE_SETTINGS_FILE); // May give error, but no real consequence from that.
+	deluge::io::unlink(RUNTIME_FEATURE_SETTINGS_FILE); // May give error, but no real consequence from that.
 
 	Error error = StorageManager::createXMLFile(RUNTIME_FEATURE_SETTINGS_FILE, smSerializer, true);
 	if (error != Error::NONE) {

@@ -36,4 +36,57 @@ Status to_status(DelugeStatus status) {
 	return Status::ERR; // unreachable while the switch above stays exhaustive
 }
 
+std::expected<File, Status> File::open(std::string_view path, DelugeFileOpenMode mode) {
+	DelugeFile* handle = nullptr;
+	DelugeStatus status = deluge_file_open(path.data(), mode, &handle);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return File(handle);
+}
+
+std::expected<std::span<std::byte>, Status> File::read(std::span<std::byte> buffer) {
+	uint32_t out_read = 0;
+	DelugeStatus status = deluge_file_read(handle_, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_read);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return buffer.subspan(0, out_read);
+}
+
+std::expected<uint32_t, Status> File::write(std::span<const std::byte> buffer) {
+	uint32_t out_written = 0;
+	DelugeStatus status = deluge_file_write(handle_, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_written);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return out_written;
+}
+
+std::expected<void, Status> File::seek(uint32_t offset) {
+	DelugeStatus status = deluge_file_seek(handle_, offset);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
+std::expected<uint32_t, Status> File::size() {
+	uint32_t out_size = 0;
+	DelugeStatus status = deluge_file_size(handle_, &out_size);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return out_size;
+}
+
+std::expected<void, Status> File::close() {
+	DelugeStatus status = deluge_file_close(handle_);
+	handle_ = nullptr; // matters even on error: don't let the destructor double-close
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
 } // namespace deluge::io

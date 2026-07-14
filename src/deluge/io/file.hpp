@@ -2,6 +2,11 @@
 
 #include "libdeluge/file_io.h"
 
+#include <cstdint>
+#include <expected>
+#include <span>
+#include <string_view>
+
 namespace deluge::io {
 
 /// A real enum class over DelugeStatus's C enum, matching the existing
@@ -25,5 +30,38 @@ enum class Status {
 };
 
 Status to_status(DelugeStatus status);
+
+class File {
+public:
+	File(File&) = delete;
+	File(File&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+	File& operator=(File&) = delete;
+	File& operator=(File&& other) noexcept {
+		if (this != &other) {
+			if (handle_) {
+				deluge_file_close(handle_);
+			}
+			handle_ = other.handle_;
+			other.handle_ = nullptr;
+		}
+		return *this;
+	}
+	~File() {
+		if (handle_) {
+			deluge_file_close(handle_);
+		}
+	}
+
+	[[nodiscard]] static std::expected<File, Status> open(std::string_view path, DelugeFileOpenMode mode);
+	std::expected<std::span<std::byte>, Status> read(std::span<std::byte> buffer);
+	std::expected<uint32_t, Status> write(std::span<const std::byte> buffer);
+	std::expected<void, Status> seek(uint32_t offset);
+	std::expected<uint32_t, Status> size();
+	std::expected<void, Status> close();
+
+private:
+	explicit File(DelugeFile* handle) : handle_(handle) {}
+	DelugeFile* handle_ = nullptr;
+};
 
 } // namespace deluge::io

@@ -638,6 +638,7 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 				}
 				else {
 					status = result.error();
+					size = 0;
 				}
 			}
 			else {

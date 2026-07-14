@@ -31,6 +31,7 @@ enum class Status {
 };
 
 Status to_status(DelugeStatus status);
+DelugeStatus to_deluge_status(Status status);
 
 class File {
 public:

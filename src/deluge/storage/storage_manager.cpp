@@ -22,6 +22,7 @@
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "libdeluge/block_device.h"
 #include "libdeluge/control_surface.h"
 #include "memory/general_memory_allocator.h"
@@ -763,7 +764,6 @@ Error StorageManager::openDelugeFile(FileItem* currentFileItem, char const* firs
 
 bool StorageManager::buildPathToFile(const char* fileName) {
 
-	FRESULT res;
 	etl::string<255> s_container;
 	s_container.append(fileName);
 	char* s = s_container.data();
@@ -778,17 +778,17 @@ bool StorageManager::buildPathToFile(const char* fileName) {
 	if (i > 0) {
 		s[i] = 0; // replace '/' with NUL
 
-		res = f_mkdir(s);
+		auto res = deluge::io::mkdir(s);
 
-		if (res == FR_NO_PATH) {
+		if (!res.has_value() && res.error() == deluge::io::Status::NOT_FOUND) {
 			// try the next folder in the path
 			if (buildPathToFile(s)) {
 				// if that worked, try again
-				res = f_mkdir(s);
+				res = deluge::io::mkdir(s);
 			}
 		}
 
-		if (res == FR_OK || res == FR_EXIST)
+		if (res.has_value() || res.error() == deluge::io::Status::EXISTS)
 			return true;
 	}
 	return false;

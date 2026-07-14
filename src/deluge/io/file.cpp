@@ -36,6 +36,40 @@ Status to_status(DelugeStatus status) {
 	return Status::ERR; // unreachable while the switch above stays exhaustive
 }
 
+DelugeStatus to_deluge_status(Status status) {
+	switch (status) {
+	case Status::OK:
+		return DELUGE_OK;
+	case Status::ERR:
+		return DELUGE_ERR;
+	case Status::PARAM:
+		return DELUGE_ERR_PARAM;
+	case Status::BUSY:
+		return DELUGE_ERR_BUSY;
+	case Status::TIMEOUT:
+		return DELUGE_ERR_TIMEOUT;
+	case Status::IO:
+		return DELUGE_ERR_IO;
+	case Status::NODEV:
+		return DELUGE_ERR_NODEV;
+	case Status::UNSUPPORTED:
+		return DELUGE_ERR_UNSUPPORTED;
+	case Status::NOT_FOUND:
+		return DELUGE_ERR_NOT_FOUND;
+	case Status::EXISTS:
+		return DELUGE_ERR_EXISTS;
+	case Status::NO_SPACE:
+		return DELUGE_ERR_NO_SPACE;
+	case Status::NO_FILESYSTEM:
+		return DELUGE_ERR_NO_FILESYSTEM;
+	case Status::WRITE_PROTECTED:
+		return DELUGE_ERR_WRITE_PROTECTED;
+	case Status::NO_MEMORY:
+		return DELUGE_ERR_NO_MEMORY;
+	}
+	return DELUGE_ERR; // unreachable while the switch above stays exhaustive
+}
+
 std::expected<File, Status> File::open(std::string_view path, DelugeFileOpenMode mode) {
 	DelugeFile* handle = nullptr;
 	DelugeStatus status = deluge_file_open(path.data(), mode, &handle);

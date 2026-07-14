@@ -25,6 +25,7 @@
 #include "gui/views/session_view.h"
 #include "gui/views/view.h"
 #include "hid/display/display.h"
+#include "io/file.hpp"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/midi_takeover.h"
@@ -1666,8 +1667,8 @@ void MidiFollow::readDefaultsFromFile() {
 	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML, &fp);
 	if (!success) {
 		// if file doesn't exist, lets make SETTINGS folder if it doesn't already exist
-		FRESULT result = f_mkdir(SETTINGS_FOLDER);
-		if (result == FR_OK || result == FR_EXIST) {
+		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
+		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
 			// folder eixsts now, write defaults
 			writeDefaultsToFile();
 			successfullyReadDefaultsFromFile = true;

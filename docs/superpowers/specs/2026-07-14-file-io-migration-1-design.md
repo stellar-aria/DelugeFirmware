@@ -6,9 +6,9 @@
 
 ## 1. Goal
 
-Migrate the six simplest, lowest-risk FatFS call sites in the app from raw FatFS calls to **`deluge::io`** (merged into `next`; design at `docs/superpowers/specs/2026-07-14-deluge-io-wrapper-design.md`) — the idiomatic C++23 wrapper (`Status` enum class, move-only RAII `File`/`Directory`, `std::expected`-returning methods, `mkdir`/`unlink`/`rename` free functions) over `include/libdeluge/file_io.h` (also merged into `next`; design at `docs/superpowers/specs/2026-07-14-libdeluge-file-io-boundary-design.md`). Call sites migrate to `deluge::io`, **not** to raw `file_io.h` C-ABI calls directly — that raw boundary is BSP-implementation territory, not app-facing (see the wrapper design doc §1 for why). This is Plan 1 of a five-plan migration sequence covering the ~65 call sites the boundary design doc's §7 catalogued:
+Migrate the five simplest, lowest-risk FatFS call sites in the app from raw FatFS calls to **`deluge::io`** (merged into `next`; design at `docs/superpowers/specs/2026-07-14-deluge-io-wrapper-design.md`) — the idiomatic C++23 wrapper (`Status` enum class, move-only RAII `File`/`Directory`, `std::expected`-returning methods, `mkdir`/`unlink`/`rename` free functions) over `include/libdeluge/file_io.h` (also merged into `next`; design at `docs/superpowers/specs/2026-07-14-libdeluge-file-io-boundary-design.md`). Call sites migrate to `deluge::io`, **not** to raw `file_io.h` C-ABI calls directly — that raw boundary is BSP-implementation territory, not app-facing (see the wrapper design doc §1 for why). This is Plan 1 of a five-plan migration sequence covering the ~65 call sites the boundary design doc's §7 catalogued:
 
-1. **Plan 1 (this doc)** — the six mechanical files.
+1. **Plan 1 (this doc)** — the five mechanical files.
 2. **Plan 2** — `storage/storage_manager.cpp` (the central file-I/O engine; excludes its `fileSystem.mount(...)` calls, which are SD-card mount/detection lifecycle already covered by `block_device.h`, not `file_io.h`).
 3. **Plan 3** — `gui/ui/browser/browser.cpp` (directory browsing).
 4. **Plan 4** — `storage/smsysex.cpp` (the companion SysEx protocol; ~40 FatFS references woven through real business logic — multi-step file-copy-with-retry, rename-with-path-autocreate, paginated directory listing. Deliberately last, once the boundary's real-world shape is proven on four simpler plans first).
@@ -16,9 +16,11 @@ Migrate the six simplest, lowest-risk FatFS call sites in the app from raw FatFS
 
 Each plan is independently shippable and golden-master-verifiable (or, for this plan, verifiable by the alternative means below) on its own — no plan depends on a later one landing first.
 
-## 2. Scope: six files, two patterns, eleven call sites
+## 2. Scope: five files, two patterns, eleven call sites
 
 All eleven call sites are in `src/deluge/`, all already build against the merged `deluge::io` (`src/deluge/io/file.hpp`).
+
+**`gui/ui/browser/sample_browser.cpp` was in the original scope, dropped after reading the actual surrounding code (not visible from a call-site grep alone).** Its `AM_DIR` check sits inside a folder-load loop built on `FatFS::Directory::read_and_get_filepointer()`, which returns a `FilePointer` (`{DWORD sclust; FSIZE_t objsize;}` — a raw FAT starting-cluster + size fast-path) forwarded into `AudioFileManager::getAudioFileFromFilename` so it can jump straight to a file's location instead of re-resolving the path. `file_io.h`/`deluge::io` deliberately expose no cluster-level concept, so there is nothing to migrate this call to without either a real fast-handle extension to the boundary or a redesign of the loop to resolve by path instead — neither is mechanical. Tracked in `TODO.md` as its own item; out of scope for every plan in this migration series until that's designed.
 
 ### Pattern A — settings-folder bootstrap (four files, eight call sites)
 
@@ -50,18 +52,35 @@ if (result.has_value() || result.error() == deluge::io::Status::EXISTS) { ... }
 
 `f_rename(a, b)` → `deluge::io::rename(a, b)`; `f_unlink(path)` → `deluge::io::unlink(path)`; both keep their existing error-tolerant call sites unchanged (return value already discarded or only loosely checked today — no new error handling introduced, none removed). Confirmed against the landed header (`src/deluge/io/file.hpp:98-100`): `mkdir`/`unlink`/`rename` are **not** `[[nodiscard]]` (only `File::open`/`Directory::open` are), so the existing best-effort, discard-the-result call sites need no `(void)` cast to stay warning-clean.
 
-### Pattern B — directory listing / is-this-a-directory (two files, three call sites)
+### Pattern B — directory listing / is-this-a-directory (one file, three call sites)
 
 | file:line | operation |
 |---|---|
-| `gui/ui/browser/sample_browser.cpp:1264` | `staticFNO.fattrib & AM_DIR` (already reads from a `FatFS::Directory`-wrapper-produced `FILINFO`) |
-| `gui/views/instrument_clip_view.cpp:2092` | `FatFS::Directory::open(path)` (wrapper) |
+| `gui/views/instrument_clip_view.cpp:2092` | `staticDIR = D_TRY_CATCH(FatFS::Directory::open(path), error, {...})` (wrapper, reassigning a `static`-lifetime `Directory`) |
 | `gui/views/instrument_clip_view.cpp:2101` | `f_readdir(&staticDIR.inner(), &staticFNO)` (raw call on the wrapper's inner `DIR` — a level-mixing pre-existing wart this migration also cleans up) |
 | `gui/views/instrument_clip_view.cpp:2103` | `staticFNO.fattrib & AM_DIR` |
 
-`instrument_clip_view.cpp` currently mixes the `FatFS::Directory` C++ wrapper (for `open`) with a raw `f_readdir` call on its inner `DIR` — this migration replaces the whole sequence with `deluge::io::Directory::open`/`.read()`/(RAII close, no explicit call needed at scope exit — though an explicit `.close()` before reuse may still be wanted if the existing code reuses one `static` `Directory` across calls, matching today's `static FatFS::Directory staticDIR` pattern; check this while implementing). `sample_browser.cpp` already goes through the `FatFS::Directory` wrapper for the entry itself; only the `AM_DIR` bit-check line changes, reading `DelugeDirEntry::is_directory` off the entry `deluge::io::Directory::read()` returns instead.
+`instrument_clip_view.cpp` currently mixes the `FatFS::Directory` C++ wrapper (for `open`) with a raw `f_readdir` call on its inner `DIR` — this migration replaces the whole sequence with `deluge::io::Directory::open`/`.read()` (RAII close; no explicit `.close()` call needed, since `staticDIR`'s *reassignment* on the next call — see below — is what actually needs to release the old handle, not scope exit). No `FilePointer`/fast-path dependency here (unlike the dropped `sample_browser.cpp` site above) — this loop only reads directory entries, checks `AM_DIR`, and does reservoir sampling; genuinely mechanical.
 
-**This is not a purely mechanical rename** (flagged by the `deluge::io` wrapper's final whole-branch review as a real migration-planning risk, not a blocker): FatFS's `Directory::read()` returns `std::expected<FileInfo, Error>` with an empty-name field signaling end-of-directory, requiring a loop that inspects the returned struct's name each iteration. `deluge::io::Directory::read()` instead returns `std::expected<std::optional<DelugeDirEntry>, Status>` — end-of-directory is `std::nullopt`, checked directly, no name-field inspection needed. Both call sites' iteration loops need a real rewrite (loop-until-`nullopt` instead of loop-until-empty-name), not a token-for-token substitution — budget real implementation time for this, not just a search-and-replace.
+**`staticDIR`'s reassignment needs `D_TRY_CATCH_MOVE`, not `D_TRY_CATCH`** (both already exist as generic macros in `src/deluge/util/try.h`, not part of `deluge::io` — `D_TRY_CATCH`'s expansion ends in `result.value();`, a copy/lvalue-bind that won't compile against `deluge::io::Directory`'s deleted copy-assignment; `D_TRY_CATCH_MOVE`'s expansion ends in `std::move(result.value());`, which correctly selects `Directory`'s move-assignment — already self-guarded and already closes its own prior handle before taking the new one, verified in the wrapper's own review). The block body is unchanged (it doesn't reference the caught error variable at all today — `{ *slashAddress = '/'; display->displayError(Error::SD_CARD); return ActionResult::DEALT_WITH; }` — so no error-type translation is needed either):
+
+```cpp
+// before
+staticDIR = D_TRY_CATCH(FatFS::Directory::open(path), error, {
+	*slashAddress = '/';
+	display->displayError(Error::SD_CARD);
+	return ActionResult::DEALT_WITH;
+});
+
+// after
+staticDIR = D_TRY_CATCH_MOVE(deluge::io::Directory::open(path), error, {
+	*slashAddress = '/';
+	display->displayError(Error::SD_CARD);
+	return ActionResult::DEALT_WITH;
+});
+```
+
+**The read-loop itself is not a purely mechanical rename** (flagged by the `deluge::io` wrapper's final whole-branch review as a real migration-planning risk, not a blocker): the current `while (f_readdir(&staticDIR.inner(), &staticFNO) == FR_OK && staticFNO.fname[0] != 0) { ... }` loop inspects a returned struct's name field to detect end-of-directory. `deluge::io::Directory::read()` instead returns `std::expected<std::optional<DelugeDirEntry>, Status>` — end-of-directory is `std::nullopt`, checked directly, no name-field inspection needed. The loop needs a real rewrite (loop-until-`nullopt`), not a token-for-token substitution — budget real implementation time for this, not just a search-and-replace.
 
 ## 3. Testing — not golden-harness-covered; code-review verified
 
@@ -76,6 +95,7 @@ Verification for this plan:
 
 ## 4. Out of scope
 
+- `sample_browser.cpp`'s `AM_DIR` call site (§2) — blocked on the `FilePointer` fast-path gap, tracked in `TODO.md`, not part of any Plan in this migration series until that's designed.
 - `storage_manager.cpp`'s `fileSystem.mount(...)` calls — SD-card lifecycle, not file access; not part of any Plan in this migration series.
 - Removing `fresultToDelugeErrorCode`/`fatfsErrorToDelugeError` — still load-bearing for every file not yet migrated (Plans 2-4); removal is Plan 5, gated on all of them landing.
 - Any behavior change beyond the mechanical translation — Pattern A's "tolerate already-exists," "best-effort unlink," and "rename legacy filename" semantics are preserved exactly as they exist today.

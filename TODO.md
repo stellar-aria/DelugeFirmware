@@ -1,3 +1,4 @@
 - [] remove TEST_VECTOR*
 - [] sample accurate midi/usb note-on from embassy
 - [] encapsulate deluge::dsp::fixed::Interpolator's tap windows (buffer_l/buffer_r are public because sample_low_level_reader / live-input play_head / wave_table manage them directly for loop crossfades + jump-fills — lift that behind a richer feed/window API so they can go private)
+- [] rework sample_browser.cpp's folder-load loop (~line 1202-1290) to not depend on FatFS::Directory::read_and_get_filepointer()'s FilePointer (raw starting-cluster + size fast-path for audioFileManager.getAudioFileFromFilename) so it can migrate off FatFS to deluge::io::Directory — file_io.h/deluge::io deliberately expose no cluster-level concept, so either add a real fast-handle extension to the boundary or redesign the loop to resolve files by path instead. Blocks migrating this one call site (dropped from migration Plan 1, docs/superpowers/specs/2026-07-14-file-io-migration-1-design.md).

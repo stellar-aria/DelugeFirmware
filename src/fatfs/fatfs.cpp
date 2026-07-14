@@ -128,6 +128,13 @@ std::expected<FileInfo, Error> stat(std::string_view path) {
 }
 #endif
 
+#if FF_USE_CHMOD
+std::expected<void, Error> utime(std::string_view path, const FILINFO *fno) {
+  FF_TRY(f_utime(path.data(), fno));
+  return {};
+}
+#endif
+
 std::expected<bool, Error> Filesystem::mount(BYTE opt, char const* path) {
   FRESULT error = f_mount(this, path, opt);
 

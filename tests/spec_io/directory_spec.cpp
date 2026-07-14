@@ -52,6 +52,22 @@ describe directory("deluge::io::Directory", $ {
 		auto closed = moved.close();
 		expect(closed).to_have_value();
 	});
+
+	it("propagates size through Directory::read", _ {
+		mock_file_io_reset();
+		deluge_file_mkdir("SONGS");
+		auto f = deluge::io::File::open("SONGS/big.wav", DELUGE_FILE_WRITE_CREATE);
+		std::byte buf[10]{};
+		(void)f->write(buf);
+		(void)f->close();
+
+		auto dir = deluge::io::Directory::open("SONGS");
+		expect(dir.has_value()).to_equal(true);
+		auto entry = dir->read();
+		expect(entry).to_have_value();
+		expect(entry->has_value()).to_equal(true);
+		expect((*entry)->size).to_equal(10u);
+	});
 });
 
 CPPSPEC_SPEC(directory)

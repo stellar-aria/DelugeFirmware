@@ -178,4 +178,12 @@ std::expected<void, Status> rename(std::string_view old_path, std::string_view n
 	return {};
 }
 
+std::expected<void, Status> set_time(std::string_view path, DelugeTimestamp timestamp) {
+	DelugeStatus status = deluge_file_set_time(path.data(), timestamp);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
 } // namespace deluge::io

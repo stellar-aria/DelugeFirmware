@@ -14,6 +14,16 @@ FileAccessMode to_fatfs_mode(DelugeFileOpenMode mode);
 /// (anything not explicitly listed) fall back to `DELUGE_ERR_IO`.
 DelugeStatus to_deluge_status(FatFS::Error error);
 
+/// Packs a DelugeTimestamp into a FAT DOS-format date WORD (the format
+/// FILINFO::fdate/f_utime's FILINFO::fdate use — see ff.h's FILINFO comment).
+WORD to_fat_date(DelugeTimestamp timestamp);
+
+/// Packs a DelugeTimestamp into a FAT DOS-format time WORD (FILINFO::ftime).
+WORD to_fat_time(DelugeTimestamp timestamp);
+
+/// Unpacks a FAT DOS-format date/time WORD pair back into a DelugeTimestamp.
+DelugeTimestamp from_fat_date_time(WORD date, WORD time);
+
 /// Converts a raw `FILINFO` (as returned by `FatFS::Directory::read`) into a
 /// `DelugeDirEntry`. FatFS signals end-of-directory by returning a
 /// zero-length `fname` with no error (not by failing the call) — this

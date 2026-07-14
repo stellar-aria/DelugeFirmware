@@ -41,6 +41,25 @@ DelugeStatus to_deluge_status(FatFS::Error error) {
 	}
 }
 
+WORD to_fat_date(DelugeTimestamp timestamp) {
+	return static_cast<WORD>(((timestamp.year - 1980) << 9) | (timestamp.month << 5) | timestamp.day);
+}
+
+WORD to_fat_time(DelugeTimestamp timestamp) {
+	return static_cast<WORD>((timestamp.hour << 11) | (timestamp.minute << 5) | (timestamp.second / 2));
+}
+
+DelugeTimestamp from_fat_date_time(WORD date, WORD time) {
+	DelugeTimestamp timestamp{};
+	timestamp.year = static_cast<uint16_t>(1980 + ((date >> 9) & 0x7F));
+	timestamp.month = static_cast<uint8_t>((date >> 5) & 0x0F);
+	timestamp.day = static_cast<uint8_t>(date & 0x1F);
+	timestamp.hour = static_cast<uint8_t>((time >> 11) & 0x1F);
+	timestamp.minute = static_cast<uint8_t>((time >> 5) & 0x3F);
+	timestamp.second = static_cast<uint8_t>((time & 0x1F) * 2);
+	return timestamp;
+}
+
 void to_dir_entry(const FatFS::FileInfo& info, DelugeDirEntry& out, bool& out_has_entry) {
 	if (info.fname[0] == 0) {
 		out_has_entry = false;
@@ -50,6 +69,12 @@ void to_dir_entry(const FatFS::FileInfo& info, DelugeDirEntry& out, bool& out_ha
 	std::strncpy(out.name, info.fname, DELUGE_MAX_FILENAME - 1);
 	out.name[DELUGE_MAX_FILENAME - 1] = 0;
 	out.is_directory = (info.fattrib & AM_DIR) != 0;
+	out.size = static_cast<uint32_t>(info.fsize);
+	out.modified_time = from_fat_date_time(info.fdate, info.ftime);
+	out.is_read_only = (info.fattrib & AM_RDO) != 0;
+	out.is_hidden = (info.fattrib & AM_HID) != 0;
+	out.is_system = (info.fattrib & AM_SYS) != 0;
+	out.is_archive = (info.fattrib & AM_ARC) != 0;
 }
 
 } // namespace deluge::fatfs_adapter
@@ -108,6 +133,17 @@ DelugeStatus deluge_file_close(DelugeFile* file) {
 	auto* f = reinterpret_cast<FatFS::File*>(file);
 	auto result = f->close();
 	delete f;
+	if (!result) {
+		return deluge::fatfs_adapter::to_deluge_status(result.error());
+	}
+	return DELUGE_OK;
+}
+
+DelugeStatus deluge_file_set_time(const char* path, DelugeTimestamp timestamp) {
+	FatFS::FileInfo info{};
+	info.fdate = deluge::fatfs_adapter::to_fat_date(timestamp);
+	info.ftime = deluge::fatfs_adapter::to_fat_time(timestamp);
+	auto result = FatFS::utime(path, &info);
 	if (!result) {
 		return deluge::fatfs_adapter::to_deluge_status(result.error());
 	}

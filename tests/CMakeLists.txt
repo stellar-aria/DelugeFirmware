@@ -85,5 +85,6 @@ if (UNIX AND NOT APPLE)
     add_subdirectory(spec_resource)
 endif ()
 add_subdirectory(spec)
+add_subdirectory(spec_io)
 add_subdirectory(unit)
 

@@ -10,12 +10,12 @@ using FileAccessMode = deluge::fatfs_adapter::FileAccessMode;
 // clang-format off
 describe file_io("file_io adapter", $ {
 	it("maps DELUGE_FILE_READ to FA_READ", _ {
-		expect(deluge::fatfs_adapter::to_fatfs_mode(DELUGE_FILE_READ)).to_equal((FileAccessMode)FA_READ);
+		expect(deluge::fatfs_adapter::to_fatfs_mode(DELUGE_FILE_READ)).to_equal(static_cast<FileAccessMode>(FA_READ));
 	});
 
 	it("maps DELUGE_FILE_WRITE_CREATE to FA_WRITE|FA_CREATE_ALWAYS", _ {
 		expect(deluge::fatfs_adapter::to_fatfs_mode(DELUGE_FILE_WRITE_CREATE))
-		    .to_equal((FileAccessMode)(FA_WRITE | FA_CREATE_ALWAYS));
+		    .to_equal(static_cast<FileAccessMode>(FA_WRITE | FA_CREATE_ALWAYS));
 	});
 
 	it("maps every FatFS::Error to a non-generic DelugeStatus where one exists", _ {

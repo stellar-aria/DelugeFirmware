@@ -29,6 +29,7 @@
 #include "hid/encoders.h"
 #include "hid/matrix/matrix_driver.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "model/instrument/instrument.h"
 #include "model/song/song.h"
 #include "processing/engines/audio_engine.h"
@@ -527,13 +528,13 @@ tryReadingItems:
 					if (triedCreatingFolder) {
 						return error;
 					}
-					FRESULT result = f_mkdir(defaultDirToAlsoTry);
-					if (result == FR_OK) {
+					auto result = deluge::io::mkdir(defaultDirToAlsoTry);
+					if (result.has_value()) {
 						triedCreatingFolder = true;
 						goto tryReadingItems;
 					}
 					else {
-						return fresultToDelugeErrorCode(result);
+						return delugeStatusToError(deluge::io::to_deluge_status(result.error()));
 					}
 				}
 			}
@@ -1726,8 +1727,8 @@ Error Browser::createFolder() {
 
 	newDirPath.append(enteredText);
 
-	FRESULT result = f_mkdir(newDirPath.c_str());
-	if (result) {
+	auto result = deluge::io::mkdir(newDirPath.c_str());
+	if (!result.has_value()) {
 		return Error::SD_CARD;
 	}
 
@@ -1750,9 +1751,10 @@ Error Browser::createFoldersRecursiveIfNotExists(const char* path) {
 		tempPath[len] = '\0';
 
 		if (*p == '/' || *(p + 1) == '\0') {
-			FRESULT result = f_mkdir(tempPath);
-			if (result != FR_OK && result != FR_EXIST) {
-				return fresultToDelugeErrorCode(FR_NO_PATH);
+			auto result = deluge::io::mkdir(tempPath);
+			if (!result.has_value() && result.error() != deluge::io::Status::EXISTS) {
+				return delugeStatusToError(
+				    DELUGE_ERR_NOT_FOUND); // hardcoded, preserving today's exact (pre-existing) quirk
 			}
 		}
 	}

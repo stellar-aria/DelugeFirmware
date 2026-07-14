@@ -52,6 +52,9 @@ typedef enum DelugeFileOpenMode {
 	DELUGE_FILE_WRITE_CREATE, ///< create the file, truncating if it exists
 } DelugeFileOpenMode;
 
+/// Set a file or directory's last-modified timestamp. [task]
+DelugeStatus deluge_file_set_time(const char* path, DelugeTimestamp timestamp);
+
 /// Open `path`. On success, `*out` is a handle the caller must eventually
 /// pass to `deluge_file_close`. [task]
 DelugeStatus deluge_file_open(const char* path, DelugeFileOpenMode mode, DelugeFile** out);
@@ -78,6 +81,12 @@ DelugeStatus deluge_file_close(DelugeFile* file);
 typedef struct DelugeDirEntry {
 	char name[DELUGE_MAX_FILENAME];
 	bool is_directory;
+	uint32_t size;
+	DelugeTimestamp modified_time;
+	bool is_read_only;
+	bool is_hidden;
+	bool is_system;
+	bool is_archive;
 } DelugeDirEntry;
 
 /// Open `path` as a directory for iteration. [task]

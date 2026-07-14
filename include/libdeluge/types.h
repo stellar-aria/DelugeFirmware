@@ -46,6 +46,19 @@ typedef enum DelugeStatus {
 	DELUGE_ERR_NO_MEMORY = -13,       ///< RAM allocation failed (distinct from NO_SPACE, which is storage/disk space)
 } DelugeStatus;
 
+/// A portable, timezone-free timestamp — matches FAT DOS date/time's own
+/// decomposition (year/month/day/hour/minute/second, no epoch, no TZ) so no
+/// backend needs to invent a timezone. A DOS-backed implementation rounds
+/// `second` down to its native 2-second resolution.
+typedef struct DelugeTimestamp {
+	uint16_t year;  ///< full year, e.g. 2026 (not DOS's 1980-relative offset)
+	uint8_t month;  ///< 1-12
+	uint8_t day;    ///< 1-31
+	uint8_t hour;   ///< 0-23
+	uint8_t minute; ///< 0-59
+	uint8_t second; ///< 0-59
+} DelugeTimestamp;
+
 /// One stereo frame of audio. Layout-compatible with the application's
 /// `StereoSample` (`{ q31_t l; q31_t r; }`). Samples are signed Q31 fixed point.
 typedef struct DelugeStereoSample {

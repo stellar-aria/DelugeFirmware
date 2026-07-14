@@ -41,6 +41,23 @@ describe free_functions("deluge::io free functions", $ {
 		expect(result.has_value()).to_equal(false);
 		expect(result.error()).to_equal(deluge::io::Status::NOT_FOUND);
 	});
+
+	it("set_time updates a file's stored modification time", _ {
+		mock_file_io_reset();
+		auto f = deluge::io::File::open("a.txt", DELUGE_FILE_WRITE_CREATE);
+		expect(f.has_value()).to_equal(true);
+		expect(f->close()).to_have_value();
+		DelugeTimestamp ts{.year = 2026, .month = 7, .day = 14, .hour = 12, .minute = 0, .second = 0};
+		expect(deluge::io::set_time("a.txt", ts)).to_have_value();
+	});
+
+	it("set_time on a missing path reports NOT_FOUND", _ {
+		mock_file_io_reset();
+		DelugeTimestamp ts{};
+		auto result = deluge::io::set_time("missing.txt", ts);
+		expect(result.has_value()).to_equal(false);
+		expect(result.error()).to_equal(deluge::io::Status::NOT_FOUND);
+	});
 });
 
 CPPSPEC_SPEC(free_functions)

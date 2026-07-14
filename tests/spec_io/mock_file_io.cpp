@@ -19,6 +19,11 @@ namespace {
 struct MockEntry {
 	bool is_directory = false;
 	std::vector<uint8_t> data; // unused for directories
+	DelugeTimestamp modified_time{};
+	bool is_read_only = false;
+	bool is_hidden = false;
+	bool is_system = false;
+	bool is_archive = false;
 };
 
 std::map<std::string, MockEntry> g_entries;
@@ -35,7 +40,11 @@ struct DelugeFile {
 };
 
 struct DelugeDir {
-	std::vector<std::pair<std::string, bool>> children; // (basename, is_directory), snapshotted at open time
+	struct ChildInfo {
+		std::string name;
+		MockEntry entry; // snapshotted at open time
+	};
+	std::vector<ChildInfo> children;
 	size_t index = 0;
 };
 
@@ -104,7 +113,7 @@ DelugeStatus deluge_dir_open(const char* path, DelugeDir** out) {
 		if (p.size() > prefix.size() && p.compare(0, prefix.size(), prefix) == 0) {
 			std::string rest = p.substr(prefix.size());
 			if (rest.find('/') == std::string::npos) {
-				dir->children.emplace_back(rest, entry.is_directory);
+				dir->children.push_back({rest, entry});
 			}
 		}
 	}
@@ -117,10 +126,16 @@ DelugeStatus deluge_dir_read(DelugeDir* dir, DelugeDirEntry* out, bool* out_has_
 		*out_has_entry = false;
 		return DELUGE_OK;
 	}
-	const auto& [name, is_dir] = dir->children[dir->index++];
-	std::strncpy(out->name, name.c_str(), DELUGE_MAX_FILENAME - 1);
+	const auto& child = dir->children[dir->index++];
+	std::strncpy(out->name, child.name.c_str(), DELUGE_MAX_FILENAME - 1);
 	out->name[DELUGE_MAX_FILENAME - 1] = 0;
-	out->is_directory = is_dir;
+	out->is_directory = child.entry.is_directory;
+	out->size = static_cast<uint32_t>(child.entry.data.size());
+	out->modified_time = child.entry.modified_time;
+	out->is_read_only = child.entry.is_read_only;
+	out->is_hidden = child.entry.is_hidden;
+	out->is_system = child.entry.is_system;
+	out->is_archive = child.entry.is_archive;
 	*out_has_entry = true;
 	return DELUGE_OK;
 }
@@ -157,6 +172,16 @@ DelugeStatus deluge_file_rename(const char* old_path, const char* new_path) {
 	}
 	g_entries[n] = std::move(it->second);
 	g_entries.erase(it);
+	return DELUGE_OK;
+}
+
+DelugeStatus deluge_file_set_time(const char* path, DelugeTimestamp timestamp) {
+	std::string p(path);
+	auto it = g_entries.find(p);
+	if (it == g_entries.end()) {
+		return DELUGE_ERR_NOT_FOUND;
+	}
+	it->second.modified_time = timestamp;
 	return DELUGE_OK;
 }
 

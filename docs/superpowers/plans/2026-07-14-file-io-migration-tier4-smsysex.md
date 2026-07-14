@@ -408,7 +408,7 @@ git commit -m "file_io: add timestamp-setting and extend DelugeDirEntry (Tier 4 
 
 ### Task 2: `smsysex.cpp` — translators + the always-local-handle functions
 
-Migrates every function that never touches the shared `openFiles` pool or `sxDIR` global: `createPathDirectories`, `openFile`'s FRESULT-preserving helper `openFIL`'s *signature only is NOT part of this task* (that's Task 3 — `openFIL`/`closeFIL` touch the pool). This task covers `deleteFile`, `createDirectory`, `rename`, `updateTime`, `setFileTimestamp`, `performFileCopy`, `copyFile`, `moveFile`, `createPathDirectories`, plus the new local translators they all depend on.
+Migrates every function that never touches the shared `openFiles` pool or `sxDIR` global — `deleteFile`, `createDirectory`, `rename`, `updateTime`, `setFileTimestamp`, `performFileCopy`, `copyFile`, `moveFile`, `createPathDirectories` — plus the new local translators they all depend on. `openFIL`/`closeFIL`/`openFile`/`closeFile`/`readBlock`/`writeBlock` (the pool itself) are Task 3's concern, not this one.
 
 **Files:**
 - Modify: `src/deluge/storage/smsysex.h`
@@ -450,11 +450,8 @@ struct FileOpParams {
 };
 ```
 
-Update the function declarations that change signature (lines 25, 45, 56-57):
+Update the function declarations that change signature in this task (lines 45, 56-57). **Do not touch `openFIL`'s declaration (line 25) here** — its body isn't rewritten until Task 3, so changing its declared signature in this task would leave `smsysex.h`'s declaration mismatched against `smsysex.cpp`'s still-unmodified definition, a compile error. Task 3 Step 1 updates that declaration in the same step it rewrites the definition.
 
-```cpp
-FILdata* openFIL(const char* fPath, bool forWrite, FRESULT* eCode);
-```
 ```cpp
 FRESULT createPathDirectories(std::string& path, std::optional<DelugeTimestamp> timestamp);
 ```
@@ -463,7 +460,7 @@ FRESULT performFileCopy(const FileOpParams& params);
 void setFileTimestamp(std::string_view path, uint32_t date, uint32_t time);
 ```
 
-(`performFileCopy`'s declared type doesn't change — it was already `FRESULT`; only `setFileTimestamp`'s parameter type and `openFIL`/`createPathDirectories`'s signatures change. `closeFIL`'s declaration, line 26, is unchanged — still `FRESULT closeFIL(FILdata* fd);`.)
+(`performFileCopy`'s declared type doesn't change — it was already `FRESULT`; only `setFileTimestamp`'s parameter type and `createPathDirectories`'s signature change in this task. `closeFIL`'s declaration, line 26, is unchanged — still `FRESULT closeFIL(FILdata* fd);`. `openFIL`'s declaration changes in Task 3, not here.)
 
 - [ ] **Step 3: add the local translators**
 
@@ -954,6 +951,7 @@ git commit -m "smsysex: migrate the local-handle functions to deluge::io, add wi
 ### Task 3: `smsysex.cpp` — the `FILdata` pool (`openFIL`/`closeFIL`/`openFile`/`closeFile`/`readBlock`/`writeBlock`)
 
 **Files:**
+- Modify: `src/deluge/storage/smsysex.h` (just `openFIL`'s declaration, Step 2)
 - Modify: `src/deluge/storage/smsysex.cpp`
 
 **Interfaces:**
@@ -979,7 +977,13 @@ struct FILdata {
 
 - [ ] **Step 2: `openFIL`**
 
-Replace the whole function (lines 137-158). The dead `fsize` out-parameter (never written by the original body — `openFile`'s caller always re-reads `fp->fSize` instead) is dropped.
+First update its declaration in `src/deluge/storage/smsysex.h` (line 25):
+
+```cpp
+FILdata* openFIL(const char* fPath, bool forWrite, FRESULT* eCode);
+```
+
+Then replace the whole function in `src/deluge/storage/smsysex.cpp` (lines 137-158). The dead `fsize` out-parameter (never written by the original body — `openFile`'s caller always re-reads `fp->fSize` instead) is dropped.
 
 ```cpp
 FILdata* smSysex::openFIL(const char* fPath, bool forWrite, FRESULT* eCode) {
@@ -1154,7 +1158,7 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 	FILdata* fp = entryForFID(fid);
 	FRESULT errCode = FRESULT::FR_OK;
 
-	if (fp == nullptr) {
+	if (fp == nullptr || !fp->fileOpen) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
 	uint8_t* srcAddr = (uint8_t*)addr;
@@ -1181,6 +1185,7 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 				}
 				else {
 					status = result.error();
+					size = 0;
 				}
 			}
 			else {
@@ -1271,10 +1276,10 @@ void smSysex::writeBlock(MIDICable& cable, JsonDeserializer& reader) {
 	FRESULT errCode = FRESULT::FR_OK;
 	FILdata* fp = entryForFID(fileId);
 
-	if (fp == nullptr) {
+	if (fp == nullptr || !fp->fileOpen) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
-	if (writeBlockBuffer && (fp != nullptr)) {
+	if (writeBlockBuffer && (fp != nullptr) && fp->fileOpen) {
 		deluge::io::Status status = deluge::io::Status::OK;
 		if (addr != fp->fPosition) {
 			auto seeked = fp->file->seek(addr);
@@ -1319,7 +1324,7 @@ cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
 - [ ] **Step 9: commit**
 
 ```bash
-git add src/deluge/storage/smsysex.cpp
+git add src/deluge/storage/smsysex.h src/deluge/storage/smsysex.cpp
 git commit -m "smsysex: migrate the FILdata pool (open/close/read/write) to deluge::io"
 ```
 

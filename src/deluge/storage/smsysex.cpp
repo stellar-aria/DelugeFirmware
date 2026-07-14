@@ -41,8 +41,8 @@ struct FILdata {
 	uint32_t fSize = 0;
 	uint32_t fPosition = 0; // file offset noted after last read/write operation.
 	bool fileOpen = false;
-	int forWrite = false;
-	FIL file;
+	bool forWrite = false;
+	std::optional<deluge::io::File> file;
 };
 
 int32_t FIDcounter = 1;
@@ -199,38 +199,41 @@ void smSysex::sendMsg(MIDICable& cable, JsonSerializer& writer) {
 	cable.sendSysex((const uint8_t*)bitz, bw);
 };
 
-FILdata* smSysex::openFIL(const char* fPath, int forWrite, uint32_t* fsize, FRESULT* eCode) {
+FILdata* smSysex::openFIL(const char* fPath, bool forWrite, FRESULT* eCode) {
 	FILdata* fp = findEmptyFIL();
 	fp->fName = fPath;
 	fp->fileID = FIDcounter++;
 	noteFileIdUse(fp);
-	BYTE mode = FA_READ;
-	if (forWrite) {
-		mode = FA_WRITE;
-		if (forWrite == 1)
-			mode |= FA_CREATE_ALWAYS;
+
+	auto opened = deluge::io::File::open(fPath, forWrite ? DELUGE_FILE_WRITE_CREATE : DELUGE_FILE_READ);
+	*eCode = toWireFresult(opened.has_value() ? deluge::io::Status::OK : opened.error());
+	if (!opened.has_value()) {
+		return nullptr;
 	}
-	FRESULT err = f_open(&fp->file, fPath, mode);
-	*eCode = err;
-	if (err == FRESULT::FR_OK) {
-		fp->fileOpen = true;
-		fp->forWrite = forWrite;
-		fp->fSize = f_size(&fp->file);
-		fp->fPosition = 0;
-		return fp;
-	}
-	return nullptr;
+	fp->file = std::move(*opened);
+	auto size = fp->file->size();
+	fp->fSize = size.has_value() ? *size : 0;
+	fp->fileOpen = true;
+	fp->forWrite = forWrite;
+	fp->fPosition = 0;
+	return fp;
 }
 
 FRESULT smSysex::closeFIL(FILdata* fp) {
-	if (fp == nullptr)
+	if (fp == nullptr) {
 		return FRESULT::FR_INVALID_OBJECT;
+	}
 
-	FRESULT err = f_close(&fp->file);
+	deluge::io::Status status = deluge::io::Status::OK;
+	if (fp->file.has_value()) {
+		auto result = fp->file->close();
+		status = result.has_value() ? deluge::io::Status::OK : result.error();
+		fp->file.reset();
+	}
 	fp->fileOpen = false;
-	fp->forWrite = 0;
+	fp->forWrite = false;
 	fp->fSize = 0;
-	return err;
+	return toWireFresult(status);
 }
 
 // Fill in missing directories for the full path name given.
@@ -289,7 +292,6 @@ FRESULT smSysex::createPathDirectories(std::string& path, std::optional<DelugeTi
 void smSysex::openFile(MIDICable& cable, JsonDeserializer& reader) {
 	bool forWrite = false;
 	std::string path;
-	int32_t rn = 0;
 	char const* tagName;
 	uint32_t date = 0;
 	uint32_t time = 0;
@@ -301,8 +303,6 @@ void smSysex::openFile(MIDICable& cable, JsonDeserializer& reader) {
 		else if (!strcmp(tagName, "path")) {
 			reader.readTagOrAttributeValueString(path);
 		}
-		// Since you can't change the date/time of an open file, we use date/time
-		// only for created directoris.
 		else if (!strcmp(tagName, "date")) {
 			date = reader.readTagOrAttributeValueInt();
 		}
@@ -320,12 +320,12 @@ retry:
 	FRESULT errCode;
 	uint32_t fSize = 0;
 
-	FILdata* fp = openFIL(path.c_str(), forWrite, &fSize, &errCode);
+	FILdata* fp = openFIL(path.c_str(), forWrite, &errCode);
 
 	if (fp != nullptr) {
 		fSize = fp->fSize;
 	}
-	if (forWrite && !pathCreateTried && errCode == FRESULT::FR_NO_PATH) { // was the path missing?
+	if (forWrite && !pathCreateTried && errCode == FRESULT::FR_NO_FILE) { // was the path missing?
 		createPathDirectories(path, timestampFromWireDateTime(date, time));
 		pathCreateTried = true;
 		goto retry;
@@ -580,12 +580,11 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 	reader.match('}');
 
 	FILdata* fp = entryForFID(fid);
-	FRESULT errCode = FR_OK;
+	FRESULT errCode = FRESULT::FR_OK;
 
 	if (fp == nullptr) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
-	UINT actuallyRead = 0;
 	uint8_t* srcAddr = (uint8_t*)addr;
 	if (errCode == FRESULT::FR_OK) {
 		if (!readBlockBuffer && fp) {
@@ -594,19 +593,28 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 
 		if (readBlockBuffer && fp) {
 			noteFileIdUse(fp);
+			deluge::io::Status status = deluge::io::Status::OK;
 			// If file position requested is not what we expect, seek to requested.
 			if (fp->fPosition != addr) {
-				errCode = f_lseek(&fp->file, addr);
+				auto seeked = fp->file->seek(addr);
+				status = seeked.has_value() ? deluge::io::Status::OK : seeked.error();
 			}
-			if (errCode == FRESULT::FR_OK) {
-				errCode = f_read(&fp->file, readBlockBuffer, size, &actuallyRead);
-				size = actuallyRead;
-				srcAddr = readBlockBuffer;
-				fp->fPosition = addr + actuallyRead;
+			if (status == deluge::io::Status::OK) {
+				auto result = fp->file->read(std::span{reinterpret_cast<std::byte*>(readBlockBuffer), size});
+				if (result.has_value()) {
+					uint32_t actuallyRead = static_cast<uint32_t>(result->size());
+					size = actuallyRead;
+					srcAddr = readBlockBuffer;
+					fp->fPosition = addr + actuallyRead;
+				}
+				else {
+					status = result.error();
+				}
 			}
 			else {
-				D_PRINTLN("lseek issue: %d", errCode);
+				D_PRINTLN("lseek issue: %d", toWireFresult(status));
 			}
+			errCode = toWireFresult(status);
 		}
 	}
 	else {
@@ -675,7 +683,6 @@ void smSysex::writeBlock(MIDICable& cable, JsonDeserializer& reader) {
 	reader.match('}');
 	reader.match('}'); // skip box too.
 
-	// We should be on the separator character, check to make
 	char aChar;
 	if (reader.peekChar(&aChar) && aChar != 0) {
 		D_PRINTLN("Missing Separater error in writeBlock");
@@ -683,7 +690,6 @@ void smSysex::writeBlock(MIDICable& cable, JsonDeserializer& reader) {
 	uint32_t decodedSize = decodeDataFromReader(reader, writeBlockBuffer, size);
 	D_PRINTLN("Decoded block len: %d", decodedSize);
 
-	// Here is where we actually write the buffer out.
 	FRESULT errCode = FRESULT::FR_OK;
 	FILdata* fp = entryForFID(fileId);
 
@@ -691,16 +697,24 @@ void smSysex::writeBlock(MIDICable& cable, JsonDeserializer& reader) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
 	if (writeBlockBuffer && (fp != nullptr)) {
+		deluge::io::Status status = deluge::io::Status::OK;
 		if (addr != fp->fPosition) {
-			errCode = f_lseek(&fp->file, addr);
+			auto seeked = fp->file->seek(addr);
+			status = seeked.has_value() ? deluge::io::Status::OK : seeked.error();
 		}
-		if (errCode == FRESULT::FR_OK) {
+		if (status == deluge::io::Status::OK) {
 			noteFileIdUse(fp);
-			UINT actuallyWritten = 0;
-			errCode = f_write(&fp->file, writeBlockBuffer, decodedSize, &actuallyWritten);
-			size = actuallyWritten;
-			fp->fPosition = addr + actuallyWritten;
+			auto result = fp->file->write(std::span{reinterpret_cast<const std::byte*>(writeBlockBuffer), decodedSize});
+			if (result.has_value()) {
+				size = *result;
+				fp->fPosition = addr + *result;
+			}
+			else {
+				status = result.error();
+				size = 0;
+			}
 		}
+		errCode = toWireFresult(status);
 	}
 	startReply(jWriter, reader);
 	jWriter.writeOpeningTag("^write", false, true);

@@ -23,7 +23,7 @@ struct FileOpParams {
 	bool hasTimestamp() const { return date != 0 || time != 0; }
 };
 
-FILdata* openFIL(const char* fPath, int forWrite, uint32_t* fsize, FRESULT* eCode);
+FILdata* openFIL(const char* fPath, bool forWrite, FRESULT* eCode);
 FRESULT closeFIL(FILdata* fd);
 FILdata* findEmptyFIL();
 

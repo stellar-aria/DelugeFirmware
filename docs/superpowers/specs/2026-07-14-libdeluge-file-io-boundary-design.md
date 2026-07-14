@@ -189,6 +189,24 @@ same call sites, new enum.
   storage-concurrency design already sketched for that BSP. Out of scope for
   *this* doc; noted here only so the dependency is visible.
 
+  **Implementation-detail note (not a boundary-contract concern):** the
+  Linux (and possibly `bsp/host`) adapter's *internal* implementation of
+  `file_io.h` is a reasonable place to use `std::filesystem`
+  (`directory_iterator`, `path`, `file_size`, `create_directory`, `remove`,
+  `rename`, all via the non-throwing `std::error_code&` overloads so no
+  exception crosses the C-ABI boundary — matching `target_architecture.md`
+  §5.2) instead of hand-rolled POSIX calls. It maps closely onto the function
+  list in §4 and fits this project's preference for idiomatic modern C++ in
+  new code. This is purely an adapter-internal style choice — it doesn't
+  change the boundary shape, the error mapping, or the concurrency design
+  (§6 above still applies: `std::filesystem` calls block on the same
+  underlying syscalls, so the worker-thread/yield bridge is unaffected).
+  **Verify before committing to it:** deluge-linux's musl cross toolchain
+  (`arm-linux-g++` + static `libstdc++` per the Linux BSP spec's build
+  section) needs a working `<filesystem>` — musl/embedded libstdc++ builds
+  have historically had gaps here (missing symbols, needing `-lstdc++fs` on
+  older GCC). Not yet checked against the actual toolchain.
+
 ## 7. Migration scope
 
 The ~65 call sites move from FatFS's own API to `file_io.h`. Concretely, per

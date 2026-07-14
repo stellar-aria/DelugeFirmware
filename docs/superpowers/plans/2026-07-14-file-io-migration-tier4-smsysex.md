@@ -1158,7 +1158,7 @@ void smSysex::readBlock(MIDICable& cable, JsonDeserializer& reader) {
 	FILdata* fp = entryForFID(fid);
 	FRESULT errCode = FRESULT::FR_OK;
 
-	if (fp == nullptr) {
+	if (fp == nullptr || !fp->fileOpen) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
 	uint8_t* srcAddr = (uint8_t*)addr;
@@ -1275,10 +1275,10 @@ void smSysex::writeBlock(MIDICable& cable, JsonDeserializer& reader) {
 	FRESULT errCode = FRESULT::FR_OK;
 	FILdata* fp = entryForFID(fileId);
 
-	if (fp == nullptr) {
+	if (fp == nullptr || !fp->fileOpen) {
 		errCode = FRESULT::FR_NOT_ENABLED;
 	}
-	if (writeBlockBuffer && (fp != nullptr)) {
+	if (writeBlockBuffer && (fp != nullptr) && fp->fileOpen) {
 		deluge::io::Status status = deluge::io::Status::OK;
 		if (addr != fp->fPosition) {
 			auto seeked = fp->file->seek(addr);

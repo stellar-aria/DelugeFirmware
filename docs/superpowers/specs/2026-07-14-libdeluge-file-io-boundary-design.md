@@ -222,8 +222,8 @@ file:
 | `gui/views/performance_view.cpp` | mkdir `FR_EXIST` branch |
 | `io/midi/midi_follow.cpp` | mkdir `FR_EXIST` branch |
 | `io/midi/midi_device_manager.cpp` | mkdir `FR_EXIST` branch |
-| `storage/flash_storage/runtime_feature_settings.cpp` | mkdir `FR_EXIST` branch |
-| `processing/stem_export.cpp` | mkdir/rename branches |
+| `model/settings/runtime_feature_settings.cpp` | mkdir `FR_EXIST` branch |
+| `processing/stem_export/stem_export.cpp` | mkdir/rename branches |
 | `util/functions.cpp` | the translator itself: `fresultToDelugeErrorCode` → a `DelugeStatus`-based version |
 
 Each site keeps its existing control flow; only the function names, handle

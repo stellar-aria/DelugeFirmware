@@ -38,6 +38,11 @@ typedef enum DelugeStatus {
 	DELUGE_ERR_IO = -5,      ///< hardware / transport I/O error
 	DELUGE_ERR_NODEV = -6,   ///< no such device / not present
 	DELUGE_ERR_UNSUPPORTED = -7,
+	DELUGE_ERR_NOT_FOUND = -8,        ///< path does not exist
+	DELUGE_ERR_EXISTS = -9,           ///< path already exists
+	DELUGE_ERR_NO_SPACE = -10,        ///< storage full / allocation failed
+	DELUGE_ERR_NO_FILESYSTEM = -11,   ///< media present but has no valid filesystem
+	DELUGE_ERR_WRITE_PROTECTED = -12, ///< media is read-only / locked
 } DelugeStatus;
 
 /// One stereo frame of audio. Layout-compatible with the application's

@@ -89,4 +89,35 @@ std::expected<void, Status> File::close() {
 	return {};
 }
 
+std::expected<Directory, Status> Directory::open(std::string_view path) {
+	DelugeDir* handle = nullptr;
+	DelugeStatus status = deluge_dir_open(path.data(), &handle);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return Directory(handle);
+}
+
+std::expected<std::optional<DelugeDirEntry>, Status> Directory::read() {
+	DelugeDirEntry entry{};
+	bool has_entry = false;
+	DelugeStatus status = deluge_dir_read(handle_, &entry, &has_entry);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	if (!has_entry) {
+		return std::nullopt;
+	}
+	return entry;
+}
+
+std::expected<void, Status> Directory::close() {
+	DelugeStatus status = deluge_dir_close(handle_);
+	handle_ = nullptr; // matters even on error: don't let the destructor double-close
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
 } // namespace deluge::io

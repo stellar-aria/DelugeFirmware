@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -62,6 +63,36 @@ public:
 private:
 	explicit File(DelugeFile* handle) : handle_(handle) {}
 	DelugeFile* handle_ = nullptr;
+};
+
+class Directory {
+public:
+	Directory(Directory&) = delete;
+	Directory(Directory&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+	Directory& operator=(Directory&) = delete;
+	Directory& operator=(Directory&& other) noexcept {
+		if (this != &other) {
+			if (handle_) {
+				deluge_dir_close(handle_);
+			}
+			handle_ = other.handle_;
+			other.handle_ = nullptr;
+		}
+		return *this;
+	}
+	~Directory() {
+		if (handle_) {
+			deluge_dir_close(handle_);
+		}
+	}
+
+	[[nodiscard]] static std::expected<Directory, Status> open(std::string_view path);
+	std::expected<std::optional<DelugeDirEntry>, Status> read();
+	std::expected<void, Status> close();
+
+private:
+	explicit Directory(DelugeDir* handle) : handle_(handle) {}
+	DelugeDir* handle_ = nullptr;
 };
 
 } // namespace deluge::io

@@ -50,8 +50,10 @@ using FileAccessMode = uint8_t;
 
 class File {
 public:
-  File(File &) = default;  // Copy constructor
-  File(File &&) = default; // Move constructor
+  File(File &) = default; // Copy constructor
+  File(File &&other) noexcept : file_(other.file_) {
+    other.file_.obj.fs = nullptr;
+  } // Move constructor
   File &operator=(File const &other) = default;
 
   ~File() { f_close(&file_); }
@@ -126,6 +128,18 @@ using FileInfo = FILINFO;
 
 class Directory {
 public:
+  Directory() = default;
+  Directory(Directory const &) = default; // Copy constructor
+  Directory(Directory &&other) noexcept : dir_(other.dir_) {
+    other.dir_.obj.fs = nullptr;
+  } // Move constructor
+  Directory &operator=(Directory const &other) = default; // Copy assignment
+  Directory &operator=(Directory &&other) noexcept {
+    dir_ = other.dir_;
+    other.dir_.obj.fs = nullptr;
+    return *this;
+  } // Move assignment
+
   ~Directory() { f_closedir(&dir_); }
 
   /* Open a directory */
@@ -159,8 +173,6 @@ public:
   constexpr DIR &inner() { return dir_; }
 
 private:
-  //Directory() = default;
-
   DIR dir_;
 
   friend std::expected<Directory, Error> mkdir_and_open(std::string_view path);

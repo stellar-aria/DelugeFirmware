@@ -20,7 +20,8 @@
 #include "const_functions.h"
 #include "definitions_cxx.hpp"
 #include "fatfs/ff.h"
-#include "gui/colour/colour.h"         // IWYU pragma: export todo: this probably shouldn't be exported from here
+#include "gui/colour/colour.h" // IWYU pragma: export todo: this probably shouldn't be exported from here
+#include "libdeluge/file_io.h"
 #include "util/audio_format_helpers.h" // byte/format helpers (charsToIntegerConstant, swapEndianness*, …) re-exported
 #include "util/c_string.h"
 #include "util/cfunctions.h" // IWYU pragma: export - minimal set of functions which need c linkage
@@ -411,6 +412,7 @@ namespace FatFS {
 enum class Error;
 }
 Error fatfsErrorToDelugeError(FatFS::Error result);
+Error delugeStatusToError(DelugeStatus status);
 
 [[gnu::always_inline]] inline void writeInt16(char** address, uint16_t number) {
 	*(uint16_t*)*address = number;

@@ -2185,6 +2185,29 @@ Error fatfsErrorToDelugeError(FatFS::Error result) {
 	}
 }
 
+Error delugeStatusToError(DelugeStatus status) {
+	switch (status) {
+	case DELUGE_OK:
+		return Error::NONE;
+	case DELUGE_ERR_NOT_FOUND:
+		return Error::FILE_NOT_FOUND;
+	case DELUGE_ERR_EXISTS:
+		return Error::FILE_ALREADY_EXISTS;
+	case DELUGE_ERR_NO_SPACE:
+		return Error::SD_CARD_FULL;
+	case DELUGE_ERR_NO_FILESYSTEM:
+		return Error::SD_CARD_NO_FILESYSTEM;
+	case DELUGE_ERR_WRITE_PROTECTED:
+		return Error::WRITE_PROTECTED;
+	case DELUGE_ERR_NODEV:
+		return Error::SD_CARD_NOT_PRESENT;
+	case DELUGE_ERR_NO_MEMORY:
+		return Error::INSUFFICIENT_RAM;
+	default:
+		return Error::SD_CARD;
+	}
+}
+
 char miscStringBuffer[kFilenameBufferSize] __attribute__((aligned(CACHE_LINE_SIZE)));
 char shortStringBuffer[kShortStringBufferSize] __attribute__((aligned(CACHE_LINE_SIZE)));
 

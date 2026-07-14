@@ -1,8 +1,9 @@
-# `deluge::io` migration — Tier 2: retiring `FilePointer` via a transparent adapter-side cache
+# `deluge::io` migration — Tier 2: an adapter-side directory cache (`FilePointer` mostly stays)
 
 **Date:** 2026-07-14
 **Status:** Design
 **Context:** Tier 2 of `docs/superpowers/specs/2026-07-14-file-io-migration-roadmap-design.md` §3 — the last remaining tier after Tier 4 (`smsysex.cpp`, merged) and before Tier 3 (`FileReader`/`FileWriter`, independent, not started).
+**Scope note (read this first):** this doc went through two real narrowings while being written. The roadmap's original four-file framing narrowed to "just build an adapter-side cache" (§1-§5, below). Then, mid-brainstorm, tracing `FilePointer`'s actual downstream consumer in `audio_file_manager.cpp` found the cache alone doesn't let three of the four files retire `FilePointer` at all — §6 covers that finding and why it's a real, permanent scope cut, not a deferred task. **The only things this design actually delivers are the adapter cache (§4) and `instrument_clip_view.cpp`'s migration (§6) — read §8 for the real rollout.**
 
 ## 1. Why this doc exists, and how it revises the roadmap's framing
 
@@ -52,7 +53,7 @@ struct DirCache {
 
 **Consulted by `deluge_file_open`** — only for `DELUGE_FILE_READ` (a `DELUGE_FILE_WRITE_CREATE` is creating/truncating, not looking up an existing entry, so it always takes the normal path). Split `path` into `(dirname, basename)`; if `dirname == cache.directory_path` and `basename` is found in `cache.entries`, construct the `FIL` via the same raw-internals fast path `openFilePointer` uses today (`obj.sclust`/`obj.objsize`/`obj.fs`/`obj.id` set directly, skipping `f_open`'s directory walk) — this logic *moves into* the adapter, it doesn't change. Otherwise, fall through to an ordinary `f_open`.
 
-**No validation on a cache hit** — matches today's exact behavior; `openFilePointer` doesn't validate today either (see §6 on the one place this note has an app-visible consequence).
+**No validation on a cache hit** — matches today's exact behavior; `openFilePointer` doesn't validate today either.
 
 **Invalidation policy: any write-shaped call anywhere clears the cache unconditionally.** `deluge_file_open(path, DELUGE_FILE_WRITE_CREATE)`, `deluge_file_mkdir`, `deluge_file_unlink`, `deluge_file_rename` all clear `cache.valid = false` before doing their own work. This is deliberately coarse — it doesn't try to reason about whether a given write actually touches the cached directory — because writes are rare relative to scans/reads in this app's usage pattern, so the performance cost of being conservative is negligible, and a coarse, easy-to-prove-correct invariant is worth far more here than a marginal cache-hit-rate improvement.
 
@@ -60,33 +61,38 @@ struct DirCache {
 
 `AudioFileManager::resolveFilePointer`'s `tryAlternateName` (today: `create_name`+`dir_find`+`ld_clust`+`ld_dword` on a kept-open `alternateLoadDir`, checking several candidate filenames in sequence without opening any of them) doesn't need a new boundary "stat by name" function. It becomes ordinary `deluge::io::Directory` iteration: open the alternate directory once (already what happens today — `alternateLoadDir` is opened once and reused, just via raw FatFS), then for each candidate name, iterate `Directory::read()` comparing names until a match or the directory is exhausted. This costs the same asymptotically as the raw internals it replaces (§3), and — because it goes through `deluge_dir_read` — it warms the adapter's cache as a side effect, so the *actual* open that follows a successful match gets the fast path for free.
 
-## 6. App-side consequences, file by file
+## 6. Why `browser.cpp`, `sample_browser.cpp`, and `audio_file_manager.cpp` are excluded from this design — a correction made mid-brainstorm
 
-### `browser.cpp`
-- `readFileItemsForFolder`'s scan loop migrates to a local `deluge::io::Directory` (no more `staticDIR`/`staticFNO`).
-- `FileItem::filePointer` (`FilePointer`, a raw FatFS type) is **deleted**. The fast-reopen behavior that motivated it is now automatic and invisible.
-- Three call sites used `.sclust` as an identity/staleness token, not for reopening — each is addressed independently:
-  - `checkFP()` (`browser.cpp:96-115`, gated `#if ALPHA_OR_BETA_VERSION` — a debug assertion, not user-facing production behavior) compared a fresh lookup's `.sclust` against the cached `.sclust` to detect "the file at this exact path was deleted and replaced by a different file with the same name" between scan-time and now. Without a locator to compare, this narrows to just re-confirming the path still resolves to *some* file (`deluge::io::File::open(filePath, DELUGE_FILE_READ)` succeeding) — losing the specific same-path-different-file detection. **This is an intentional, explicit narrowing of a debug-only safety net**, not a silent behavior change; flagged here for review the same way prior tiers flagged their accepted collapses.
-  - `deleteFolderAndDuplicateItems` (`browser.cpp:356-357,383-384`) used `.sclust == 0` as a sentinel for "this `FileItem` doesn't actually exist on the card yet" (e.g. a virtual/placeholder entry for an `Instrument` reference with no backing file). This is a pure existence flag, unrelated to reopening — becomes an explicit `bool resolved` (or reuse of the existing `maybeExistsOnCard`, if that field already carries the same meaning — needs a one-line confirmation during implementation) instead of overloading a locator field's zero-ness.
-  - `predictExtendedText` (`browser.cpp:919-923,1023`) compared `.sclust` before/after a folder re-read to detect "the currently-selected file changed" (captured as a POD value specifically because the `fileItems` vector can reallocate during the re-read, making the old `FileItem*` unsafe to dereference afterward). Filename comparison (`std::string`, already stored by value in `FileItem`, equally reallocation-safe) is a direct, equally-correct substitute — no loss of behavior, since two *different* files never legitimately share a name within one directory.
+An earlier draft of this section proposed deleting `FileItem::filePointer` entirely and migrating all three files' scan loops to `deluge::io::Directory`, on the premise that the adapter cache (§4) makes every reopen fast without the app needing to carry a locator. That premise is **wrong for one real consumer**, discovered by tracing `AudioFileManager::buildAudioFileFromCard`'s `AudioFileType::SAMPLE` branch (`audio_file_manager.cpp:801-816`) all the way through:
 
-### `sample_browser.cpp`
-- `loadAllSamplesInFolder`'s scan loop migrates to a local `deluge::io::Directory`.
-- `AudioEngine::previewSample`/`AudioFileManager::getAudioFileFromFilename`'s `FilePointer*` parameters are dropped; both become plain path-based calls, fast automatically when the path was recently scanned.
+```cpp
+uint32_t currentSDCluster = effectiveFilePointer.sclust; // First cluster, whose address we already got.
+while (true) {
+	static_cast<Sample*>(audioFile)->clusters[currentClusterIndex].sdAddress = clst2sect(&fileSystem, currentSDCluster);
+	...
+	currentSDCluster = get_fat_from_fs(&fileSystem, currentSDCluster);
+	...
+}
+```
 
-### `instrument_clip_view.cpp`
-- Its randomize-drum-sample scan migrates to a local `deluge::io::Directory` — genuinely mechanical, since it never touched `FilePointer`, `staticDIR`, or `staticFNO` for anything but convenience.
+This isn't avoiding a directory walk — it's using `effectiveFilePointer.sclust` as the seed for its own raw FAT cluster-chain walk (`get_fat_from_fs`/`clst2sect`, more FatFS-internal functions), building a complete cluster→sector address table for the sample file. That table feeds `ClusterByteSource`, which streams audio data directly from SD card sectors during playback, deliberately bypassing FatFS's buffered file-read API for real-time performance. **This is a categorically different capability than "open a file portably"** — it's raw block/cluster-level access, and no reasonable design for `file_io.h`/`deluge::io` should expose it; a Linux backend has no FAT clusters to walk at all.
 
-### `audio_file_manager.cpp`
-- `resolveFilePointer` (likely renamed, since "FilePointer" as a concept is gone from the app) simplifies to: the "regular path" case becomes a plain `deluge::io::File::open(path)`; the "alternate dir" case becomes the `Directory`-iteration described in §5. All raw `ld_clust`/`ld_dword`/`create_name`/`dir_find`/`readFIL.obj.sclust` access disappears from app code — it doesn't vanish, it *relocates* into the FatFS adapter as part of the cache implementation (§4), which is exactly where FatFS-internals access belongs.
+`Browser::readFileItemsForFolder` (the scan loop this design proposed migrating) is the *shared base-class* implementation used by both `SampleBrowser` (whose selections feed straight into the cluster-walk above) and the preset/song browsers (`LoadInstrumentPresetUI`, `DxSyxBrowser`, via `SlotBrowser`/`LoadUI` — same base class, same `FileItem` struct). Because one real consumer of `FileItem::filePointer` has this irreducible dependency, `FileItem::filePointer` **cannot** be deleted or made portable, and `browser.cpp`'s scan loop **cannot** migrate off `staticDIR.read_and_get_filepointer()` — not until the deeper problem (below) has its own answer.
 
-### `storage_manager.cpp`/`.h`
-- `openFilePointer` and its raw `FIL` construction are deleted — the adapter does the equivalent internally now (§4).
-- `openXMLFile`/`openJsonFile` collapse to their path-based `deluge::io::File::open`, relying on the adapter cache for speed.
-- `staticDIR`/`staticFNO` (`storage_manager.h:410-411`) are deleted entirely once all three UI consumers hold their own local `deluge::io::Directory` instances — a full retirement of this shared-global pattern, not a partial one.
+### Where this actually belongs: `deluge-stream`, not `file_io.h`
+
+Checked this against two things before concluding it's genuinely out of scope, not just hard:
+
+1. **The resource manager (`crates/deluge_resource/`, Rust, fully merged into `next`) already gets this right and doesn't need to change.** Its `Source.materialize` callback for sample clusters is `AudioFileManager::readClusterData` (`audio_file_manager.cpp:924`), which does a raw sector read at an *already-resolved* `sdAddress` — it never touches FAT structures itself. The cluster-chain walk above runs once, upstream, at file-open time, entirely before the resource manager is involved; it produces the input `Source.materialize` later consumes. The resource manager's abstraction is already disk-*address*-oriented, not path/FAT-oriented — correctly layered, nothing to fix there.
+2. **`docs/dev/target_architecture.md` already names this exact split as intentional, not-yet-built future work** (lines 262-272): `deluge-files` ("task-context storage: browsing, preset/song load/save... blocking-allowed") versus `deluge-stream` ("audio-context storage: cluster cache, sample streaming, SD read scheduling... Split from deluge-files because the two halves have opposite realtime contracts"). `file_io.h`/`deluge::io` is `deluge-files`'s boundary. The cluster-chain walk is squarely `deluge-stream`'s territory — an upstream, one-time "resolve this path to a cluster→sector table" operation, distinct from both `file_io.h` and the resource manager's `Source` abstraction.
+
+**Conclusion:** `browser.cpp`, `sample_browser.cpp`, and `audio_file_manager.cpp`'s `FilePointer` usage stays exactly as it is. It isn't blocked on more design work in *this* doc — it's blocked on a future `deluge-stream` boundary, a separate, substantial architecture project (real-time audio streaming storage) that doesn't exist yet and isn't scoped here. `storage_manager.cpp`'s `openFilePointer`/`openXMLFile`/`openJsonFile`(`FilePointer*`, ...) overlaps this only through `staticDIR`/`staticFNO`'s shared-global retirement (blocked for the same reason) and through the WAVETABLE path's use of `FileReader` — that piece is Tier 3's territory (once `FileReader` holds a `deluge::io::File` instead of a raw `FIL`, `openXMLFile` can take a path directly, no locator involved) and resolves as a side effect of Tier 3, not something this doc or Tier 2 needs to solve.
+
+### `instrument_clip_view.cpp` — unaffected, still migrates cleanly
+Its randomize-drum-sample scan migrates to a local `deluge::io::Directory` — genuinely mechanical, since it never touched `FilePointer`, `staticDIR`, or `staticFNO` for anything but convenience, and has no relationship to the cluster-streaming path above.
 
 ### `staticFNO.altname`-based recording-slot numbering
-The roadmap doc's catalogue (§6 item 2) separately flagged `audio_file_manager.cpp`'s use of `staticFNO.altname` (raw 8.3 short-filename bytes) for `"REC*.WAV"` auto-numbering. This is unrelated to `FilePointer`/locators and is **out of scope for this design** — it's a `DelugeDirEntry` gap (no short-name field), not a caching one. Left as a tracked, separate `TODO.md` item if not already resolved by the time this lands.
+The roadmap doc's catalogue (§6 item 2) separately flagged `audio_file_manager.cpp`'s use of `staticFNO.altname` (raw 8.3 short-filename bytes) for `"REC*.WAV"` auto-numbering. Unrelated to `FilePointer`/locators — a `DelugeDirEntry` gap (no short-name field), not a caching one. Left as a tracked, separate `TODO.md` item.
 
 ## 7. Testing
 
@@ -99,14 +105,17 @@ This is adapter-internal logic with no app-visible behavior difference on the ha
 
 ## 8. Rollout
 
-Two independent halves, in this order:
-1. **Adapter cache** (`src/fatfs/file_io_internal.hpp`/`file_io.cpp`) — self-contained, testable via `tests/spec/file_io_spec.cpp` alone, no app-side changes yet. `deluge_file_open`'s observable behavior is unchanged (same results, just sometimes faster) — this half is safe to land and golden-master-verify on its own.
-2. **App-side migration**, file by file, roughly ascending complexity: `instrument_clip_view.cpp` (fully independent, no `FilePointer` involvement) → `browser.cpp` (needs the three identity-comparison decisions from §6 resolved) → `sample_browser.cpp` → `audio_file_manager.cpp`/`storage_manager.cpp` (the deepest, since `openFilePointer`'s raw internals and `resolveFilePointer`'s alternate-dir probe live here).
+Two tasks, both real, both worth landing on their own — this is the design's *entire* rollout, not a first phase of a larger one:
 
-`staticDIR`/`staticFNO` can only be deleted once *all three* UI consumers (browser.cpp, sample_browser.cpp, instrument_clip_view.cpp) have migrated off them — tracked as the rollout's completion gate, not a per-file task.
+1. **Adapter cache** (`src/fatfs/file_io_internal.hpp`/`file_io.cpp`) — self-contained, testable via `tests/spec/file_io_spec.cpp` alone, no app-side changes. `deluge_file_open`'s observable behavior is unchanged (same results, just sometimes faster) — genuine, immediate value for every already-migrated call site (Tiers 1 and 4) and every future one (Tier 3), independent of anything else in this doc.
+2. **`instrument_clip_view.cpp`** — migrates its scan loop to a local `deluge::io::Directory`. Small, fully independent, no `FilePointer` involvement.
+
+`browser.cpp`, `sample_browser.cpp`, `audio_file_manager.cpp`, and `storage_manager.cpp`'s `FilePointer`/`staticDIR`/`staticFNO` usage are **not** part of this rollout (§6) — they stay as they are pending a future `deluge-stream` boundary design, tracked as a separate `TODO.md` item, not a task of this plan.
 
 ## 9. Out of scope
 
-- Tier 3 (`storage_manager.cpp`'s `FileReader`/`FileWriter`) — independent, not started, tracked separately.
+- **`browser.cpp`, `sample_browser.cpp`, `audio_file_manager.cpp`'s `FilePointer` usage, and `staticDIR`/`staticFNO`'s retirement** (§6) — blocked on a future `deluge-stream` boundary (`docs/dev/target_architecture.md` lines 262-272), a separate, substantial architecture project for real-time audio-streaming storage. Not part of this migration.
+- Tier 3 (`storage_manager.cpp`'s `FileReader`/`FileWriter`) — independent, not started, tracked separately. Its completion incidentally simplifies `openXMLFile`/`openJsonFile`'s `FilePointer*` dependency (once `FileReader` holds a `deluge::io::File`, those functions can take a path directly), but that's a side effect of Tier 3, not something Tier 2 does.
 - `staticFNO.altname`-based recording-slot numbering (§6) — a different `DelugeDirEntry` gap, not a locator/caching one.
 - Any change to the adapter cache's *policy* beyond what's described here (e.g. a smarter multi-directory LRU) — the single-slot design is deliberately matched to this app's actual usage pattern (§3), not a general-purpose cache; revisit only if a future use site's access pattern genuinely doesn't fit it.
+- Designing the `deluge-stream` boundary itself — a real, valuable, separate future project. Its rough shape (a `deluge_stream_open`/`deluge_stream_read_at`-style port, sibling to `file_io.h`, feeding the resource manager's `Source.materialize` the same way `readClusterData` does today) is sketched in this doc's brainstorm history but not designed here.

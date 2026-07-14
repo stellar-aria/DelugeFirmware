@@ -24,6 +24,22 @@ std::expected<File, Error> File::open(std::string_view path,
   return file;
 }
 
+File File::open_by_locator(FATFS *fs, WORD id, DWORD sclust, FSIZE_t objsize) {
+  File file{};
+  file.file_ = {}; // zero every field first -- File's own file_ member has no
+                    // in-class initializer (unlike FileReader::readFIL{}, whose
+                    // starting state this mirrors), so this isn't redundant.
+  file.file_.obj.fs = fs;
+  file.file_.obj.id = id;
+  file.file_.obj.sclust = sclust;
+  file.file_.obj.objsize = objsize;
+  file.file_.flag = FA_READ;
+  file.file_.err = 0;
+  file.file_.sect = 0;
+  file.file_.fptr = 0;
+  return file;
+}
+
 std::expected<void, Error> File::close() {
   FF_TRY(f_close(&file_));
   return {};

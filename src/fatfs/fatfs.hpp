@@ -62,6 +62,13 @@ public:
   static std::expected<File, Error> open(std::string_view path,
                                          FileAccessMode mode);
 
+  /* Open a file directly via a previously-resolved locator (starting
+     cluster + size), skipping the directory-tree walk f_open performs
+     internally. Cannot fail -- pure field construction, no I/O. Always
+     read-only (FA_READ); the caller must already know this file exists and
+     where it starts (e.g. from a prior directory scan). */
+  static File open_by_locator(FATFS *fs, WORD id, DWORD sclust, FSIZE_t objsize);
+
   /* Close an open file object */
   std::expected<void, Error> close();
 

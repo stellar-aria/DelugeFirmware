@@ -112,6 +112,31 @@ describe file_io("file_io adapter", $ {
 		expect(out.is_hidden).to_equal(false);
 		expect(out.is_system).to_equal(false);
 	});
+
+	it("open_by_locator constructs a File with exactly the given locator fields, matching openFilePointer's contract", _ {
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 42, 100, 5000);
+		expect(file.inner().obj.fs).to_equal(&fakeFs);
+		expect(file.inner().obj.id).to_equal(static_cast<WORD>(42));
+		expect(file.inner().obj.sclust).to_equal(static_cast<DWORD>(100));
+		expect(file.inner().obj.objsize).to_equal(static_cast<FSIZE_t>(5000));
+		expect(file.inner().flag).to_equal(static_cast<BYTE>(FA_READ));
+		expect(file.inner().err).to_equal(static_cast<BYTE>(0));
+		expect(file.inner().sect).to_equal(static_cast<DWORD>(0));
+		expect(file.inner().fptr).to_equal(static_cast<FSIZE_t>(0));
+		expect(file.size()).to_equal(5000u);
+		expect(file.tell()).to_equal(0u);
+
+		// fakeFs is zero-initialized (fs_type == 0), so FatFS's own validate()
+		// safely rejects it as FR_INVALID_OBJECT on close -- confirms this
+		// doesn't crash against an object that was never really f_open'd. This
+		// test target has no real disk backing (see this file's scope note),
+		// so genuine I/O was never on the table anyway -- this only verifies
+		// the field construction itself.
+		auto closed = file.close();
+		expect(closed.has_value()).to_equal(false);
+		expect(closed.error()).to_equal(FatFS::Error::INVALID_OBJECT);
+	});
 });
 
 CPPSPEC_SPEC(file_io)

@@ -34,6 +34,7 @@
 #include "hid/display/display.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
+#include "io/file.hpp"
 #include "mem_functions.h"
 #include "model/action/action_logger.h"
 #include "model/clip/instrument_clip.h"
@@ -1863,10 +1864,10 @@ void PerformanceView::readDefaultsFromFile() {
 		// since we changed the file path for the PerformanceView.XML in c1.3, it's possible
 		// that a PerformanceView file may exists in the root of the SD card
 		// if so, let's move it to the new SETTINGS folder (but first make sure folder exists)
-		FRESULT result = f_mkdir(SETTINGS_FOLDER);
-		if (result == FR_OK || result == FR_EXIST) {
-			result = f_rename("PerformanceView.XML", PERFORM_DEFAULTS_XML);
-			if (result == FR_OK) {
+		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
+		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
+			auto renamed = deluge::io::rename("PerformanceView.XML", PERFORM_DEFAULTS_XML);
+			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
 				success = StorageManager::fileExists(PERFORM_DEFAULTS_XML, &fp);

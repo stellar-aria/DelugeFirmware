@@ -23,7 +23,7 @@
 extern "C" {
 extern uint8_t currentlyAccessingCard;
 }
-DIR sxDIR;
+std::optional<deluge::io::Directory> sxDir;
 uint32_t dirOffsetCounter;
 
 JsonSerializer jWriter;
@@ -110,6 +110,33 @@ std::optional<DelugeTimestamp> timestampFromWireDateTime(uint32_t date, uint32_t
 	ts.minute = static_cast<uint8_t>((time >> 5) & 0x3F);
 	ts.second = static_cast<uint8_t>((time & 0x1F) * 2);
 	return ts;
+}
+
+// Inverse of timestampFromWireDateTime — packs a portable DelugeTimestamp
+// back into the wire's FAT DOS-packed WORD shape for getDirEntries's reply.
+WORD wireDateFromTimestamp(const DelugeTimestamp& ts) {
+	return static_cast<WORD>(((ts.year - 1980) << 9) | (ts.month << 5) | ts.day);
+}
+
+WORD wireTimeFromTimestamp(const DelugeTimestamp& ts) {
+	return static_cast<WORD>((ts.hour << 11) | (ts.minute << 5) | (ts.second / 2));
+}
+
+// Packs DelugeDirEntry's portable attribute flags back into the wire's raw
+// FatFS fattrib byte shape.
+BYTE wireAttribFromFlags(const DelugeDirEntry& entry) {
+	BYTE attrib = 0;
+	if (entry.is_read_only)
+		attrib |= AM_RDO;
+	if (entry.is_hidden)
+		attrib |= AM_HID;
+	if (entry.is_system)
+		attrib |= AM_SYS;
+	if (entry.is_directory)
+		attrib |= AM_DIR;
+	if (entry.is_archive)
+		attrib |= AM_ARC;
+	return attrib;
 }
 
 } // namespace
@@ -495,22 +522,25 @@ void smSysex::getDirEntries(MIDICable& cable, JsonDeserializer& reader) {
 		linesWanted = MAX_DIR_LINES;
 	// We should pick up on path changes and out-of-order offset requests.
 
-	const char* pathVal = path.c_str();
-	const TCHAR* pathTC = (const TCHAR*)pathVal;
-	if (lineOffset == 0 || strcmp(activeDirName.c_str(), pathVal) || lineOffset != dirOffsetCounter) {
-		errCode = f_opendir(&sxDIR, pathTC);
-		if (errCode != FRESULT::FR_OK)
+	if (lineOffset == 0 || activeDirName != path || lineOffset != dirOffsetCounter) {
+		auto opened = deluge::io::Directory::open(path);
+		if (!opened.has_value()) {
+			errCode = toWireFresult(opened.error());
 			goto errorFound;
+		}
+		sxDir = std::move(*opened);
 		dirOffsetCounter = 0;
-		activeDirName = pathVal;
+		activeDirName = path;
 		if (lineOffset > 0) {
-			FILINFO fno;
 			for (uint32_t ix = 0; ix < lineOffset; ++ix) {
-				errCode = f_readdir(&sxDIR, &fno);
-				if (errCode != FRESULT::FR_OK)
+				auto entry = sxDir->read();
+				if (!entry.has_value()) {
+					errCode = toWireFresult(entry.error());
 					break;
-				if (fno.altname[0] == 0)
+				}
+				if (!entry->has_value()) {
 					break;
+				}
 				dirOffsetCounter++;
 			}
 		}
@@ -522,19 +552,18 @@ errorFound:;
 	jWriter.writeOpeningTag("^dir", false, true);
 	jWriter.writeArrayStart("list", true, false);
 
-	for (uint32_t ix = 0; ix < linesWanted; ++ix) {
-		FILINFO fno;
-		FRESULT err = f_readdir(&sxDIR, &fno);
-		if (err != FRESULT::FR_OK)
+	for (uint32_t ix = 0; ix < linesWanted && sxDir.has_value(); ++ix) {
+		auto entry = sxDir->read();
+		if (!entry.has_value() || !entry->has_value()) {
 			break;
-		if (fno.altname[0] == 0)
-			break;
+		}
+		const DelugeDirEntry& fno = **entry;
 
 		jWriter.writeOpeningTag(NULL, true);
-		jWriter.writeAttribute("name", fno.fname);
-		jWriter.writeAttribute("size", fno.fsize);
-		jWriter.writeAttribute("date", fno.fdate);
-		jWriter.writeAttribute("time", fno.ftime);
+		jWriter.writeAttribute("name", fno.name);
+		jWriter.writeAttribute("size", fno.size);
+		jWriter.writeAttribute("date", wireDateFromTimestamp(fno.modified_time));
+		jWriter.writeAttribute("time", wireTimeFromTimestamp(fno.modified_time));
 
 		// AM_RDO  0x01 Read only
 		// AM_HID  0x02 Hidden
@@ -542,7 +571,7 @@ errorFound:;
 
 		// AM_DIR  0x10 Directory
 		// AM_ARC  0x20 Archive
-		jWriter.writeAttribute("attr", fno.fattrib);
+		jWriter.writeAttribute("attr", wireAttribFromFlags(fno));
 
 		jWriter.closeTag();
 		dirOffsetCounter++;

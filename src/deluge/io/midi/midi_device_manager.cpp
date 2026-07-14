@@ -24,6 +24,7 @@
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "io/midi/cable_types/din.h"
 #include "io/midi/cable_types/usb_device_cable.h"
 #include "io/midi/device_specific/specific_midi_device.h"
@@ -464,7 +465,7 @@ void writeDevicesToFile() {
 
 	if (!anyWorthWritting) {
 		// If still here, nothing worth writing. Delete the file if there was one.
-		f_unlink(MIDI_DEVICES_XML); // May give error, but no real consequence from that.
+		deluge::io::unlink(MIDI_DEVICES_XML); // May give error, but no real consequence from that.
 		return;
 	}
 
@@ -515,10 +516,10 @@ void readDevicesFromFile() {
 		// since we changed the file path for the MIDIDevices.XML in c1.3, it's possible
 		// that a MIDIDevice file may exists in the root of the SD card
 		// if so, let's move it to the new SETTINGS folder (but first make sure folder exists)
-		FRESULT result = f_mkdir(SETTINGS_FOLDER);
-		if (result == FR_OK || result == FR_EXIST) {
-			result = f_rename("MIDIDevices.XML", MIDI_DEVICES_XML);
-			if (result == FR_OK) {
+		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
+		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
+			auto renamed = deluge::io::rename("MIDIDevices.XML", MIDI_DEVICES_XML);
+			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
 				success = StorageManager::fileExists(MIDI_DEVICES_XML, &fp);

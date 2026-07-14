@@ -2201,6 +2201,8 @@ Error delugeStatusToError(DelugeStatus status) {
 		return Error::WRITE_PROTECTED;
 	case DELUGE_ERR_NODEV:
 		return Error::SD_CARD_NOT_PRESENT;
+	case DELUGE_ERR_NO_MEMORY:
+		return Error::INSUFFICIENT_RAM;
 	default:
 		return Error::SD_CARD;
 	}

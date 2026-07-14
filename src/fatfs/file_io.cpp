@@ -26,6 +26,8 @@ DelugeStatus to_deluge_status(FatFS::Error error) {
 	case FatFS::Error::NO_FILESYSTEM:
 		return DELUGE_ERR_NO_FILESYSTEM;
 	case FatFS::Error::NOT_ENOUGH_CORE:
+		return DELUGE_ERR_NO_MEMORY;
+	case FatFS::Error::DENIED:
 		return DELUGE_ERR_NO_SPACE;
 	case FatFS::Error::INVALID_PARAMETER:
 	case FatFS::Error::INVALID_NAME:

@@ -43,6 +43,7 @@ typedef enum DelugeStatus {
 	DELUGE_ERR_NO_SPACE = -10,        ///< storage full / allocation failed
 	DELUGE_ERR_NO_FILESYSTEM = -11,   ///< media present but has no valid filesystem
 	DELUGE_ERR_WRITE_PROTECTED = -12, ///< media is read-only / locked
+	DELUGE_ERR_NO_MEMORY = -13,       ///< RAM allocation failed (distinct from NO_SPACE, which is storage/disk space)
 } DelugeStatus;
 
 /// One stereo frame of audio. Layout-compatible with the application's

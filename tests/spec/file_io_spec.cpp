@@ -26,6 +26,11 @@ describe file_io("file_io adapter", $ {
 		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::NO_FILESYSTEM)).to_equal(DELUGE_ERR_NO_FILESYSTEM);
 	});
 
+	it("maps NOT_ENOUGH_CORE to DELUGE_ERR_NO_MEMORY and DENIED to DELUGE_ERR_NO_SPACE", _ {
+		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::NOT_ENOUGH_CORE)).to_equal(DELUGE_ERR_NO_MEMORY);
+		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::DENIED)).to_equal(DELUGE_ERR_NO_SPACE);
+	});
+
 	it("maps unrecognized FatFS::Error values to the generic DELUGE_ERR_IO", _ {
 		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::INT_ERR)).to_equal(DELUGE_ERR_IO);
 	});

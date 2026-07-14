@@ -2,6 +2,9 @@
 #include "io/midi/midi_device_manager.h"
 #include "storage/storage_manager.h"
 
+#include "io/file.hpp"
+#include <optional>
+
 struct FILdata;
 
 namespace smSysex {
@@ -17,8 +20,6 @@ struct FileOpParams {
 
 	const char* getFromPath() const { return fromName.c_str(); }
 	const char* getToPath() const { return toName.c_str(); }
-	const TCHAR* getFromTC() const { return (const TCHAR*)fromName.c_str(); }
-	const TCHAR* getToTC() const { return (const TCHAR*)toName.c_str(); }
 	bool hasTimestamp() const { return date != 0 || time != 0; }
 };
 
@@ -42,7 +43,7 @@ void writeBlock(MIDICable& cable, JsonDeserializer& reader);
 void getDirEntries(MIDICable& cable, JsonDeserializer& reader);
 void deleteFile(MIDICable& cable, JsonDeserializer& reader);
 void createDirectory(MIDICable& cable, JsonDeserializer& reader);
-FRESULT createPathDirectories(std::string& path, uint32_t date, uint32_t time);
+FRESULT createPathDirectories(std::string& path, std::optional<DelugeTimestamp> timestamp);
 void rename(MIDICable& cable, JsonDeserializer& reader);
 void updateTime(MIDICable& cable, JsonDeserializer& reader);
 void copyFile(MIDICable& cable, JsonDeserializer& reader);
@@ -54,6 +55,6 @@ uint32_t decodeDataFromReader(JsonDeserializer& reader, uint8_t* dest, uint32_t 
 // Helper functions for file operations
 bool parseFileOpParams(JsonDeserializer& reader, FileOpParams& params);
 FRESULT performFileCopy(const FileOpParams& params);
-void setFileTimestamp(const TCHAR* path, uint32_t date, uint32_t time);
+void setFileTimestamp(std::string_view path, uint32_t date, uint32_t time);
 
 } // namespace smSysex

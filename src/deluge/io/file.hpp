@@ -95,4 +95,8 @@ private:
 	DelugeDir* handle_ = nullptr;
 };
 
+std::expected<void, Status> mkdir(std::string_view path);
+std::expected<void, Status> unlink(std::string_view path);
+std::expected<void, Status> rename(std::string_view old_path, std::string_view new_path);
+
 } // namespace deluge::io

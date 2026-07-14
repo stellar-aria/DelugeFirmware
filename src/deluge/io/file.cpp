@@ -120,4 +120,28 @@ std::expected<void, Status> Directory::close() {
 	return {};
 }
 
+std::expected<void, Status> mkdir(std::string_view path) {
+	DelugeStatus status = deluge_file_mkdir(path.data());
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
+std::expected<void, Status> unlink(std::string_view path) {
+	DelugeStatus status = deluge_file_unlink(path.data());
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
+std::expected<void, Status> rename(std::string_view old_path, std::string_view new_path) {
+	DelugeStatus status = deluge_file_rename(old_path.data(), new_path.data());
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
 } // namespace deluge::io

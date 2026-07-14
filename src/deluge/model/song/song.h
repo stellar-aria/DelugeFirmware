@@ -222,8 +222,6 @@ public:
 	MusicalKey key;
 	std::bitset<NUM_PRESET_SCALES> disabledPresetScales{};
 
-	uint16_t slot;
-	int8_t subSlot;
 	std::string name{};
 
 	bool affectEntire;

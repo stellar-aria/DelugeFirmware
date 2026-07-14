@@ -188,7 +188,14 @@ ActionResult KeyboardScreen::padAction(int32_t x, int32_t y, int32_t velocity) {
 		updateActiveNotes();
 	}
 
-	requestRendering();
+	// The main pad grid only changes when the set of active notes changes, but rendering it re-transmits the whole
+	// grid over UART. During rapid pressing that competes with reading incoming pad events; the reporter of #3168
+	// specifically saw redundant redraws (e.g. a second finger on an already-lit note, or lifting one of two
+	// fingers on the same note - both leave the highlight unchanged). Skip the main render for those no-op events,
+	// but always refresh the sidebar since column-control pads can change it. uiNeedsRendering OR-accumulates, so
+	// this can never suppress a render another code path already requested.
+	uint32_t mainRowsToRender = (currentNotesState.states != lastNotesState.states) ? 0xFFFFFFFF : 0;
+	uiNeedsRendering(this, mainRowsToRender, 0xFFFFFFFF);
 	return ActionResult::DEALT_WITH;
 }
 
@@ -352,12 +359,7 @@ void KeyboardScreen::updateActiveNotes() {
 	if (lastNotesState.count != 0 && currentNotesState.count == 0) {
 		exitUIMode(UI_MODE_AUDITIONING);
 
-		if (display->haveOLED()) {
-			deluge::hid::display::OLED::removePopup();
-		}
-		else {
-			redrawNumericDisplay();
-		}
+		deluge::hid::display::OLED::removePopup();
 	}
 }
 
@@ -454,9 +456,6 @@ ActionResult KeyboardScreen::buttonAction(deluge::hid::Button b, bool on, bool i
 				else {
 					enterScaleMode();
 				}
-			}
-			else if (inScaleMode && display->have7SEG()) {
-				displayCurrentScaleName();
 			}
 		}
 	}
@@ -717,11 +716,9 @@ void KeyboardScreen::selectEncoderAction(int8_t offset) {
 
 		char noteName[3] = {0};
 		noteName[0] = useSharps ? noteCodeToNoteLetter[newRootNote] : noteCodeToNoteLetterFlats[newRootNote];
-		if (display->haveOLED()) {
-			if (noteCodeIsSharp[newRootNote]) {
-				char accidential = useSharps ? '#' : FLAT_CHAR;
-				noteName[1] = accidential;
-			}
+		if (noteCodeIsSharp[newRootNote]) {
+			char accidential = useSharps ? '#' : FLAT_CHAR;
+			noteName[1] = accidential;
 		}
 		display->displayPopup(noteName, 3, false, (noteCodeIsSharp[newRootNote] ? 0 : 255));
 		layout_list[getCurrentInstrumentClip()->keyboardState.currentLayout]->handleHorizontalEncoder(
@@ -745,9 +742,6 @@ void KeyboardScreen::exitAuditionMode() {
 	updateActiveNotes();
 
 	exitUIMode(UI_MODE_AUDITIONING);
-	if (display->have7SEG()) {
-		redrawNumericDisplay();
-	}
 }
 
 bool KeyboardScreen::opened() {
@@ -816,6 +810,12 @@ bool KeyboardScreen::renderSidebar(uint32_t whichRows, RGB image[][kDisplayWidth
 
 	layout_list[getCurrentInstrumentClip()->keyboardState.currentLayout]->renderSidebarPads(image);
 
+	if (occupancyMask) {
+		for (int32_t y = 0; y < kDisplayHeight; y++) {
+			PadLEDs::refreshSidebarOccupancy(image[y], occupancyMask[y]);
+		}
+	}
+
 	return true;
 }
 
@@ -833,12 +833,7 @@ void KeyboardScreen::enterScaleMode(int32_t selectedRootNote) {
 
 	getCurrentInstrumentClip()->yScroll = instrumentClipView.setupForEnteringScaleMode(selectedRootNote);
 
-	if (display->haveOLED()) {
-		currentSong->displayCurrentRootNoteAndScaleName();
-	}
-	else {
-		displayCurrentScaleName();
-	}
+	currentSong->displayCurrentRootNoteAndScaleName();
 
 	evaluateActiveNotes();
 	updateActiveNotes();

@@ -105,10 +105,10 @@ ArrangerView::ArrangerView() {
 void ArrangerView::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) {
 	if (stemExport.processStarted) {
 		if (stemExport.exportMixdown) {
-			stemExport.displayStemExportProgressOLED(StemExportType::MIXDOWN);
+			stemExport.displayStemExportProgress(StemExportType::MIXDOWN);
 		}
 		else {
-			stemExport.displayStemExportProgressOLED(StemExportType::TRACK);
+			stemExport.displayStemExportProgress(StemExportType::TRACK);
 		}
 	}
 	else if (currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION) {
@@ -302,7 +302,6 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 			bool available = context_menu::cancelStemExport.setupAndCheckAvailability();
 
 			if (available) {
-				display->setNextTransitionDirection(1);
 				openUI(&context_menu::cancelStemExport);
 			}
 		}
@@ -330,7 +329,6 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 		}
 		// open Song FX menu
 		else if (on && currentUIMode == UI_MODE_NONE) {
-			display->setNextTransitionDirection(1);
 			soundEditor.setup();
 			openUI(&soundEditor);
 		}
@@ -428,7 +426,7 @@ doActualSimpleChange:
 	else if (b == Y_ENC) {
 		if (on && !Buttons::isShiftButtonPressed()) {
 			UI* currentUI = getCurrentUI();
-			bool isOLEDSessionView = display->haveOLED() && (currentUI == &sessionView || currentUI == &arrangerView);
+			bool isOLEDSessionView = (currentUI == &sessionView || currentUI == &arrangerView);
 			// only display pop-up if we're using 7SEG or we're not currently in Song / Arranger View
 			if (!isOLEDSessionView) {
 				currentSong->displayCurrentRootNoteAndScaleName();
@@ -834,7 +832,7 @@ Instrument* ArrangerView::createNewInstrument(OutputType newOutputType, bool* in
 
 	Error error = Error::NONE;
 	if (!newInstrument) {
-		std::string newPresetName = fileItem->getDisplayNameWithoutExtension();
+		std::string newPresetName = fileItem->getFilenameWithoutExtension();
 		error = StorageManager::loadInstrumentFromFile(currentSong, nullptr, newOutputType, false, &newInstrument,
 		                                               &fileItem->filePointer, &newPresetName, &Browser::currentDir);
 	}
@@ -945,7 +943,7 @@ void ArrangerView::auditionEnded() {
 
 	if (getRootUI() == &automationView) {
 		if (automationView.inAutomationEditor()) {
-			automationView.displayAutomation(true, !display->have7SEG());
+			automationView.displayAutomation(true, true);
 		}
 		else {
 			automationView.renderDisplay();
@@ -1783,12 +1781,7 @@ void ArrangerView::exitSubModeWithoutAction(UI* ui) {
 
 /// redraw OLED and 7SEG displays
 void ArrangerView::renderDisplay() {
-	if (display->haveOLED()) {
-		renderUIsForOled();
-	}
-	else {
-		sessionView.redrawNumericDisplay();
-	}
+	renderUIsForOled();
 }
 
 /// enter clip view
@@ -1836,6 +1829,11 @@ void ArrangerView::transitionToClipView(ClipInstance* clipInstance) {
 
 		if (clip->type == ClipType::INSTRUMENT) {
 			instrumentClipView.recalculateColours();
+			// Automation view reuses instrument clip offscreen rows during explode animations.
+			instrumentClipView.fillOffScreenImageStores();
+		}
+		else {
+			PadLEDs::clearTransitionStoreOffScreenRows();
 		}
 
 		automationView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1], false);
@@ -1945,7 +1943,9 @@ bool ArrangerView::transitionToArrangementEditor() {
 
 	memcpy(PadLEDs::imageStore[1], PadLEDs::image, (kDisplayWidth + kSideBarWidth) * kDisplayHeight * sizeof(RGB));
 	memcpy(PadLEDs::occupancyMaskStore[1], PadLEDs::occupancyMask, (kDisplayWidth + kSideBarWidth) * kDisplayHeight);
-	if (getCurrentUI() == &instrumentClipView) {
+	// Both instrument and automation views need the offscreen instrument rows for a complete collapse into Arranger.
+	if (getCurrentClip()->type == ClipType::INSTRUMENT
+	    && (getCurrentUI() == &instrumentClipView || getCurrentUI() == &automationView)) {
 		instrumentClipView.fillOffScreenImageStores();
 	}
 
@@ -3112,9 +3112,7 @@ void ArrangerView::graphicsRoutine() {
 		PadLEDs::sendOutSidebarColours();
 	}
 
-	if (display->haveOLED()) {
-		sessionView.displayPotentialTempoChange(this);
-	}
+	sessionView.displayPotentialTempoChange(this);
 
 	if (PadLEDs::flashCursor != FLASH_CURSOR_OFF) {
 

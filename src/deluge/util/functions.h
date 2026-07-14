@@ -28,6 +28,7 @@
 #include "util/etl_string.h"
 #include "util/fixedpoint.h"
 #include "util/lookuptables/lookuptables.h"
+#include "util/name_compare.h" // IWYU pragma: export - strcmpspecial and friends used to live here
 #include "util/waves.h"
 #include <bit>
 #include <cstdint>
@@ -223,7 +224,7 @@ int32_t getFinalParameterValueHybrid(int32_t paramNeutralValue, int32_t patchedV
 int32_t getFinalParameterValueExp(int32_t paramNeutralValue, int32_t patchedValue);
 int32_t getFinalParameterValueExpWithDumbEnvelopeHack(int32_t paramNeutralValue, int32_t patchedValue, int32_t p);
 
-char const* getSourceDisplayNameForOLED(PatchSource s);
+char const* getSourceDisplayName(PatchSource s);
 
 char const* sourceToString(PatchSource source);
 PatchSource stringToSource(char const* string);
@@ -324,15 +325,11 @@ inline q31_t sampleTriangleDistribution() {
 
 void seedRandom();
 
-extern bool shouldInterpretNoteNames;
-extern bool octaveStartsFromA;
-
 int32_t random(int32_t upperLimit);
 bool shouldDoPanning(int32_t panAmount, int32_t* amplitudeL, int32_t* amplitudeR);
 
 uint32_t getOscInitialPhaseForZero(OscType waveType);
 int32_t fastPythag(int32_t x, int32_t y);
-int32_t strcmpspecial(char const* first, char const* second);
 int32_t doLanczos(int32_t* data, int32_t pos, uint32_t posWithinPos, int32_t memoryNumElements);
 int32_t doLanczosCircular(int32_t* data, int32_t pos, uint32_t posWithinPos, int32_t memoryNumElements);
 

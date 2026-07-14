@@ -35,7 +35,6 @@ FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory
 
 class Instrument;
 class FileItem;
-class NumericLayerScrollingText;
 class Song;
 
 // FIXME: std::expected<std::pair<bool, FileItem*>, Error>
@@ -127,6 +126,9 @@ protected:
 	virtual void currentFileChanged(int32_t movementDirection) {}
 	void displayText(bool blinkImmediately = false) override;
 	static Slot getSlot(char const* displayName);
+	/// Returns the character just past filePrefix within `name`, or nullptr if `name` does not start with filePrefix.
+	/// Names always carry the prefix; only *rendering* strips it.
+	char const* nameAfterPrefix(char const* name) const;
 	Error readFileItemsFromFolderAndMemory(Song* song, OutputType outputType, char const* filePrefixHere,
 	                                       char const* filenameToStartAt, char const* defaultDirToAlsoTry,
 	                                       bool allowFoldersint,
@@ -149,8 +151,7 @@ protected:
 	int32_t fileIconPt2Width;
 
 	// 7Seg Only
-	static int8_t numberEditPos; // -1 is default
-	static NumericLayerScrollingText* scrollingText;
+	static int8_t numberEditPos;   // -1 is default
 	bool shouldWrapFolderContents; // As in, wrap around at the end.
 
 	bool mayDefaultToBrandNewNameOnEntry;

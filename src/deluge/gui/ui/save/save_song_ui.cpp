@@ -149,7 +149,6 @@ gotError:
 
 		if (available) { // Always true.
 			display->removeWorkingAnimation();
-			display->setNextTransitionDirection(1);
 			openUI(&context_menu::overwriteFile);
 			return true;
 		}
@@ -165,10 +164,7 @@ gotError:
 	// Create sample dir
 	std::string newSongAlternatePath;
 
-	std::string filenameWithoutExtension = getCurrentFilenameWithoutExtension();
-
-	error = audioFileManager.setupAlternateAudioFileDir(newSongAlternatePath, currentDir.c_str(),
-	                                                    filenameWithoutExtension.c_str());
+	error = audioFileManager.setupAlternateAudioFileDir(newSongAlternatePath, currentDir.c_str(), enteredText.c_str());
 	if (error != Error::NONE) {
 		goto gotError;
 	}

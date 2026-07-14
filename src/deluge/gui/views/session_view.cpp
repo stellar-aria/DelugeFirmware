@@ -93,6 +93,19 @@ using namespace gui;
 
 PLACE_SDRAM_BSS SessionView sessionView{};
 
+namespace {
+// Keyboard view's sidebar columns morph to/from the Session colours of the clip's row. The mute colour PadLEDs
+// already has; hand it the section colour, unless the clip's row is off-screen and there is nothing to morph to.
+void setUpKeyboardSidebarMorph(int32_t clipRow) {
+	if (clipRow < 0 || clipRow >= kDisplayHeight) {
+		return;
+	}
+	RGB sidebarRow[kDisplayWidth + kSideBarWidth]{};
+	sessionView.drawSectionSquare(clipRow, sidebarRow);
+	PadLEDs::enableKeyboardSidebarMorph(sidebarRow[kDisplayWidth + 1]);
+}
+} // namespace
+
 SessionView::SessionView() {
 	xScrollBeforeFollowingAutoExtendingLinearRecording = -1;
 	createClip = false;
@@ -169,12 +182,7 @@ void SessionView::focusRegained() {
 		view.setActiveModControllableTimelineCounter(currentSong);
 	}
 
-	if (display->haveOLED()) {
-		setCentralLEDStates();
-	}
-	else {
-		redrawNumericDisplay();
-	}
+	setCentralLEDStates();
 
 	indicator_leds::setLedState(IndicatorLED::BACK, false);
 
@@ -440,7 +448,6 @@ moveAfterClipInstance:
 			bool available = context_menu::cancelStemExport.setupAndCheckAvailability();
 
 			if (available) {
-				display->setNextTransitionDirection(1);
 				openUI(&context_menu::cancelStemExport);
 			}
 		}
@@ -535,17 +542,11 @@ moveAfterClipInstance:
 						session.cancelAllArming();
 						session.cancelAllLaunchScheduling();
 						session.lastSectionArmed = 255;
-						if (display->haveOLED()) {
-							renderUIsForOled();
-						}
-						else {
-							redrawNumericDisplay();
-						}
+						renderUIsForOled();
 						requestRendering(this, 0, 0xFFFFFFFF);
 					}
 				}
 				// open Song FX menu
-				display->setNextTransitionDirection(1);
 				soundEditor.setup();
 				openUI(&soundEditor);
 			}
@@ -661,7 +662,7 @@ doActualSimpleChange:
 	else if (b == Y_ENC) {
 		if (on && !Buttons::isShiftButtonPressed()) {
 			UI* currentUI = getCurrentUI();
-			bool isOLEDSessionView = display->haveOLED() && (currentUI == &sessionView || currentUI == &arrangerView);
+			bool isOLEDSessionView = (currentUI == &sessionView || currentUI == &arrangerView);
 			// only display pop-up if we're using 7SEG or we're not currently in Song / Arranger View
 			if (!isOLEDSessionView) {
 				currentSong->displayCurrentRootNoteAndScaleName();
@@ -1082,12 +1083,7 @@ void SessionView::clipPressEnded() {
 
 	if (isUIModeActive(UI_MODE_HOLDING_SECTION_PAD)) {
 		exitUIMode(UI_MODE_HOLDING_SECTION_PAD);
-		if (display->haveOLED()) {
-			deluge::hid::display::OLED::removePopup();
-		}
-		else {
-			redrawNumericDisplay();
-		}
+		deluge::hid::display::OLED::removePopup();
 	}
 
 	if (currentUIMode == UI_MODE_EXPLODE_ANIMATION) {
@@ -1105,15 +1101,10 @@ void SessionView::clipPressEnded() {
 
 	currentUIMode = UI_MODE_NONE;
 	view.setActiveModControllableTimelineCounter(currentSong);
-	if (display->haveOLED()) {
-		renderUIsForOled();
-		// check UI in case this code is called from performance view
-		if (getCurrentUI() == &sessionView) {
-			setCentralLEDStates();
-		}
-	}
-	else {
-		redrawNumericDisplay();
+	renderUIsForOled();
+	// check UI in case this code is called from performance view
+	if (getCurrentUI() == &sessionView) {
+		setCentralLEDStates();
 	}
 }
 
@@ -1189,12 +1180,7 @@ void SessionView::sectionPadAction(uint8_t y, bool on) {
 				session.armSection(sectionPressed, kInternalButtonPressLatency);
 			}
 			exitUIMode(UI_MODE_HOLDING_SECTION_PAD);
-			if (display->haveOLED()) {
-				deluge::hid::display::OLED::removePopup();
-			}
-			else {
-				redrawNumericDisplay();
-			}
+			deluge::hid::display::OLED::removePopup();
 			uiTimerManager.unsetTimer(TimerName::UI_SPECIFIC);
 		}
 
@@ -1236,7 +1222,7 @@ ActionResult SessionView::timerCallback() {
 void SessionView::drawSectionRepeatNumber() {
 	int32_t number = currentSong->sections[sectionPressed].numRepetitions;
 	char const* outputText;
-	if (display->haveOLED()) {
+	{
 		char buffer[21];
 		if (number == -2) {
 			outputText = "Launch \nexclusively"; // Need line break to match format of next label.
@@ -1261,20 +1247,6 @@ void SessionView::drawSectionRepeatNumber() {
 		else {
 			display->popupTextTemporary(outputText);
 		}
-	}
-	else {
-		char buffer[5];
-		if (number == -1) {
-			outputText = "SHAR";
-		}
-		else if (number == 0) {
-			outputText = "INFI";
-		}
-		else {
-			intToString(number, buffer);
-			outputText = buffer;
-		}
-		display->setText(outputText, true, 255, true);
 	}
 }
 
@@ -1382,12 +1354,7 @@ void SessionView::editNumRepeatsTilLaunch(int32_t offset) {
 		session.numRepeatsTilLaunch = 9999;
 	}
 	else {
-		if (display->haveOLED()) {
-			renderUIsForOled();
-		}
-		else {
-			redrawNumericDisplay();
-		}
+		renderUIsForOled();
 	}
 }
 
@@ -1589,7 +1556,7 @@ Error setPresetOrNextUnlaunchedOne(InstrumentClip* clip, OutputType outputType, 
 
 	Error error = Error::NONE;
 	if (!newInstrument) {
-		std::string newPresetName = fileItem->getDisplayNameWithoutExtension();
+		std::string newPresetName = fileItem->getFilenameWithoutExtension();
 		error = StorageManager::loadInstrumentFromFile(currentSong, nullptr, outputType, false, &newInstrument,
 		                                               &fileItem->filePointer, &newPresetName, &Browser::currentDir);
 	}
@@ -1604,12 +1571,7 @@ Error setPresetOrNextUnlaunchedOne(InstrumentClip* clip, OutputType outputType, 
 		currentSong->removeInstrumentFromHibernationList(newInstrument);
 	}
 
-	if (display->haveOLED()) {
-		deluge::hid::display::OLED::displayWorkingAnimation("Loading");
-	}
-	else {
-		display->displayLoadingAnimation();
-	}
+	deluge::hid::display::OLED::displayWorkingAnimation("Loading");
 
 	newInstrument->loadAllAudioFiles(true);
 
@@ -1896,7 +1858,7 @@ extern char loopsRemainingText[];
 
 void SessionView::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) {
 	if (stemExport.processStarted) {
-		stemExport.displayStemExportProgressOLED(StemExportType::CLIP);
+		stemExport.displayStemExportProgress(StemExportType::CLIP);
 		return;
 	}
 
@@ -1925,104 +1887,6 @@ void SessionView::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) 
 			}
 		}
 	}
-}
-
-void SessionView::redrawNumericDisplay() {
-	if ((currentUIMode == UI_MODE_CLIP_PRESSED_IN_SONG_VIEW || stemExport.processStarted)) {
-		return;
-	}
-
-	UI* currentUI = getCurrentUI();
-
-	bool isPerformanceView = (currentUI == &performanceView);
-
-	bool isSessionView =
-	    ((currentUI == &sessionView) || (isPerformanceView && currentSong->lastClipInstanceEnteredStartPos == -1));
-
-	bool isArrangerView =
-	    ((currentUI == &arrangerView) || (isPerformanceView && currentSong->lastClipInstanceEnteredStartPos != -1));
-
-	// If playback on...
-	if (playbackHandler.isEitherClockActive()) {
-
-		// Session playback
-		if (currentPlaybackMode == &session) {
-			if (!session.launchEventAtSwungTickCount) {
-				goto nothingToDisplay;
-			}
-
-			if (loadSongUI.isLoadingSong()) {
-				if (currentUIMode == UI_MODE_LOADING_SONG_UNESSENTIAL_SAMPLES_ARMED) {
-					displayRepeatsTilLaunch();
-				}
-			}
-
-			else if (isArrangerView) {
-				if (currentUIMode == UI_MODE_NONE || currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW
-				    || currentUIMode == UI_MODE_HOLDING_HORIZONTAL_ENCODER_BUTTON) {
-					if (session.switchToArrangementAtLaunchEvent) {
-						displayRepeatsTilLaunch();
-					}
-					else {
-						clearNumericDisplay();
-					}
-				}
-			}
-
-			else if (isSessionView) {
-				if (currentUIMode != UI_MODE_HOLDING_SECTION_PAD) {
-					displayRepeatsTilLaunch();
-				}
-			}
-		}
-
-		else { // Arrangement playback
-			if (isArrangerView) {
-
-				if (currentUIMode != UI_MODE_HOLDING_SECTION_PAD && currentUIMode != UI_MODE_HOLDING_ARRANGEMENT_ROW) {
-					if (playbackHandler.stopOutputRecordingAtLoopEnd) {
-						display->setText("1", true, 255, true, NULL, false, true);
-					}
-					else {
-						clearNumericDisplay();
-					}
-				}
-			}
-			else if (isSessionView) {
-				clearNumericDisplay();
-			}
-		}
-	}
-
-	// Or if no playback active...
-	else {
-nothingToDisplay:
-		if ((isSessionView || isArrangerView)) {
-			if (currentUIMode != UI_MODE_HOLDING_SECTION_PAD) {
-				clearNumericDisplay();
-			}
-		}
-	}
-
-	// don't override LED states set by performance view
-	if (!isPerformanceView) {
-		setCentralLEDStates();
-	}
-}
-
-void SessionView::clearNumericDisplay() {
-	if (getCurrentUI() == &performanceView) {
-		performanceView.renderViewDisplay();
-	}
-	else {
-		display->setText("");
-	}
-}
-
-void SessionView::displayRepeatsTilLaunch() {
-	char buffer[5];
-	intToString(session.numRepeatsTilLaunch, buffer);
-	display->setText(buffer, true, 255, true, NULL, false, true);
 }
 
 /// render session view display on opening
@@ -2105,8 +1969,6 @@ void SessionView::displayCurrentRootNoteAndScaleName(deluge::hid::display::oled_
 	canvas.drawString(rootNoteAndScaleName.c_str(), 0, yPos, kTextSpacingX, kTextSpacingY);
 }
 
-// This gets called by redrawNumericDisplay() - or, if OLED, it gets called instead, because this still needs to
-// happen.
 void SessionView::setCentralLEDStates() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false);
@@ -2184,9 +2046,7 @@ void SessionView::graphicsRoutine() {
 		PadLEDs::sendOutSidebarColours();
 	}
 
-	if (display->haveOLED()) {
-		displayPotentialTempoChange(this);
-	}
+	displayPotentialTempoChange(this);
 
 	bool reallyNoTickSquare = (!playbackHandler.isEitherClockActive() || currentUIMode == UI_MODE_EXPLODE_ANIMATION
 	                           || currentUIMode == UI_MODE_IMPLODE_ANIMATION || !session.launchEventAtSwungTickCount);
@@ -2381,19 +2241,15 @@ int32_t SessionView::displayLoopsRemainingPopup(bool ephemeral) {
 			etl::string<40> popupMsg;
 			if (sixteenthNotesRemaining > 16) {
 				int32_t barsRemaining = ((sixteenthNotesRemaining - 1) / 16) + 1;
-				if (display->haveOLED()) {
-					popupMsg.append("Bars Remaining: ");
-				}
+				popupMsg.append("Bars Remaining: ");
 				deluge::string::appendInt(popupMsg, barsRemaining);
 			}
 			else {
 				int32_t quarterNotesRemaining = ((sixteenthNotesRemaining - 1) / 4) + 1;
-				if (display->haveOLED()) {
-					popupMsg.append("Beats Remaining: ");
-				}
+				popupMsg.append("Beats Remaining: ");
 				deluge::string::appendInt(popupMsg, quarterNotesRemaining);
 			}
-			if (display->haveOLED() && !ephemeral) {
+			if (!ephemeral) {
 				deluge::hid::display::OLED::clearMainImage();
 				deluge::hid::display::OLED::drawPermanentPopupLookingText(popupMsg.c_str());
 				deluge::hid::display::OLED::sendMainImage();
@@ -2744,8 +2600,6 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 		return;
 	}
 
-	PadLEDs::recordTransitionBegin(kClipCollapseSpeed);
-
 	bool onKeyboardScreen = ((clip->type == ClipType::INSTRUMENT) && ((InstrumentClip*)clip)->onKeyboardScreen);
 
 	// when transitioning back to clip, if keyboard view is enabled, it takes precedent
@@ -2753,8 +2607,16 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 	if (clip->onAutomationClipView && !onKeyboardScreen) {
 		currentUIMode = UI_MODE_INSTRUMENT_CLIP_EXPANDING;
 
-		automationView.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore, false);
-		clip->renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+		// Store rows 1..kDisplayHeight hold the visible clip rows; rows 0 and kDisplayHeight + 1 are reserved for
+		// offscreen rows so sidebar pads can animate the full height.
+		automationView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1], false);
+		clip->renderSidebar(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1]);
+		if (clip->type == ClipType::INSTRUMENT) {
+			instrumentClipView.fillOffScreenImageStores();
+		}
+		else {
+			PadLEDs::clearTransitionStoreOffScreenRows();
+		}
 
 		PadLEDs::numAnimatedRows = kDisplayHeight + 2;
 		for (int32_t y = 0; y < PadLEDs::numAnimatedRows; y++) {
@@ -2764,6 +2626,9 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 
 		PadLEDs::setupInstrumentClipCollapseAnimation(true);
 
+		// Preparing the stores can take a while (fillOffScreenImageStores loads clusters), so only start the clock
+		// once we're ready to draw the first frame.
+		PadLEDs::recordTransitionBegin(kClipCollapseSpeed);
 		PadLEDs::renderClipExpandOrCollapse();
 
 		if (clip->type == ClipType::INSTRUMENT) {
@@ -2779,6 +2644,7 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 
 		if (onKeyboardScreen) {
 
+			// Keyboard view uses only its visible rows for this animation, so it starts at store row 0.
 			keyboardScreen.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
 			keyboardScreen.renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
 
@@ -2794,8 +2660,10 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 			// Won't have happened automatically because we haven't begun the "session"
 			instrumentClipView.recalculateColours();
 
-			instrumentClipView.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore, false);
-			instrumentClipView.renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+			// Non-keyboard clip views include one offscreen row above and below the visible rows.
+			instrumentClipView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1],
+			                                  false);
+			instrumentClipView.renderSidebar(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1]);
 
 			// Important that this is done after currentSong->xScroll is changed, above
 			instrumentClipView.fillOffScreenImageStores();
@@ -2808,7 +2676,12 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 		}
 
 		PadLEDs::setupInstrumentClipCollapseAnimation(true);
+		if (onKeyboardScreen) {
+			setUpKeyboardSidebarMorph(clipPlaceOnScreen);
+		}
 
+		// As above: don't let the store setup eat into the animation's 200ms.
+		PadLEDs::recordTransitionBegin(kClipCollapseSpeed);
 		PadLEDs::renderClipExpandOrCollapse();
 
 		// Hook point for specificMidiDevice
@@ -2829,6 +2702,7 @@ void SessionView::transitionToViewForClip(Clip* clip) {
 
 			PadLEDs::setupAudioClipCollapseOrExplodeAnimation(clip);
 
+			PadLEDs::recordTransitionBegin(kClipCollapseSpeed);
 			PadLEDs::renderAudioClipExpandOrCollapse();
 
 			PadLEDs::clearSideBar(); // Sends "now"
@@ -2867,9 +2741,18 @@ void SessionView::transitionToSessionView() {
 	}
 	else {
 		int32_t transitioningToRow = getClipPlaceOnScreen(getCurrentClip());
+		bool transitioningFromKeyboardScreen = false;
 		if (getCurrentUI() == &automationView) {
-			automationView.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore, false);
-			getCurrentClip()->renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+			// Automation collapse follows the same store layout as instrument clip view: offscreen row, visible rows,
+			// offscreen row.
+			automationView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1], false);
+			getCurrentClip()->renderSidebar(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1]);
+			if (getCurrentClip()->type == ClipType::INSTRUMENT) {
+				instrumentClipView.fillOffScreenImageStores();
+			}
+			else {
+				PadLEDs::clearTransitionStoreOffScreenRows();
+			}
 
 			// I didn't see a difference but the + 2 seems intentional
 			PadLEDs::numAnimatedRows = kDisplayHeight + 2;
@@ -2881,8 +2764,11 @@ void SessionView::transitionToSessionView() {
 		else {
 			InstrumentClip* instrumentClip = getCurrentInstrumentClip();
 			if (instrumentClip->onKeyboardScreen) {
-				keyboardScreen.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore, false);
-				keyboardScreen.renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+				transitioningFromKeyboardScreen = true;
+				// Start keyboard collapse from the exact frame currently on the LEDs. Re-rendering here can change
+				// transient sidebar colours before the first animation frame and reads as a blink.
+				memcpy(PadLEDs::imageStore, PadLEDs::image, sizeof(PadLEDs::image));
+				memcpy(PadLEDs::occupancyMaskStore, PadLEDs::occupancyMask, sizeof(PadLEDs::occupancyMask));
 
 				PadLEDs::numAnimatedRows = kDisplayHeight;
 				for (int32_t y = 0; y < kDisplayHeight; y++) {
@@ -2891,8 +2777,10 @@ void SessionView::transitionToSessionView() {
 				}
 			}
 			else {
-				instrumentClipView.renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore, false);
-				instrumentClipView.renderSidebar(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+				// Instrument clip collapse renders visible rows into the middle of the transition store.
+				instrumentClipView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1],
+				                                  false);
+				instrumentClipView.renderSidebar(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1]);
 
 				// I didn't see a difference but the + 2 seems intentional
 				PadLEDs::numAnimatedRows = kDisplayHeight + 2;
@@ -2906,13 +2794,13 @@ void SessionView::transitionToSessionView() {
 		// Must set this after above render calls, or else they'll see it and not render
 		currentUIMode = UI_MODE_INSTRUMENT_CLIP_COLLAPSING;
 
-		// Set occupancy masks to full for the sidebar squares in the Store
-		for (int32_t y = 0; y < kDisplayHeight; y++) {
-			PadLEDs::occupancyMaskStore[y + 1][kDisplayWidth] = 64;
-			PadLEDs::occupancyMaskStore[y + 1][kDisplayWidth + 1] = 64;
-		}
+		// The sidebar occupancy the renderSidebar() calls above produced is authoritative: a black sidebar pad is
+		// empty, and forcing it to occupied would make drawSquare() marginalise the destination pad it collapses into.
 
 		PadLEDs::setupInstrumentClipCollapseAnimation(true);
+		if (transitioningFromKeyboardScreen) {
+			setUpKeyboardSidebarMorph(transitioningToRow);
+		}
 
 		if (getCurrentUI() == &instrumentClipView) {
 			instrumentClipView.fillOffScreenImageStores();
@@ -3831,9 +3719,7 @@ void SessionView::gridNewTrackClipAndEnter(uint32_t packedXY) {
 		transitionToViewForClip(clip);
 		return;
 	}
-	if (display->haveOLED()) {
-		deluge::hid::display::OLED::removePopup();
-	}
+	deluge::hid::display::OLED::removePopup();
 	view.displayOutputName(clip->output, true, clip);
 	gridSelectClipForPulsing(*clip);
 	currentSong->setCurrentClip(clip);
@@ -4004,12 +3890,7 @@ ActionResult SessionView::gridHandlePadsEdit(int32_t x, int32_t y, int32_t on, C
 		else {
 			if (isUIModeActive(UI_MODE_HOLDING_SECTION_PAD)) {
 				exitUIMode(UI_MODE_HOLDING_SECTION_PAD);
-				if (display->haveOLED()) {
-					deluge::hid::display::OLED::removePopup();
-				}
-				else {
-					redrawNumericDisplay();
-				}
+				deluge::hid::display::OLED::removePopup();
 			}
 		}
 
@@ -4067,11 +3948,9 @@ ActionResult SessionView::gridHandlePadsEdit(int32_t x, int32_t y, int32_t on, C
 			if (clip == nullptr) {
 				return ActionResult::ACTIONED_AND_CAUSED_CHANGE;
 			}
-			if (display->haveOLED()) {
-				// removes potential stuck pop-up if you're previewing / entering a clip
-				// while holding section pad and repeats popup is displayed
-				deluge::hid::display::OLED::removePopup();
-			}
+			// removes potential stuck pop-up if you're previewing / entering a clip
+			// while holding section pad and repeats popup is displayed
+			deluge::hid::display::OLED::removePopup();
 			view.displayOutputName(clip->output, true, clip);
 
 			// we've either created or selected a clip, so set it to be current
@@ -4206,12 +4085,7 @@ ActionResult SessionView::gridHandlePadsLaunch(int32_t x, int32_t y, int32_t on,
 					session.armSection(sectionPressed, kInternalButtonPressLatency);
 				}
 				exitUIMode(UI_MODE_HOLDING_SECTION_PAD);
-				if (display->haveOLED()) {
-					deluge::hid::display::OLED::removePopup();
-				}
-				else {
-					redrawNumericDisplay();
-				}
+				deluge::hid::display::OLED::removePopup();
 				uiTimerManager.unsetTimer(TimerName::UI_SPECIFIC);
 			}
 		}
@@ -4470,13 +4344,7 @@ ActionResult SessionView::gridHandlePadsMacros(int32_t x, int32_t y, int32_t on,
 			macro.kind = (SessionMacroKind)kindIndex;
 		}
 
-		if (display->haveOLED()) {
-			renderUIsForOled();
-		}
-		else {
-			const char* macroKind = getMacroKindString(macro.kind);
-			display->displayPopup(macroKind);
-		}
+		renderUIsForOled();
 
 		return ActionResult::ACTIONED_AND_CAUSED_CHANGE;
 	}
@@ -4565,7 +4433,9 @@ void SessionView::gridTransitionToSessionView() {
 
 	memcpy(PadLEDs::imageStore[1], PadLEDs::image, (kDisplayWidth + kSideBarWidth) * kDisplayHeight * sizeof(RGB));
 	memcpy(PadLEDs::occupancyMaskStore[1], PadLEDs::occupancyMask, (kDisplayWidth + kSideBarWidth) * kDisplayHeight);
-	if (getCurrentUI() == &instrumentClipView) {
+	// Grid collapse uses the same offscreen instrument rows whether the current editor is notes or automation.
+	if (getCurrentClip()->type == ClipType::INSTRUMENT
+	    && (getCurrentUI() == &instrumentClipView || getCurrentUI() == &automationView)) {
 		instrumentClipView.fillOffScreenImageStores();
 	}
 
@@ -4616,6 +4486,11 @@ void SessionView::gridTransitionToViewForClip(Clip* clip) {
 
 		if (clip->type == ClipType::INSTRUMENT) {
 			instrumentClipView.recalculateColours();
+			// Automation grid explode still needs the instrument rows above and below the visible display.
+			instrumentClipView.fillOffScreenImageStores();
+		}
+		else {
+			PadLEDs::clearTransitionStoreOffScreenRows();
 		}
 
 		automationView.renderMainPads(0xFFFFFFFF, &PadLEDs::imageStore[1], &PadLEDs::occupancyMaskStore[1], false);

@@ -85,14 +85,7 @@ void SaveUI::enterKeyPress() {
 	else if (enteredText.empty()) {} // Previously had &&currentFolderIsEmpty ... why?
 
 	else {
-		SlotBrowser::enterKeyPress();
-		bool dealtWith = performSave(false);
-
-		if (display->have7SEG()) {
-			if (!dealtWith) {
-				displayText(false);
-			}
-		}
+		performSave(false);
 	}
 }
 
@@ -116,13 +109,11 @@ ActionResult SaveUI::buttonAction(deluge::hid::Button b, bool on, bool inCardRou
 
 ActionResult SaveUI::timerCallback() {
 	if (currentUIMode == UI_MODE_HOLDING_BUTTON_POTENTIAL_LONG_PRESS) {
-		convertToPrefixFormatIfPossible();
 
 		bool available = gui::context_menu::saveSongOrInstrument.setupAndCheckAvailability();
 
 		if (available) {
 			currentUIMode = UI_MODE_NONE;
-			display->setNextTransitionDirection(1);
 			openUI(&gui::context_menu::saveSongOrInstrument);
 		}
 		else {

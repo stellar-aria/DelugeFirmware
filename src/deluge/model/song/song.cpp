@@ -143,9 +143,6 @@ Song::Song() {
 	insideWorldTickMagnitudeOffsetFromBPM = 0;
 	syncScalingClip = nullptr;
 	currentClip = nullptr;
-	slot = 32767;
-	subSlot = -1;
-
 	xScroll[NAVIGATION_CLIP] = 0;
 	xScroll[NAVIGATION_ARRANGEMENT] = 0;
 	xScrollForReturnToSongView = 0;
@@ -366,7 +363,7 @@ bool Song::ensureAtLeastOneSessionClip() {
 	result = loadInstrumentPresetUI.findAnUnlaunchedPresetIncludingWithinSubfolders(nullptr, OutputType::SYNTH,
 	                                                                                Availability::ANY);
 	if (result) {
-		std::string newPresetName = result.value()->getDisplayNameWithoutExtension();
+		std::string newPresetName = result.value()->getFilenameWithoutExtension();
 		error =
 		    StorageManager::loadInstrumentFromFile(this, firstClip, OutputType::SYNTH, false, &newInstrument,
 		                                           &result.value()->filePointer, &newPresetName, &Browser::currentDir);
@@ -4681,12 +4678,11 @@ Output* Song::navigateThroughPresetsForInstrument(Output* output, int32_t offset
 		PresetNavigationResult results =
 		    loadInstrumentPresetUI.doPresetNavigation(offset, oldInstrument, Availability::INSTRUMENT_UNUSED, true);
 		if (results.error == Error::NO_ERROR_BUT_GET_OUT) {
-removeWorkingAnimationAndGetOut:
-			if (display->haveOLED()) {
-				auto oled = static_cast<deluge::hid::display::OLED*>(display);
-				oled->consoleTimerEvent();
-				oled->removeWorkingAnimation();
-			}
+removeWorkingAnimationAndGetOut: {
+	auto oled = static_cast<deluge::hid::display::OLED*>(display);
+	oled->consoleTimerEvent();
+	oled->removeWorkingAnimation();
+}
 			return output;
 		}
 		else if (results.error != Error::NONE) {
@@ -4829,7 +4825,7 @@ gotAnInstrument: {}
 
 		Error error = Error::NONE;
 		if (!newInstrument) {
-			std::string newPresetName = fileItem->getDisplayNameWithoutExtension();
+			std::string newPresetName = fileItem->getFilenameWithoutExtension();
 			error =
 			    StorageManager::loadInstrumentFromFile(this, nullptr, newOutputType, false, &newInstrument,
 			                                           &fileItem->filePointer, &newPresetName, &Browser::currentDir);
@@ -4854,14 +4850,8 @@ gotAnInstrument: {}
 	}
 
 #if ALPHA_OR_BETA_VERSION
-	display->setText("A002");
 #endif
 	replaceInstrument(oldInstrument, newInstrument);
-#if ALPHA_OR_BETA_VERSION
-	if (display->have7SEG()) {
-		view.displayOutputName(newInstrument);
-	}
-#endif
 
 	instrumentSwapped(newInstrument);
 
@@ -5709,16 +5699,14 @@ void Song::getCurrentRootNoteAndScaleName(etl::istring& buffer) {
 	noteCodeToString(currentSong->key.rootNote, noteName, &isNatural);
 
 	buffer.append(noteName);
-	if (display->haveOLED()) {
-		buffer.append(" ");
-		buffer.append(getScaleName(getCurrentScale()));
-	}
+	buffer.append(" ");
+	buffer.append(getScaleName(getCurrentScale()));
 }
 
 void Song::displayCurrentRootNoteAndScaleName() {
 	etl::string<40> popupMsg;
 	getCurrentRootNoteAndScaleName(popupMsg);
-	if (display->haveOLED()) {
+	{
 		UI* currentUI = getCurrentUI();
 		bool isSessionView = (currentUI == &sessionView || currentUI == &arrangerView);
 		// only display pop-up if we're using 7SEG or we're not currently in Song / Arranger View
@@ -5764,23 +5752,13 @@ void Song::adjustMasterTransposeInterval(int32_t interval) {
 void Song::displayMasterTransposeInterval() {
 	etl::string<40> popupMsg;
 
-	if (display->haveOLED()) {
-		popupMsg.append("Transpose Interval: \n");
-		if (masterTransposeInterval == 0) {
-			popupMsg.append("Encoder");
-		}
-		else {
-			deluge::string::appendInt(popupMsg, masterTransposeInterval);
-			popupMsg.append(" Semitones");
-		}
+	popupMsg.append("Transpose Interval: \n");
+	if (masterTransposeInterval == 0) {
+		popupMsg.append("Encoder");
 	}
 	else {
-		if (masterTransposeInterval == 0) {
-			popupMsg.append("ENC");
-		}
-		else {
-			deluge::string::appendInt(popupMsg, masterTransposeInterval);
-		}
+		deluge::string::appendInt(popupMsg, masterTransposeInterval);
+		popupMsg.append(" Semitones");
 	}
 	display->displayPopup(popupMsg.c_str());
 }
@@ -5839,9 +5817,7 @@ void Song::changeThresholdRecordingMode(int8_t offset) {
 
 void Song::displayThresholdRecordingMode() {
 	etl::string<40> popupMsg;
-	if (display->haveOLED()) {
-		popupMsg.append("Threshold: ");
-	}
+	popupMsg.append("Threshold: ");
 
 	switch (currentSong->thresholdRecordingMode) {
 	case ThresholdRecordingMode::OFF:

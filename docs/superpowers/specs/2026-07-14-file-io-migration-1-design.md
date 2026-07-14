@@ -67,10 +67,10 @@ if (result != FR_OK && result != FR_EXIST) {
 // after
 auto result = deluge::io::mkdir(tempPath);
 if (!result.has_value() && result.error() != deluge::io::Status::EXISTS) {
-	return delugeStatusToError(DELUGE_ERR_NOT_FOUND); // hardcoded, preserving today's exact (pre-existing) quirk
+	return delugeStatusToError(DELUGE_ERR_NOT_FOUND); // hardcoded, preserving the quirk's shape (not its exact value — see below)
 }
 ```
-Preserve the hardcoding exactly — it's an existing quirk, not something this migration should "fix" (see §4).
+Preserve the *shape* of the hardcoding exactly (always-hardcoded, ignores the real failure) — it's an existing quirk, not something this migration should "fix" (see §4). **The exact returned `Error` value is not preserved, and can't be**: `fresultToDelugeErrorCode(FR_NO_PATH)` produces `Error::FOLDER_DOESNT_EXIST`, but `delugeStatusToError` (the new translator this call site must use) never produces that value — the boundary's `DELUGE_ERR_NOT_FOUND` deliberately collapses what used to be two distinct FatFS codes (`FR_NO_FILE`, `FR_NO_PATH`) into one, and `delugeStatusToError` maps it to `Error::FILE_NOT_FOUND` instead. This is a direct, already-accepted consequence of that collapse (a project-wide boundary design decision, not something introduced here), caught during this plan's final whole-branch review. Real-world impact is limited to a cosmetic OLED string ("File not found" instead of "Folder not found") on an already-rare path — no caller of this function branches on the specific `Error` value it can now produce here. If the exact string ever matters, the fix is giving `delugeStatusToError` a `FOLDER_DOESNT_EXIST` case, which is out of this plan's scope.
 
 **Two sites use a genuinely different idiom — preserve both exactly, don't unify them:**
 
@@ -134,4 +134,4 @@ Verification for this plan:
 - `browser.cpp`'s main directory-scan loop (`readFileItemsForFolder`) — the same Tier 2 problem as above; only its three standalone `f_mkdir` sites (§2) are in this plan.
 - `smsysex.cpp` (Tier 4 of the roadmap) — gated on two of its own bounded gaps (a missing `f_utime` boundary function, a wire-protocol `FRESULT`-compatibility question), not designed yet.
 - Removing `fresultToDelugeErrorCode`/`fatfsErrorToDelugeError` — still load-bearing for every file not yet migrated across every tier; gated on all of them landing (see the roadmap doc §7).
-- Any behavior change beyond the mechanical translation — every idiom identified in §2 (EXISTS-tolerant, `FR_OK`-only, no-tolerance) is preserved exactly as it exists today, including the pre-existing quirk where `createFoldersRecursiveIfNotExists` always returns a hardcoded `FR_NO_PATH`-derived error regardless of the actual failure code — not something this migration should silently "fix."
+- Any behavior change beyond the mechanical translation — every idiom identified in §2 (EXISTS-tolerant, `FR_OK`-only, no-tolerance) is preserved exactly as it exists today, including the pre-existing quirk where `createFoldersRecursiveIfNotExists` always returns a hardcoded, real-failure-ignoring error regardless of the actual failure code — not something this migration should silently "fix." (The hardcoded error's exact *value* does shift, `FOLDER_DOESNT_EXIST`→`FILE_NOT_FOUND`, as an unavoidable consequence of the boundary's `NOT_FOUND` collapse — see §2's caveat. This is the one place in this plan where "preserved exactly" means shape, not byte-for-byte value.)

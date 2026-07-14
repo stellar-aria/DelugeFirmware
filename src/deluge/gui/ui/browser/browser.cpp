@@ -1754,7 +1754,11 @@ Error Browser::createFoldersRecursiveIfNotExists(const char* path) {
 			auto result = deluge::io::mkdir(tempPath);
 			if (!result.has_value() && result.error() != deluge::io::Status::EXISTS) {
 				return delugeStatusToError(
-				    DELUGE_ERR_NOT_FOUND); // hardcoded, preserving today's exact (pre-existing) quirk
+				    DELUGE_ERR_NOT_FOUND); // hardcoded, preserving the pre-existing quirk's shape (always
+				                           // ignores the real failure); the exact Error value shifts from the
+				                           // original's FOLDER_DOESNT_EXIST to FILE_NOT_FOUND here, an
+				                           // unavoidable consequence of the NOT_FOUND collapse -- see the
+				                           // design doc's §2 caveat
 			}
 		}
 	}

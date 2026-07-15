@@ -15,12 +15,6 @@
 
 using namespace deluge::audio::stream;
 
-namespace {
-void count_yields(void* ctx) {
-	++*static_cast<int*>(ctx);
-}
-} // namespace
-
 // clang-format off
 describe convert_cluster("convert_cluster_data", $ {
 	it("NATIVE leaves data untouched and does not write the backup out-param", _ {
@@ -36,7 +30,7 @@ describe convert_cluster("convert_cluster_data", $ {
 		                                      .audio_data_length_bytes = 10,
 		                                      .first_cluster_index_with_no_audio_data = 1},
 		                      /*cluster_size=*/16, /*cluster_size_magnitude=*/4,
-		                      std::span<std::byte, 3>(backup), nullptr, nullptr);
+		                      std::span<std::byte, 3>(backup), [] {});
 
 		expect(data == original).to_equal(true);
 		expect(std::to_integer<int>(backup[0])).to_equal(0xEE);
@@ -58,7 +52,7 @@ describe convert_cluster("convert_cluster_data", $ {
 		                                      .audio_data_length_bytes = 1000,
 		                                      .first_cluster_index_with_no_audio_data = 5},
 		                      cluster_size, /*cluster_size_magnitude=*/5,
-		                      std::span<std::byte, 3>(backup), nullptr, nullptr);
+		                      std::span<std::byte, 3>(backup), [] {});
 
 		// Backup captured before any swap: the cluster's absolute first 3 bytes.
 		expect(std::to_integer<int>(backup[0])).to_equal(0);
@@ -95,7 +89,7 @@ describe convert_cluster("convert_cluster_data", $ {
 		                                      .audio_data_length_bytes = 1000,
 		                                      .first_cluster_index_with_no_audio_data = 5},
 		                      cluster_size, /*cluster_size_magnitude=*/4,
-		                      std::span<std::byte, 3>(backup), nullptr, nullptr);
+		                      std::span<std::byte, 3>(backup), [] {});
 
 		// Bytes before the (4-byte-aligned) start pos are untouched.
 		expect(std::to_integer<int>(data[0])).to_equal(0x00);
@@ -122,7 +116,7 @@ describe convert_cluster("convert_cluster_data", $ {
 		                                      .audio_data_length_bytes = 10,
 		                                      .first_cluster_index_with_no_audio_data = 1},
 		                      /*cluster_size=*/16, /*cluster_size_magnitude=*/4,
-		                      std::span<std::byte, 3>(backup), nullptr, nullptr);
+		                      std::span<std::byte, 3>(backup), [] {});
 
 		expect(data == original).to_equal(true);
 		expect(std::to_integer<int>(backup[0])).to_equal(0xEE);
@@ -141,7 +135,7 @@ describe convert_cluster("convert_cluster_data", $ {
 		                                      .audio_data_length_bytes = 100000,
 		                                      .first_cluster_index_with_no_audio_data = 5},
 		                      cluster_size, /*cluster_size_magnitude=*/12,
-		                      std::span<std::byte, 3>(backup), count_yields, &yield_count);
+		                      std::span<std::byte, 3>(backup), [&] { ++yield_count; });
 
 		expect(yield_count >= 1).to_equal(true);
 	});

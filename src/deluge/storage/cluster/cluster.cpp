@@ -69,11 +69,10 @@ void Cluster::convertDataIfNecessary() {
 	    // Cooperative yield during long conversions. Both of convert_cluster_data's yield sites route
 	    // here, so the "from convert-data" marker now also fires on the non-24-bit path (originally only
 	    // the 24-bit path logged it) — a deliberate, audio-neutral widening (goldens bit-exact).
-	    [](void*) {
+	    [] {
 		    AudioEngine::logAction("from convert-data");
 		    AudioEngine::runRoutine();
-	    },
-	    nullptr);
+	    });
 }
 
 // The resource-manager Asset that owns this cluster's residency for the *leased* (reason-tracked)

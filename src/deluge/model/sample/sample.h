@@ -22,6 +22,7 @@
 #include "model/sample/sample_cluster.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
+#include "storage/audio/stream/convert.h"
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
@@ -98,28 +99,7 @@ public:
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }
 
 	[[nodiscard]] q31_t convertToNative(int32_t value) const {
-		switch (rawDataFormat) {
-		case RawDataFormat::FLOAT:
-			return q31_from_float(std::bit_cast<float>(value));
-
-		case RawDataFormat::ENDIANNESS_WRONG_32: // Or endianness swap
-			return swapEndianness32(value);
-
-		case RawDataFormat::ENDIANNESS_WRONG_16:
-			return swapEndianness2x16(value);
-
-		case RawDataFormat::UNSIGNED_8:
-			return value ^ 0x80808080;
-
-		case RawDataFormat::ENDIANNESS_WRONG_24:
-			// handled by caller
-			[[fallthrough]];
-
-		case RawDataFormat::NATIVE:
-			// nothing to be done
-			break;
-		}
-		return value;
+		return deluge::audio::stream::convert_word(value, rawDataFormat);
 	}
 
 	std::string tempFilePathForRecording{};

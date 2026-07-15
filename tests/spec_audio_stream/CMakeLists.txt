@@ -11,11 +11,17 @@ FetchContent_MakeAvailable(CppSpec)
 function(create_specs_driver driver_name spec_dir)
   file(GLOB_RECURSE spec_sources RELATIVE ${spec_dir} ${spec_dir}/*_spec.cpp)
   create_test_sourcelist(specs ${driver_name}.cpp ${spec_sources})
-  add_executable(${driver_name} ${specs})
+  add_executable(${driver_name} ${specs}
+    # convert_spec.cpp exercises the real convert_word implementation (not a mock), so its
+    # translation unit must be linked in.
+    ../../src/deluge/storage/audio/stream/convert.cpp
+    ../../src/deluge/util/audio_format_helpers.cpp
+  )
   target_link_libraries(${driver_name} PRIVATE c++spec)
   target_include_directories(${driver_name} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ../../include      # libdeluge/types.h
+    ../../src         # definitions_cxx.hpp
     ../../src/deluge   # storage/audio/stream/read_source.h, io/stream.hpp
   )
   set_target_properties(${driver_name} PROPERTIES CXX_STANDARD 26 CXX_STANDARD_REQUIRED YES)

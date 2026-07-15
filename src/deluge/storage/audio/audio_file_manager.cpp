@@ -37,6 +37,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/cluster_byte_source.h"
 #include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/stream/read_source.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -988,26 +989,20 @@ getOutEarly:
 	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
-	if (sample->readStream_.has_value()) {
-		auto readResult = sample->readStream_->read_at(
-		    static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude,
-		    std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
+	{
+		// Read seam: SampleStream owns source selection (Stream for a loaded sample, Block for a
+		// still-being-written recording). See storage/audio/stream/read_source.h and design §6/§7.
+		auto source = deluge::audio::stream::makeReadSource(*sample);
+		auto readResult =
+		    source->read(static_cast<uint32_t>(clusterIndex),
+		                 std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
 		if (readResult) {
-			bytesRead = static_cast<uint32_t>(readResult->size());
+			bytesRead = readResult.value();
 			status = DELUGE_OK;
 		}
 		else {
-			status = deluge::io::to_deluge_status(readResult.error());
+			status = readResult.error();
 		}
-	}
-	else {
-		// No open stream_io.h handle: this Sample wasn't opened via buildAudioFileFromCard's SAMPLE
-		// branch (e.g. it's still being written/finalized by SampleRecorder, which reads back its own
-		// just-written first cluster to patch the WAV header -- see
-		// SampleRecorder::finalizeRecordedFile). SampleRecorder populates sdAddress directly as it
-		// writes each cluster, so fall back to the direct block read against that address.
-		status = deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(cluster.data),
-		                           sample->clusters[cluster.clusterIndex].sdAddress, static_cast<uint32_t>(numSectors));
 	}
 
 #if REPORT_LOAD_TIME

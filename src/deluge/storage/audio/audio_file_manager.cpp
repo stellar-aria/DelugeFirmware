@@ -51,15 +51,6 @@ extern "C" {
 #include "fatfs/ff.h"
 #include "libdeluge/block_device.h"
 
-DWORD get_fat_from_fs(                      /* 0xFFFFFFFF:Disk error, 1:Internal error, 2..0x7FFFFFFF:Cluster status */
-                      FATFS* fs, DWORD clst /* Cluster number to get the value */
-);
-
-LBA_t clst2sect(           /* !=0:Sector number, 0:Failed (invalid cluster#) */
-                FATFS* fs, /* Filesystem object */
-                DWORD clst /* Cluster# to be converted */
-);
-
 extern uint8_t currentlyAccessingCard;
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
@@ -235,29 +226,27 @@ clusterSizeChangedButItsOk:
 			else {
 				if (thisAudioFile->type == AudioFileType::SAMPLE) {
 					// Check the Sample's file still exists
-					FIL sampleFile;
 					char const* filePath = ((Sample*)thisAudioFile)->tempFilePathForRecording.c_str();
 					if (!*filePath) {
 						filePath = thisAudioFile->filePath.c_str();
 					}
 
-					FRESULT result = f_open(&sampleFile, filePath, FA_READ);
-					if (result != FR_OK) {
+					DelugeStream* sampleStream = nullptr;
+					DelugeStatus openStatus = deluge_stream_open(filePath, DELUGE_STREAM_READ, &sampleStream);
+					if (openStatus != DELUGE_OK) {
 						D_PRINTLN("couldn't open file");
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
 
-					uint32_t firstSector = clst2sect(&fileSystem, sampleFile.obj.sclust);
+					uint32_t firstSector = 0;
+					DelugeStatus sectorStatus = deluge_stream_sector_of(sampleStream, 0, &firstSector);
 
-					f_close(&sampleFile);
+					deluge_stream_close(sampleStream);
 
-					// If address of first sector remained unchanged, we can be sure enough that the file hasn't been
-					// changed
-					if (firstSector == ((Sample*)thisAudioFile)->clusters[0].sdAddress) {}
-
-					// Otherwise
-					else {
+					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
+					// enough the file hasn't changed
+					if (sectorStatus != DELUGE_OK || firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}

@@ -43,8 +43,8 @@
 // load, on-demand sample-cluster streaming, stem writes — all unchanged). When
 // the env is unset we keep the historical no-disk behaviour, so a plain run
 // still boots the default no-SD patch. The app provides disk_read/disk_write
-// (the LBA_t-facing wrappers, audio_file_manager.cpp); they call the
-// _without_streaming_first variants below, which do the real I/O.
+// (the LBA_t-facing wrappers, audio_file_manager.cpp); they call down into
+// deluge_block_read/deluge_block_write below, which do the real I/O.
 // ===========================================================================
 
 #define HOST_SECTOR_SIZE 512u

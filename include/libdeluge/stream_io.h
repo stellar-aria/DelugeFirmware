@@ -53,7 +53,11 @@ typedef enum DelugeStreamMode {
 DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeStream** out);
 
 /// Read exactly `count` bytes at cluster-aligned `byte_offset` into `dst`.
-/// `*out_read` is the number of bytes actually read. [task]
+/// `*out_read` is the number of bytes actually read. Internally rounds `count` up to a
+/// whole sector (512-byte) boundary for the underlying block read, so `dst` must be sized
+/// to that sector-rounded count, not just `count` bytes -- up to 511 bytes may be written
+/// past `count`. Safe under this codebase's fixed cluster-size-buffer convention (matches
+/// pre-migration behavior). [task]
 DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, void* dst, uint32_t count,
                                    uint32_t* out_read);
 

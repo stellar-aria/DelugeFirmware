@@ -36,9 +36,12 @@ describe stream_io("stream_io adapter", $ {
 		// open_by_locator is pure field construction (no I/O), same precedent as file_io_spec.cpp's
 		// "open_by_locator constructs a File with exactly the given locator fields" test -- safe to call
 		// against an unmounted fake FATFS because objsize=0 makes resolve_read_layout return before it
-		// ever touches fs->csize or walks the FAT chain.
+		// ever walks the FAT chain. Note resolve_read_layout DOES unconditionally read fs->csize (it's
+		// read before the size==0 early-return check) -- that read is harmless here because a real 0-size
+		// file open still has a valid `fs` pointer to read csize from, so fakeFs.csize below just needs to
+		// be some valid non-zero value, not something the test is avoiding touching.
 		FATFS fakeFs{};
-		fakeFs.csize = 8; // must be non-zero, but resolve_read_layout must not read it for a 0-size file
+		fakeFs.csize = 8; // read unconditionally by resolve_read_layout; harmless, just needs to be non-zero
 		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
 		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_READ};
 

@@ -74,6 +74,34 @@ describe stream_io("stream_io adapter", $ {
 		impl.layout = nullptr;
 	});
 
+	it("read_at accepts a sector-rounded count that exceeds file_size but stays within the cluster's "
+	   "physical allocation", _ {
+		// file_size (400) is not a multiple of cluster_size_bytes (512): the last cluster is padded
+		// out to the cluster boundary on disk, same as e.g. Cymbal 2.wav's last cluster (862874-byte
+		// file, 11264-byte sector-rounded read request). A cluster-aligned, in-range read of the full
+		// cluster (512 bytes) must not be rejected just because it's more than the logical file_size.
+		deluge::fatfs_adapter::StreamLayoutEntry layout[1] = {{.sector = 1000}};
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/400);
+		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_READ};
+		impl.cluster_size_bytes = 512;
+		impl.num_clusters = 1;
+		impl.file_size = 400;
+		impl.layout = layout;
+
+		uint8_t dst[512];
+		uint32_t out_read = 999;
+		DelugeStatus status = deluge_stream_read_at(reinterpret_cast<DelugeStream*>(&impl), 0, dst, 512, &out_read);
+		// This spec build links mocks/mock_diskio.cpp, whose deluge_block_read always reports "no disk"
+		// (DELUGE_ERR_NODEV) -- there's no mountable image here (see file_io_spec.cpp's scope note), so
+		// the read itself can never actually complete. The bug under test is in *validation*, before the
+		// block device is ever touched: DELUGE_ERR_NODEV (not DELUGE_ERR_PARAM) is proof the request
+		// passed validation and reached deluge_block_read.
+		expect(status).to_equal(DELUGE_ERR_NODEV);
+		expect(out_read).to_equal(0u);
+		impl.layout = nullptr;
+	});
+
 	it("sector_of returns DELUGE_ERR_PARAM for an out-of-range cluster index", _ {
 		deluge::fatfs_adapter::StreamLayoutEntry layout[1] = {{.sector = 1000}};
 		FATFS fakeFs{};

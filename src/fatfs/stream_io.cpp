@@ -82,10 +82,13 @@ DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, v
 	    || count > impl->cluster_size_bytes) {
 		return DELUGE_ERR_PARAM; // read_at reads exactly one cluster at a time, from a cluster-aligned offset
 	}
-	if (byte_offset + count > impl->file_size) {
-		return DELUGE_ERR_PARAM;
-	}
-
+	// Deliberately no file_size bound here: file_size is the file's *logical* byte count, but FAT
+	// allocates whole clusters, so the last cluster's on-disk allocation is always >= file_size (padded
+	// up to the cluster boundary). Callers legitimately request sector-rounded counts for the last
+	// cluster that exceed file_size while still being fully within its allocated physical space. The
+	// cluster_index bound below (derived from file_size via num_clusters in resolve_read_layout, and
+	// tight thanks to the cluster-aligned/one-cluster-max check above) is what actually guarantees the
+	// read stays within a resolved, physically-allocated cluster.
 	uint32_t cluster_index = byte_offset / impl->cluster_size_bytes;
 	if (cluster_index >= impl->num_clusters) {
 		return DELUGE_ERR_PARAM;

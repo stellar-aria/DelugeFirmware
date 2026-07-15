@@ -1452,3 +1452,237 @@ Delete the full "deluge-stream boundary (future, unscoped)" bullet (line 4 of `T
 git add docs/dev/target_architecture.md TODO.md
 git commit -m "docs: correct deluge-stream's Stealable reference, resolve the TODO.md entry"
 ```
+
+---
+
+## Phase C: idiomatic C++ wrapper (added post-implementation)
+
+Tasks 1-9 above landed and were reviewed clean, including a final whole-branch review. During
+that review's follow-up, a design gap was identified: `stream_io.h` has real open/close handle
+lifecycle (unlike `block_device.h`, which was the (wrong) precedent Section "Global Constraints"
+originally compared it to) — the same shape `file_io.h` has, which already got a move-only RAII
+C++ wrapper (`deluge::io::File`, `src/deluge/io/file.hpp`/`.cpp`) specifically to eliminate
+manual-close bookkeeping. `Sample::readStream_` and `SampleRecorder::file` are both currently
+raw `DelugeStream*` with manual `deluge_stream_close()` calls at every site — this task gives
+them the same treatment `File` already has, restoring the `std::optional<...>`-held-RAII-object
+idiom `SampleRecorder::file` had before Task 8 (it was `std::optional<FatFS::File>` before that
+task, and only became a raw pointer because no wrapper existed yet to hold in the optional).
+
+**This is a pure refactor — no behavior change.** Every call this task touches already goes
+through the exact same `stream_io.h` C-ABI functions underneath; the wrapper is a thin,
+zero-cost RAII layer over calls that already exist and already work. Verification should
+confirm nothing changed, not explore new behavior.
+
+### Task 10: `deluge::io::Stream` wrapper + migrate `Sample`/`SampleRecorder` onto it
+
+**Files:**
+- Create: `src/deluge/io/stream.hpp`
+- Create: `src/deluge/io/stream.cpp`
+- Modify: `src/deluge/model/sample/sample.h` (`readStream_` becomes `std::optional<deluge::io::Stream>`)
+- Modify: `src/deluge/model/sample/sample.cpp` (`~Sample()`'s manual close removed — the optional's destructor handles it)
+- Modify: `src/deluge/storage/audio/audio_file_manager.cpp` (`buildAudioFileFromCard`, `readClusterData`, `cardReinserted` — all three call sites touching `readStream_`/raw `deluge_stream_*` calls)
+- Modify: `src/deluge/model/sample/sample_recorder.h` (`file` becomes `std::optional<deluge::io::Stream>`)
+- Modify: `src/deluge/model/sample/sample_recorder.cpp` (`cardRoutine`'s creation, `writeCluster`, `finalizeRecordedFile`, `alterFile`'s reopen, `truncateFileDownToSize`)
+
+**Interfaces:**
+- Consumes: `include/libdeluge/stream_io.h`'s C-ABI (Tasks 5/7, already complete); `deluge::io::Status`/`to_status`/`to_deluge_status` (already declared in `src/deluge/io/file.hpp`/`.cpp` — reuse, don't duplicate).
+- Produces: `deluge::io::Stream` — move-only RAII wrapper, `std::expected<T, deluge::io::Status>` returns.
+
+- [ ] **Step 1: Write `src/deluge/io/stream.hpp`**
+
+```cpp
+#pragma once
+
+#include "io/file.hpp" // reuses deluge::io::Status / to_status / to_deluge_status
+#include "libdeluge/stream_io.h"
+
+#include <cstdint>
+#include <expected>
+#include <span>
+#include <string_view>
+
+namespace deluge::io {
+
+class Stream {
+public:
+	Stream(Stream&) = delete;
+	Stream(Stream&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+	Stream& operator=(Stream&) = delete;
+	Stream& operator=(Stream&& other) noexcept {
+		if (this != &other) {
+			if (handle_) {
+				deluge_stream_close(handle_);
+			}
+			handle_ = other.handle_;
+			other.handle_ = nullptr;
+		}
+		return *this;
+	}
+	~Stream() {
+		if (handle_) {
+			deluge_stream_close(handle_);
+		}
+	}
+
+	[[nodiscard]] static std::expected<Stream, Status> open(std::string_view path, DelugeStreamMode mode);
+	std::expected<std::span<std::byte>, Status> read_at(uint32_t byte_offset, std::span<std::byte> buffer);
+	std::expected<uint32_t, Status> write_at(uint32_t byte_offset, std::span<const std::byte> buffer);
+	std::expected<void, Status> truncate(uint32_t new_size);
+	std::expected<uint32_t, Status> size();
+	std::expected<uint32_t, Status> sector_of(uint32_t cluster_index);
+	std::expected<void, Status> close();
+
+private:
+	explicit Stream(DelugeStream* handle) : handle_(handle) {}
+	DelugeStream* handle_ = nullptr;
+};
+
+} // namespace deluge::io
+```
+
+- [ ] **Step 2: Write `src/deluge/io/stream.cpp`**
+
+```cpp
+#include "io/stream.hpp"
+
+namespace deluge::io {
+
+std::expected<Stream, Status> Stream::open(std::string_view path, DelugeStreamMode mode) {
+	DelugeStream* handle = nullptr;
+	DelugeStatus status = deluge_stream_open(path.data(), mode, &handle);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return Stream(handle);
+}
+
+std::expected<std::span<std::byte>, Status> Stream::read_at(uint32_t byte_offset, std::span<std::byte> buffer) {
+	uint32_t out_read = 0;
+	DelugeStatus status =
+	    deluge_stream_read_at(handle_, byte_offset, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_read);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return buffer.subspan(0, out_read);
+}
+
+std::expected<uint32_t, Status> Stream::write_at(uint32_t byte_offset, std::span<const std::byte> buffer) {
+	uint32_t out_written = 0;
+	DelugeStatus status =
+	    deluge_stream_write_at(handle_, byte_offset, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_written);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return out_written;
+}
+
+std::expected<void, Status> Stream::truncate(uint32_t new_size) {
+	DelugeStatus status = deluge_stream_truncate(handle_, new_size);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
+std::expected<uint32_t, Status> Stream::size() {
+	uint32_t out_size = 0;
+	DelugeStatus status = deluge_stream_size(handle_, &out_size);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return out_size;
+}
+
+std::expected<uint32_t, Status> Stream::sector_of(uint32_t cluster_index) {
+	uint32_t out_sector = 0;
+	DelugeStatus status = deluge_stream_sector_of(handle_, cluster_index, &out_sector);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return out_sector;
+}
+
+std::expected<void, Status> Stream::close() {
+	DelugeStatus status = deluge_stream_close(handle_);
+	handle_ = nullptr; // matters even on error: don't let the destructor double-close
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
+	}
+	return {};
+}
+
+} // namespace deluge::io
+```
+
+- [ ] **Step 3: Register the new files in the build**
+
+Add `stream.cpp` to wherever `file.cpp` is registered for the `src/deluge/io/` sources (check the relevant `CMakeLists.txt`/source-list — mirror `file.cpp`'s exact entry). Also add to `tests/spec/CMakeLists.txt`'s `deluge_spec` source list if `file.cpp` is listed there too (check first — it may not need to be, if no spec test exercises the wrapper directly; a real mounted disk would be needed to meaningfully test it beyond what `stream_io_spec.cpp` already covers at the C-ABI level, so a dedicated wrapper-level spec test is not required by this task unless a cheap, real-logic test is obviously available).
+
+- [ ] **Step 4: Migrate `Sample`/`audio_file_manager.cpp`'s read side onto the wrapper**
+
+In `sample.h`, change:
+```cpp
+	DelugeStream* readStream_ = nullptr;
+```
+to:
+```cpp
+	std::optional<deluge::io::Stream> readStream_;
+```
+(add `#include "io/stream.hpp"` and `#include <optional>` as needed; remove the now-unneeded raw `#include "libdeluge/stream_io.h"` if nothing else in this header needs it directly — check first).
+
+In `sample.cpp`'s `~Sample()`, remove the manual close block:
+```cpp
+	if (readStream_ != nullptr) {
+		deluge_stream_close(readStream_);
+		readStream_ = nullptr;
+	}
+```
+entirely — `std::optional<deluge::io::Stream>`'s destructor now handles this automatically (a disengaged optional does nothing; an engaged one destructs its `Stream`, which closes the handle).
+
+In `audio_file_manager.cpp`:
+- `buildAudioFileFromCard`: replace the raw `deluge_stream_open(...)` call + manual `sampleFile->readStream_ = stream` assignment with `sampleFile->readStream_ = deluge::io::Stream::open(filePath, DELUGE_STREAM_READ);` — but since `Stream::open` returns `std::expected<Stream, Status>` not a `Stream` directly, handle the error case explicitly (matching the existing early-return-on-failure shape at this call site) before assigning, e.g.:
+  ```cpp
+  auto opened = deluge::io::Stream::open(filePath, DELUGE_STREAM_READ);
+  if (!opened) {
+  	*error = Error::FILE_NOT_FOUND;
+  	destroyAudioFileObject(*audioFile);
+  	return nullptr;
+  }
+  sampleFile->readStream_ = std::move(opened.value());
+  ```
+  and update the per-cluster `sdAddress` population loop to call `sampleFile->readStream_->sector_of(i)` (handling its `expected` return the same best-effort way the current raw `deluge_stream_sector_of` call is handled — result ignored on failure, `sector` stays its default).
+- `readClusterData`: replace the null-check-and-raw-call fallback logic with the wrapper's `expected`-returning `read_at`, keeping the exact same "readStream_ has no value → fall back to raw `deluge_block_read(sdAddress)`" branch structure Task 6 established (this fallback behavior doesn't change, only the non-fallback branch's mechanics do — `sample->readStream_->read_at(...)` instead of the raw C-ABI call).
+- `cardReinserted`: replace the raw `deluge_stream_open`/`deluge_stream_sector_of`/`deluge_stream_close` sequence (added in the final-review fix, `66a3e0fca`) with `deluge::io::Stream::open(...)` + `.sector_of(0)`, relying on the `Stream`'s destructor for cleanup instead of an explicit `deluge_stream_close` call — preserve the exact same `markAsUnloadable()`/`continue` semantics on any failure.
+
+- [ ] **Step 5: Migrate `SampleRecorder`/`sample_recorder.cpp`'s write side onto the wrapper**
+
+In `sample_recorder.h`, change:
+```cpp
+	DelugeStream* file = nullptr;
+```
+to:
+```cpp
+	std::optional<deluge::io::Stream> file;
+```
+(update includes similarly to Step 4).
+
+In `sample_recorder.cpp`:
+- File creation (`cardRoutine`): `this->file = deluge::io::Stream::open(filePathCreated.c_str(), mayOverwrite ? DELUGE_STREAM_WRITE_CREATE : DELUGE_STREAM_WRITE_CREATE_NEW);`, handling the error case (currently `goto gotError`) the same way the existing code does when the `expected` doesn't hold a value.
+- `writeCluster`: `file->write_at(byteOffset, ...)` then `file->sector_of(clusterIndex)`, same sequencing as today, `expected`-returning instead of `DelugeStatus`-returning.
+- `finalizeRecordedFile`'s close sites: `file->close()` (or just let the `std::optional` be `.reset()`/reassigned — match whichever the surrounding code's control flow makes cleaner; if the code needs to explicitly observe close-failure as an error, call `.close()` and check the `expected`, don't just silently reset).
+- `alterFile`'s reopen: `this->file = deluge::io::Stream::open(sample->filePath.c_str(), DELUGE_STREAM_WRITE_APPEND);` — a plain move-assignment over the existing (already-closed, per the current control flow) `std::optional`, matching `File`'s established reopen idiom.
+- `truncateFileDownToSize`: `file->truncate(newFileSize)`.
+
+- [ ] **Step 6: Build, verify, and confirm zero behavior change**
+
+Run: host-sim build + `scripts/golden_mixdown.sh check` for `cordae` and `icoustic` (`NO_BUILD=1` if already built) — both must remain bit-exact, since this is a pure refactor. Run the full CppSpec/CTest suite. As an extra confidence check given this touches the exact same recording path Task 8 verified carefully, exercise a real recording via `deluge_render` (e.g. a DRUM-mode export) and confirm it's byte-identical to a `git stash`-based A/B against pre-Task-10 code, the same methodology Task 8 used. Also confirm via `grep -rn "DelugeStream\*\|deluge_stream_close\|deluge_stream_open" src/deluge/model/sample/sample.h src/deluge/model/sample/sample.cpp src/deluge/model/sample/sample_recorder.h src/deluge/model/sample/sample_recorder.cpp` that no raw `DelugeStream*` handle or raw C-ABI call remains in these 4 files (they should all go through `deluge::io::Stream` now) — `audio_file_manager.cpp` is expected to still call `deluge::io::Stream::open` (a static factory, not raw C-ABI) plus keep its existing fallback-path raw `deluge_block_read` call in `readClusterData` (Task 6's null-`readStream_` fallback, unrelated to this task, must survive unchanged).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/deluge/io/stream.hpp src/deluge/io/stream.cpp \
+        src/deluge/model/sample/sample.h src/deluge/model/sample/sample.cpp \
+        src/deluge/storage/audio/audio_file_manager.cpp \
+        src/deluge/model/sample/sample_recorder.h src/deluge/model/sample/sample_recorder.cpp
+git commit -m "refactor(io): add deluge::io::Stream RAII wrapper, migrate Sample/SampleRecorder onto it"
+```

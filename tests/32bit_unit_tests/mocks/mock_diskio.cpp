@@ -7,6 +7,20 @@
 // documented behaviour for a drive that never initializes.
 #include "diskio.h"
 
+#include "libdeluge/block_device.h"
+
+// stream_io.cpp (src/fatfs/stream_io.cpp) calls the block_device.h boundary
+// directly (below FatFS, not through diskio.h) to read whole clusters. Same
+// "no disk" stub reasoning as disk_read/disk_status above -- link-only, no
+// spec drives it through to real I/O.
+uint8_t deluge_block_sd_unit(void) {
+	return 0;
+}
+
+DelugeStatus deluge_block_read(uint8_t /*unit*/, uint8_t* /*dst*/, uint32_t /*sector*/, uint32_t /*count*/) {
+	return DELUGE_ERR_NODEV;
+}
+
 // The vendored ff.c (create_chain(), src/fatfs/ff.c:1507) reaches out to this
 // app-level MIDI-thru-during-cluster-write counter (real definition:
 // src/deluge/playback/playback_handler.cpp). No spec drives cluster writes, so

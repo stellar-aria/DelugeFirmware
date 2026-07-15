@@ -19,6 +19,7 @@ add_library(deluge_spec STATIC
 ../../src/deluge/util/c_string.cpp
 ../../src/deluge/util/lookuptables/lookuptables.cpp
 ../../src/fatfs/file_io.cpp
+../../src/fatfs/stream_io.cpp
 # file_io.cpp's deluge_file_*/deluge_dir_* functions (added on top of Task 2's
 # pure helpers) call the real FatFS::File/Directory implementations, so the
 # real FatFS engine has to be link-complete here too. No spec drives actual

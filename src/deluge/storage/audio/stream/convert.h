@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 
 namespace deluge::audio::stream {
@@ -10,6 +11,23 @@ namespace deluge::audio::stream {
 // format. ENDIANNESS_WRONG_24 and NATIVE return the word unchanged (the 24-bit 3-byte swap is done
 // group-wise in convert_cluster_data).
 int32_t convert_word(int32_t word, RawDataFormat format);
+
+// UB-free int32-over-byte access: memcpy through a local int32_t, which the compiler folds into a
+// single unaligned load/store at -O2 (zero cost), unlike `*reinterpret_cast<int32_t*>(p)` which is both
+// unaligned access and a strict-aliasing violation on a char/std::byte buffer.
+inline int32_t load_word_unaligned(const std::byte* p) {
+	int32_t w;
+	std::memcpy(&w, p, sizeof(w));
+	return w;
+}
+inline void store_word_unaligned(std::byte* p, int32_t w) {
+	std::memcpy(p, &w, sizeof(w));
+}
+// Convert one word at a (possibly unaligned) byte address in place — UB-free replacement for
+// `*(int32_t*)p = convert_word(*(int32_t*)p, format)`.
+inline void convert_word_in_place(std::byte* p, RawDataFormat format) {
+	store_word_unaligned(p, convert_word(load_word_unaligned(p), format));
+}
 
 // The audio-data geometry convert_cluster_data needs from the owning Sample. Gathered by the caller
 // (Cluster owns none of this itself).
@@ -99,32 +117,32 @@ void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawD
 
 		// Or, all other bit depths
 		else {
-			int32_t* pos;
+			std::byte* pos;
 
 			if (cluster_index == start_cluster) {
-				pos = (int32_t*)&char_data[start_pos & (cluster_size - 1)];
+				pos = data.data() + (start_pos & (cluster_size - 1));
 			}
 			else {
-				pos = (int32_t*)&char_data[start_pos & 0b11];
+				pos = data.data() + (start_pos & 0b11);
 			}
 
-			int32_t* end_pos;
+			std::byte* end_pos;
 			if (cluster_index == geometry.first_cluster_index_with_no_audio_data - 1) {
 				uint32_t end_at_byte_pos = geometry.audio_data_start_pos_bytes + geometry.audio_data_length_bytes;
 				uint32_t end_at_pos_within_cluster = end_at_byte_pos & (cluster_size - 1);
-				end_pos = (int32_t*)&char_data[end_at_pos_within_cluster];
+				end_pos = data.data() + end_at_pos_within_cluster;
 			}
 			else {
-				end_pos = (int32_t*)&char_data[cluster_size - 3];
+				end_pos = data.data() + (cluster_size - 3);
 			}
 
-			for (; pos < end_pos; pos++) {
+			for (; pos < end_pos; pos += 4) {
 
 				if (!((uintptr_t)pos & 0b1111111100)) {
 					yield();
 				}
 
-				*pos = convert_word(*pos, format);
+				convert_word_in_place(pos, format);
 			}
 		}
 	}

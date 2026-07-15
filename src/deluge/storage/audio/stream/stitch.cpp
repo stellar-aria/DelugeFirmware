@@ -66,13 +66,7 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
 
 					// There'll be one word in there which hasn't yet been converted. Do it now. (We've
 					// probably also just moved over the next one too, which already was converted)
-					// NOTE (accepted UB): this and the two `self_data` straddle reads below reinterpret an
-					// unaligned byte address as int32* — unaligned access + strict-aliasing UB, carried
-					// verbatim from the original inline stitch to stay golden-bit-exact. An alignment-safe
-					// rewrite (memcpy through a local int32) is tracked as future hardening; keep any change
-					// behaviour-identical.
-					auto* this_number = reinterpret_cast<int32_t*>(&prev->tail[misalignment]);
-					*this_number = convert_word(*this_number, format);
+					convert_word_in_place(&prev->tail[misalignment], format);
 
 					// And now, copy 3 bytes back to this cluster (that's the maximum that the float
 					// could have been overhanging the boundary)
@@ -157,8 +151,7 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
 					std::memcpy(&self_data[cluster_size], next->head.data(), 7);
 
 					// There'll be one word in there which hasn't yet been converted from float. Do it now
-					auto* this_number = reinterpret_cast<int32_t*>(&self_data[start_pos]);
-					*this_number = convert_word(*this_number, format);
+					convert_word_in_place(&self_data[start_pos], format);
 
 					// And now, copy 3 bytes back to the next cluster (that's the maximum that the float
 					// could have been overhanging the boundary)
@@ -175,8 +168,7 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
 					std::memcpy(&self_data[cluster_size], next->unconverted_head.data(), 3);
 
 					// There'll be one word in there which hasn't yet been converted from float. Do it now
-					auto* this_number = reinterpret_cast<int32_t*>(&self_data[start_pos]);
-					*this_number = convert_word(*this_number, format);
+					convert_word_in_place(&self_data[start_pos], format);
 
 					// And now just copy the converted-from-float first bytes from the next cluster to the
 					// end of this one

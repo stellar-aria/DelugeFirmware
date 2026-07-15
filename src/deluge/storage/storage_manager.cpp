@@ -1149,9 +1149,11 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 		}
 	}
 
-	result = closeWriter();
-	if (result) {
-		return Error::WRITE_FAIL;
+	if (path) {
+		result = closeWriter();
+		if (result) {
+			return Error::WRITE_FAIL;
+		}
 	}
 
 	return Error::NONE;

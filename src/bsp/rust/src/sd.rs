@@ -20,7 +20,10 @@ use embassy_futures::block_on;
 use crate::sys::{
     DelugeCardEvent, DelugeCardEvent_DELUGE_CARD_EVENT_EJECTED as CARD_EJECTED,
     DelugeCardEvent_DELUGE_CARD_EVENT_INSERTED as CARD_INSERTED,
-    DelugeCardEvent_DELUGE_CARD_EVENT_NONE as CARD_NONE,
+    DelugeCardEvent_DELUGE_CARD_EVENT_NONE as CARD_NONE, DelugeStatus,
+    DelugeStatus_DELUGE_ERR_IO as DELUGE_ERR_IO, DelugeStatus_DELUGE_ERR_NODEV as DELUGE_ERR_NODEV,
+    DelugeStatus_DELUGE_ERR_WRITE_PROTECTED as DELUGE_ERR_WRITE_PROTECTED,
+    DelugeStatus_DELUGE_OK as DELUGE_OK,
 };
 
 // FatFS diskio status/result codes (src/fatfs/diskio.h).
@@ -206,6 +209,50 @@ pub extern "C" fn disk_write_without_streaming_first(
             // write error"). Helps diagnose the first-exercised write path.
             log::warn!("disk_write err {e:?} (sector={sector} count={count})");
             RES_ERROR
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_read(
+    unit: u8,
+    dst: *mut u8,
+    sector: u32,
+    count: u32,
+) -> DelugeStatus {
+    if unit != 0 || !sd::is_ready() {
+        return DELUGE_ERR_NODEV;
+    }
+    let len = count as usize * SECTOR_SIZE;
+    // SAFETY: caller guarantees `dst` holds `count` sectors.
+    let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
+    match block_on(sd::read_sectors(sector, count, out)) {
+        Ok(()) => DELUGE_OK,
+        Err(_) => DELUGE_ERR_IO,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_write(
+    unit: u8,
+    src: *const u8,
+    sector: u32,
+    count: u32,
+) -> DelugeStatus {
+    if unit != 0 || !sd::is_ready() {
+        return DELUGE_ERR_NODEV;
+    }
+    if sd::is_write_protected() {
+        return DELUGE_ERR_WRITE_PROTECTED;
+    }
+    let len = count as usize * SECTOR_SIZE;
+    // SAFETY: caller guarantees `src` holds `count` sectors.
+    let data = unsafe { core::slice::from_raw_parts(src, len) };
+    match block_on(sd::write_sectors(sector, count, data)) {
+        Ok(()) => DELUGE_OK,
+        Err(e) => {
+            log::warn!("deluge_block_write err {e:?} (sector={sector} count={count})");
+            DELUGE_ERR_IO
         }
     }
 }

@@ -37,6 +37,44 @@ struct ConvertGeometry {
 	int32_t first_cluster_index_with_no_audio_data; // = sample->getFirstClusterIndexWithNoAudioData()
 };
 
+// The ENDIANNESS_WRONG_24 byteswap loop: swaps byte 0 and byte 2 of every 3-byte group in [begin, end),
+// yielding roughly every 1024 bytes. `yield` is skipped after the final chunk (see convert_cluster_data's
+// doc comment for what it's for).
+template <class Yield>
+void convert_24bit_range(char* begin, char const* end, Yield yield) {
+	while (true) {
+		char const* end_pos_now = begin + 1024; // Every this many bytes, we'll pause and do an audio routine
+		end_pos_now = std::min(end_pos_now, end);
+
+		while (begin < end_pos_now) {
+			uint8_t temp = begin[0];
+			begin[0] = begin[2];
+			begin[2] = temp;
+			begin += 3;
+		}
+
+		if (begin >= end) {
+			break;
+		}
+
+		yield();
+	}
+}
+
+// The other-bit-depths word loop: converts every 4-byte word in [begin, end) in place via
+// convert_word_in_place, yielding on a 1024-byte address-aligned cadence.
+template <class Yield>
+void convert_word_range(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
+	for (; begin < end; begin += 4) {
+
+		if (!((uintptr_t)begin & 0b1111111100)) {
+			yield();
+		}
+
+		convert_word_in_place(begin, format);
+	}
+}
+
 // Pure core of Cluster::convertDataIfNecessary: converts data[0..cluster_size) in place from `format` to
 // native, given this cluster's index and the sample's audio-data geometry. On format != NATIVE, backs up
 // the pre-conversion first 3 bytes of `data` into unconverted_head_out (mirrors
@@ -96,23 +134,7 @@ void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawD
 				end_pos = &char_data[cluster_size - 2];
 			}
 
-			while (true) {
-				char const* end_pos_now = pos + 1024; // Every this many bytes, we'll pause and do an audio routine
-				end_pos_now = std::min(end_pos_now, end_pos);
-
-				while (pos < end_pos_now) {
-					uint8_t temp = pos[0];
-					pos[0] = pos[2];
-					pos[2] = temp;
-					pos += 3;
-				}
-
-				if (pos >= end_pos) {
-					break;
-				}
-
-				yield();
-			}
+			convert_24bit_range(pos, end_pos, yield);
 		}
 
 		// Or, all other bit depths
@@ -136,14 +158,7 @@ void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawD
 				end_pos = data.data() + (cluster_size - 3);
 			}
 
-			for (; pos < end_pos; pos += 4) {
-
-				if (!((uintptr_t)pos & 0b1111111100)) {
-					yield();
-				}
-
-				convert_word_in_place(pos, format);
-			}
+			convert_word_range(pos, end_pos, format, yield);
 		}
 	}
 }

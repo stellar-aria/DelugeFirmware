@@ -147,6 +147,18 @@ void dir_cache_invalidate() {
 extern "C" {
 
 DelugeStatus deluge_file_open(const char* path, DelugeFileOpenMode mode, DelugeFile** out) {
+	if (mode == DELUGE_FILE_READ) {
+		if (const auto* entry = deluge::fatfs_adapter::dir_cache_lookup(path)) {
+			deluge::fatfs_adapter::g_dir_cache_hits++;
+			auto file = FatFS::File::open_by_locator(entry->fs, entry->id, entry->sclust, entry->objsize);
+			*out = reinterpret_cast<DelugeFile*>(new FatFS::File(std::move(file)));
+			return DELUGE_OK;
+		}
+		deluge::fatfs_adapter::g_dir_cache_misses++;
+	}
+	else {
+		deluge::fatfs_adapter::dir_cache_invalidate();
+	}
 	auto opened = FatFS::File::open(path, deluge::fatfs_adapter::to_fatfs_mode(mode));
 	if (!opened) {
 		return deluge::fatfs_adapter::to_deluge_status(opened.error());
@@ -252,6 +264,7 @@ DelugeStatus deluge_dir_close(DelugeDir* dir) {
 }
 
 DelugeStatus deluge_file_mkdir(const char* path) {
+	deluge::fatfs_adapter::dir_cache_invalidate();
 	auto result = FatFS::mkdir(path);
 	if (!result) {
 		return deluge::fatfs_adapter::to_deluge_status(result.error());
@@ -260,6 +273,7 @@ DelugeStatus deluge_file_mkdir(const char* path) {
 }
 
 DelugeStatus deluge_file_unlink(const char* path) {
+	deluge::fatfs_adapter::dir_cache_invalidate();
 	auto result = FatFS::unlink(path);
 	if (!result) {
 		return deluge::fatfs_adapter::to_deluge_status(result.error());
@@ -268,6 +282,7 @@ DelugeStatus deluge_file_unlink(const char* path) {
 }
 
 DelugeStatus deluge_file_rename(const char* old_path, const char* new_path) {
+	deluge::fatfs_adapter::dir_cache_invalidate();
 	auto result = FatFS::rename(old_path, new_path);
 	if (!result) {
 		return deluge::fatfs_adapter::to_deluge_status(result.error());

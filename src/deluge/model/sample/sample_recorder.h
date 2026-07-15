@@ -20,10 +20,9 @@
 #include "definitions_cxx.hpp"
 #include "dsp/envelope_follower/absolute_value.h"
 #include "dsp/stereo_sample.h"
-#include "fatfs/fatfs.hpp"
+#include "libdeluge/stream_io.h"
 #include <cstddef>
 #include <gsl/gsl>
-#include <optional>
 #include <string>
 
 enum class MonitoringAction {
@@ -142,7 +141,7 @@ public:
 
 	int32_t* sourcePos{};
 
-	std::optional<FatFS::File> file{};
+	DelugeStream* file = nullptr;
 
 private:
 	void setExtraBytesOnPreviousCluster(Cluster* currentCluster, int32_t currentClusterIndex);

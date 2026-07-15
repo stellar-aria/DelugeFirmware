@@ -359,10 +359,6 @@ extern FileDeserializer* activeDeserializer;
 namespace StorageManager {
 
 std::expected<deluge::io::File, Error> createFile(char const* filePath, bool mayOverwrite);
-/// Low-level sibling of createFile() returning the raw FatFS::File, for the one legitimate consumer
-/// (SampleRecorder) that needs raw FAT cluster addressing / truncate() / a raw append-reopen afterward —
-/// none of which deluge::io::File exposes, deliberately.
-std::expected<FatFS::File, Error> createFileRaw(char const* filePath, bool mayOverwrite);
 Error createXMLFile(char const* pathName, XMLSerializer& writer, bool mayOverwrite = false, bool displayErrors = true);
 Error createJsonFile(char const* pathName, JsonSerializer& writer, bool mayOverwrite = false,
                      bool displayErrors = true);

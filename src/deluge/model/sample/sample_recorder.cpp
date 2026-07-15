@@ -21,8 +21,10 @@
 #include "gui/ui/browser/sample_browser.h"
 #include "gui/ui/root_ui.h"
 #include "gui/ui_timer_manager.h"
+#include "io/file.hpp"
 #include "libdeluge/control_surface.h"
 #include "libdeluge/file_io.h"
+#include "libdeluge/stream_io.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/audio_clip.h"
 #include "model/sample/sample.h"
@@ -41,11 +43,6 @@
 
 extern "C" {
 #include "fatfs/diskio.h"
-
-LBA_t clst2sect(           /* !=0:Sector number, 0:Failed (invalid cluster#) */
-                FATFS* fs, /* Filesystem object */
-                DWORD clst /* Cluster# to be converted */
-);
 }
 
 extern uint8_t currentlyAccessingCard;
@@ -481,13 +478,60 @@ aborted:
 			}
 
 			// Recording could finish or abort during this!
-			auto created = StorageManager::createFileRaw(filePathCreated.c_str(), mayOverwrite);
-			if (!created) {
+			DelugeStream* stream = nullptr;
+			DelugeStreamMode streamOpenMode =
+			    mayOverwrite ? DELUGE_STREAM_WRITE_CREATE : DELUGE_STREAM_WRITE_CREATE_NEW;
+			bool triedCreatingRecordingFolder = false;
+
+tryOpenRecordingStream:
+			// Bypasses the Tier 2 locator cache (same as the raw FatFS open createFileRaw used to do)
+			// -- must invalidate it, or a stale cached locator for this exact path (from an earlier
+			// directory listing) could survive a mayOverwrite create-always reopen and feed a later
+			// cache-hit read the pre-overwrite file's stale sclust/objsize.
+			deluge_file_invalidate_cache();
+			DelugeStatus streamStatus = deluge_stream_open(filePathCreated.c_str(), streamOpenMode, &stream);
+			if (streamStatus == DELUGE_ERR_NOT_FOUND) {
+				// deluge_stream_open (unlike the old createFileRaw, and unlike the portable
+				// deluge::io layer's createFile()) does no folder-creation retry of its own -- but the
+				// containing folder legitimately might not exist yet (AudioClip's CLIPS/TEMP
+				// subfolder, or a per-song recording subfolder under RECORD/RESAMPLE -- see
+				// AudioFileManager::getUnusedAudioRecordingFilePath). Replicate createFileRaw's
+				// create-parent-and-retry behaviour here, one folder level at a time.
+				if (triedCreatingRecordingFolder) {
+					filePathCreated.clear();
+					goto gotError;
+				}
+				triedCreatingRecordingFolder = true;
+
+				std::string folderPath = filePathCreated;
+
+cutRecordingFolderPathAndTryCreating:
+				size_t slashPos = folderPath.find_last_of('/');
+				if (slashPos == std::string::npos) {
+					filePathCreated.clear();
+					goto gotError;
+				}
+				folderPath.resize(slashPos);
+
+				auto madeDir = deluge::io::mkdir(folderPath.c_str());
+				if (madeDir) {
+					goto tryOpenRecordingStream;
+				}
+				else if (madeDir.error() == deluge::io::Status::NOT_FOUND) {
+					triedCreatingRecordingFolder = false; // Let it try multiple levels again
+					goto cutRecordingFolderPathAndTryCreating;
+				}
+				else {
+					filePathCreated.clear();
+					goto gotError;
+				}
+			}
+			if (streamStatus != DELUGE_OK) {
 				filePathCreated.clear();
 				goto gotError;
 			}
 			else {
-				this->file = created.value();
+				this->file = stream;
 			}
 
 			if (status == RecorderStatus::ABORTED) {
@@ -718,8 +762,9 @@ Error SampleRecorder::finalizeRecordedFile() {
 	// If some processing of the recorded audio data needs to happen...
 	if (lshiftAmount || action != MonitoringAction::NONE) {
 
-		auto closed = this->file->close();
-		if (!closed) {
+		DelugeStatus closeStatus = deluge_stream_close(this->file);
+		this->file = nullptr;
+		if (closeStatus != DELUGE_OK) {
 			return Error::SD_CARD;
 		}
 
@@ -742,8 +787,9 @@ Error SampleRecorder::finalizeRecordedFile() {
 			Error error = truncateFileDownToSize(correctLength);
 		}
 
-		auto closed = this->file->close();
-		if (!closed) {
+		DelugeStatus closeStatus = deluge_stream_close(this->file);
+		this->file = nullptr;
+		if (closeStatus != DELUGE_OK) {
 			return Error::SD_CARD;
 		}
 
@@ -826,8 +872,11 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 
 	SampleCluster* sampleCluster = &sample->clusters[clusterIndex];
 
-	auto written = file->write({(std::byte*)sampleCluster->cluster->data, numBytes});
-	if (!written || numBytes != written.value()) {
+	uint32_t byteOffset = static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude;
+	uint32_t bytesWritten = 0;
+	DelugeStatus status = deluge_stream_write_at(file, byteOffset, sampleCluster->cluster->data,
+	                                             static_cast<uint32_t>(numBytes), &bytesWritten);
+	if (status != DELUGE_OK || bytesWritten != numBytes) {
 		return Error::SD_CARD;
 	}
 
@@ -836,7 +885,9 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	sampleCluster = &sample->clusters[clusterIndex];
 
 	// Grab the SD address, for later
-	sampleCluster->sdAddress = clst2sect(&fileSystem, file->inner().clust);
+	uint32_t sector = 0;
+	(void)deluge_stream_sector_of(file, static_cast<uint32_t>(clusterIndex), &sector);
+	sampleCluster->sdAddress = sector;
 
 	// Now flushed to the card with its sdAddress recorded, this cluster is reconstructable like any
 	// sample cluster (materialize re-reads it) — so clear dirty, letting the manager evict + reload
@@ -1526,20 +1577,20 @@ writeFailed:
 		if (action != MonitoringAction::NONE || capturedTooMuch) {
 
 			deluge_file_invalidate_cache();
-			auto opened = this->file->open(sample->filePath.c_str(), FA_WRITE);
-
-			if (!opened) {
+			DelugeStatus reopenStatus =
+			    deluge_stream_open(sample->filePath.c_str(), DELUGE_STREAM_WRITE_APPEND, &this->file);
+			if (reopenStatus != DELUGE_OK) {
 				return Error::SD_CARD;
 			}
-			this->file = opened.value();
 
 			Error error = truncateFileDownToSize(dataLengthAfterAction + sample->audioDataStartPosBytes);
 			if (error != Error::NONE) {
 				return error;
 			}
 
-			auto closed = this->file->close();
-			if (!closed) {
+			DelugeStatus closeStatus = deluge_stream_close(this->file);
+			this->file = nullptr;
+			if (closeStatus != DELUGE_OK) {
 				return Error::SD_CARD;
 			}
 		}
@@ -1570,13 +1621,8 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 		sample->clusters.erase(sample->clusters.begin() + numClustersAfterAction, sample->clusters.end());
 	}
 
-	// Truncate file size
-	auto seeked = file->lseek(newFileSize);
-	if (!seeked) {
-		return Error::SD_CARD;
-	}
-	auto truncated = file->truncate();
-	if (!truncated) {
+	DelugeStatus status = deluge_stream_truncate(file, newFileSize);
+	if (status != DELUGE_OK) {
 		return Error::SD_CARD;
 	}
 

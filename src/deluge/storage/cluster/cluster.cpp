@@ -22,6 +22,7 @@
 #include "model/sample/sample_cache.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/convert.h"
 #include "util/misc.h"
 
 #include "deluge_resource.h" // resource manager: manager-owned clusters lease instead of queueing
@@ -58,98 +59,18 @@ void Cluster::operator delete(void* ptr) {
  *        and converts them to the Deluge's native PCM 24-bit format if needed
  */
 void Cluster::convertDataIfNecessary() {
-	// We haven't yet figured out where the audio data starts
-	if (sample->audioDataStartPosBytes == 0) {
-		return;
-	}
-
-	if (sample->rawDataFormat != RawDataFormat::NATIVE) {
-		std::copy(data, &data[3], firstThreeBytesPreDataConversion);
-
-		int32_t startPos = sample->audioDataStartPosBytes;
-		int32_t startCluster = startPos >> Cluster::size_magnitude;
-
-		if (clusterIndex < startCluster) { // Hmm, there must have been a case where this happens...
-			return;
-		}
-
-		// Special case for 24-bit with its uneven number of bytes
-		if (sample->rawDataFormat == RawDataFormat::ENDIANNESS_WRONG_24) {
-			char* pos;
-
-			if (clusterIndex == startCluster) {
-				pos = &data[startPos & (Cluster::size - 1)];
-			}
-			else {
-				uint32_t bytesBeforeStartOfCluster = clusterIndex * Cluster::size - sample->audioDataStartPosBytes;
-				int32_t bytesThatWillBeEatingIntoAnother3Byte = bytesBeforeStartOfCluster % 3;
-				if (bytesThatWillBeEatingIntoAnother3Byte == 0) {
-					bytesThatWillBeEatingIntoAnother3Byte = 3;
-				}
-				pos = &data[3 - bytesThatWillBeEatingIntoAnother3Byte];
-			}
-
-			char const* endPos;
-			if (clusterIndex == sample->getFirstClusterIndexWithNoAudioData() - 1) {
-				uint32_t endAtBytePos = sample->audioDataStartPosBytes + sample->audioDataLengthBytes;
-				uint32_t endAtPosWithinCluster = endAtBytePos & (Cluster::size - 1);
-				endPos = &data[endAtPosWithinCluster];
-			}
-			else {
-				endPos = &data[Cluster::size - 2];
-			}
-
-			while (true) {
-				char const* endPosNow = pos + 1024; // Every this many bytes, we'll pause and do an audio routine
-				endPosNow = std::min(endPosNow, endPos);
-
-				while (pos < endPosNow) {
-					uint8_t temp = pos[0];
-					pos[0] = pos[2];
-					pos[2] = temp;
-					pos += 3;
-				}
-
-				if (pos >= endPos) {
-					break;
-				}
-
-				AudioEngine::logAction("from convert-data");
-				AudioEngine::runRoutine();
-			}
-		}
-
-		// Or, all other bit depths
-		else {
-			int32_t* pos;
-
-			if (clusterIndex == startCluster) {
-				pos = (int32_t*)&data[startPos & (Cluster::size - 1)];
-			}
-			else {
-				pos = (int32_t*)&data[startPos & 0b11];
-			}
-
-			int32_t* endPos;
-			if (clusterIndex == sample->getFirstClusterIndexWithNoAudioData() - 1) {
-				uint32_t endAtBytePos = sample->audioDataStartPosBytes + sample->audioDataLengthBytes;
-				uint32_t endAtPosWithinCluster = endAtBytePos & (Cluster::size - 1);
-				endPos = (int32_t*)&data[endAtPosWithinCluster];
-			}
-			else {
-				endPos = (int32_t*)&data[Cluster::size - 3];
-			}
-
-			for (; pos < endPos; pos++) {
-
-				if (!((uintptr_t)pos & 0b1111111100)) {
-					AudioEngine::runRoutine();
-				}
-
-				*pos = sample->convertToNative(*pos);
-			}
-		}
-	}
+	deluge::audio::stream::convert_cluster_data(
+	    std::span<std::byte>(reinterpret_cast<std::byte*>(data), Cluster::size), clusterIndex, sample->rawDataFormat,
+	    {.audio_data_start_pos_bytes = sample->audioDataStartPosBytes,
+	     .audio_data_length_bytes = sample->audioDataLengthBytes,
+	     .first_cluster_index_with_no_audio_data = sample->getFirstClusterIndexWithNoAudioData()},
+	    Cluster::size, Cluster::size_magnitude,
+	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(firstThreeBytesPreDataConversion), 3),
+	    [](void*) {
+		    AudioEngine::logAction("from convert-data");
+		    AudioEngine::runRoutine();
+	    },
+	    nullptr);
 }
 
 // The resource-manager Asset that owns this cluster's residency for the *leased* (reason-tracked)

@@ -171,6 +171,13 @@ first-class (neither is a fallback):
 This replaces the current buried `if (has readStream_) … else deluge_block_read` branch inside
 `readClusterData` with an explicit, testable seam.
 
+**`SampleStream` owns `ReadSource` selection.** It picks `StreamReadSource` vs. `BlockReadSource` from
+the Sample's backing state (open read stream vs. recorder-tracked `sdAddress`) before invoking the
+core. No caller branches on or constructs a source — in particular **`SampleRecorder` stays oblivious
+to block-vs-stream**: it just calls `getCluster`. (The recorder's remaining coupling — that it
+*populates* the `sdAddress` table via `sector_of` while writing — is left for the §11 `RecordingBacking`
+follow-on, not this increment.)
+
 **Why this is the delicate part.** For non-native formats a multi-byte sample frame straddles the FAT
 boundary (e.g. 3-byte 24-bit frames don't divide 32768 evenly), so the last bytes of one cluster are
 the first part of a frame whose remainder lives in the next cluster (not yet loaded when this one is
@@ -277,14 +284,27 @@ Steps 1–3 should stay bit-exact (pure moves); step 4 and any conversion-path r
 
 ---
 
-## 11. Documented later step (explicitly out of this increment)
+## 11. Documented later steps (explicitly out of this increment)
 
-**Decouple `ComputedChunk` sizing from the FAT-derived `Cluster::size`.** The repitch and perc caches
-have no FAT relationship, yet today they inherit whatever cluster size the *card* dictates (a single
-mutable static `Cluster::size`, set at boot). Sizing computed chunks independently — leaning on the
-resource manager's already-size-aware eviction — is a genuine memory/perf improvement. It changes
-slab layout and carries its own golden/hardware risk, so it lands as a **separate step on top** of
-this increment, not bundled into the core refactor. Recorded here as a named follow-on.
+**Follow-on A — decouple `ComputedChunk` sizing from the FAT-derived `Cluster::size`.** The repitch
+and perc caches have no FAT relationship, yet today they inherit whatever cluster size the *card*
+dictates (a single mutable static `Cluster::size`, set at boot). Sizing computed chunks independently
+— leaning on the resource manager's already-size-aware eviction — is a genuine memory/perf
+improvement. It changes slab layout and carries its own golden/hardware risk, so it lands as a
+**separate step on top** of this increment, not bundled into the core refactor.
+
+**Follow-on B — `RecordingBacking`: hide physical addressing from the recorder.** After this
+increment, `SampleStream` already picks `ReadSource` so no caller *branches* on block-vs-stream (§6).
+The residual coupling is that `SampleRecorder` still *populates* the `sdAddress` table via `sector_of`
+as it writes, so that later block-reads can find earlier clusters — a block-level concept in the
+recorder's write path. The fix is the symmetric completion of `ReadSource`: a `RecordingBacking` (or
+`ClusterBacking`) owning *both* the write stream and the physical-address bookkeeping, exposing only
+`writeCluster(index, bytes)` / `readCluster(index, span)`; `sector_of`, `sdAddress`, and block-vs-
+stream all move inside it, and it derives its own `BlockReadSource` from its address table. This is a
+**write-path / recorder refactor** — `SampleRecorder` is large and layout-sensitive (see the accepted
+`SampleRecorder::file` risk in the deluge-stream work), so it stays out of this read-path increment.
+`ReadSource` is deliberately the read half of that eventual backing, so this increment is the stepping
+stone, not a redo.
 
 ---
 

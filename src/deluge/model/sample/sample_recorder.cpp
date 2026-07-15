@@ -481,7 +481,7 @@ aborted:
 			}
 
 			// Recording could finish or abort during this!
-			auto created = StorageManager::createFile(filePathCreated.c_str(), mayOverwrite);
+			auto created = StorageManager::createFileRaw(filePathCreated.c_str(), mayOverwrite);
 			if (!created) {
 				filePathCreated.clear();
 				goto gotError;

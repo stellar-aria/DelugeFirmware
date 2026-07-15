@@ -95,6 +95,19 @@ DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeS
 	impl->file_size = (mode == DELUGE_STREAM_WRITE_APPEND) ? static_cast<uint32_t>(impl->file.inner().obj.objsize) : 0;
 	impl->num_clusters = 0;
 	impl->layout = nullptr; // write modes never populate the read-side layout table
+
+	if (mode == DELUGE_STREAM_WRITE_APPEND) {
+		// Plain FA_WRITE (no FA_OPEN_APPEND) leaves FatFS's internal file pointer at 0, not EOF --
+		// without this seek, the first write_at() would silently land at byte 0 and corrupt the
+		// file's start instead of appending.
+		auto seeked = impl->file.lseek(impl->file_size);
+		if (!seeked) {
+			DelugeStatus status = to_deluge_status(seeked.error());
+			delete impl;
+			return status;
+		}
+	}
+
 	*out = reinterpret_cast<DelugeStream*>(impl);
 	return DELUGE_OK;
 }
@@ -134,6 +147,14 @@ DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, 
                                     uint32_t* out_written) {
 	auto* impl = reinterpret_cast<deluge::fatfs_adapter::StreamImpl*>(stream);
 	*out_written = 0;
+
+	if (count > impl->cluster_size_bytes) {
+		// write_at writes at most one cluster per call -- see stream_io.h's contract note. Without
+		// this guard, a write spanning more than one cluster would leave last_written_cluster_index
+		// (computed from byte_offset below) desynced from FatFS's live current cluster (fil.clust),
+		// which sector_of() reads afterward -- producing a silently wrong sector, not a clean error.
+		return DELUGE_ERR_PARAM;
+	}
 
 	if (byte_offset != impl->file_size) {
 		return DELUGE_ERR_PARAM; // sequential append only -- see stream_io.h's contract note

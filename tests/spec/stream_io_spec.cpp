@@ -155,6 +155,26 @@ describe stream_io("stream_io adapter", $ {
 		expect(out_written).to_equal(0u);
 	});
 
+	it("write_at rejects a count larger than one cluster", _ {
+		// Mirrors "read_at rejects a count larger than one cluster" -- without this guard,
+		// last_written_cluster_index (computed from byte_offset) would desync from FatFS's live
+		// current cluster once a write spans more than one cluster, and sector_of() would silently
+		// answer with the wrong sector instead of erroring. Checked before the append-only
+		// byte_offset check, so it applies even when byte_offset happens to be correct.
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
+		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_WRITE_CREATE};
+		impl.cluster_size_bytes = 512;
+		impl.file_size = 0; // byte_offset below matches file_size, isolating the count guard
+
+		uint8_t src[600] = {};
+		uint32_t out_written = 999;
+		DelugeStatus status =
+		    deluge_stream_write_at(reinterpret_cast<DelugeStream*>(&impl), 0, src, 600, &out_written);
+		expect(status).to_equal(DELUGE_ERR_PARAM);
+		expect(out_written).to_equal(0u);
+	});
+
 	it("sector_of in a write mode rejects any cluster index other than the most recently written one", _ {
 		FATFS fakeFs{};
 		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);

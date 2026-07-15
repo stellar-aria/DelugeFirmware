@@ -24,9 +24,11 @@
 /// docs/superpowers/specs/2026-07-15-deluge-stream-boundary-design.md.
 ///
 /// `write_at`'s real contract is sequential append, not general random-access
-/// write -- callers write whole clusters in increasing index order. `read_at`
-/// reads exactly one cluster per call, from a cluster-aligned offset -- not a
-/// general arbitrary-byte-range reader.
+/// write -- callers write whole clusters in increasing index order, and `count`
+/// may not exceed one cluster per call (checked; violating this desyncs the
+/// write-side "most recently written cluster" bookkeeping `sector_of` relies on).
+/// `read_at` reads exactly one cluster per call, from a cluster-aligned offset --
+/// not a general arbitrary-byte-range reader.
 #ifndef LIBDELUGE_STREAM_IO_H
 #define LIBDELUGE_STREAM_IO_H
 
@@ -56,7 +58,9 @@ DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, v
                                    uint32_t* out_read);
 
 /// Append `count` bytes at `byte_offset` (must equal the stream's current end-of-file --
-/// sequential append only). `*out_written` is the number of bytes actually written. [task]
+/// sequential append only). `count` must not exceed one cluster (`DELUGE_ERR_PARAM` otherwise) --
+/// write_at writes at most one cluster per call, same limit as `read_at`. `*out_written` is the
+/// number of bytes actually written. [task]
 DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, const void* src, uint32_t count,
                                     uint32_t* out_written);
 

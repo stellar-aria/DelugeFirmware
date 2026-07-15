@@ -17,6 +17,12 @@ describe stream_io("stream_io adapter", $ {
 		expect(status).to_equal(DELUGE_ERR_UNSUPPORTED);
 	});
 
+	it("returns DELUGE_ERR_UNSUPPORTED for DELUGE_STREAM_WRITE_APPEND (not yet implemented)", _ {
+		DelugeStream* stream = nullptr;
+		DelugeStatus status = deluge_stream_open("SAMPLES/TEST.WAV", DELUGE_STREAM_WRITE_APPEND, &stream);
+		expect(status).to_equal(DELUGE_ERR_UNSUPPORTED);
+	});
+
 	it("resolve_read_layout on a zero-size file needs no FAT walk", _ {
 		// open_by_locator is pure field construction (no I/O), same precedent as file_io_spec.cpp's
 		// "open_by_locator constructs a File with exactly the given locator fields" test -- safe to call

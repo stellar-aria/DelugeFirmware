@@ -66,6 +66,9 @@ void Cluster::convertDataIfNecessary() {
 	     .first_cluster_index_with_no_audio_data = sample->getFirstClusterIndexWithNoAudioData()},
 	    Cluster::size, Cluster::size_magnitude,
 	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(firstThreeBytesPreDataConversion), 3),
+	    // Cooperative yield during long conversions. Both of convert_cluster_data's yield sites route
+	    // here, so the "from convert-data" marker now also fires on the non-24-bit path (originally only
+	    // the 24-bit path logged it) — a deliberate, audio-neutral widening (goldens bit-exact).
 	    [](void*) {
 		    AudioEngine::logAction("from convert-data");
 		    AudioEngine::runRoutine();

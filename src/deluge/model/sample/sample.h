@@ -27,7 +27,6 @@
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <array>
-#include <bit>
 #include <cstdint>
 #include <optional>
 

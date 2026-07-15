@@ -307,20 +307,6 @@ bool deluge_block_ready(uint8_t unit) {
 	(void)unit;
 	return false;
 }
-DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count) {
-	(void)unit;
-	(void)dst;
-	(void)sector;
-	(void)count;
-	return DELUGE_ERR_NODEV;
-}
-DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count) {
-	(void)unit;
-	(void)src;
-	(void)sector;
-	(void)count;
-	return DELUGE_ERR_NODEV;
-}
 uint32_t deluge_block_sector_count(uint8_t unit) {
 	(void)unit;
 	return 0;

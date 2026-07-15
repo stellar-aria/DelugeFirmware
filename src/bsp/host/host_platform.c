@@ -26,8 +26,9 @@
 // Must precede the first system header include.
 #define _FILE_OFFSET_BITS 64
 
-#include "board_config.h" // TRIGGER_CLOCK_INPUT_NUM_TIMES_STORED
-#include "diskio.h"       // FatFS DSTATUS/DRESULT/STA_*/RES_*
+#include "board_config.h"           // TRIGGER_CLOCK_INPUT_NUM_TIMES_STORED
+#include "diskio.h"                 // FatFS DSTATUS/DRESULT/STA_*/RES_*
+#include "libdeluge/block_device.h" // DelugeStatus, DELUGE_ERR_*
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,8 +43,8 @@
 // load, on-demand sample-cluster streaming, stem writes — all unchanged). When
 // the env is unset we keep the historical no-disk behaviour, so a plain run
 // still boots the default no-SD patch. The app provides disk_read/disk_write
-// (the LBA_t-facing wrappers, audio_file_manager.cpp); they call the
-// _without_streaming_first variants below, which do the real I/O.
+// (the LBA_t-facing wrappers, audio_file_manager.cpp); they call down into
+// deluge_block_read/deluge_block_write below, which do the real I/O.
 // ===========================================================================
 
 #define HOST_SECTOR_SIZE 512u
@@ -142,52 +143,49 @@ void disk_timerproc(UINT msPassed) {
 	(void)msPassed;
 }
 
-// App-side cluster-streaming wrappers (declared in audio_file_manager.cpp). These
-// do the real sector I/O against the image; FatFS's disk_read/disk_write and the
-// sample streamer both funnel here.
-DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, UINT count) {
-	(void)pdrv;
+DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count) {
+	(void)unit;
 	if (host_img_fd < 0) {
-		return RES_NOTRDY;
+		return DELUGE_ERR_NODEV;
 	}
 	if ((uint64_t)sector + count > host_img_sectors) {
-		return RES_PARERR;
+		return DELUGE_ERR_PARAM;
 	}
 	size_t total = (size_t)count * HOST_SECTOR_SIZE;
 	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
 	size_t done = 0;
 	while (done < total) {
-		ssize_t n = pread(host_img_fd, buff + done, total - done, base + (off_t)done);
+		ssize_t n = pread(host_img_fd, dst + done, total - done, base + (off_t)done);
 		if (n <= 0) {
-			return RES_ERROR;
+			return DELUGE_ERR_IO;
 		}
 		done += (size_t)n;
 	}
-	return RES_OK;
+	return DELUGE_OK;
 }
 
-DRESULT disk_write_without_streaming_first(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count) {
-	(void)pdrv;
+DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count) {
+	(void)unit;
 	if (host_img_fd < 0) {
-		return RES_NOTRDY;
+		return DELUGE_ERR_NODEV;
 	}
 	if (!host_img_writable) {
-		return RES_WRPRT;
+		return DELUGE_ERR_WRITE_PROTECTED;
 	}
 	if ((uint64_t)sector + count > host_img_sectors) {
-		return RES_PARERR;
+		return DELUGE_ERR_PARAM;
 	}
 	size_t total = (size_t)count * HOST_SECTOR_SIZE;
 	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
 	size_t done = 0;
 	while (done < total) {
-		ssize_t n = pwrite(host_img_fd, buff + done, total - done, base + (off_t)done);
+		ssize_t n = pwrite(host_img_fd, src + done, total - done, base + (off_t)done);
 		if (n <= 0) {
-			return RES_ERROR;
+			return DELUGE_ERR_IO;
 		}
 		done += (size_t)n;
 	}
-	return RES_OK;
+	return DELUGE_OK;
 }
 
 // Fixed timestamp (2024-01-01 00:00:00) in FatFS packed form. No RTC on host.

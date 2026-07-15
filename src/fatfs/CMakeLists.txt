@@ -6,6 +6,7 @@ add_library(fatfs STATIC
     ffunicode.c
     fatfs.cpp
     file_io.cpp
+    stream_io.cpp
 )
 target_include_directories(fatfs PUBLIC ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_SOURCE_DIR}/include) # <libdeluge/...> boundary headers
 set_target_properties(fatfs

@@ -24,7 +24,9 @@
 #include "io/debug/log.h"
 #include "io/file.hpp"
 #include "io/midi/midi_device_manager.h"
+#include "io/stream.hpp"
 #include "libdeluge/block_device.h"
+#include "libdeluge/stream_io.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 
@@ -48,42 +50,35 @@
 extern "C" {
 #include "fatfs/diskio.h"
 #include "fatfs/ff.h"
-
-DWORD get_fat_from_fs(                      /* 0xFFFFFFFF:Disk error, 1:Internal error, 2..0x7FFFFFFF:Cluster status */
-                      FATFS* fs, DWORD clst /* Cluster number to get the value */
-);
-
-LBA_t clst2sect(           /* !=0:Sector number, 0:Failed (invalid cluster#) */
-                FATFS* fs, /* Filesystem object */
-                DWORD clst /* Cluster# to be converted */
-);
-
-DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, UINT count);
-DRESULT disk_write_without_streaming_first(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count);
+#include "libdeluge/block_device.h"
 
 extern uint8_t currentlyAccessingCard;
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
 
 // FatFs porting symbols. Service the audio cluster-streaming queue before every FatFs
-// sector access (an app priority concern), then do the plain sector I/O. Inverts what
-// used to be a HAL->app upcall (diskio.c calling loadAnyEnqueuedClustersRoutine): the
-// streaming policy now lives in the app and calls *down* into the block device.
+// sector access (an app priority concern), then do the plain sector I/O via the
+// libdeluge block-device boundary. Inverts what used to be a HAL->app upcall (diskio.c
+// calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
+// calls *down* into the block device.
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
 
-	DRESULT result = disk_read_without_streaming_first(pdrv, buff, sector, count);
+	DelugeStatus status =
+	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 
 	if (currentlySearchingForCluster) {
 		pendingGlobalMIDICommandNumClustersWritten++;
 	}
 
-	return result;
+	return status == DELUGE_OK ? RES_OK : RES_ERROR;
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
 	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
-	return disk_write_without_streaming_first(pdrv, buff, sector, count);
+	DelugeStatus status =
+	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
+	return status == DELUGE_OK ? RES_OK : RES_ERROR;
 }
 }
 
@@ -232,29 +227,24 @@ clusterSizeChangedButItsOk:
 			else {
 				if (thisAudioFile->type == AudioFileType::SAMPLE) {
 					// Check the Sample's file still exists
-					FIL sampleFile;
 					char const* filePath = ((Sample*)thisAudioFile)->tempFilePathForRecording.c_str();
 					if (!*filePath) {
 						filePath = thisAudioFile->filePath.c_str();
 					}
 
-					FRESULT result = f_open(&sampleFile, filePath, FA_READ);
-					if (result != FR_OK) {
+					auto sampleStream = deluge::io::Stream::open(filePath, DELUGE_STREAM_READ);
+					if (!sampleStream) {
 						D_PRINTLN("couldn't open file");
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
 
-					uint32_t firstSector = clst2sect(&fileSystem, sampleFile.obj.sclust);
+					auto firstSector = sampleStream->sector_of(0);
+					// sampleStream's destructor closes the handle once it goes out of scope below.
 
-					f_close(&sampleFile);
-
-					// If address of first sector remained unchanged, we can be sure enough that the file hasn't been
-					// changed
-					if (firstSector == ((Sample*)thisAudioFile)->clusters[0].sdAddress) {}
-
-					// Otherwise
-					else {
+					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
+					// enough the file hasn't changed
+					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -801,25 +791,38 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->filePath = filePath;
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
-		// Go directly to god-mode and store the address of each of the file's clusters.
-		uint32_t currentClusterIndex = 0;
-		uint32_t currentSDCluster = effectiveFilePointer.sclust; // First cluster, whose address we already got.
-		while (true) {
-			static_cast<Sample*>(audioFile)->clusters[currentClusterIndex].sdAddress =
-			    clst2sect(&fileSystem, currentSDCluster);
-
-			currentClusterIndex++;
-			if (currentClusterIndex >= numClusters) {
-				break;
+		// Open the stream_io.h boundary once for this Sample's lifetime; readClusterData (called
+		// per-cluster during playback) reads through it. sdAddress stays populated too -- it feeds
+		// AudioFileManager's cold-path "did the card's file change" re-validation check, a separate,
+		// FatFS-specific concern outside the real-time read path.
+		//
+		// `filePath` is only the file's *actual* on-disk location when it wasn't resolved via the
+		// alternate-load-dir mechanism (see resolveFilePointer): when `usingAlternateLocation` is
+		// non-empty, that's where the bytes backing `effectiveFilePointer` really live (filePath stays
+		// the nominal/display path). Must open the same file effectiveFilePointer was resolved from, or
+		// numClusters (computed from effectiveFilePointer.objsize) mismatches the opened file's real
+		// size/cluster layout.
+		Sample* sampleFile = static_cast<Sample*>(audioFile);
+		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
+		auto openedStream = deluge::io::Stream::open(pathToOpen, DELUGE_STREAM_READ);
+		if (!openedStream) {
+			*error = Error::FILE_NOT_FOUND;
+			destroyAudioFileObject(*audioFile);
+			return nullptr;
+		}
+		sampleFile->readStream_ = std::move(openedStream.value());
+		for (uint32_t i = 0; i < numClusters; i++) {
+			uint32_t sector = 0;
+			auto sectorResult = sampleFile->readStream_->sector_of(i); // best-effort; only meaningful
+			                                                           // on FatFS-family backends
+			if (sectorResult) {
+				sector = *sectorResult;
 			}
-			currentSDCluster = get_fat_from_fs(&fileSystem, currentSDCluster);
-			if (currentSDCluster == 0xFFFFFFFF || currentSDCluster < 2) {
-				break;
-			}
+			sampleFile->clusters[i].sdAddress = sector;
 		}
 
 		// The byte source streams the clusters; its destructor releases the held cluster's reason.
-		ClusterByteSource source{static_cast<Sample&>(*audioFile), effectiveFilePointer.objsize};
+		ClusterByteSource source{*sampleFile, effectiveFilePointer.objsize};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts);
 	}
 	else {
@@ -982,8 +985,30 @@ getOutEarly:
 	}
 #endif
 
-	DRESULT result = disk_read_without_streaming_first(deluge_block_sd_unit(), (BYTE*)cluster.data,
-	                                                   sample->clusters[cluster.clusterIndex].sdAddress, numSectors);
+	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
+	uint32_t bytesRead = 0;
+	DelugeStatus status;
+	if (sample->readStream_.has_value()) {
+		auto readResult = sample->readStream_->read_at(
+		    static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude,
+		    std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
+		if (readResult) {
+			bytesRead = static_cast<uint32_t>(readResult->size());
+			status = DELUGE_OK;
+		}
+		else {
+			status = deluge::io::to_deluge_status(readResult.error());
+		}
+	}
+	else {
+		// No open stream_io.h handle: this Sample wasn't opened via buildAudioFileFromCard's SAMPLE
+		// branch (e.g. it's still being written/finalized by SampleRecorder, which reads back its own
+		// just-written first cluster to patch the WAV header -- see
+		// SampleRecorder::finalizeRecordedFile). SampleRecorder populates sdAddress directly as it
+		// writes each cluster, so fall back to the direct block read against that address.
+		status = deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(cluster.data),
+		                           sample->clusters[cluster.clusterIndex].sdAddress, static_cast<uint32_t>(numSectors));
+	}
 
 #if REPORT_LOAD_TIME
 	uint16_t endTime = MTU2.TCNT_0;
@@ -1008,7 +1033,7 @@ getOutEarly:
 #endif
 
 	// If that failed, get out
-	if (result != 0u) {
+	if (status != DELUGE_OK) {
 		goto getOutEarly;
 	}
 

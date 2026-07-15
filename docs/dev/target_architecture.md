@@ -267,9 +267,11 @@ writes these attributes," so neither model nor format library knows the
 other. Also owns the legacy-name alias tables (§7.3).
 
 **deluge-stream** — audio-context storage: cluster cache, sample streaming,
-SD read scheduling, `Stealable` implementations. Split from `deluge-files`
-because the two halves have opposite realtime contracts (blocking-allowed vs
-audio-safe), which today share a directory and a god-object.
+SD read scheduling, resource-manager `Source`/`materialize`/`on_evict` wiring (`Stealable` is fully
+retired -- see `crates/deluge_resource`). Split from `deluge-files` because the two halves have
+opposite realtime contracts (blocking-allowed vs audio-safe), which today share a directory and
+a god-object. Implemented via `include/libdeluge/stream_io.h`
+(docs/superpowers/specs/2026-07-15-deluge-stream-boundary-design.md).
 
 **deluge-engine** — voice allocation and rendering, patch compilation and
 evaluation (§7), the sequencer/playback handler, arpeggiator runtime, audio

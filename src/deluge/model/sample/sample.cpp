@@ -214,6 +214,9 @@ uint32_t Sample::ensureResourceAsset() {
 }
 
 Sample::~Sample() {
+	// readStream_'s std::optional<deluge::io::Stream> destructor closes the handle automatically
+	// (a disengaged optional does nothing; an engaged one destructs its Stream, closing it).
+
 	// Retire our Asset first (frees any clusters the manager still has resident, via
 	// clusterEvict, which nulls our clusters[] entries) so the SampleCluster destructors
 	// below see nothing to free. No-op if we never defined one. The manager must exist if

@@ -20,7 +20,7 @@
 #include "definitions_cxx.hpp"
 #include "dsp/envelope_follower/absolute_value.h"
 #include "dsp/stereo_sample.h"
-#include "fatfs/fatfs.hpp"
+#include "io/stream.hpp"
 #include <cstddef>
 #include <gsl/gsl>
 #include <optional>
@@ -142,7 +142,24 @@ public:
 
 	int32_t* sourcePos{};
 
-	std::optional<FatFS::File> file{};
+	// NOTE (Kate, deluge-stream boundary migration): this used to be an inline
+	// std::optional<FatFS::File> member, then briefly a heap-allocated DelugeStream*
+	// handle behind stream_io.h (Task 8), and is now back to an inline
+	// std::optional<deluge::io::Stream> RAII wrapper over that same handle (Task 10).
+	// The write-dispatch logic itself was confirmed structurally identical
+	// pre/post-Task-8-migration (same buffer, same underlying FatFS calls, just
+	// relocated behind the boundary), but that type change (inline optional -> heap
+	// pointer) altered SampleRecorder's object size and allocation timing. One
+	// `highsiderr` TRACK-mode golden-master fixture (of 5 in that session) showed
+	// small-magnitude PCM sample differences against a pre-migration A/B (same file
+	// size/WAV structure, converging back to identical near the end) -- suspected to
+	// be this layout/allocation-timing shift interacting with this fixture's
+	// documented prior history of repitch/time-stretch fragility under unrelated
+	// code-shape changes, not a genuine regression. Reviewed and knowingly accepted
+	// rather than further bisected (a proposed isolation test -- padding
+	// SampleRecorder back to its old size -- was not run). If you're chasing a
+	// highsiderr-adjacent audio bug, start here.
+	std::optional<deluge::io::Stream> file;
 
 private:
 	void setExtraBytesOnPreviousCluster(Cluster* currentCluster, int32_t currentClusterIndex);

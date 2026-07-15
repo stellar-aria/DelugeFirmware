@@ -180,65 +180,29 @@ processError:
     return diskStatus;
 }
 
-/*-----------------------------------------------------------------------*/
-/* Read Sector(s)                                                        */
-/*-----------------------------------------------------------------------*/
-
-DRESULT disk_read_without_streaming_first(BYTE pdrv, /* Physical drive nmuber to identify the drive */
-    BYTE* buff,                                      /* Data buffer to store read data */
-    DWORD sector,                                    /* Sector address in LBA */
-    UINT count                                       /* Number of sectors to read */
-)
+DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count)
 {
-
+    (void)unit;
     BYTE err;
 
     if (currentlyAccessingCard)
     {
         if (ALPHA_OR_BETA_VERSION)
         {
-            // Operatricks got! But I think I fixed.
             FREEZE_WITH_ERROR("E259");
         }
     }
 
-    // uint16_t startTime = MTU2.TCNT_0;
-
     currentlyAccessingCard = 1;
-
-    err = sd_read_sect(SD_PORT, buff, sector, count);
-
+    err                    = sd_read_sect(SD_PORT, dst, sector, count);
     currentlyAccessingCard = 0;
 
-    /*
-    uint16_t endTime = MTU2.TCNT_0;
-    uint16_t duration = endTime - startTime;
-    uartPrintln(intToStringUSB(duration));
-    */
-
-    // My good 16gb card gave about 150 per read. Bad card gave ~250, and occasionally up to 30,000!
-
-    if (err == 0)
-    {
-        return RES_OK;
-    }
-    else
-    {
-        return RES_ERROR;
-    }
+    return (err == 0) ? DELUGE_OK : DELUGE_ERR_IO;
 }
 
-/*-----------------------------------------------------------------------*/
-/* Write Sector(s)                                                       */
-/*-----------------------------------------------------------------------*/
-
-DRESULT disk_write_without_streaming_first(BYTE pdrv, /* Physical drive nmuber to identify the drive */
-    const BYTE* buff,                                 /* Data to be written */
-    LBA_t sector,                                     /* Sector address in LBA */
-    UINT count                                        /* Number of sectors to write */
-)
+DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count)
 {
-
+    (void)unit;
     BYTE err;
 
     if (currentlyAccessingCard)
@@ -250,19 +214,10 @@ DRESULT disk_write_without_streaming_first(BYTE pdrv, /* Physical drive nmuber t
     }
 
     currentlyAccessingCard = 1;
-
-    err = sd_write_sect(SD_PORT, buff, sector, count, 0x0001u);
-
+    err                    = sd_write_sect(SD_PORT, src, sector, count, 0x0001u);
     currentlyAccessingCard = 0;
 
-    if (err == 0)
-    {
-        return RES_OK;
-    }
-    else
-    {
-        return RES_ERROR;
-    }
+    return (err == 0) ? DELUGE_OK : DELUGE_ERR_IO;
 }
 
 /*-----------------------------------------------------------------------*/

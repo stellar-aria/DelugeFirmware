@@ -169,92 +169,6 @@ cutFolderPathAndTryCreating:
 	return std::move(opened.value());
 }
 
-// Low-level sibling of createFile(), for the one legitimate consumer that needs the raw FatFS::File
-// afterward (SampleRecorder: real-time recording needs raw FAT cluster addressing via .inner(), plus
-// .truncate()/a raw FA_WRITE reopen for the final-size adjustment — none of which deluge::io::File
-// exposes, deliberately, since it's the exact FatFS-internals leak this boundary exists to prevent).
-// Same create-with-folder-retry logic as createFile(), just against FatFS::File/FatFS::mkdir directly,
-// so it still needs to invalidate Tier 2's adapter-side directory cache itself (deluge::io's own
-// write-create-open/mkdir do that internally; raw FatFS::File::open/FatFS::mkdir do not).
-std::expected<FatFS::File, Error> StorageManager::createFileRaw(char const* filePath, bool mayOverwrite) {
-
-	Error error = initSD();
-	if (error != Error::NONE) {
-		return std::unexpected(error);
-	}
-
-	error = checkSpaceOnCard();
-	if (error != Error::NONE) {
-		return std::unexpected(error);
-	}
-
-	bool triedCreatingFolder = false;
-
-	BYTE mode = FA_WRITE;
-	if (mayOverwrite) {
-		mode |= FA_CREATE_ALWAYS;
-	}
-	else {
-		mode |= FA_CREATE_NEW;
-	}
-
-tryAgainRaw:
-	deluge_file_invalidate_cache();
-	auto opened = FatFS::File::open(filePath, mode);
-	if (!opened) {
-
-processErrorRaw:
-		// If folder doesn't exist, try creating it - once only
-		if (opened.error() == FatFS::Error::NO_PATH) {
-			if (triedCreatingFolder) {
-				return std::unexpected(Error::FOLDER_DOESNT_EXIST);
-			}
-			triedCreatingFolder = true;
-
-			std::string folderPath;
-			folderPath = filePath;
-
-			// Get just the folder path
-cutFolderPathAndTryCreatingRaw:
-			char const* folderPathChars = folderPath.c_str();
-			char const* slashAddr = strrchr(folderPathChars, '/');
-			if (!slashAddr) {
-				return std::unexpected(Error::UNSPECIFIED); // Shouldn't happen
-			}
-			int32_t slashPos = slashAddr - folderPathChars;
-
-			folderPath.resize(slashPos);
-
-			// Try making the folder
-			deluge_file_invalidate_cache();
-			auto made_dir = FatFS::mkdir(folderPath.c_str());
-			if (made_dir) {
-				goto tryAgainRaw;
-			}
-			// If that folder couldn't be created because its parent folder didn't exist...
-			else if (made_dir.error() == FatFS::Error::NO_PATH) {
-				triedCreatingFolder = false;         // Let it do multiple tries again
-				goto cutFolderPathAndTryCreatingRaw; // Go and try creating the parent folder
-			}
-			else {
-				goto processErrorRaw;
-			}
-		}
-
-		// Otherwise, just return the appropriate error.
-		else {
-
-			error = fatfsErrorToDelugeError(opened.error());
-			if (error == Error::SD_CARD) {
-				error = Error::WRITE_FAIL; // Get a bit more specific if we only got the most general error.
-			}
-			return std::unexpected(error);
-		}
-	}
-
-	return opened.value();
-}
-
 Error StorageManager::createXMLFile(char const* filePath, XMLSerializer& writer, bool mayOverwrite,
                                     bool displayErrors) {
 	auto created = createFile(filePath, mayOverwrite);
@@ -1149,9 +1063,11 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 		}
 	}
 
-	result = closeWriter();
-	if (result) {
-		return Error::WRITE_FAIL;
+	if (path) {
+		result = closeWriter();
+		if (result) {
+			return Error::WRITE_FAIL;
+		}
 	}
 
 	return Error::NONE;

@@ -18,6 +18,28 @@ describe file_io("file_io adapter", $ {
 		    .to_equal(static_cast<FileAccessMode>(FA_WRITE | FA_CREATE_ALWAYS));
 	});
 
+	it("maps DELUGE_FILE_WRITE_CREATE_NEW to FA_WRITE|FA_CREATE_NEW", _ {
+		expect(deluge::fatfs_adapter::to_fatfs_mode(DELUGE_FILE_WRITE_CREATE_NEW))
+		    .to_equal(static_cast<FileAccessMode>(FA_WRITE | FA_CREATE_NEW));
+	});
+
+	// StorageManager::createFile (src/deluge/storage/storage_manager.cpp) itself can't be exercised from this
+	// target -- it pulls in most of the app (Song, FavouriteManager, InstrumentClipView, AudioFileManager,
+	// SoundEditor, Display, UITimerManager, ...), and this test target's host build has no real mountable
+	// filesystem to open against anyway (mock_diskio.cpp reports STA_NOINIT unconditionally -- see this file's
+	// other tests for the same accepted gap). What we *can* check here, at this boundary, is the shape of
+	// createFile's mode selection: `mayOverwrite ? DELUGE_FILE_WRITE_CREATE : DELUGE_FILE_WRITE_CREATE_NEW`,
+	// verified end-to-end through to the FatFS flags it resolves to.
+	it("createFile's mayOverwrite selects DELUGE_FILE_WRITE_CREATE vs DELUGE_FILE_WRITE_CREATE_NEW", _ {
+		auto createFileMode = [](bool mayOverwrite) {
+			return mayOverwrite ? DELUGE_FILE_WRITE_CREATE : DELUGE_FILE_WRITE_CREATE_NEW;
+		};
+		expect(deluge::fatfs_adapter::to_fatfs_mode(createFileMode(true)))
+		    .to_equal(static_cast<FileAccessMode>(FA_WRITE | FA_CREATE_ALWAYS));
+		expect(deluge::fatfs_adapter::to_fatfs_mode(createFileMode(false)))
+		    .to_equal(static_cast<FileAccessMode>(FA_WRITE | FA_CREATE_NEW));
+	});
+
 	it("maps every FatFS::Error to a non-generic DelugeStatus where one exists", _ {
 		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::NO_FILE)).to_equal(DELUGE_ERR_NOT_FOUND);
 		expect(deluge::fatfs_adapter::to_deluge_status(FatFS::Error::NO_PATH)).to_equal(DELUGE_ERR_NOT_FOUND);

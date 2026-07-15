@@ -169,9 +169,8 @@ void RuntimeFeatureSettings::init() {
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {
-	FilePointer fp;
 	// CommunityFeatures.XML
-	bool success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE, &fp);
+	bool success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
 	if (!success) {
 		// since we changed the file path for the CommunityFeatures.XML in c1.3, it's possible
 		// that a CommunityFeatures file may exists in the root of the SD card
@@ -182,7 +181,7 @@ void RuntimeFeatureSettings::readSettingsFromFile() {
 			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
-				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE, &fp);
+				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
 			}
 		}
 		if (!success) {
@@ -190,7 +189,8 @@ void RuntimeFeatureSettings::readSettingsFromFile() {
 		}
 	}
 
-	Error error = StorageManager::openXMLFile(&fp, smDeserializer, TAG_RUNTIME_FEATURE_SETTINGS);
+	Error error =
+	    StorageManager::openXMLFile(RUNTIME_FEATURE_SETTINGS_FILE, smDeserializer, TAG_RUNTIME_FEATURE_SETTINGS);
 	if (error != Error::NONE) {
 		return;
 	}

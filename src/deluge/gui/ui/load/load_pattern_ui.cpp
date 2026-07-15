@@ -288,8 +288,8 @@ Error LoadPatternUI::performLoad() {
 	fileName.append(enteredText.c_str());
 	fileName.append(".XML");
 
-	Error error = StorageManager::loadPatternFile(&currentFileItem->filePointer, &fileName, overwriteExisting,
-	                                              noScaling, previewOnly, selectedDrumOnly);
+	Error error = StorageManager::loadPatternFile(fileName.c_str(), &fileName, overwriteExisting, noScaling,
+	                                              previewOnly, selectedDrumOnly);
 
 	if (error != Error::NONE) {
 		display->displayError(currentLabelLoadError);

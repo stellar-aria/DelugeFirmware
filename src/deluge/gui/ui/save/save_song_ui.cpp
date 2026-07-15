@@ -23,6 +23,7 @@
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "libdeluge/file_io.h"
 #include "model/sample/sample.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -236,19 +237,18 @@ gotError:
 				// Note: we can't just use the clusters to write back to the card, cos these might contain data that we
 				// converted
 
-				// Open file to read
-				FRESULT result = FRESULT::FR_OK;
 				// this is just blind copying to move samples to/from the song folder. The serializer is being used for
 				// the song file write so use the deserializer
-				result = f_open(&activeDeserializer->readFIL, sourceFilePath, FA_READ);
+				auto sourceOpened = deluge::io::File::open(sourceFilePath, DELUGE_FILE_READ);
 
-				if (result != FR_OK) {
+				if (!sourceOpened) {
 					D_PRINTLN("open fail %s", sourceFilePath);
 					error = Error::UNSPECIFIED;
 					display->removeLoadingAnimation();
 					display->displayError(error);
 					return false;
 				}
+				activeDeserializer->file = std::move(sourceOpened.value());
 
 				char const* destFilePath;
 				char const* normalFilePath; // Just briefly stores a thing below
@@ -359,10 +359,9 @@ gotError:
 
 					// Copy
 					while (true) {
-						UINT bytesRead;
-						result = f_read(&activeDeserializer->readFIL, activeDeserializer->fileClusterBuffer,
-						                Cluster::size, &bytesRead);
-						if (result) {
+						auto readResult = activeDeserializer->file->read(std::span<std::byte>(
+						    reinterpret_cast<std::byte*>(activeDeserializer->fileClusterBuffer), Cluster::size));
+						if (!readResult) {
 							D_PRINTLN("read fail");
 							error = Error::UNSPECIFIED;
 							activeDeserializer->closeWriter();
@@ -370,6 +369,7 @@ gotError:
 							display->displayError(error);
 							return false;
 						}
+						UINT bytesRead = static_cast<UINT>(readResult->size());
 						if (!bytesRead) {
 							break; // Stop, on rare case where file ended right at end of last cluster
 						}
@@ -377,7 +377,7 @@ gotError:
 						auto written =
 						    created.value().write({(std::byte*)activeDeserializer->fileClusterBuffer, bytesRead});
 						if (!written || written.value() != bytesRead) {
-							D_PRINTLN("write fail %d", result);
+							D_PRINTLN("write fail");
 							error = Error::UNSPECIFIED;
 							activeDeserializer->closeWriter();
 							display->removeLoadingAnimation();

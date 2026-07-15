@@ -94,7 +94,89 @@ Error StorageManager::checkSpaceOnCard() {
 }
 
 // Creates folders and subfolders as needed!
-std::expected<FatFS::File, Error> StorageManager::createFile(char const* filePath, bool mayOverwrite) {
+std::expected<deluge::io::File, Error> StorageManager::createFile(char const* filePath, bool mayOverwrite) {
+
+	Error error = initSD();
+	if (error != Error::NONE) {
+		return std::unexpected(error);
+	}
+
+	error = checkSpaceOnCard();
+	if (error != Error::NONE) {
+		return std::unexpected(error);
+	}
+
+	DelugeFileOpenMode mode = mayOverwrite ? DELUGE_FILE_WRITE_CREATE : DELUGE_FILE_WRITE_CREATE_NEW;
+
+	bool triedCreatingFolder = false;
+
+tryAgain:
+	auto opened = deluge::io::File::open(filePath, mode);
+	if (!opened) {
+
+processError:
+		// If folder doesn't exist, try creating it - once only
+		if (opened.error() == deluge::io::Status::NOT_FOUND) {
+			if (triedCreatingFolder) {
+				return std::unexpected(Error::FOLDER_DOESNT_EXIST);
+			}
+			triedCreatingFolder = true;
+
+			std::string folderPath;
+			folderPath = filePath;
+
+			// Get just the folder path
+cutFolderPathAndTryCreating:
+			char const* folderPathChars = folderPath.c_str();
+			char const* slashAddr = strrchr(folderPathChars, '/');
+			if (!slashAddr) {
+				return std::unexpected(Error::UNSPECIFIED); // Shouldn't happen
+			}
+			int32_t slashPos = slashAddr - folderPathChars;
+
+			folderPath.resize(slashPos);
+
+			// Try making the folder
+			auto made_dir = deluge::io::mkdir(folderPath.c_str());
+			if (made_dir) {
+				goto tryAgain;
+			}
+			// If that folder couldn't be created because its parent folder didn't exist...
+			else if (made_dir.error() == deluge::io::Status::NOT_FOUND) {
+				triedCreatingFolder = false;      // Let it do multiple tries again
+				goto cutFolderPathAndTryCreating; // Go and try creating the parent folder
+			}
+			else {
+				goto processError;
+			}
+		}
+
+		// The file already exists and mayOverwrite was false.
+		else if (opened.error() == deluge::io::Status::EXISTS) {
+			return std::unexpected(Error::FILE_ALREADY_EXISTS);
+		}
+
+		// Otherwise, just return the appropriate error.
+		else {
+			error = delugeStatusToError(deluge::io::to_deluge_status(opened.error()));
+			if (error == Error::SD_CARD) {
+				error = Error::WRITE_FAIL; // Get a bit more specific if we only got the most general error.
+			}
+			return std::unexpected(error);
+		}
+	}
+
+	return std::move(opened.value());
+}
+
+// Low-level sibling of createFile(), for the one legitimate consumer that needs the raw FatFS::File
+// afterward (SampleRecorder: real-time recording needs raw FAT cluster addressing via .inner(), plus
+// .truncate()/a raw FA_WRITE reopen for the final-size adjustment — none of which deluge::io::File
+// exposes, deliberately, since it's the exact FatFS-internals leak this boundary exists to prevent).
+// Same create-with-folder-retry logic as createFile(), just against FatFS::File/FatFS::mkdir directly,
+// so it still needs to invalidate Tier 2's adapter-side directory cache itself (deluge::io's own
+// write-create-open/mkdir do that internally; raw FatFS::File::open/FatFS::mkdir do not).
+std::expected<FatFS::File, Error> StorageManager::createFileRaw(char const* filePath, bool mayOverwrite) {
 
 	Error error = initSD();
 	if (error != Error::NONE) {
@@ -116,12 +198,12 @@ std::expected<FatFS::File, Error> StorageManager::createFile(char const* filePat
 		mode |= FA_CREATE_NEW;
 	}
 
-tryAgain:
+tryAgainRaw:
 	deluge_file_invalidate_cache();
 	auto opened = FatFS::File::open(filePath, mode);
 	if (!opened) {
 
-processError:
+processErrorRaw:
 		// If folder doesn't exist, try creating it - once only
 		if (opened.error() == FatFS::Error::NO_PATH) {
 			if (triedCreatingFolder) {
@@ -133,7 +215,7 @@ processError:
 			folderPath = filePath;
 
 			// Get just the folder path
-cutFolderPathAndTryCreating:
+cutFolderPathAndTryCreatingRaw:
 			char const* folderPathChars = folderPath.c_str();
 			char const* slashAddr = strrchr(folderPathChars, '/');
 			if (!slashAddr) {
@@ -147,15 +229,15 @@ cutFolderPathAndTryCreating:
 			deluge_file_invalidate_cache();
 			auto made_dir = FatFS::mkdir(folderPath.c_str());
 			if (made_dir) {
-				goto tryAgain;
+				goto tryAgainRaw;
 			}
 			// If that folder couldn't be created because its parent folder didn't exist...
 			else if (made_dir.error() == FatFS::Error::NO_PATH) {
-				triedCreatingFolder = false;      // Let it do multiple tries again
-				goto cutFolderPathAndTryCreating; // Go and try creating the parent folder
+				triedCreatingFolder = false;         // Let it do multiple tries again
+				goto cutFolderPathAndTryCreatingRaw; // Go and try creating the parent folder
 			}
 			else {
-				goto processError;
+				goto processErrorRaw;
 			}
 		}
 
@@ -184,7 +266,7 @@ Error StorageManager::createXMLFile(char const* filePath, XMLSerializer& writer,
 		}
 		return created.error();
 	}
-	writer.writeFIL = created.value().inner();
+	writer.file = std::move(created.value());
 	writer.reset();
 	if (!writeJsonFlag) {
 		writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -203,7 +285,7 @@ Error StorageManager::createJsonFile(char const* filePath, JsonSerializer& write
 		}
 		return created.error();
 	}
-	writer.writeFIL = created.value().inner();
+	writer.file = std::move(created.value());
 	writer.reset();
 	return Error::NONE;
 }
@@ -282,30 +364,9 @@ bool StorageManager::checkSDInitialized() {
 	return !(status & STA_NOINIT);
 }
 
-// Function can't fail.
-void StorageManager::openFilePointer(FilePointer* fp, FileReader& reader) {
-
-	AudioEngine::logAction("openFilePointer");
-
-	D_PRINTLN("openFilePointer");
-
-	reader.readFIL.obj.sclust = fp->sclust;
-	reader.readFIL.obj.objsize = fp->objsize;
-	reader.readFIL.obj.fs = &fileSystem; /* Validate the file object */
-	reader.readFIL.obj.id = fileSystem.id;
-
-	reader.readFIL.flag = FA_READ; /* Set file access mode */
-	reader.readFIL.err = 0;        /* Clear error flag */
-	reader.readFIL.sect = 0;       /* Invalidate current data sector */
-	reader.readFIL.fptr = 0;       /* Set file pointer top of the file */
-}
-
-Error StorageManager::openInstrumentFile(OutputType outputType, FilePointer* filePointer) {
+Error StorageManager::openInstrumentFile(OutputType outputType, char const* path) {
 
 	AudioEngine::logAction("openInstrumentFile");
-	if (!filePointer->sclust) {
-		return Error::FILE_NOT_FOUND;
-	}
 	char const* firstTagName;
 	char const* altTagName = "";
 
@@ -320,21 +381,20 @@ Error StorageManager::openInstrumentFile(OutputType outputType, FilePointer* fil
 		firstTagName = "kit";
 	}
 
-	Error error = openXMLFile(filePointer, smDeserializer, firstTagName, altTagName);
+	Error error = openXMLFile(path, smDeserializer, firstTagName, altTagName);
 	return error;
 }
 
 // Returns error status
 // clip may be NULL
 Error StorageManager::loadInstrumentFromFile(Song* song, InstrumentClip* clip, OutputType outputType,
-                                             bool mayReadSamplesFromFiles, Instrument** getInstrument,
-                                             FilePointer* filePointer, std::string* name, std::string* dirPath) {
+                                             bool mayReadSamplesFromFiles, Instrument** getInstrument, char const* path,
+                                             std::string* name, std::string* dirPath) {
 
 	AudioEngine::logAction("loadInstrumentFromFile");
-	D_PRINTLN("opening instrument file -  %s %s  from FP  %lu", dirPath->c_str(), name->c_str(),
-	          (int32_t)filePointer->sclust);
+	D_PRINTLN("opening instrument file -  %s %s  from path  %s", dirPath->c_str(), name->c_str(), path);
 
-	Error error = openInstrumentFile(outputType, filePointer);
+	Error error = openInstrumentFile(outputType, path);
 	if (error != Error::NONE) {
 		D_PRINTLN("opening instrument file failed -  %s", name->c_str());
 		return error;
@@ -422,29 +482,25 @@ paramManagersMissing:
 	return Error::NONE;
 }
 
-Error StorageManager::openMidiDeviceDefinitionFile(FilePointer* filePointer) {
+Error StorageManager::openMidiDeviceDefinitionFile(char const* path) {
 
 	AudioEngine::logAction("openMidiDeviceDefinitionFile");
-	if (!filePointer->sclust) {
-		return Error::FILE_NOT_FOUND;
-	}
 	char const* firstTagName = "midiDevice";
 	char const* altTagName = "";
 
-	Error error = openXMLFile(filePointer, smDeserializer, firstTagName, altTagName);
+	Error error = openXMLFile(path, smDeserializer, firstTagName, altTagName);
 	return error;
 }
 
 // Returns error status
-Error StorageManager::loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrument, FilePointer* filePointer,
+Error StorageManager::loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrument, char const* path,
                                                    std::string* fileName, bool updateFileName) {
 	midiInstrument->loadDeviceDefinitionFile = false;
 
 	AudioEngine::logAction("loadMidiDeviceDefinitionFile");
-	D_PRINTLN("opening midi device definition file -  %s %s  from FP  %lu", fileName->c_str(),
-	          (int32_t)filePointer->sclust);
+	D_PRINTLN("opening midi device definition file -  %s  from path  %s", fileName->c_str(), path);
 
-	Error error = openMidiDeviceDefinitionFile(filePointer);
+	Error error = openMidiDeviceDefinitionFile(path);
 	if (error != Error::NONE) {
 		D_PRINTLN("opening midi device definition file failed -  %s", fileName->c_str());
 		return error;
@@ -472,39 +528,33 @@ Error StorageManager::loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrumen
 	return Error::NONE;
 }
 
-Error StorageManager::openPatternFile(FilePointer* filePointer) {
+Error StorageManager::openPatternFile(char const* path) {
 
 	AudioEngine::logAction("openPatternFile");
-	if (!filePointer->sclust) {
-		return Error::FILE_NOT_FOUND;
-	}
 	char const* firstTagName = "pattern";
 	char const* altTagName = "";
 
-	Error error = openXMLFile(filePointer, smDeserializer, firstTagName, altTagName);
+	Error error = openXMLFile(path, smDeserializer, firstTagName, altTagName);
 	return error;
 }
 
-Error StorageManager::openFavouriteFile(FilePointer* filePointer) {
+Error StorageManager::openFavouriteFile(char const* path) {
 
 	AudioEngine::logAction("openFavouriteFile");
-	if (!filePointer->sclust) {
-		return Error::FILE_NOT_FOUND;
-	}
 	char const* firstTagName = "favourites";
 	char const* altTagName = "";
 
-	Error error = openXMLFile(filePointer, smDeserializer, firstTagName, altTagName);
+	Error error = openXMLFile(path, smDeserializer, firstTagName, altTagName);
 	return error;
 }
 
 // Returns error status
-Error StorageManager::loadPatternFile(FilePointer* filePointer, std::string* fileName, bool overwriteExisting,
-                                      bool noScaling, bool previewOnly, bool selectedDrumOnly) {
+Error StorageManager::loadPatternFile(char const* path, std::string* fileName, bool overwriteExisting, bool noScaling,
+                                      bool previewOnly, bool selectedDrumOnly) {
 
 	AudioEngine::logAction("loadPatternFile");
 
-	Error error = openPatternFile(filePointer);
+	Error error = openPatternFile(path);
 	if (error != Error::NONE) {
 		return error;
 	}
@@ -529,11 +579,11 @@ Error StorageManager::loadPatternFile(FilePointer* filePointer, std::string* fil
 }
 
 // Returns error status
-Error StorageManager::loadFavouriteFile(FilePointer* filePointer, std::string* fileName) {
+Error StorageManager::loadFavouriteFile(char const* path, std::string* fileName) {
 
 	AudioEngine::logAction("loadFavouriteFile");
 
-	Error error = openFavouriteFile(filePointer);
+	Error error = openFavouriteFile(path);
 	if (error != Error::NONE) {
 		return error;
 	}
@@ -560,7 +610,7 @@ Error StorageManager::loadFavouriteFile(FilePointer* filePointer, std::string* f
  * Special function to read a synth preset into a sound drum
  */
 Error StorageManager::loadSynthToDrum(Song* song, InstrumentClip* clip, bool mayReadSamplesFromFiles,
-                                      SoundDrum** getInstrument, FilePointer* filePointer, std::string* name,
+                                      SoundDrum** getInstrument, char const* path, std::string* name,
                                       std::string* dirPath) {
 	OutputType outputType = OutputType::SYNTH;
 	SoundDrum* newDrum = (SoundDrum*)createNewDrum(DrumType::SOUND);
@@ -570,7 +620,7 @@ Error StorageManager::loadSynthToDrum(Song* song, InstrumentClip* clip, bool may
 
 	AudioEngine::logAction("loadSynthDrumFromFile");
 
-	Error error = openInstrumentFile(outputType, filePointer);
+	Error error = openInstrumentFile(outputType, path);
 	if (error != Error::NONE) {
 		return error;
 	}
@@ -718,14 +768,17 @@ Drum* StorageManager::createNewDrum(DrumType drumType) {
 	return newDrum;
 }
 
-Error StorageManager::openXMLFile(FilePointer* filePointer, XMLDeserializer& reader, char const* firstTagName,
+Error StorageManager::openXMLFile(char const* path, XMLDeserializer& reader, char const* firstTagName,
                                   char const* altTagName, bool ignoreIncorrectFirmware) {
 
 	AudioEngine::logAction("openXMLFile");
 	reader.reset();
-	// Prep to read first Cluster shortly
-	openFilePointer(filePointer, reader);
-	Error err = reader.openXMLFile(filePointer, firstTagName, altTagName, ignoreIncorrectFirmware);
+	auto opened = deluge::io::File::open(path, DELUGE_FILE_READ);
+	if (!opened) {
+		return Error::FILE_NOT_FOUND;
+	}
+	reader.file = std::move(opened.value());
+	Error err = reader.openXMLFile(firstTagName, altTagName, ignoreIncorrectFirmware);
 	activeDeserializer = &reader;
 	if (err == Error::NONE)
 		return Error::NONE;
@@ -734,14 +787,17 @@ Error StorageManager::openXMLFile(FilePointer* filePointer, XMLDeserializer& rea
 	return Error::FILE_CORRUPTED;
 }
 
-Error StorageManager::openJsonFile(FilePointer* filePointer, JsonDeserializer& reader, char const* firstTagName,
+Error StorageManager::openJsonFile(char const* path, JsonDeserializer& reader, char const* firstTagName,
                                    char const* altTagName, bool ignoreIncorrectFirmware) {
 
 	AudioEngine::logAction("openJsonFile");
 	reader.reset();
-	// Prep to read first Cluster shortly
-	openFilePointer(filePointer, reader);
-	Error err = reader.openJsonFile(filePointer, firstTagName, altTagName, ignoreIncorrectFirmware);
+	auto opened = deluge::io::File::open(path, DELUGE_FILE_READ);
+	if (!opened) {
+		return Error::FILE_NOT_FOUND;
+	}
+	reader.file = std::move(opened.value());
+	Error err = reader.openJsonFile(firstTagName, altTagName, ignoreIncorrectFirmware);
 	activeDeserializer = &reader;
 	if (err == Error::NONE)
 		return Error::NONE;
@@ -750,16 +806,15 @@ Error StorageManager::openJsonFile(FilePointer* filePointer, JsonDeserializer& r
 	return Error::FILE_CORRUPTED;
 }
 
-Error StorageManager::openDelugeFile(FileItem* currentFileItem, char const* firstTagName, char const* altTagName,
+Error StorageManager::openDelugeFile(char const* path, char const* firstTagName, char const* altTagName,
                                      bool ignoreIncorrectFirmware) {
 	Error error;
-	if (currentFileItem->filename.find(".Json") != std::string::npos) {
-		error = StorageManager::openJsonFile(&currentFileItem->filePointer, smJsonDeserializer, firstTagName,
-		                                     altTagName, ignoreIncorrectFirmware);
+	if (strstr(path, ".Json") != nullptr) {
+		error =
+		    StorageManager::openJsonFile(path, smJsonDeserializer, firstTagName, altTagName, ignoreIncorrectFirmware);
 	}
 	else {
-		error = StorageManager::openXMLFile(&currentFileItem->filePointer, smDeserializer, firstTagName, altTagName,
-		                                    ignoreIncorrectFirmware);
+		error = StorageManager::openXMLFile(path, smDeserializer, firstTagName, altTagName, ignoreIncorrectFirmware);
 	}
 	return error;
 }
@@ -862,10 +917,11 @@ bool FileReader::readFileCluster() {
 		return true;
 	}
 
-	FRESULT result = f_read(&readFIL, (UINT*)fileClusterBuffer, Cluster::size, &currentReadBufferEndPos);
-	if (result) {
+	auto result = file->read(std::span<std::byte>(reinterpret_cast<std::byte*>(fileClusterBuffer), Cluster::size));
+	if (!result) {
 		return false;
 	}
+	currentReadBufferEndPos = static_cast<UINT>(result->size());
 
 	// If error or we reached end of file
 	if (!currentReadBufferEndPos) {
@@ -924,10 +980,12 @@ void FileReader::readDone() {
 }
 
 FRESULT FileReader::closeWriter() {
-	if (!memoryBased)
-		return f_close(&readFIL);
-	else
+	if (memoryBased) {
 		return FRESULT::FR_OK;
+	}
+	auto result = file->close();
+	file.reset();
+	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
 }
 
 FileWriter::FileWriter() {
@@ -964,7 +1022,9 @@ FRESULT FileWriter::closeWriter() {
 			return FRESULT::FR_INT_ERR;
 		}
 	}
-	return f_close(&writeFIL);
+	auto result = file->close();
+	file.reset();
+	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
 }
 
 void FileWriter::writeBlock(uint8_t* block, uint32_t size) {
@@ -1008,9 +1068,9 @@ void FileWriter::writeChars(char const* output) {
 }
 
 Error FileWriter::writeBufferToFile() {
-	UINT bytesWritten;
-	FRESULT result = f_write(&writeFIL, writeClusterBuffer, fileWriteBufferCurrentPos, &bytesWritten);
-	if (result != FR_OK || bytesWritten != fileWriteBufferCurrentPos) {
+	auto written = file->write(
+	    std::span<const std::byte>(reinterpret_cast<const std::byte*>(writeClusterBuffer), fileWriteBufferCurrentPos));
+	if (!written || *written != fileWriteBufferCurrentPos) {
 		return Error::SD_CARD;
 	}
 
@@ -1023,13 +1083,25 @@ Error FileWriter::writeBufferToFile() {
 Error FileWriter::closeAfterWriting(char const* path, char const* beginningString, char const* endString) {
 
 	if (fileAccessFailedDuringWrite) {
-		return Error::WRITE_FAIL; // Calling f_close if this is false might be dangerous - if access has failed, we
+		return Error::WRITE_FAIL; // Calling close if this is false might be dangerous - if access has failed, we
 		                          // don't want it to flush any data to the card or anything
 	}
 	if (memoryBased)
 		return Error::NONE;
+
+	if ((beginningString || endString) && !path) {
+		return Error::WRITE_FAIL; // Can't verify beginning/end strings without reopening by path.
+	}
+
 	Error error = writeBufferToFile();
 	if (error != Error::NONE) {
+		return Error::WRITE_FAIL;
+	}
+
+	// Check size while the file is still open in write mode - deluge::io::File has no way to query a
+	// closed handle's last-known size.
+	auto size = file->size();
+	if (!size || *size != fileTotalBytesWritten) {
 		return Error::WRITE_FAIL;
 	}
 
@@ -1039,24 +1111,19 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 	}
 
 	if (path) {
-		// Check file exists
-		result = f_open(&writeFIL, path, FA_READ);
-		if (result) {
+		// Reopen for reading, to verify the beginning/end strings.
+		auto opened = deluge::io::File::open(path, DELUGE_FILE_READ);
+		if (!opened) {
 			return Error::WRITE_FAIL;
 		}
-	}
-
-	// Check size
-	if (f_size(&writeFIL) != fileTotalBytesWritten) {
-		return Error::WRITE_FAIL;
+		file = std::move(opened.value());
 	}
 
 	// Check beginning
 	if (beginningString) {
-		UINT dontCare;
 		int32_t length = strlen(beginningString);
-		result = f_read(&writeFIL, miscStringBuffer, length, &dontCare);
-		if (result) {
+		auto read = file->read(std::span<std::byte>(reinterpret_cast<std::byte*>(miscStringBuffer), length));
+		if (!read) {
 			return Error::WRITE_FAIL;
 		}
 		if (memcmp(miscStringBuffer, beginningString, length)) {
@@ -1066,16 +1133,15 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 
 	// Check end
 	if (endString) {
-		UINT dontCare;
 		int32_t length = strlen(endString);
 
-		result = f_lseek(&writeFIL, fileTotalBytesWritten - length);
-		if (result) {
+		auto sought = file->seek(fileTotalBytesWritten - length);
+		if (!sought) {
 			return Error::WRITE_FAIL;
 		}
 
-		result = f_read(&writeFIL, miscStringBuffer, length, &dontCare);
-		if (result) {
+		auto read = file->read(std::span<std::byte>(reinterpret_cast<std::byte*>(miscStringBuffer), length));
+		if (!read) {
 			return Error::WRITE_FAIL;
 		}
 		if (memcmp(miscStringBuffer, endString, length)) {

@@ -1807,9 +1807,8 @@ void PerformanceView::readDefaultsFromFile() {
 		return;
 	}
 
-	FilePointer fp;
 	// PerformanceView.XML
-	bool success = StorageManager::fileExists(PERFORM_DEFAULTS_XML, &fp);
+	bool success = StorageManager::fileExists(PERFORM_DEFAULTS_XML);
 	if (!success) {
 		// since we changed the file path for the PerformanceView.XML in c1.3, it's possible
 		// that a PerformanceView file may exists in the root of the SD card
@@ -1820,7 +1819,7 @@ void PerformanceView::readDefaultsFromFile() {
 			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
-				success = StorageManager::fileExists(PERFORM_DEFAULTS_XML, &fp);
+				success = StorageManager::fileExists(PERFORM_DEFAULTS_XML);
 			}
 		}
 		if (!success) {
@@ -1830,7 +1829,7 @@ void PerformanceView::readDefaultsFromFile() {
 	}
 
 	//<defaults>
-	Error error = StorageManager::openXMLFile(&fp, smDeserializer, PERFORM_DEFAULTS_TAG);
+	Error error = StorageManager::openXMLFile(PERFORM_DEFAULTS_XML, smDeserializer, PERFORM_DEFAULTS_TAG);
 	if (error != Error::NONE) {
 		loadDefaultLayout();
 		return;

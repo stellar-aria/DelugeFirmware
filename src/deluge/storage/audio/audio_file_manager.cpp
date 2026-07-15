@@ -22,6 +22,7 @@
 #include "gui/ui/ui.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "io/midi/midi_device_manager.h"
 #include "libdeluge/block_device.h"
 #include "memory/general_memory_allocator.h"
@@ -581,10 +582,12 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 
 	// Open the file at its regular path; on success fill effectiveFilePointer. Returns the FatFS result.
 	const auto tryRegularPath = [&]() -> FRESULT {
-		const FRESULT result = f_open(&smDeserializer.readFIL, filePath.c_str(), FA_READ);
+		FIL fil;
+		const FRESULT result = f_open(&fil, filePath.c_str(), FA_READ);
 		if (result == FR_OK) {
-			effectiveFilePointer.sclust = activeDeserializer->readFIL.obj.sclust;
-			effectiveFilePointer.objsize = activeDeserializer->readFIL.obj.objsize;
+			effectiveFilePointer.sclust = fil.obj.sclust;
+			effectiveFilePointer.objsize = fil.obj.objsize;
+			f_close(&fil);
 		}
 		return result;
 	};
@@ -827,8 +830,17 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->filePath = filePath;
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
-		// WaveTable reads the file more normally through FatFS, so "open" it.
-		StorageManager::openFilePointer(&effectiveFilePointer, smDeserializer); // It never returns fail.
+		// WaveTable reads the file more normally, so open it for the deserializer to stream from. `filePath`
+		// is already the correct final resolved path (regular or alternate) at this point, and Tier 2's
+		// adapter-side directory cache makes this reopen fast even though the file was just opened once
+		// already (in tryRegularPath, to discover effectiveFilePointer).
+		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
+		if (!opened) {
+			*error = Error::FILE_NOT_FOUND;
+			destroyAudioFileObject(*audioFile);
+			return nullptr;
+		}
+		smDeserializer.file = std::move(opened.value());
 
 		// One deserializer-backed source serves both the header parse (via the AudioByteSource surface) and
 		// WaveTable::setup's zero-copy band read (via its cluster accessors) — hence passed both ways.

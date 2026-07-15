@@ -219,8 +219,8 @@ Error LoadMidiDeviceDefinitionUI::performLoad(bool doClone) {
 	fileName.append(enteredText.c_str());
 	fileName.append(".XML");
 
-	Error error = StorageManager::loadMidiDeviceDefinitionFile((MIDIInstrument*)getCurrentOutput(),
-	                                                           &currentFileItem->filePointer, &fileName);
+	Error error =
+	    StorageManager::loadMidiDeviceDefinitionFile((MIDIInstrument*)getCurrentOutput(), fileName.c_str(), &fileName);
 
 	if (error != Error::NONE) {
 		return error;

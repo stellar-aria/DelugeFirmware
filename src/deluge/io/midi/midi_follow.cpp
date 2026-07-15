@@ -1657,9 +1657,8 @@ void MidiFollow::readDefaultsFromFile() {
 		a.channelOrZone = 0; // MIDI channel 1; cable left null = match any input device (omni)
 	}
 
-	FilePointer fp;
 	// MIDIFollow.XML
-	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML, &fp);
+	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML);
 	if (!success) {
 		// if file doesn't exist, lets make SETTINGS folder if it doesn't already exist
 		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
@@ -1672,7 +1671,7 @@ void MidiFollow::readDefaultsFromFile() {
 	}
 
 	//<defaults>
-	Error error = StorageManager::openXMLFile(&fp, smDeserializer, MIDI_DEFAULTS_TAG);
+	Error error = StorageManager::openXMLFile(MIDI_FOLLOW_XML, smDeserializer, MIDI_DEFAULTS_TAG);
 	if (error != Error::NONE) {
 		writeDefaultsToFile();
 		successfullyReadDefaultsFromFile = true;

@@ -10,6 +10,8 @@ FileAccessMode to_fatfs_mode(DelugeFileOpenMode mode) {
 		return FA_READ;
 	case DELUGE_FILE_WRITE_CREATE:
 		return FA_WRITE | FA_CREATE_ALWAYS;
+	case DELUGE_FILE_WRITE_CREATE_NEW:
+		return FA_WRITE | FA_CREATE_NEW;
 	}
 	return FA_READ;
 }

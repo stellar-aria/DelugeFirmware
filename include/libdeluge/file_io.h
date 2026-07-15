@@ -48,8 +48,9 @@ typedef struct DelugeDir DelugeDir;
 #define DELUGE_MAX_FILENAME 256
 
 typedef enum DelugeFileOpenMode {
-	DELUGE_FILE_READ,         ///< open an existing file for reading
-	DELUGE_FILE_WRITE_CREATE, ///< create the file, truncating if it exists
+	DELUGE_FILE_READ,             ///< open an existing file for reading
+	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
+	DELUGE_FILE_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists
 } DelugeFileOpenMode;
 
 /// Set a file or directory's last-modified timestamp. [task]

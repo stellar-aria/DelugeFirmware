@@ -831,8 +831,7 @@ void XMLDeserializer::exitTag(char const* exitTagName, bool closeObject) {
 	tagDepthCaller = tagDepthFile;
 }
 
-Error XMLDeserializer::openXMLFile(FilePointer* filePointer, char const* firstTagName, char const* altTagName,
-                                   bool ignoreIncorrectFirmware) {
+Error XMLDeserializer::openXMLFile(char const* firstTagName, char const* altTagName, bool ignoreIncorrectFirmware) {
 
 	AudioEngine::logAction("openXMLFile");
 

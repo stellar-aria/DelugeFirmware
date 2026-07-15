@@ -990,10 +990,10 @@ getOutEarly:
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
 	{
-		// Read seam: makeReadSource owns source selection (Stream for a loaded sample, Block for a
+		// Read seam: make_read_source owns source selection (Stream for a loaded sample, Block for a
 		// still-being-written recording). Selection ownership moves onto SampleStream in Phase 4.
 		// See storage/audio/stream/read_source.h and design §6/§7.
-		auto source = deluge::audio::stream::makeReadSource(*sample);
+		auto source = deluge::audio::stream::make_read_source(*sample);
 		auto readResult =
 		    source->read(static_cast<uint32_t>(clusterIndex),
 		                 std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));

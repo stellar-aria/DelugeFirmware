@@ -5,22 +5,31 @@
 
 // clang-format off
 describe stream_io("stream_io adapter", $ {
-	it("returns DELUGE_ERR_UNSUPPORTED for DELUGE_STREAM_WRITE_CREATE (not yet implemented)", _ {
+	// Task 7 implements the write-mode opens for real: they now reach FatFS::File::open instead of
+	// short-circuiting with DELUGE_ERR_UNSUPPORTED. This spec build links mocks/mock_diskio.cpp, whose
+	// disk_status/disk_initialize always report "no disk" -- there's no mountable image here (see
+	// file_io_spec.cpp's scope note, and its "falls through to the normal path on a cache miss" test for
+	// the same "assert not-OK / not the old sentinel, not a specific FatFS error code" idiom -- the exact
+	// FatFS::Error a real, unmounted f_open() fails with isn't a contract worth pinning down here), so a
+	// real open can never actually succeed. What matters is that it's no longer the old hard-coded
+	// DELUGE_ERR_UNSUPPORTED stub -- proof each mode's open attempt passed mode selection and actually
+	// reached FatFS.
+	it("DELUGE_STREAM_WRITE_CREATE's open attempt reaches FatFS (no longer short-circuits as unsupported)", _ {
 		DelugeStream* stream = nullptr;
 		DelugeStatus status = deluge_stream_open("SAMPLES/TEST.WAV", DELUGE_STREAM_WRITE_CREATE, &stream);
-		expect(status).to_equal(DELUGE_ERR_UNSUPPORTED);
+		expect(status != DELUGE_ERR_UNSUPPORTED).to_equal(true);
 	});
 
-	it("returns DELUGE_ERR_UNSUPPORTED for DELUGE_STREAM_WRITE_CREATE_NEW (not yet implemented)", _ {
+	it("DELUGE_STREAM_WRITE_CREATE_NEW's open attempt reaches FatFS (no longer short-circuits as unsupported)", _ {
 		DelugeStream* stream = nullptr;
 		DelugeStatus status = deluge_stream_open("SAMPLES/TEST.WAV", DELUGE_STREAM_WRITE_CREATE_NEW, &stream);
-		expect(status).to_equal(DELUGE_ERR_UNSUPPORTED);
+		expect(status != DELUGE_ERR_UNSUPPORTED).to_equal(true);
 	});
 
-	it("returns DELUGE_ERR_UNSUPPORTED for DELUGE_STREAM_WRITE_APPEND (not yet implemented)", _ {
+	it("DELUGE_STREAM_WRITE_APPEND's open attempt reaches FatFS (no longer short-circuits as unsupported)", _ {
 		DelugeStream* stream = nullptr;
 		DelugeStatus status = deluge_stream_open("SAMPLES/TEST.WAV", DELUGE_STREAM_WRITE_APPEND, &stream);
-		expect(status).to_equal(DELUGE_ERR_UNSUPPORTED);
+		expect(status != DELUGE_ERR_UNSUPPORTED).to_equal(true);
 	});
 
 	it("resolve_read_layout on a zero-size file needs no FAT walk", _ {
@@ -129,6 +138,32 @@ describe stream_io("stream_io adapter", $ {
 		expect(status).to_equal(DELUGE_OK);
 		expect(sector).to_equal(1008u);
 		impl.layout = nullptr;
+	});
+
+	it("write_at rejects a byte_offset that doesn't match the current file size (append-only contract)", _ {
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
+		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_WRITE_CREATE};
+		impl.file_size = 512; // pretend 512 bytes are already written
+
+		uint8_t src[64] = {};
+		uint32_t out_written = 999;
+		DelugeStatus status =
+		    deluge_stream_write_at(reinterpret_cast<DelugeStream*>(&impl), 0 /* wrong -- should be 512 */, src, 64,
+		                           &out_written);
+		expect(status).to_equal(DELUGE_ERR_PARAM);
+		expect(out_written).to_equal(0u);
+	});
+
+	it("sector_of in a write mode rejects any cluster index other than the most recently written one", _ {
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
+		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_WRITE_CREATE};
+		impl.last_written_cluster_index = 3; // pretend cluster 3 was the most recently completed write
+
+		uint32_t sector = 0;
+		DelugeStatus status = deluge_stream_sector_of(reinterpret_cast<DelugeStream*>(&impl), 0, &sector);
+		expect(status).to_equal(DELUGE_ERR_PARAM);
 	});
 });
 

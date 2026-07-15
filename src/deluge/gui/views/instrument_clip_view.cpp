@@ -18,7 +18,6 @@
 #include "gui/views/instrument_clip_view.h"
 #include "definitions_cxx.hpp"
 #include "extern.h"
-#include "fatfs.hpp"
 #include "gui/colour/colour.h"
 #include "gui/context_menu/stem_export/cancel_stem_export.h"
 #include "gui/l10n/l10n.h"
@@ -47,6 +46,7 @@
 #include "hid/led/pad_leds.h"
 #include "hid/matrix/matrix_driver.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "io/midi/device_specific/specific_midi_device.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/midi_transpose.h"
@@ -2100,22 +2100,28 @@ ActionResult InstrumentClipView::potentiallyRandomizeDrumSample(Kit* kit, Drum* 
 
 	// Open directory of current audio file
 	*slashAddress = 0;
-	staticDIR = D_TRY_CATCH(FatFS::Directory::open(path), error, {
+	auto dirOpened = deluge::io::Directory::open(path);
+	if (!dirOpened.has_value()) {
 		*slashAddress = '/';
 		display->displayError(Error::SD_CARD);
 		return ActionResult::DEALT_WITH;
-	});
+	}
+	deluge::io::Directory dir = std::move(*dirOpened);
 	*slashAddress = '/';
 
 	// Select random audio file from directory
 	int32_t fileCount = 0;
-	while (f_readdir(&staticDIR.inner(), &staticFNO) == FR_OK && staticFNO.fname[0] != 0) {
+	while (true) {
+		auto entry = dir.read();
+		if (!entry.has_value() || !entry->has_value()) {
+			break;
+		}
 		audioFileManager.loadAnyEnqueuedClusters();
-		if (staticFNO.fattrib & AM_DIR || !isAudioFilename(staticFNO.fname)) {
+		if ((*entry)->is_directory || !isAudioFilename((*entry)->name)) {
 			continue;
 		}
 		if (random(fileCount++) == 0) { // Algorithm: Reservoir Sampling with k=1
-			strncpy(chosenFilename, staticFNO.fname, 256);
+			strncpy(chosenFilename, (*entry)->name, 256);
 		}
 	}
 

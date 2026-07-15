@@ -265,6 +265,46 @@ DRESULT disk_write_without_streaming_first(BYTE pdrv, /* Physical drive nmuber t
     }
 }
 
+DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count)
+{
+    (void)unit;
+    BYTE err;
+
+    if (currentlyAccessingCard)
+    {
+        if (ALPHA_OR_BETA_VERSION)
+        {
+            FREEZE_WITH_ERROR("E259");
+        }
+    }
+
+    currentlyAccessingCard = 1;
+    err                    = sd_read_sect(SD_PORT, dst, sector, count);
+    currentlyAccessingCard = 0;
+
+    return (err == 0) ? DELUGE_OK : DELUGE_ERR_IO;
+}
+
+DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count)
+{
+    (void)unit;
+    BYTE err;
+
+    if (currentlyAccessingCard)
+    {
+        if (ALPHA_OR_BETA_VERSION)
+        {
+            FREEZE_WITH_ERROR("E258");
+        }
+    }
+
+    currentlyAccessingCard = 1;
+    err                    = sd_write_sect(SD_PORT, src, sector, count, 0x0001u);
+    currentlyAccessingCard = 0;
+
+    return (err == 0) ? DELUGE_OK : DELUGE_ERR_IO;
+}
+
 /*-----------------------------------------------------------------------*/
 /* Miscellaneous Functions                                               */
 /*-----------------------------------------------------------------------*/

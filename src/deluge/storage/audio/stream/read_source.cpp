@@ -18,13 +18,13 @@ std::expected<uint32_t, DelugeStatus> StreamReadSource::read(uint32_t cluster_in
 }
 
 std::expected<uint32_t, DelugeStatus> BlockReadSource::read(uint32_t cluster_index, std::span<std::byte> dst) {
-	uint32_t numSectors = static_cast<uint32_t>(dst.size()) >> 9;
+	uint32_t num_sectors = static_cast<uint32_t>(dst.size()) >> 9;
 	DelugeStatus status = deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(dst.data()),
-	                                        sample_.clusters[cluster_index].sdAddress, numSectors);
+	                                        sample_.clusters[cluster_index].sdAddress, num_sectors);
 	if (status != DELUGE_OK) {
 		return std::unexpected(status);
 	}
-	return static_cast<uint32_t>(numSectors) * 512u;
+	return static_cast<uint32_t>(num_sectors) * 512u;
 }
 
 std::unique_ptr<ReadSource> make_read_source(Sample& sample) {

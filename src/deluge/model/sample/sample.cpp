@@ -214,6 +214,11 @@ uint32_t Sample::ensureResourceAsset() {
 }
 
 Sample::~Sample() {
+	if (readStream_ != nullptr) {
+		deluge_stream_close(readStream_);
+		readStream_ = nullptr;
+	}
+
 	// Retire our Asset first (frees any clusters the manager still has resident, via
 	// clusterEvict, which nulls our clusters[] entries) so the SampleCluster destructors
 	// below see nothing to free. No-op if we never defined one. The manager must exist if

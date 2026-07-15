@@ -149,13 +149,27 @@ CACHE_LINE_SIZE`) is preserved. The dead `GENERAL_MEMORY` / `OTHER` enumerators 
 `readClusterData`'s body (`audio_file_manager.cpp:939-1240`) becomes a **pure function**, POD in/out,
 with no reach into C++ object graphs:
 
-- **In:** a read source (the `deluge::io::Stream` handle, or the raw-block fallback via
-  `deluge_block_read` against `SampleCluster::sdAddress` for not-yet-streamed recordings); the byte
-  offset + length for this cluster; the destination span; a small **format descriptor** POD
-  (`rawDataFormat`, byte depth, channel count, `audioDataStartPosBytes`, total length); and — for the
-  stitch — the **edge spans of the neighbor chunks** plus their current boundary flags.
+- **In:** a **`ReadSource`** (see below) to pull this cluster's raw bytes from; the byte offset +
+  length for this cluster; the destination span; a small **format descriptor** POD (`rawDataFormat`,
+  byte depth, channel count, `audioDataStartPosBytes`, total length); and — for the stitch — the
+  **edge spans of the neighbor chunks** plus their current boundary flags.
 - **Out:** converted bytes written into the destination, plus the **boundary-state deltas** (which
   `extraBytesAt*Converted` to set, `firstThreeBytesPreDataConversion` to stash).
+
+**The read seam — `ReadSource`.** The core is agnostic to *where* raw bytes come from: it calls
+`source.read(cluster_index, span)` on a small `ReadSource` interface. Two implementations, both
+first-class (neither is a fallback):
+- **`StreamReadSource`** — wraps `deluge::io::Stream`; the normal playback / load path.
+- **`BlockReadSource`** — wraps the recorder's per-cluster `sdAddress` table + `deluge_block_read`;
+  the recorder read-back path (§7). This is *not* a leak: reading an arbitrary earlier cluster of a
+  file still open for append-only writing is exactly what `stream_io.h`'s read side does not serve
+  (write-mode streams keep no read layout table, `write_at` is append-only), so reading physically-
+  written sectors by known address is the correct, robust mechanism. `block_device.h` is a stable
+  platform seam beneath, same status as `stream_io.h`, so both sources are equally portable to a
+  future Rust core.
+
+This replaces the current buried `if (has readStream_) … else deluge_block_read` branch inside
+`readClusterData` with an explicit, testable seam.
 
 **Why this is the delicate part.** For non-native formats a multi-byte sample frame straddles the FAT
 boundary (e.g. 3-byte 24-bit frames don't divide 32768 evenly), so the last bytes of one cluster are
@@ -202,12 +216,17 @@ block-read fallback, the separate `numReasonsHeldBySampleRecorder` hold layered 
 lease) are carried through faithfully on `StreamedChunk` as a first-class case, not an afterthought —
 this path is behavior-sensitive.
 
-**Open question (resolve in the plan) — the raw-block fallback.** `readClusterData` today has a
-fallback *below* `stream_io.h`: `deluge_block_read` against `SampleCluster::sdAddress`, for samples
-with no open `deluge::io::Stream` (a recording still being written). This is the one place raw
-C-level I/O leaks into the module. Decide during planning whether it can be routed through
-`deluge::io::Stream` / `File` (open the recording file) or must stay raw because a readable stream
-doesn't exist mid-record. Lean toward the wrapper; keep raw only if recording forces it.
+**Recorder read-back — resolved (`BlockReadSource`).** The recorder reads back earlier clusters of a
+still-being-written file in several places — the WAV-header patch in `finalizeRecordedFile`
+(sample_recorder.cpp:804) and the `alterFile` reprocessing (sample_recorder.cpp:1261/1278/1445/1493)
+— all via `getCluster(CLUSTER_LOAD_IMMEDIATELY)` → the reconstruction core. Investigation showed this
+**must** use raw block-by-address, not a stream wrapper: write-mode streams keep no read-side layout
+table (stream_io.cpp:97,218) so `read_at` can't serve an earlier cluster, `sector_of` only knows the
+last-written cluster (stream_io.cpp:220-224), and `write_at` is append-only (stream_io.cpp:159). The
+recorder already tracks each cluster's physical `sdAddress` as it writes, so the core reads it back
+through a **`BlockReadSource`** (§6) — a first-class read source, not a fallback. The two rejected
+alternatives (teach write-mode streams to random-read; open a second read handle on a mid-write file)
+both introduce read/write-aliasing or unflushed-data hazards for a single caller.
 
 ---
 
@@ -234,7 +253,9 @@ Steps 1–3 should stay bit-exact (pure moves); step 4 and any conversion-path r
   full-heap bit-exact is the gate for steps 1–3.
 - **Dual-arch CppSpec unit specs for the reconstruction core specifically** (x86 SIMDe + ARM/qemu) —
   format-conversion + boundary-stitch is pure logic that wants a dedicated regression net, and those
-  specs *are* the Rust-port contract (the Rust impl must satisfy the same specs).
+  specs *are* the Rust-port contract (the Rust impl must satisfy the same specs). The `ReadSource`
+  seam makes this trivially testable — feed a mock in-memory `ReadSource` and assert converted output
+  + boundary-state deltas, no card required.
 - **Real render + ear-check** as the true gate for the behavior-touching steps (step 4, conversion
   reshaping), per the "not bit-exact-gated" steer and the "real execution catches what review misses"
   lesson.

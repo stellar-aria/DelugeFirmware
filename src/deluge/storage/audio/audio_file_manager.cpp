@@ -24,6 +24,7 @@
 #include "io/debug/log.h"
 #include "io/file.hpp"
 #include "io/midi/midi_device_manager.h"
+#include "io/stream.hpp"
 #include "libdeluge/block_device.h"
 #include "libdeluge/stream_io.h"
 #include "memory/general_memory_allocator.h"
@@ -231,22 +232,19 @@ clusterSizeChangedButItsOk:
 						filePath = thisAudioFile->filePath.c_str();
 					}
 
-					DelugeStream* sampleStream = nullptr;
-					DelugeStatus openStatus = deluge_stream_open(filePath, DELUGE_STREAM_READ, &sampleStream);
-					if (openStatus != DELUGE_OK) {
+					auto sampleStream = deluge::io::Stream::open(filePath, DELUGE_STREAM_READ);
+					if (!sampleStream) {
 						D_PRINTLN("couldn't open file");
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
 
-					uint32_t firstSector = 0;
-					DelugeStatus sectorStatus = deluge_stream_sector_of(sampleStream, 0, &firstSector);
-
-					deluge_stream_close(sampleStream);
+					auto firstSector = sampleStream->sector_of(0);
+					// sampleStream's destructor closes the handle once it goes out of scope below.
 
 					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
 					// enough the file hasn't changed
-					if (sectorStatus != DELUGE_OK || firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
+					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -806,17 +804,20 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
-		DelugeStream* stream = nullptr;
-		DelugeStatus streamStatus = deluge_stream_open(pathToOpen.c_str(), DELUGE_STREAM_READ, &stream);
-		if (streamStatus != DELUGE_OK) {
+		auto openedStream = deluge::io::Stream::open(pathToOpen, DELUGE_STREAM_READ);
+		if (!openedStream) {
 			*error = Error::FILE_NOT_FOUND;
 			destroyAudioFileObject(*audioFile);
 			return nullptr;
 		}
-		sampleFile->readStream_ = stream;
+		sampleFile->readStream_ = std::move(openedStream.value());
 		for (uint32_t i = 0; i < numClusters; i++) {
 			uint32_t sector = 0;
-			(void)deluge_stream_sector_of(stream, i, &sector); // best-effort; only meaningful on FatFS-family backends
+			auto sectorResult = sampleFile->readStream_->sector_of(i); // best-effort; only meaningful
+			                                                           // on FatFS-family backends
+			if (sectorResult) {
+				sector = *sectorResult;
+			}
 			sampleFile->clusters[i].sdAddress = sector;
 		}
 
@@ -987,10 +988,17 @@ getOutEarly:
 	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
-	if (sample->readStream_ != nullptr) {
-		status =
-		    deluge_stream_read_at(sample->readStream_, static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude,
-		                          cluster.data, bytesRequested, &bytesRead);
+	if (sample->readStream_.has_value()) {
+		auto readResult = sample->readStream_->read_at(
+		    static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude,
+		    std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
+		if (readResult) {
+			bytesRead = static_cast<uint32_t>(readResult->size());
+			status = DELUGE_OK;
+		}
+		else {
+			status = deluge::io::to_deluge_status(readResult.error());
+		}
 	}
 	else {
 		// No open stream_io.h handle: this Sample wasn't opened via buildAudioFileFromCard's SAMPLE

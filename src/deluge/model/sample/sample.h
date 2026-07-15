@@ -18,7 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
-#include "libdeluge/stream_io.h"
+#include "io/stream.hpp"
 #include "model/sample/sample_cluster.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
@@ -28,6 +28,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <optional>
 
 #define SAMPLE_DO_LOCKS (ALPHA_OR_BETA_VERSION)
 
@@ -183,9 +184,10 @@ public:
 	uint32_t resourceAssetId{0xFFFFFFFFu};
 
 	// Opened once by AudioFileManager::buildAudioFileFromCard (DELUGE_STREAM_READ mode), used by
-	// readClusterData for every cluster read thereafter; closed in ~Sample. nullptr for a Sample
-	// that isn't backed by a stream_io.h read (e.g. one still being recorded).
-	DelugeStream* readStream_ = nullptr;
+	// readClusterData for every cluster read thereafter; closed (via the optional's destructor) in
+	// ~Sample. Disengaged for a Sample that isn't backed by a stream_io.h read (e.g. one still being
+	// recorded).
+	std::optional<deluge::io::Stream> readStream_;
 
 protected:
 	// Project-relevance hooks (the object's hard-lease 0↔1 transitions): toggle the soft-reference on

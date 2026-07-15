@@ -1,7 +1,6 @@
 #pragma once
 #include "storage/audio/audio_file_format.h" // RawDataFormat
 #include <algorithm>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>

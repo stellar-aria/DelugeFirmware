@@ -66,6 +66,11 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
 
 					// There'll be one word in there which hasn't yet been converted. Do it now. (We've
 					// probably also just moved over the next one too, which already was converted)
+					// NOTE (accepted UB): this and the two `self_data` straddle reads below reinterpret an
+					// unaligned byte address as int32* — unaligned access + strict-aliasing UB, carried
+					// verbatim from the original inline stitch to stay golden-bit-exact. An alignment-safe
+					// rewrite (memcpy through a local int32) is tracked as future hardening; keep any change
+					// behaviour-identical.
 					auto* this_number = reinterpret_cast<int32_t*>(&prev->tail[misalignment]);
 					*this_number = convert_word(*this_number, format);
 

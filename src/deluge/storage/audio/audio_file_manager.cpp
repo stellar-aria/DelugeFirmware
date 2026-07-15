@@ -38,6 +38,7 @@
 #include "storage/audio/cluster_byte_source.h"
 #include "storage/audio/deserializer_byte_source.h"
 #include "storage/audio/stream/read_source.h"
+#include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -46,6 +47,7 @@
 #include <cstddef>
 
 #include <new>
+#include <optional>
 #include <string.h>
 
 extern "C" {
@@ -1041,186 +1043,38 @@ getOutEarly:
 	}
 #endif
 
-	int32_t misalignment = sample->audioDataStartPosBytes & 0b11;
-
-	// Give extra bytes to previous Cluster
+	// Gather the neighbor edge spans and hand off to the pure stitch core (Phase 2b). A neighbor is
+	// only passed when present AND loaded, matching the original inline gates exactly.
+	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
 		Cluster* prevCluster = sample->clusters[cluster.clusterIndex - 1].cluster;
-
 		if (prevCluster && prevCluster->loaded) {
-
-			// We first copy our first 7 bytes from here to the end of the prev Cluster...
-			memcpy(&prevCluster->data[Cluster::size], cluster.data, 7);
-
-			// If 24-bit wrong-endian data...
-			if (sample->rawDataFormat == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-				// If we hadn't previously written the "extra" bytes to the end of the prev Cluster and converted
-				// them, do so now...
-				if (!prevCluster->extraBytesAtEndConverted) {
-
-					uint32_t bytesBeforeStartOfCluster = clusterIndex * Cluster::size - sample->audioDataStartPosBytes;
-					int32_t bytesUnconvertedBeforeCluster = bytesBeforeStartOfCluster % 3;
-					if (bytesUnconvertedBeforeCluster) {
-
-						// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-						// just copied over the next one and a bit, which already was converted)
-						int32_t startPos = Cluster::size - bytesUnconvertedBeforeCluster;
-						uint8_t* thisNumber = (uint8_t*)&prevCluster->data[startPos];
-
-						uint8_t temp = thisNumber[0];
-						thisNumber[0] = thisNumber[2];
-						thisNumber[2] = temp;
-
-						// And now, copy 2 bytes back to this Cluster (that's the maximum that the float could have
-						// been overhanging the boundary)
-						memcpy(cluster.data, &prevCluster->data[Cluster::size], 2);
-					}
-
-					prevCluster->extraBytesAtEndConverted = true;
-				}
-			}
-
-			// Or, all other types of raw data conversion
-			else if (sample->rawDataFormat != RawDataFormat::NATIVE) {
-
-				// If we haven't previously written the "extra" bytes to the end of the prev Cluster and converted
-				// them, do so now...
-				if (!prevCluster->extraBytesAtEndConverted) {
-
-					// If misaligned from the 4-byte boundary
-					if (misalignment) {
-
-						// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-						// also just moved over the next one too, which already was converted)
-						int32_t startPos = Cluster::size - 4 + misalignment;
-						auto& thisNumber = reinterpret_cast<int32_t&>(prevCluster->data[startPos]);
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now, copy 3 bytes back to this Cluster (that's the maximum that the float could have
-						// been overhanging the boundary)
-						memcpy(cluster.data, &prevCluster->data[Cluster::size], 3);
-					}
-
-					prevCluster->extraBytesAtEndConverted = true;
-				}
-			}
-
-			cluster.extraBytesAtStartConverted = true;
+			prev_edge = deluge::audio::stream::StitchPrevEdge{
+			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
+			    .end_boundary_converted = &prevCluster->extraBytesAtEndConverted,
+			};
 		}
 	}
+	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
 
-	// Grab extra bytes from next Cluster
+	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
 	if (clusterIndex < static_cast<int32_t>(sample->clusters.size()) - 1) {
 		Cluster* nextCluster = sample->clusters[cluster.clusterIndex + 1].cluster;
-
 		if (nextCluster && nextCluster->loaded) {
-
-			// If 24-bit wrong-endian data...
-			if (sample->rawDataFormat == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-				uint32_t bytesBeforeStartOfNextCluster =
-				    (clusterIndex + 1) * Cluster::size - sample->audioDataStartPosBytes;
-				int32_t bytesUnconvertedBeforeNextCluster = bytesBeforeStartOfNextCluster % 3;
-
-				// If one word missed conversion...
-				if (bytesUnconvertedBeforeNextCluster) {
-
-					// If we had't previously converted the first couple of bytes of the next Cluster...
-					if (!nextCluster->extraBytesAtStartConverted) {
-
-						// We first copy the next Cluster first 7 bytes to the end of this Cluster
-						memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-
-						// Grab the unconverted bytes back from where we backed them up to
-						memcpy(&cluster.data[Cluster::size], nextCluster->firstThreeBytesPreDataConversion, 2);
-					}
-
-					// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-					// just copied over the next one and a bit, which already was converted)
-					uint8_t* thisNumber = (uint8_t*)&cluster.data[Cluster::size - bytesUnconvertedBeforeNextCluster];
-
-					uint8_t temp = thisNumber[0];
-					thisNumber[0] = thisNumber[2];
-					thisNumber[2] = temp;
-
-					// If we had't previously converted the first couple of bytes of the next Cluster, do so now...
-					if (!nextCluster->extraBytesAtStartConverted) {
-						nextCluster->extraBytesAtStartConverted = true;
-
-						// And now, copy 2 bytes back to the next Cluster (that's the maximum that the 24-bit
-						// int32_t could have been overhanging the boundary)
-						memcpy(nextCluster->data, &cluster.data[Cluster::size], 2);
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-						goto copy7ToMe;
-					}
-				}
-
-				// Or if no words missed conversion
-				else {
-					goto copy7ToMe;
-				}
-			}
-
-			// Or, all other types of raw data conversion
-			else if (sample->rawDataFormat != RawDataFormat::NATIVE) {
-
-				// If one word missed conversion...
-				if (misalignment) {
-					int32_t startPos = Cluster::size - 4 + misalignment;
-					auto& thisNumber = reinterpret_cast<int32_t&>(cluster.data[startPos]);
-
-					// If we had't previously converted the first couple of bytes of the next Cluster, do so now...
-					if (!nextCluster->extraBytesAtStartConverted) {
-
-						// We first copy the next Cluster first 7 bytes to the end of this Cluster
-						memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-
-						// There'll be one word in there which hasn't yet been converted from float. Do it now
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now, copy 3 bytes back to the next Cluster (that's the maximum that the float could
-						// have been overhanging the boundary)
-						memcpy(nextCluster->data, &cluster.data[Cluster::size], 3);
-
-						nextCluster->extraBytesAtStartConverted = true;
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-
-						// Grab the unconverted bytes back from where we backed them up to
-						memcpy(&cluster.data[Cluster::size], nextCluster->firstThreeBytesPreDataConversion, 3);
-
-						// There'll be one word in there which hasn't yet been converted from float. Do it now
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now just copy the converted-from-float first bytes from the next Cluster to the end
-						// of this one
-						goto copy7ToMe;
-					}
-				}
-				else {
-					goto copy7ToMe;
-				}
-			}
-
-			else {
-copy7ToMe:
-				// We copy the next Cluster's first 7 bytes to the end of this Cluster
-				memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-			}
-
-			cluster.extraBytesAtEndConverted = true;
+			next_edge = deluge::audio::stream::StitchNextEdge{
+			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),
+			    .unconverted_head = std::span<const std::byte, 3>(
+			        reinterpret_cast<const std::byte*>(nextCluster->firstThreeBytesPreDataConversion), 3),
+			    .start_boundary_converted = &nextCluster->extraBytesAtStartConverted,
+			};
 		}
 	}
+	deluge::audio::stream::StitchNextEdge* next_ptr = next_edge ? &*next_edge : nullptr;
+
+	std::span<std::byte> self_span(reinterpret_cast<std::byte*>(cluster.data), Cluster::size + 7);
+	deluge::audio::stream::stitch_boundaries(
+	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
+	    cluster.extraBytesAtStartConverted, cluster.extraBytesAtEndConverted, prev_ptr, next_ptr);
 
 	cluster.loaded = true;
 	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in

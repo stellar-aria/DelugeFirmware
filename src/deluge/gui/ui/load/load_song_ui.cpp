@@ -331,7 +331,8 @@ void LoadSongUI::performLoad() {
 	}
 	Error error;
 
-	error = StorageManager::openDelugeFile(currentFileItem, "song");
+	std::string filePath = currentDir + "/" + currentFileItem->filename;
+	error = StorageManager::openDelugeFile(filePath.c_str(), "song");
 
 	currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
 	indicator_leds::setLedState(IndicatorLED::LOAD, false);
@@ -555,10 +556,10 @@ swapDone:
 		if (thisOutput && thisOutput->type == OutputType::MIDI_OUT) {
 			MIDIInstrument* midiInstrument = (MIDIInstrument*)thisOutput;
 			if (midiInstrument->loadDeviceDefinitionFile) {
-				FilePointer tempfp;
-				bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str(), &tempfp);
+				bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str());
 				if (fileExists) {
-					StorageManager::loadMidiDeviceDefinitionFile(midiInstrument, &tempfp,
+					StorageManager::loadMidiDeviceDefinitionFile(midiInstrument,
+					                                             midiInstrument->deviceDefinitionFileName.c_str(),
 					                                             &midiInstrument->deviceDefinitionFileName, false);
 				}
 			}
@@ -836,7 +837,8 @@ void LoadSongUI::drawSongPreview(bool toStore) {
 	Error error;
 	Deserializer* reader;
 	char const* tagName;
-	error = StorageManager::openDelugeFile(currentFileItem, "song");
+	std::string filePath = currentDir + "/" + currentFileItem->filename;
+	error = StorageManager::openDelugeFile(filePath.c_str(), "song");
 	if (error != Error::NONE) {
 		if (error != Error::NONE) {
 			display->displayError(error);

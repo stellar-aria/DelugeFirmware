@@ -364,9 +364,9 @@ bool Song::ensureAtLeastOneSessionClip() {
 	                                                                                Availability::ANY);
 	if (result) {
 		std::string newPresetName = result.value()->getFilenameWithoutExtension();
-		error =
-		    StorageManager::loadInstrumentFromFile(this, firstClip, OutputType::SYNTH, false, &newInstrument,
-		                                           &result.value()->filePointer, &newPresetName, &Browser::currentDir);
+		std::string filePath = Browser::currentDir + "/" + result.value()->filename;
+		error = StorageManager::loadInstrumentFromFile(this, firstClip, OutputType::SYNTH, false, &newInstrument,
+		                                               filePath.c_str(), &newPresetName, &Browser::currentDir);
 
 		Browser::emptyFileItems();
 		if (error != Error::NONE) {
@@ -4826,9 +4826,9 @@ gotAnInstrument: {}
 		Error error = Error::NONE;
 		if (!newInstrument) {
 			std::string newPresetName = fileItem->getFilenameWithoutExtension();
-			error =
-			    StorageManager::loadInstrumentFromFile(this, nullptr, newOutputType, false, &newInstrument,
-			                                           &fileItem->filePointer, &newPresetName, &Browser::currentDir);
+			std::string filePath = Browser::currentDir + "/" + fileItem->filename;
+			error = StorageManager::loadInstrumentFromFile(this, nullptr, newOutputType, false, &newInstrument,
+			                                               filePath.c_str(), &newPresetName, &Browser::currentDir);
 		}
 
 		Browser::emptyFileItems();

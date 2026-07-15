@@ -26,8 +26,9 @@
 // Must precede the first system header include.
 #define _FILE_OFFSET_BITS 64
 
-#include "board_config.h" // TRIGGER_CLOCK_INPUT_NUM_TIMES_STORED
-#include "diskio.h"       // FatFS DSTATUS/DRESULT/STA_*/RES_*
+#include "board_config.h"           // TRIGGER_CLOCK_INPUT_NUM_TIMES_STORED
+#include "diskio.h"                 // FatFS DSTATUS/DRESULT/STA_*/RES_*
+#include "libdeluge/block_device.h" // DelugeStatus, DELUGE_ERR_*
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -188,6 +189,51 @@ DRESULT disk_write_without_streaming_first(BYTE pdrv, const BYTE* buff, DWORD se
 		done += (size_t)n;
 	}
 	return RES_OK;
+}
+
+DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count) {
+	(void)unit;
+	if (host_img_fd < 0) {
+		return DELUGE_ERR_NODEV;
+	}
+	if ((uint64_t)sector + count > host_img_sectors) {
+		return DELUGE_ERR_PARAM;
+	}
+	size_t total = (size_t)count * HOST_SECTOR_SIZE;
+	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
+	size_t done = 0;
+	while (done < total) {
+		ssize_t n = pread(host_img_fd, dst + done, total - done, base + (off_t)done);
+		if (n <= 0) {
+			return DELUGE_ERR_IO;
+		}
+		done += (size_t)n;
+	}
+	return DELUGE_OK;
+}
+
+DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count) {
+	(void)unit;
+	if (host_img_fd < 0) {
+		return DELUGE_ERR_NODEV;
+	}
+	if (!host_img_writable) {
+		return DELUGE_ERR_WRITE_PROTECTED;
+	}
+	if ((uint64_t)sector + count > host_img_sectors) {
+		return DELUGE_ERR_PARAM;
+	}
+	size_t total = (size_t)count * HOST_SECTOR_SIZE;
+	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
+	size_t done = 0;
+	while (done < total) {
+		ssize_t n = pwrite(host_img_fd, src + done, total - done, base + (off_t)done);
+		if (n <= 0) {
+			return DELUGE_ERR_IO;
+		}
+		done += (size_t)n;
+	}
+	return DELUGE_OK;
 }
 
 // Fixed timestamp (2024-01-01 00:00:00) in FatFS packed form. No RTC on host.

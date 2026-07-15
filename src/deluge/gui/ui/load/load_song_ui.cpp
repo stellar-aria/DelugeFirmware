@@ -331,7 +331,7 @@ void LoadSongUI::performLoad() {
 	}
 	Error error;
 
-	std::string filePath = currentDir + "/" + currentFileItem->filename;
+	std::string filePath = currentDir + "/" + currentFileItem->getFilenameWithExtension();
 	error = StorageManager::openDelugeFile(filePath.c_str(), "song");
 
 	currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
@@ -837,7 +837,7 @@ void LoadSongUI::drawSongPreview(bool toStore) {
 	Error error;
 	Deserializer* reader;
 	char const* tagName;
-	std::string filePath = currentDir + "/" + currentFileItem->filename;
+	std::string filePath = currentDir + "/" + currentFileItem->getFilenameWithExtension();
 	error = StorageManager::openDelugeFile(filePath.c_str(), "song");
 	if (error != Error::NONE) {
 		if (error != Error::NONE) {

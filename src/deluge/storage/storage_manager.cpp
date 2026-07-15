@@ -158,7 +158,11 @@ cutFolderPathAndTryCreating:
 
 		// Otherwise, just return the appropriate error.
 		else {
-			return std::unexpected(Error::WRITE_FAIL);
+			error = delugeStatusToError(deluge::io::to_deluge_status(opened.error()));
+			if (error == Error::SD_CARD) {
+				error = Error::WRITE_FAIL; // Get a bit more specific if we only got the most general error.
+			}
+			return std::unexpected(error);
 		}
 	}
 
@@ -1084,6 +1088,11 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 	}
 	if (memoryBased)
 		return Error::NONE;
+
+	if ((beginningString || endString) && !path) {
+		return Error::WRITE_FAIL; // Can't verify beginning/end strings without reopening by path.
+	}
+
 	Error error = writeBufferToFile();
 	if (error != Error::NONE) {
 		return Error::WRITE_FAIL;

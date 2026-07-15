@@ -3758,7 +3758,7 @@ Instrument* InstrumentClip::changeOutputType(ModelStackWithTimelineCounter* mode
 
 		if (!newInstrument) {
 			std::string newPresetName = fileItem->getFilenameWithoutExtension();
-			std::string filePath = Browser::currentDir + "/" + fileItem->filename;
+			std::string filePath = Browser::currentDir + "/" + fileItem->getFilenameWithExtension();
 			error =
 			    StorageManager::loadInstrumentFromFile(modelStack->song, nullptr, newOutputType, false, &newInstrument,
 			                                           filePath.c_str(), &newPresetName, &Browser::currentDir);

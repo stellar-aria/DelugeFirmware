@@ -13,8 +13,10 @@ function(create_specs_driver driver_name spec_dir)
   create_test_sourcelist(specs ${driver_name}.cpp ${spec_sources})
   add_executable(${driver_name} ${specs}
     # convert_spec.cpp exercises the real convert_word implementation (not a mock), so its
-    # translation unit must be linked in.
+    # translation unit must be linked in. stitch_spec.cpp exercises the real stitch_boundaries
+    # (which itself calls convert_word), so stitch.cpp must be linked too.
     ../../src/deluge/storage/audio/stream/convert.cpp
+    ../../src/deluge/storage/audio/stream/stitch.cpp
     ../../src/deluge/util/audio_format_helpers.cpp
   )
   target_link_libraries(${driver_name} PRIVATE c++spec)

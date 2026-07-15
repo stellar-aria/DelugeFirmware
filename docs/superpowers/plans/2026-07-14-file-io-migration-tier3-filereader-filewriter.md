@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **This migration is one atomic compilation unit through Task 1; it cannot be split further along the call-chain axis.** `FileReader::readFIL`/`FileWriter::writeFIL`'s only locator-based fast-open primitive (`StorageManager::openFilePointer`, a raw `FFOBJID` field poke) has **no valid replacement once the member's type changes** — `deluge::io::File` only exposes path-based `open()`, deliberately, since the whole point of Tier 2's adapter cache is that locator-based fast-reopen no longer needs to be app-visible. Since `openFilePointer` is called (directly or via the free functions `openXMLFile`/`openJsonFile`) from every layer of the wrapper chain, and none of those layers currently have a path in scope (only a `FilePointer*`), the path has to be threaded in from the outermost GUI call site all the way down, in one shot. **Task 1 therefore covers everything inside `storage_manager.h`/`.cpp` (all 13 in-scope signatures) plus 3 external files forced by the same member-type change — it will not produce a linkable firmware by itself** (external call sites in Tasks 2-4 still pass the old argument shapes until they land). Verify Task 1 by confirming `storage_manager.cpp`, `Deserializer.cpp`, `JsonDeserializer.cpp`, `deserializer_byte_source.cpp`, `save_song_ui.cpp`, `audio_file_manager.cpp`, and `fatfs.cpp` show **zero** compile errors, and that all remaining `dbt build`/`dbt sim` errors are confined to the files listed in Tasks 2-4 (each with an old-signature-shaped call). Only Task 5's build must be fully green.
-- `DelugeFileOpenMode` (`include/libdeluge/file_io.h`) has exactly two values: `DELUGE_FILE_READ` and `DELUGE_FILE_WRITE_CREATE` (always creates/truncates — there is **no** "fail if the file already exists" mode, unlike the raw `FA_CREATE_NEW` this replaces). `StorageManager::createFile`'s `mayOverwrite=false` path is real, load-bearing behaviour (several save flows check `Error::FILE_ALREADY_EXISTS` to trigger an overwrite-confirmation prompt) and must keep working — Task 1 adds an explicit existence pre-check for this case (see Task 1, Step 5). This firmware has no concurrent file writers, so a plain check-then-create is race-free in practice.
+- `DelugeFileOpenMode` (`include/libdeluge/file_io.h`) gains a third value in this task, `DELUGE_FILE_WRITE_CREATE_NEW` (fails with `DELUGE_ERR_EXISTS`/`Status::EXISTS` if the file already exists — the `FA_CREATE_NEW` semantics `StorageManager::createFile`'s `mayOverwrite=false` path needs). This is a real, load-bearing capability (several save flows check `Error::FILE_ALREADY_EXISTS` to trigger an overwrite-confirmation prompt), not optional polish — and it's a genuine boundary gap, not something to work around at the app level: `deluge_file_open` has exactly one backend today (`src/fatfs/file_io.cpp`), so this is a small, contained, additive change (see Task 1, Step 5).
 - `deluge::io::File::write`'s signature (`std::expected<uint32_t, Status> write(std::span<const std::byte> buffer)`) already matches the shape `save_song_ui.cpp`'s collect-media routine expects from `StorageManager::createFile`'s return value — no change needed to that half of that routine.
 - Every new failure path introduced by swapping a "never fails" raw-FIL poke for a real path-based open (which genuinely can fail, e.g. TOCTOU between two resolution steps) must be handled via this codebase's existing `*error`/`return nullptr` or `std::unexpected(...)` conventions at that call site — never left as an unchecked `.value()`/`operator->()` that would crash on failure.
 - Preserve exact existing behaviour of `closeAfterWriting`'s beginning/end string verification (no byte-count strictness beyond what the current `FRESULT`-only check already enforces) — this is a translation, not a behaviour tightening.
@@ -22,6 +22,8 @@
 ### Task 1: `FileReader`/`FileWriter` core redesign + `storage_manager.h`/`.cpp`'s full `FilePointer` retirement (+ 3 forced external files)
 
 **Files:**
+- Modify: `include/libdeluge/file_io.h`
+- Modify: `src/fatfs/file_io.cpp`
 - Modify: `src/deluge/storage/storage_manager.h`
 - Modify: `src/deluge/storage/storage_manager.cpp`
 - Modify: `src/deluge/storage/Deserializer.cpp`
@@ -35,6 +37,7 @@
 
 **Interfaces:**
 - Consumes: `deluge::io::File::open(std::string_view, DelugeFileOpenMode) -> std::expected<File, Status>`, `.read(std::span<std::byte>) -> std::expected<std::span<std::byte>, Status>`, `.write(std::span<const std::byte>) -> std::expected<uint32_t, Status>`, `.seek(uint32_t) -> std::expected<void, Status>`, `.size() -> std::expected<uint32_t, Status>`, `.close() -> std::expected<void, Status>` (`src/deluge/io/file.hpp`). `deluge::io::mkdir(std::string_view) -> std::expected<void, Status>`.
+- Produces (used within this same task, by Step 6): `DELUGE_FILE_WRITE_CREATE_NEW` (`include/libdeluge/file_io.h`'s `DelugeFileOpenMode`), mapped to `FA_WRITE | FA_CREATE_NEW` in `src/fatfs/file_io.cpp`'s `to_fatfs_mode`.
 - Produces (for Tasks 2-4): `StorageManager::openXMLFile(char const* path, XMLDeserializer&, char const* firstTagName, char const* altTagName = "", bool ignoreIncorrectFirmware = false) -> Error`; `openJsonFile` (same shape, `JsonDeserializer&`); `openDelugeFile(char const* path, char const* firstTagName, char const* altTagName = "", bool ignoreIncorrectFirmware = false) -> Error`; `openInstrumentFile(OutputType, char const* path) -> Error`; `openMidiDeviceDefinitionFile(char const* path) -> Error`; `loadMidiDeviceDefinitionFile(MIDIInstrument*, char const* path, std::string* fileName, bool updateFileName = true) -> Error`; `openPatternFile(char const* path) -> Error`; `loadPatternFile(char const* path, std::string* fileName, bool overwriteExisting, bool noScaling, bool previewOnly, bool selectedDrumOnly) -> Error`; `openFavouriteFile(char const* path) -> Error`; `loadFavouriteFile(char const* path, std::string* fileName) -> Error`; `loadInstrumentFromFile(Song*, InstrumentClip*, OutputType, bool, Instrument**, char const* path, std::string* name, std::string* dirPath) -> Error`; `loadSynthToDrum(Song*, InstrumentClip*, bool, SoundDrum**, char const* path, std::string* name, std::string* dirPath) -> Error`; `createFile(char const* filePath, bool mayOverwrite) -> std::expected<deluge::io::File, Error>`. `StorageManager::openFilePointer` and `FilePointer* filePointer` params are **gone** — do not reintroduce them.
 
 ---
@@ -215,7 +218,53 @@ Error FileWriter::writeBufferToFile() {
 }
 ```
 
-- [ ] **Step 5: `StorageManager::createFile`/`createXMLFile`/`createJsonFile`**
+- [ ] **Step 5: Extend `DelugeFileOpenMode` with an exclusive-create mode**
+
+In `include/libdeluge/file_io.h`, change:
+```c
+typedef enum DelugeFileOpenMode {
+	DELUGE_FILE_READ,         ///< open an existing file for reading
+	DELUGE_FILE_WRITE_CREATE, ///< create the file, truncating if it exists
+} DelugeFileOpenMode;
+```
+to:
+```c
+typedef enum DelugeFileOpenMode {
+	DELUGE_FILE_READ,             ///< open an existing file for reading
+	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
+	DELUGE_FILE_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists
+} DelugeFileOpenMode;
+```
+
+In `src/fatfs/file_io.cpp`, change `to_fatfs_mode` (currently ~line 7-14):
+```cpp
+FileAccessMode to_fatfs_mode(DelugeFileOpenMode mode) {
+	switch (mode) {
+	case DELUGE_FILE_READ:
+		return FA_READ;
+	case DELUGE_FILE_WRITE_CREATE:
+		return FA_WRITE | FA_CREATE_ALWAYS;
+	}
+	return FA_READ;
+}
+```
+to:
+```cpp
+FileAccessMode to_fatfs_mode(DelugeFileOpenMode mode) {
+	switch (mode) {
+	case DELUGE_FILE_READ:
+		return FA_READ;
+	case DELUGE_FILE_WRITE_CREATE:
+		return FA_WRITE | FA_CREATE_ALWAYS;
+	case DELUGE_FILE_WRITE_CREATE_NEW:
+		return FA_WRITE | FA_CREATE_NEW;
+	}
+	return FA_READ;
+}
+```
+No other change is needed in `file_io.cpp` — `deluge_file_open`'s `FatFS::Error::EXIST → DELUGE_ERR_EXISTS` mapping already exists in `to_deluge_status` (used today by `deluge_file_mkdir`), and `deluge::io::File::open` (`src/deluge/io/file.hpp`/`.cpp`) already forwards the raw `DelugeFileOpenMode` value it's given — it needs no change at all.
+
+- [ ] **Step 6: `StorageManager::createFile`/`createXMLFile`/`createJsonFile`**
 
 Replace `StorageManager::createFile` (currently ~line 97-174) with:
 
@@ -232,22 +281,12 @@ std::expected<deluge::io::File, Error> StorageManager::createFile(char const* fi
 		return std::unexpected(error);
 	}
 
-	// file_io.h's DELUGE_FILE_WRITE_CREATE mode always truncates/creates - it has no "fail if the file
-	// already exists" mode (unlike the raw FA_CREATE_NEW this replaces). This firmware has no concurrent
-	// writers, so a plain existence check first is race-free in practice, and preserves the
-	// overwrite-confirmation behaviour several save flows depend on (checking for FILE_ALREADY_EXISTS).
-	if (!mayOverwrite) {
-		auto existing = deluge::io::File::open(filePath, DELUGE_FILE_READ);
-		if (existing) {
-			auto _ = existing->close();
-			return std::unexpected(Error::FILE_ALREADY_EXISTS);
-		}
-	}
+	DelugeFileOpenMode mode = mayOverwrite ? DELUGE_FILE_WRITE_CREATE : DELUGE_FILE_WRITE_CREATE_NEW;
 
 	bool triedCreatingFolder = false;
 
 tryAgain:
-	auto opened = deluge::io::File::open(filePath, DELUGE_FILE_WRITE_CREATE);
+	auto opened = deluge::io::File::open(filePath, mode);
 	if (!opened) {
 
 processError:
@@ -285,6 +324,11 @@ cutFolderPathAndTryCreating:
 			else {
 				goto processError;
 			}
+		}
+
+		// The file already exists and mayOverwrite was false.
+		else if (opened.error() == deluge::io::Status::EXISTS) {
+			return std::unexpected(Error::FILE_ALREADY_EXISTS);
 		}
 
 		// Otherwise, just return the appropriate error.
@@ -338,7 +382,7 @@ Error StorageManager::createJsonFile(char const* filePath, JsonSerializer& write
 }
 ```
 
-- [ ] **Step 6: Delete `StorageManager::openFilePointer`**
+- [ ] **Step 7: Delete `StorageManager::openFilePointer`**
 
 In `src/deluge/storage/storage_manager.cpp`, delete the entire `StorageManager::openFilePointer` function body (currently ~line 286-301):
 ```cpp
@@ -362,7 +406,7 @@ void StorageManager::openFilePointer(FilePointer* fp, FileReader& reader) {
 ```
 This also resolves the `TODO.md`-tracked raw `FFOBJID.id` poke (`reader.readFIL.obj.id = fileSystem.id;`) as a side effect — it lived entirely inside this function.
 
-- [ ] **Step 7: `openXMLFile`/`openJsonFile` free functions + `openDelugeFile`**
+- [ ] **Step 8: `openXMLFile`/`openJsonFile` free functions + `openDelugeFile`**
 
 Replace `StorageManager::openXMLFile` (currently ~line 721-735):
 ```cpp
@@ -436,7 +480,7 @@ Error openDelugeFile(char const* path, char const* firstTagName, char const* alt
 ```
 (this declaration is already covered by Step 3's full-block replacement above — this note is just so the change isn't missed if applying steps out of order).
 
-- [ ] **Step 8: The four wrapper-opens**
+- [ ] **Step 9: The four wrapper-opens**
 
 Replace `StorageManager::openInstrumentFile` (currently ~line 303-325):
 ```cpp
@@ -501,7 +545,7 @@ Error StorageManager::openFavouriteFile(char const* path) {
 }
 ```
 
-- [ ] **Step 9: The five wrapper-loads**
+- [ ] **Step 10: The five wrapper-loads**
 
 Replace `StorageManager::loadInstrumentFromFile`'s signature and its `openInstrumentFile` call + log line (currently ~line 329-337; the rest of the function body, lines ~338-423, is unchanged — do not modify it):
 ```cpp
@@ -584,7 +628,7 @@ Error StorageManager::loadSynthToDrum(Song* song, InstrumentClip* clip, bool may
 ```
 (rest unchanged).
 
-- [ ] **Step 10: `FileWriter::closeAfterWriting`**
+- [ ] **Step 11: `FileWriter::closeAfterWriting`**
 
 Replace the whole function (currently ~line 1023-1092). Note the reordering: the size check now runs *before* `closeWriter()` rather than after, because `deluge::io::File` has no way to query a closed handle's last-known size (unlike the raw `FIL` this replaces, whose `f_size()` macro was a pure struct-field read that happened to survive `f_close()`). Several real call sites invoke `closeFileAfterWriting()` with all-default (null) arguments, meaning `path`/`beginningString`/`endString` are all null and only the size check runs — that path must keep working without a reopen.
 
@@ -662,7 +706,7 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 }
 ```
 
-- [ ] **Step 11: `Deserializer.cpp` — drop the dead `FilePointer*` param**
+- [ ] **Step 12: `Deserializer.cpp` — drop the dead `FilePointer*` param**
 
 In `src/deluge/storage/Deserializer.cpp`, change (currently ~line 834-835):
 ```cpp
@@ -675,7 +719,7 @@ Error XMLDeserializer::openXMLFile(char const* firstTagName, char const* altTagN
 ```
 (the function body, lines ~837-853, is unchanged — `filePointer` was never referenced inside it).
 
-- [ ] **Step 12: `JsonDeserializer.cpp` — drop the dead `FilePointer*` param**
+- [ ] **Step 13: `JsonDeserializer.cpp` — drop the dead `FilePointer*` param**
 
 In `src/deluge/storage/JsonDeserializer.cpp`, change (currently ~line 569-570):
 ```cpp
@@ -688,7 +732,7 @@ Error JsonDeserializer::openJsonFile(char const* firstTagName, char const* altTa
 ```
 (the function body, lines ~572-591, is unchanged).
 
-- [ ] **Step 13: `deserializer_byte_source.cpp`/`.h` — the raw `readFIL` reach found during plan-writing**
+- [ ] **Step 14: `deserializer_byte_source.cpp`/`.h` — the raw `readFIL` reach found during plan-writing**
 
 In `src/deluge/storage/audio/deserializer_byte_source.cpp`, replace `readNewCluster` (currently ~line 39-45):
 ```cpp
@@ -719,7 +763,7 @@ to:
 /// `AudioFileManager::buildAudioFileFromCard`'s WaveTable branch) before constructing.
 ```
 
-- [ ] **Step 14: `save_song_ui.cpp` — the raw `readFIL` reach found during plan-writing**
+- [ ] **Step 15: `save_song_ui.cpp` — the raw `readFIL` reach found during plan-writing**
 
 In `src/deluge/gui/ui/save/save_song_ui.cpp`, add near the existing `#include "libdeluge/file_io.h"`:
 ```cpp
@@ -804,7 +848,7 @@ with:
 ```
 (the loop's remaining lines — checking `!written || written.value() != bytesRead`, the `if (bytesRead < Cluster::size) break;`, and the trailing `activeDeserializer->closeWriter(); // Close source file` — are unchanged; `created` is already a `deluge::io::File` after Step 5 above, so `created.value().write(...)` needs no change).
 
-- [ ] **Step 15: `audio_file_manager.cpp` — the two raw `readFIL` reaches found during plan-writing**
+- [ ] **Step 16: `audio_file_manager.cpp` — the two raw `readFIL` reaches found during plan-writing**
 
 In `src/deluge/storage/audio/audio_file_manager.cpp`, add near the existing includes:
 ```cpp
@@ -874,7 +918,7 @@ with:
 	}
 ```
 
-- [ ] **Step 16: `fatfs.cpp` — stale comment referencing the deleted member**
+- [ ] **Step 17: `fatfs.cpp` — stale comment referencing the deleted member**
 
 In `src/fatfs/fatfs.cpp`, `File::open_by_locator`'s comment (currently ~line 27-29) names `FileReader::readFIL` by name. Change:
 ```cpp
@@ -888,7 +932,7 @@ to:
                     // in-class initializer, so this isn't redundant.
 ```
 
-- [ ] **Step 17: Confirm scope — grep for remaining raw `readFIL`/`writeFIL` references**
+- [ ] **Step 18: Confirm scope — grep for remaining raw `readFIL`/`writeFIL` references**
 
 Run:
 ```bash
@@ -896,13 +940,13 @@ grep -rn "readFIL\|writeFIL" src/deluge src/fatfs include/libdeluge tests 2>/dev
 ```
 Expected: **zero matches**. If any remain, they were missed by this task and must be resolved before proceeding (do not defer — this task's whole point is retiring this member).
 
-- [ ] **Step 18: Build check — confirm this task's own files are clean**
+- [ ] **Step 19: Build check — confirm this task's own files are clean**
 
 Run `dbt build Debug` (or the project's equivalent) and confirm:
-- Zero errors in: `storage_manager.h`, `storage_manager.cpp`, `Deserializer.cpp`, `JsonDeserializer.cpp`, `deserializer_byte_source.cpp`, `deserializer_byte_source.h`, `save_song_ui.cpp`, `audio_file_manager.cpp`, `fatfs.cpp`.
+- Zero errors in: `include/libdeluge/file_io.h`, `src/fatfs/file_io.cpp`, `storage_manager.h`, `storage_manager.cpp`, `Deserializer.cpp`, `JsonDeserializer.cpp`, `deserializer_byte_source.cpp`, `deserializer_byte_source.h`, `save_song_ui.cpp`, `audio_file_manager.cpp`, `fatfs.cpp`.
 - All remaining errors are confined to files listed in Tasks 2-4's "Files" sections below (each will show a call passing the old argument shape — e.g. `&fp` where `char const* path` is now expected). List the offending files/line numbers in the task report so Tasks 2-4 can cross-check nothing was missed.
 
-- [ ] **Step 19: `memoryBased`-path unit tests**
+- [ ] **Step 20: `memoryBased`-path unit tests**
 
 Add `tests/spec/storage_manager_spec.cpp` (new file) exercising the parts of this task that don't need real disk I/O — the `memoryBased` construction path never touches `file`, so this is fully testable:
 
@@ -928,11 +972,13 @@ TEST(StorageManagerFileReaderWriter, memoryBasedWriterClosesWithoutTouchingFile)
 
 Wire it into `tests/spec/CMakeLists.txt` following the existing pattern for other `*_spec.cpp` files in that directory (add the new source to the same target list `file_io_spec.cpp` is already registered under).
 
-- [ ] **Step 20: Extend `tests/spec/file_io_spec.cpp` — `createFile`'s `mayOverwrite=false` existence check**
+- [ ] **Step 21: Extend `tests/spec/file_io_spec.cpp` — `createFile`'s `mayOverwrite=false` mode selection**
 
-Add a case verifying the new pre-check logic added in Step 5 is structurally present (hand-constructed, matching this file's existing no-real-disk pattern — see the file's existing `open_by_locator` cases for the style to follow): confirm that `StorageManager::createFile`'s implementation, when `mayOverwrite` is `false`, performs a `DELUGE_FILE_READ`-mode existence probe before any `DELUGE_FILE_WRITE_CREATE` attempt. Since this repo's test harness has no real mountable filesystem (`mock_diskio.cpp` reports `STA_NOINIT` unconditionally — the same accepted gap as Tiers 2 and 4), this is necessarily a code-path/behavioural-shape check rather than an end-to-end disk test; follow `file_io_spec.cpp`'s existing convention for this constraint.
+Add cases (hand-constructed, matching this file's existing no-real-disk pattern — see the file's existing `open_by_locator` cases for the style to follow) covering the boundary extension added in Step 6:
+- `to_fatfs_mode(DELUGE_FILE_WRITE_CREATE_NEW)` returns `FA_WRITE | FA_CREATE_NEW` (a pure, real, callable unit check — `to_fatfs_mode` takes no I/O).
+- `StorageManager::createFile`'s implementation, when `mayOverwrite` is `false`, opens with `DELUGE_FILE_WRITE_CREATE_NEW` rather than `DELUGE_FILE_WRITE_CREATE` (when `mayOverwrite` is `true`) — a code-path/behavioural-shape check, since this repo's test harness has no real mountable filesystem (`mock_diskio.cpp` reports `STA_NOINIT` unconditionally — the same accepted gap as Tiers 2 and 4); follow `file_io_spec.cpp`'s existing convention for this constraint.
 
-- [ ] **Step 21: Commit**
+- [ ] **Step 22: Commit**
 
 ```bash
 git add src/deluge/storage/storage_manager.h src/deluge/storage/storage_manager.cpp \

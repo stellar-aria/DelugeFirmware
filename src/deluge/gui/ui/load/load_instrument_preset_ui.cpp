@@ -591,16 +591,14 @@ void LoadInstrumentPresetUI::revertToInitialPreset() {
 				// Try getting from file
 				std::string filePath = getCurrentFilePath();
 
-				FilePointer tempFilePointer;
-
-				bool success = StorageManager::fileExists(filePath.c_str(), &tempFilePointer);
+				bool success = StorageManager::fileExists(filePath.c_str());
 				if (!success) {
 					return;
 				}
 
 				Error error = StorageManager::loadInstrumentFromFile(currentSong, instrumentClipToLoadFor,
 				                                                     initialOutputType, false, &initialInstrument,
-				                                                     &tempFilePointer, &initialName, &initialDirPath);
+				                                                     filePath.c_str(), &initialName, &initialDirPath);
 				if (error != Error::NONE) {
 					return;
 				}
@@ -806,7 +804,7 @@ giveUsedError:
 
 		// synth or kit
 		error = StorageManager::loadInstrumentFromFile(currentSong, instrumentClipToLoadFor, outputTypeToLoad, false,
-		                                               &newInstrument, &currentFileItem->filePointer, &enteredText,
+		                                               &newInstrument, getCurrentFilePath().c_str(), &enteredText,
 		                                               &currentDir);
 
 		if (error != Error::NONE) {
@@ -908,10 +906,10 @@ giveUsedError:
 	if (newInstrument->type == OutputType::MIDI_OUT) {
 		MIDIInstrument* midiInstrument = (MIDIInstrument*)newInstrument;
 		if (midiInstrument->loadDeviceDefinitionFile) {
-			FilePointer tempfp;
-			bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str(), &tempfp);
+			bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str());
 			if (fileExists) {
-				StorageManager::loadMidiDeviceDefinitionFile(midiInstrument, &tempfp,
+				StorageManager::loadMidiDeviceDefinitionFile(midiInstrument,
+				                                             midiInstrument->deviceDefinitionFileName.c_str(),
 				                                             &midiInstrument->deviceDefinitionFileName, false);
 			}
 		}
@@ -950,7 +948,7 @@ Error LoadInstrumentPresetUI::performLoadSynthToKit() {
 
 	// swaps out the drum pointed to by soundDrumToReplace
 	Error error = StorageManager::loadSynthToDrum(currentSong, instrumentClipToLoadFor, false, &soundDrumToReplace,
-	                                              &currentFileItem->filePointer, &enteredText, &currentDir);
+	                                              getCurrentFilePath().c_str(), &enteredText, &currentDir);
 	if (error != Error::NONE) {
 		return error;
 	}
@@ -1453,9 +1451,10 @@ doPendingPresetNavigation:
 	// TODO: This isn't true, it's an argument so that must have changed at some point. This logic will create a clone
 	// if anything other than unused is passed in
 	if (!toReturn.fileItem->instrument) {
-		toReturn.error = StorageManager::loadInstrumentFromFile(
-		    currentSong, nullptr, outputType, false, &toReturn.fileItem->instrument, &toReturn.fileItem->filePointer,
-		    &newName, &Browser::currentDir);
+		std::string filePath = Browser::currentDir + "/" + toReturn.fileItem->getFilenameWithExtension();
+		toReturn.error = StorageManager::loadInstrumentFromFile(currentSong, nullptr, outputType, false,
+		                                                        &toReturn.fileItem->instrument, filePath.c_str(),
+		                                                        &newName, &Browser::currentDir);
 		if (toReturn.error != Error::NONE) {
 			emptyFileItems();
 			return toReturn;

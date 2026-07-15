@@ -67,8 +67,7 @@ std::string FavouritesManager::getFilenameForSave() const {
 void FavouritesManager::loadFavouritesBank() {
 	resetFavourites();
 	std::string filePath = getFilenameForSave();
-	FilePointer fileToLoad{};
-	bool fileExists = StorageManager::fileExists(filePath.c_str(), &fileToLoad);
+	bool fileExists = StorageManager::fileExists(filePath.c_str());
 	if (!fileExists) {
 		// Create an empty bank file and keep the in-memory defaults.
 		saveFavouriteBank();
@@ -76,7 +75,7 @@ void FavouritesManager::loadFavouritesBank() {
 	}
 	std::string path;
 	path = filePath.c_str();
-	Error error = StorageManager::loadFavouriteFile(&fileToLoad, &path);
+	Error error = StorageManager::loadFavouriteFile(filePath.c_str(), &path);
 	if (error != Error::NONE) {
 		resetFavourites();
 	}

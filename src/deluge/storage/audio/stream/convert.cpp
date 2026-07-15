@@ -29,7 +29,7 @@ int32_t convert_word(int32_t word, RawDataFormat format) {
 // loop bounds, and pointer arithmetic are otherwise byte-identical to the original.
 void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawDataFormat format,
                           ConvertGeometry geometry, size_t cluster_size, size_t cluster_size_magnitude,
-                          std::span<std::byte, 3> first_three_pre_conversion_out, YieldFn yield, void* yield_ctx) {
+                          std::span<std::byte, 3> unconverted_head_out, YieldFn yield, void* yield_ctx) {
 	char* char_data = reinterpret_cast<char*>(data.data());
 
 	// We haven't yet figured out where the audio data starts
@@ -38,7 +38,7 @@ void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawD
 	}
 
 	if (format != RawDataFormat::NATIVE) {
-		std::copy(char_data, &char_data[3], reinterpret_cast<char*>(first_three_pre_conversion_out.data()));
+		std::copy(char_data, &char_data[3], reinterpret_cast<char*>(unconverted_head_out.data()));
 
 		int32_t start_pos = geometry.audio_data_start_pos_bytes;
 		int32_t start_cluster = start_pos >> cluster_size_magnitude;

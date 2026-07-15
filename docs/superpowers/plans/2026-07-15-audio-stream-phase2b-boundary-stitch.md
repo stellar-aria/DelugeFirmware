@@ -41,19 +41,19 @@ namespace deluge::audio::stream {
 
 // Edge of the PREVIOUS cluster: a mutable view of prevCluster->data over [cluster_size-4, cluster_size+7)
 // (11 bytes) — so tail[4+k] == prevCluster->data[cluster_size+k], tail[0..4) == prevCluster->data[size-4..size).
-// `extra_end_converted` points at prevCluster->extraBytesAtEndConverted.
+// `end_boundary_converted` points at prevCluster->extraBytesAtEndConverted.
 struct StitchPrevEdge {
 	std::span<std::byte> tail;        // 11 bytes: prevCluster->data[cluster_size-4 .. cluster_size+7)
-	bool* extra_end_converted;
+	bool* end_boundary_converted;
 };
 
 // Edge of the NEXT cluster: a mutable view of nextCluster->data[0..7), plus a read-only view of
-// nextCluster->firstThreeBytesPreDataConversion[0..3). `extra_start_converted` points at
+// nextCluster->firstThreeBytesPreDataConversion[0..3). `start_boundary_converted` points at
 // nextCluster->extraBytesAtStartConverted.
 struct StitchNextEdge {
 	std::span<std::byte> head;                       // 7 bytes: nextCluster->data[0..7)
-	std::span<const std::byte, 3> first_three_pre;   // nextCluster->firstThreeBytesPreDataConversion
-	bool* extra_start_converted;
+	std::span<const std::byte, 3> unconverted_head;   // nextCluster->firstThreeBytesPreDataConversion
+	bool* start_boundary_converted;
 };
 
 // Pure boundary stitch for ONE cluster, matching audio_file_manager.cpp:1044-1223. Mutates `self_data`
@@ -62,7 +62,7 @@ struct StitchNextEdge {
 // (the caller only supplies a loaded neighbor). No Cluster/Sample/AudioEngine reach.
 void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, RawDataFormat format,
                        uint32_t audio_data_start_pos_bytes, size_t cluster_size,
-                       bool& self_extra_start_converted, bool& self_extra_end_converted,
+                       bool& self_start_boundary_converted, bool& self_end_boundary_converted,
                        StitchPrevEdge* prev, StitchNextEdge* next);
 
 } // namespace deluge::audio::stream
@@ -81,18 +81,18 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
 - Produces: `stitch_boundaries(...)` per the interface above.
 
 - [ ] **Step 1: Write failing specs** (`stitch_spec.cpp`, own file, `describe stitch(...)` + `CPPSPEC_SPEC(stitch)`). Use a small synthetic `cluster_size` (e.g. 32) and byte-exact assertions. Cases:
-  - (a) **No neighbors** (`prev=nullptr, next=nullptr`): `self_data` unchanged, `self_extra_start_converted`/`self_extra_end_converted` NOT set (they're set only inside the neighbor-present branches). Assert.
-  - (b) **NATIVE, both neighbors present**: no conversion happens; `prev.tail[4..11)` (== prev overhang `[size..size+7)`) becomes `self_data[0..7)`; `self_data[size..size+7)` becomes `next.head[0..7)`; `self_extra_start_converted` and `self_extra_end_converted` both become true; prev/next flags untouched. Assert exact bytes + flags.
-  - (c) **UNSIGNED_8 (a simple non-native), misaligned (audio_data_start_pos_bytes=1), both neighbors present, both neighbor flags false**: the prev-half converts the straddling word in `prev.tail` and copies 3 bytes back to `self_data[0..3)`, sets `*prev.extra_end_converted`; the next-half stages the overhang, converts the straddling word in `self_data`'s tail, writes 3 bytes to `next.head[0..3)`, sets `*next.extra_start_converted`. Hand-derive the expected bytes from the control-flow sketch + `convert_word(w, UNSIGNED_8) = w ^ 0x80808080`. (This is the hard case — derive it carefully; the golden gate in Task 2 is the backstop.)
-  - (d) **Idempotency via flags**: next-half with `*next.extra_start_converted == true` uses `next.first_three_pre` (not `next.head`) as the staging source and takes the `need_copy7` fallthrough. Assert it reads `first_three_pre`.
+  - (a) **No neighbors** (`prev=nullptr, next=nullptr`): `self_data` unchanged, `self_start_boundary_converted`/`self_end_boundary_converted` NOT set (they're set only inside the neighbor-present branches). Assert.
+  - (b) **NATIVE, both neighbors present**: no conversion happens; `prev.tail[4..11)` (== prev overhang `[size..size+7)`) becomes `self_data[0..7)`; `self_data[size..size+7)` becomes `next.head[0..7)`; `self_start_boundary_converted` and `self_end_boundary_converted` both become true; prev/next flags untouched. Assert exact bytes + flags.
+  - (c) **UNSIGNED_8 (a simple non-native), misaligned (audio_data_start_pos_bytes=1), both neighbors present, both neighbor flags false**: the prev-half converts the straddling word in `prev.tail` and copies 3 bytes back to `self_data[0..3)`, sets `*prev.end_boundary_converted`; the next-half stages the overhang, converts the straddling word in `self_data`'s tail, writes 3 bytes to `next.head[0..3)`, sets `*next.start_boundary_converted`. Hand-derive the expected bytes from the control-flow sketch + `convert_word(w, UNSIGNED_8) = w ^ 0x80808080`. (This is the hard case — derive it carefully; the golden gate in Task 2 is the backstop.)
+  - (d) **Idempotency via flags**: next-half with `*next.start_boundary_converted == true` uses `next.unconverted_head` (not `next.head`) as the staging source and takes the `need_copy7` fallthrough. Assert it reads `unconverted_head`.
 
 - [ ] **Step 2: Run, expect FAIL** (`stitch.h`/`stitch_boundaries` missing). Run: `./dbt test`.
 
 - [ ] **Step 3: Implement `stitch_boundaries`** in `stitch.{h,cpp}`, porting audio_file_manager.cpp:1044-1223 with these rules:
   - **Substitutions:** `sample->rawDataFormat`→`format`; `sample->audioDataStartPosBytes`→`audio_data_start_pos_bytes`; `clusterIndex`→`cluster_index`; `Cluster::size`→`cluster_size`; `cluster.data[k]`→`self_data[k]` (span; the overhang `cluster.data[size+k]` is `self_data[cluster_size+k]`, valid because `self_data` is `cluster_size+7`); `sample->convertToNative(w)`→`convert_word(w, format)`.
-  - **Prev neighbor:** the `if (clusterIndex > 0)` + `if (prevCluster && prevCluster->loaded)` gate becomes `if (prev != nullptr)` (the caller only passes a loaded prev, and only when `cluster_index > 0`). `prevCluster->data[cluster_size + k]` → `prev->tail[4 + k]`; `prevCluster->data[start_pos]` where `start_pos = cluster_size - 4 + misalignment` (or `cluster_size - bytes_unconverted` for 24-bit) → `prev->tail[start_pos - (cluster_size - 4)]` (i.e. index into the 11-byte tail; note the 24-bit `start_pos = cluster_size - bytes_unconverted` with `bytes_unconverted ∈ {1,2}` maps to `prev->tail[4 - bytes_unconverted]`). `prevCluster->extraBytesAtEndConverted` → `*prev->extra_end_converted`.
-  - **Next neighbor:** `if (clusterIndex < clusters.size()-1)` + `if (nextCluster && nextCluster->loaded)` → `if (next != nullptr)`. `nextCluster->data[k]` (k∈[0,7)) → `next->head[k]`; `nextCluster->firstThreeBytesPreDataConversion` → `next->first_three_pre`; `nextCluster->extraBytesAtStartConverted` → `*next->extra_start_converted`.
-  - **Self flags:** `cluster.extraBytesAtStartConverted = true` (line 1109) → `self_extra_start_converted = true`; `cluster.extraBytesAtEndConverted = true` (line 1221) → `self_extra_end_converted = true`. (Do NOT set `cluster.loaded` / call `mark_ready` — those stay in `readClusterData`, after the stitch.)
+  - **Prev neighbor:** the `if (clusterIndex > 0)` + `if (prevCluster && prevCluster->loaded)` gate becomes `if (prev != nullptr)` (the caller only passes a loaded prev, and only when `cluster_index > 0`). `prevCluster->data[cluster_size + k]` → `prev->tail[4 + k]`; `prevCluster->data[start_pos]` where `start_pos = cluster_size - 4 + misalignment` (or `cluster_size - bytes_unconverted` for 24-bit) → `prev->tail[start_pos - (cluster_size - 4)]` (i.e. index into the 11-byte tail; note the 24-bit `start_pos = cluster_size - bytes_unconverted` with `bytes_unconverted ∈ {1,2}` maps to `prev->tail[4 - bytes_unconverted]`). `prevCluster->extraBytesAtEndConverted` → `*prev->end_boundary_converted`.
+  - **Next neighbor:** `if (clusterIndex < clusters.size()-1)` + `if (nextCluster && nextCluster->loaded)` → `if (next != nullptr)`. `nextCluster->data[k]` (k∈[0,7)) → `next->head[k]`; `nextCluster->firstThreeBytesPreDataConversion` → `next->unconverted_head`; `nextCluster->extraBytesAtStartConverted` → `*next->start_boundary_converted`.
+  - **Self flags:** `cluster.extraBytesAtStartConverted = true` (line 1109) → `self_start_boundary_converted = true`; `cluster.extraBytesAtEndConverted = true` (line 1221) → `self_end_boundary_converted = true`. (Do NOT set `cluster.loaded` / call `mark_ready` — those stay in `readClusterData`, after the stitch.)
   - **The goto:** replace `goto copy7ToMe;` with `need_copy7 = true;` and, at the end of the next-half, `if (need_copy7) memcpy(&self_data[cluster_size], next->head.data(), 7);` (the `copy7ToMe` body).
   - **Ordering subtlety:** preserve the `stage_overhang → convert_straddle_word → finalize_overhang` data dependency in the other-formats misaligned arms (see the control-flow sketch below and the Global Constraints).
   - **Naming:** snake_case EVERY local (`misalignment`, `start_pos`, `bytes_unconverted_before_cluster`, `bytes_unconverted_before_next_cluster`, `need_copy7`, `temp`, …). Grep-confirm zero camelCase.
@@ -104,50 +104,50 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
   // PREV HALF:
   if prev != nullptr:
       copy self_data[0..7) -> prev->tail[4..11)                      // prev overhang refresh (unconditional)
-      if format == WRONG_24 and !*prev->extra_end_converted:
+      if format == WRONG_24 and !*prev->end_boundary_converted:
           bytes_unconverted = (cluster_index*cluster_size - audio_data_start_pos_bytes) % 3
           if bytes_unconverted != 0:
               byteswap3 the word at prev->tail[4 - bytes_unconverted ..]
               copy prev->tail[4..6) -> self_data[0..2)
-          *prev->extra_end_converted = true
-      elif format != NATIVE and !*prev->extra_end_converted:
+          *prev->end_boundary_converted = true
+      elif format != NATIVE and !*prev->end_boundary_converted:
           if misalignment != 0:
               start_idx = 4 - 4 + misalignment  // = misalignment; word at prev->tail[misalignment..+4)
               prev->tail[misalignment..+4) = convert_word(that int32, format)
               copy prev->tail[4..7) -> self_data[0..3)
-          *prev->extra_end_converted = true
+          *prev->end_boundary_converted = true
       // NATIVE: nothing
-      self_extra_start_converted = true                               // ALWAYS (prev present)
+      self_start_boundary_converted = true                               // ALWAYS (prev present)
   // NEXT HALF:
   if next != nullptr:
       need_copy7 = false
       if format == WRONG_24:
           bytes_unconverted_next = ((cluster_index+1)*cluster_size - audio_data_start_pos_bytes) % 3
           if bytes_unconverted_next != 0:
-              if !*next->extra_start_converted: self_data[size..size+7) = next->head[0..7)   // stage
-              else:                             self_data[size..size+2) = next->first_three_pre[0..2)
+              if !*next->start_boundary_converted: self_data[size..size+7) = next->head[0..7)   // stage
+              else:                             self_data[size..size+2) = next->unconverted_head[0..2)
               byteswap3 word at self_data[size - bytes_unconverted_next ..]
-              if !*next->extra_start_converted:
-                  *next->extra_start_converted = true
+              if !*next->start_boundary_converted:
+                  *next->start_boundary_converted = true
                   next->head[0..2) = self_data[size..size+2)
               else: need_copy7 = true
           else: need_copy7 = true
       elif format != NATIVE:
           if misalignment != 0:
               start_pos = size - 4 + misalignment
-              if !*next->extra_start_converted:
+              if !*next->start_boundary_converted:
                   self_data[size..size+7) = next->head[0..7)                    // stage (before convert!)
                   self_data[start_pos..+4) = convert_word(that int32, format)   // reads staged overhang
                   next->head[0..3) = self_data[size..size+3)
-                  *next->extra_start_converted = true
+                  *next->start_boundary_converted = true
               else:
-                  self_data[size..size+3) = next->first_three_pre[0..3)         // transient stage
+                  self_data[size..size+3) = next->unconverted_head[0..3)         // transient stage
                   self_data[start_pos..+4) = convert_word(that int32, format)   // reads transient
                   need_copy7 = true                                             // finalize overrides transient
           else: need_copy7 = true
       else: need_copy7 = true   // NATIVE
       if need_copy7: self_data[size..size+7) = next->head[0..7)         // copy7ToMe
-      self_extra_end_converted = true                                   // ALWAYS (next present)
+      self_end_boundary_converted = true                                   // ALWAYS (next present)
   ```
   Verify this sketch line-by-line against the actual audio_file_manager.cpp:1044-1223 as you port — the sketch is a guide, the source is the truth.
 
@@ -171,8 +171,8 @@ git commit -m "feat(audio-stream): pure stitch_boundaries core for inter-cluster
 - Consumes: `stitch_boundaries` + the edge structs (Task 1).
 
 - [ ] **Step 1: Replace the stitch block** (audio_file_manager.cpp:1044-1223) with a gather-and-call. Build the edge structs from the neighbor clusters, then call `stitch_boundaries`:
-  - `prev`: if `clusterIndex > 0` and `sample->clusters[clusterIndex-1].cluster` is non-null and `->loaded`, construct `StitchPrevEdge{ .tail = span(&prevCluster->data[Cluster::size - 4], 11), .extra_end_converted = &prevCluster->extraBytesAtEndConverted }`; else pass `nullptr`.
-  - `next`: if `clusterIndex < (int32_t)sample->clusters.size() - 1` and `nextCluster` non-null and `->loaded`, construct `StitchNextEdge{ .head = span(nextCluster->data, 7), .first_three_pre = span(nextCluster->firstThreeBytesPreDataConversion, 3), .extra_start_converted = &nextCluster->extraBytesAtStartConverted }`; else `nullptr`.
+  - `prev`: if `clusterIndex > 0` and `sample->clusters[clusterIndex-1].cluster` is non-null and `->loaded`, construct `StitchPrevEdge{ .tail = span(&prevCluster->data[Cluster::size - 4], 11), .end_boundary_converted = &prevCluster->extraBytesAtEndConverted }`; else pass `nullptr`.
+  - `next`: if `clusterIndex < (int32_t)sample->clusters.size() - 1` and `nextCluster` non-null and `->loaded`, construct `StitchNextEdge{ .head = span(nextCluster->data, 7), .unconverted_head = span(nextCluster->firstThreeBytesPreDataConversion, 3), .start_boundary_converted = &nextCluster->extraBytesAtStartConverted }`; else `nullptr`.
   - self span: `span(reinterpret_cast<std::byte*>(cluster.data), Cluster::size + 7)`.
   - Call `deluge::audio::stream::stitch_boundaries(self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size, cluster.extraBytesAtStartConverted, cluster.extraBytesAtEndConverted, prevPtr, nextPtr)`.
   - Keep `cluster.loaded = true;` and the `deluge_resource_mark_ready` block (lines 1225+) exactly as-is, AFTER the call. Add the `storage/audio/stream/stitch.h` include.

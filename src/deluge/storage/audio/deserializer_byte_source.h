@@ -25,8 +25,8 @@
 /// band-build loop drives it through the lower-level cluster accessors (`clusterBuffer` /
 /// `byteIndexWithinCluster` / `advanceClustersIfNecessary`) — those exist because that loop reads misaligned
 /// 32-bit words straight out of the cluster buffer and owns its own within-cluster cursor. Replaces
-/// WaveTableReader + the AudioFileReader base. The file must already be open (StorageManager::openFilePointer
-/// onto `smDeserializer`) before constructing.
+/// WaveTableReader + the AudioFileReader base. The file must already be open (`smDeserializer.file`, opened by
+/// `AudioFileManager::buildAudioFileFromCard`'s WaveTable branch) before constructing.
 class DeserializerByteSource final : public AudioByteSource {
 public:
 	explicit DeserializerByteSource(uint32_t fileSize);

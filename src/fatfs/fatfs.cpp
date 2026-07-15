@@ -27,8 +27,7 @@ std::expected<File, Error> File::open(std::string_view path,
 File File::open_by_locator(FATFS *fs, WORD id, DWORD sclust, FSIZE_t objsize) {
   File file{};
   file.file_ = {}; // zero every field first -- File's own file_ member has no
-                    // in-class initializer (unlike FileReader::readFIL{}, whose
-                    // starting state this mirrors), so this isn't redundant.
+                    // in-class initializer, so this isn't redundant.
   file.file_.obj.fs = fs;
   file.file_.obj.id = id;
   file.file_.obj.sclust = sclust;

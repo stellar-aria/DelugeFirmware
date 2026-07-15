@@ -20,6 +20,7 @@
 #include "definitions_cxx.hpp"
 #include "extern.h"
 #include "fatfs/fatfs.hpp"
+#include "io/file.hpp"
 #include "libdeluge/scheduler.h" // isSDRoutineActive()
 #include "model/sync.h"
 #include "util/firmware_version.h"
@@ -57,7 +58,7 @@ public:
 	FileReader(char* memBuffer, uint32_t bufLen);
 	virtual ~FileReader();
 
-	FIL readFIL{};
+	std::optional<deluge::io::File> file;
 	char* fileClusterBuffer;
 	UINT currentReadBufferEndPos{};
 	int32_t fileReadBufferCurrentPos{};
@@ -84,7 +85,7 @@ protected:
 
 class FileWriter {
 public:
-	FIL writeFIL{};
+	std::optional<deluge::io::File> file;
 	FileWriter();
 	FileWriter(bool inMem);
 
@@ -231,8 +232,7 @@ public:
 	bool match(char const ch) override;
 
 	void exitTag(char const* exitTagName = NULL, bool closeObject = false) override;
-	Error openXMLFile(FilePointer* filePointer, char const* firstTagName, char const* altTagName = "",
-	                  bool ignoreIncorrectFirmware = false);
+	Error openXMLFile(char const* firstTagName, char const* altTagName = "", bool ignoreIncorrectFirmware = false);
 	void reset() override;
 
 	Error tryReadingFirmwareTagFromFile(char const* tagName, bool ignoreIncorrectFirmware) override;
@@ -316,8 +316,7 @@ public:
 	bool match(char const ch) override;
 	void exitTag(char const* exitTagName = NULL, bool closeObject = false) override;
 
-	Error openJsonFile(FilePointer* filePointer, char const* firstTagName, char const* altTagName = "",
-	                   bool ignoreIncorrectFirmware = false);
+	Error openJsonFile(char const* firstTagName, char const* altTagName = "", bool ignoreIncorrectFirmware = false);
 	void reset() override;
 	Error tryReadingFirmwareTagFromFile(char const* tagName, bool ignoreIncorrectFirmware) override;
 	void setReplySeqNum(uint8_t msgNum) { replySeqNum = msgNum; }
@@ -359,15 +358,15 @@ extern FileDeserializer* activeDeserializer;
 
 namespace StorageManager {
 
-std::expected<FatFS::File, Error> createFile(char const* filePath, bool mayOverwrite);
+std::expected<deluge::io::File, Error> createFile(char const* filePath, bool mayOverwrite);
 Error createXMLFile(char const* pathName, XMLSerializer& writer, bool mayOverwrite = false, bool displayErrors = true);
 Error createJsonFile(char const* pathName, JsonSerializer& writer, bool mayOverwrite = false,
                      bool displayErrors = true);
-Error openXMLFile(FilePointer* filePointer, XMLDeserializer& reader, char const* firstTagName,
-                  char const* altTagName = "", bool ignoreIncorrectFirmware = false);
-Error openJsonFile(FilePointer* filePointer, JsonDeserializer& reader, char const* firstTagName,
-                   char const* altTagName = "", bool ignoreIncorrectFirmware = false);
-Error openDelugeFile(FileItem* currentFileItem, char const* firstTagName, char const* altTagName = "",
+Error openXMLFile(char const* path, XMLDeserializer& reader, char const* firstTagName, char const* altTagName = "",
+                  bool ignoreIncorrectFirmware = false);
+Error openJsonFile(char const* path, JsonDeserializer& reader, char const* firstTagName, char const* altTagName = "",
+                   bool ignoreIncorrectFirmware = false);
+Error openDelugeFile(char const* path, char const* firstTagName, char const* altTagName = "",
                      bool ignoreIncorrectFirmware = false);
 Error initSD();
 
@@ -381,29 +380,27 @@ bool checkSDInitialized();
 
 Instrument* createNewInstrument(OutputType newOutputType, ParamManager* getParamManager = nullptr);
 Error loadInstrumentFromFile(Song* song, InstrumentClip* clip, OutputType outputType, bool mayReadSamplesFromFiles,
-                             Instrument** getInstrument, FilePointer* filePointer, std::string* name,
-                             std::string* dirPath);
+                             Instrument** getInstrument, char const* path, std::string* name, std::string* dirPath);
 Instrument* createNewNonAudioInstrument(OutputType outputType, int32_t slot, int32_t subSlot);
 
-Error openMidiDeviceDefinitionFile(FilePointer* filePointer);
-Error loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrument, FilePointer* filePointer, std::string* fileName,
+Error openMidiDeviceDefinitionFile(char const* path);
+Error loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrument, char const* path, std::string* fileName,
                                    bool updateFileName = true);
 
-Error openPatternFile(FilePointer* filePointer);
-Error loadPatternFile(FilePointer* filePointer, std::string* fileName, bool overwriteExisting, bool noScaling,
-                      bool previewOnly, bool selectedDrumOnly);
+Error openPatternFile(char const* path);
+Error loadPatternFile(char const* path, std::string* fileName, bool overwriteExisting, bool noScaling, bool previewOnly,
+                      bool selectedDrumOnly);
 
-Error openFavouriteFile(FilePointer* filePointer);
-Error loadFavouriteFile(FilePointer* filePointer, std::string* fileName);
+Error openFavouriteFile(char const* path);
+Error loadFavouriteFile(char const* path, std::string* fileName);
 
 Drum* createNewDrum(DrumType drumType);
 Error loadSynthToDrum(Song* song, InstrumentClip* clip, bool mayReadSamplesFromFiles, SoundDrum** getInstrument,
-                      FilePointer* filePointer, std::string* name, std::string* dirPath);
-void openFilePointer(FilePointer* fp, FileReader& reader);
+                      char const* path, std::string* name, std::string* dirPath);
 
 Error checkSpaceOnCard();
 
-Error openInstrumentFile(OutputType outputType, FilePointer* filePointer);
+Error openInstrumentFile(OutputType outputType, char const* path);
 } // namespace StorageManager
 
 extern FirmwareVersion song_firmware_version;

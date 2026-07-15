@@ -37,9 +37,9 @@ const char* DeserializerByteSource::clusterBuffer() const {
 }
 
 Error DeserializerByteSource::readNewCluster() {
-	UINT bytesRead;
-	FRESULT result = f_read(&smDeserializer.readFIL, smDeserializer.fileClusterBuffer, Cluster::size, &bytesRead);
-	if (result != FR_OK) {
+	auto result = smDeserializer.file->read(
+	    std::span<std::byte>(reinterpret_cast<std::byte*>(smDeserializer.fileClusterBuffer), Cluster::size));
+	if (!result) {
 		return Error::SD_CARD; // Failed to load cluster from card.
 	}
 	return Error::NONE;

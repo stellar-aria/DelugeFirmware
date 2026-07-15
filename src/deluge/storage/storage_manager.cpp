@@ -117,6 +117,7 @@ std::expected<FatFS::File, Error> StorageManager::createFile(char const* filePat
 	}
 
 tryAgain:
+	deluge_file_invalidate_cache();
 	auto opened = FatFS::File::open(filePath, mode);
 	if (!opened) {
 
@@ -143,6 +144,7 @@ cutFolderPathAndTryCreating:
 			folderPath.resize(slashPos);
 
 			// Try making the folder
+			deluge_file_invalidate_cache();
 			auto made_dir = FatFS::mkdir(folderPath.c_str());
 			if (made_dir) {
 				goto tryAgain;

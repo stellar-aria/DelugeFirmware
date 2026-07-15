@@ -1525,6 +1525,7 @@ writeFailed:
 
 		if (action != MonitoringAction::NONE || capturedTooMuch) {
 
+			deluge_file_invalidate_cache();
 			auto opened = this->file->open(sample->filePath.c_str(), FA_WRITE);
 
 			if (!opened) {

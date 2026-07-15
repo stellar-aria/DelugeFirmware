@@ -434,6 +434,7 @@ void setupStartupSong() {
 	case StartupSongMode::LASTSAVED: {
 		// Create canary
 		FIL f;
+		deluge_file_invalidate_cache();
 		if (f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
 			f_close(&f);
 		}

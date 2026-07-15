@@ -827,7 +827,102 @@ git commit -m "instrument_clip_view: migrate the randomize-drum-sample scan to d
 
 ---
 
-### Task 6: Full regression check
+### Task 7: close the second cache-coherency gap (final review finding)
+
+**Why this task exists — read before starting:** the final whole-branch review (after Task 6's regression check already passed) independently swept the tree for write-shaped operations beyond Task 4's `f_unlink|f_rename|f_mkdir` grep pattern, and found four more real bypass sites — all mutate the filesystem via `FatFS::File::open`/`FatFS::mkdir` (the C++ wrapper) or raw `f_open`, none through `file_io.h`, none invalidating the cache:
+
+- `src/deluge/storage/storage_manager.cpp` — `StorageManager::createFile`'s `FatFS::File::open(filePath, mode)` (the primary song/preset save path; `mode` includes `FA_CREATE_ALWAYS` when `mayOverwrite` is true — a genuine overwrite-in-place of a possibly-cached name) **and** its retry-path `FatFS::mkdir(folderPath.c_str())`.
+- `src/deluge/model/sample/sample_recorder.cpp:1528` — `this->file->open(sample->filePath.c_str(), FA_WRITE)`, opened for an in-place truncate (changes the file's `objsize`).
+- `src/deluge/deluge.cpp:437` — the startup canary, raw `f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE)`.
+
+Same fix shape as Task 4: add `deluge_file_invalidate_cache()` immediately before each write, no migration of these files to `file_io.h` more broadly.
+
+**Files:**
+- Modify: `src/deluge/storage/storage_manager.cpp`
+- Modify: `src/deluge/model/sample/sample_recorder.cpp`
+- Modify: `src/deluge/deluge.cpp`
+
+**Interfaces:**
+- Consumes: `deluge_file_invalidate_cache()` (Task 4, already exists). All three files already include what's needed (`storage_manager.cpp` includes `io/file.hpp`, `sample_recorder.cpp` and `deluge.cpp` both already include `libdeluge/file_io.h`) — no new includes required.
+
+- [ ] **Step 1: `storage_manager.cpp`'s `createFile`**
+
+Find `StorageManager::createFile` (search for `BYTE mode = FA_WRITE;`). Add one line before the `tryAgain:`-labeled open (this single statement is re-executed on the folder-creation retry via `goto tryAgain`, so one insertion covers both the first attempt and the retry):
+
+```cpp
+tryAgain:
+	deluge_file_invalidate_cache();
+	auto opened = FatFS::File::open(filePath, mode);
+```
+
+Then, further down in the same function's folder-creation retry block, add one line before the `mkdir` call:
+
+```cpp
+			// Try making the folder
+			deluge_file_invalidate_cache();
+			auto made_dir = FatFS::mkdir(folderPath.c_str());
+```
+
+- [ ] **Step 2: `sample_recorder.cpp`'s truncate-open**
+
+At line 1528 (search for `this->file->open(sample->filePath.c_str(), FA_WRITE);`):
+
+```cpp
+		if (action != MonitoringAction::NONE || capturedTooMuch) {
+
+			deluge_file_invalidate_cache();
+			auto opened = this->file->open(sample->filePath.c_str(), FA_WRITE);
+```
+
+- [ ] **Step 3: `deluge.cpp`'s startup canary**
+
+At line 437 (search for `FIL f;` followed by `f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE)`):
+
+```cpp
+		// Create canary
+		FIL f;
+		deluge_file_invalidate_cache();
+		if (f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
+```
+
+- [ ] **Step 4: build and test**
+
+```bash
+./dbt build Debug
+cmake --build build-sim-cpp --target deluge_host deluge_render deluge_loadcheck
+NO_BUILD=1 scripts/golden_mixdown.sh check
+cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
+```
+
+Expected: all clean, golden-master bit-exact (`deluge_file_invalidate_cache()` is a pure state-reset with no I/O, same as Task 4).
+
+Confirm every write-shaped FatFS entry point in the tree — not just the four named here, and not just Task 4's original five — is now covered. Run both sweeps:
+
+```bash
+grep -n "f_unlink\|f_rename\|f_mkdir" -r src/deluge/
+grep -n "FatFS::File::open\|FatFS::mkdir\|f_open(" -r src/deluge/
+```
+
+For every match from either command, confirm (by reading the surrounding context) that the immediately preceding non-blank line is `deluge_file_invalidate_cache();`, **or** that the call is read-only (`FA_READ` mode, no `FA_WRITE`/`FA_CREATE_ALWAYS`/`FA_CREATE_NEW` flags) and therefore doesn't need invalidation at all. Flag anything that's neither.
+
+- [ ] **Step 5: commit**
+
+```bash
+git add src/deluge/storage/storage_manager.cpp src/deluge/model/sample/sample_recorder.cpp src/deluge/deluge.cpp
+git commit -m "file_io: close a second cache-coherency gap (final review finding)
+
+The final whole-branch review swept beyond Task 4's f_unlink|f_rename|f_mkdir
+pattern and found four more real bypass sites, all mutating the filesystem
+via FatFS::File::open/FatFS::mkdir or raw f_open without invalidating the
+cache: StorageManager::createFile's primary save path (including a genuine
+overwrite-in-place when mayOverwrite is true) and its mkdir retry,
+sample_recorder.cpp's in-place truncate-open, and deluge.cpp's startup
+canary. Same minimal safety-net shape as Task 4."
+```
+
+---
+
+### Task 8: Full regression check (post-Task-7)
 
 **Files:** none (verification only)
 

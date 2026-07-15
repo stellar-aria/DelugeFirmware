@@ -28,6 +28,7 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
+#include "libdeluge/file_io.h"
 #include "libdeluge/worker.h" // deluge_worker_run — run the export on the worker fiber
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
@@ -920,6 +921,7 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 	tempPath = audioRecordingFolderNames[folderID];
 
 	// try to create the STEMS folder if it doesn't exist
+	deluge_file_invalidate_cache();
 	FRESULT result = f_mkdir(tempPath.c_str());
 	// if we couldn't create folder and it doesn't exist, return error
 	if (result != FR_OK && result != FR_EXIST) {
@@ -943,6 +945,7 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 	}
 
 	// try to create folder
+	deluge_file_invalidate_cache();
 	result = f_mkdir(tempPath.c_str());
 	// if we couldn't create folder and it doesn't exist, return error
 	if (result != FR_OK && result != FR_EXIST) {
@@ -992,6 +995,7 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 		// here we loop until we are able to successfully create a folder
 		while (true) {
 			// try to create folder
+			deluge_file_invalidate_cache();
 			result = f_mkdir(tempPathForSearch.c_str());
 			// successful, exit out of loop
 			if (result == FR_OK) {

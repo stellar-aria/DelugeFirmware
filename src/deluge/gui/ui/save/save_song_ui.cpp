@@ -23,6 +23,7 @@
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
 #include "io/debug/log.h"
+#include "libdeluge/file_io.h"
 #include "model/sample/sample.h"
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
@@ -184,6 +185,7 @@ gotError:
 				// If this is a recording which still exists at its temporary location, move the file
 				if (!sample.tempFilePathForRecording.empty()) {
 					StorageManager::buildPathToFile(audioFile->filePath.c_str());
+					deluge_file_invalidate_cache();
 					FRESULT result = f_rename(sample.tempFilePathForRecording.c_str(), audioFile->filePath.c_str());
 					if (result == FR_OK) {
 						sample.tempFilePathForRecording.clear();
@@ -471,6 +473,7 @@ gotError:
 	if (fileAlreadyExisted) {
 
 		// Delete the old file
+		deluge_file_invalidate_cache();
 		FRESULT result = f_unlink(filePath.c_str());
 		if (result != FR_OK) {
 cardError:
@@ -479,6 +482,7 @@ cardError:
 		}
 
 		// Rename the new file
+		deluge_file_invalidate_cache();
 		result = f_rename(filePathDuringWrite.c_str(), filePath.c_str());
 		if (result != FR_OK) {
 			goto cardError;

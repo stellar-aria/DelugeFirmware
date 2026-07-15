@@ -112,6 +112,179 @@ describe file_io("file_io adapter", $ {
 		expect(out.is_hidden).to_equal(false);
 		expect(out.is_system).to_equal(false);
 	});
+
+	it("open_by_locator constructs a File with exactly the given locator fields, matching openFilePointer's contract", _ {
+		FATFS fakeFs{};
+		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 42, 100, 5000);
+		expect(file.inner().obj.fs).to_equal(&fakeFs);
+		expect(file.inner().obj.id).to_equal(static_cast<WORD>(42));
+		expect(file.inner().obj.sclust).to_equal(static_cast<DWORD>(100));
+		expect(file.inner().obj.objsize).to_equal(static_cast<FSIZE_t>(5000));
+		expect(file.inner().flag).to_equal(static_cast<BYTE>(FA_READ));
+		expect(file.inner().err).to_equal(static_cast<BYTE>(0));
+		expect(file.inner().sect).to_equal(static_cast<DWORD>(0));
+		expect(file.inner().fptr).to_equal(static_cast<FSIZE_t>(0));
+		expect(file.size()).to_equal(5000u);
+		expect(file.tell()).to_equal(0u);
+
+		// fakeFs is zero-initialized (fs_type == 0), so FatFS's own validate()
+		// safely rejects it as FR_INVALID_OBJECT on close -- confirms this
+		// doesn't crash against an object that was never really f_open'd. This
+		// test target has no real disk backing (see this file's scope note),
+		// so genuine I/O was never on the table anyway -- this only verifies
+		// the field construction itself.
+		auto closed = file.close();
+		expect(closed.has_value()).to_equal(false);
+		expect(closed.error()).to_equal(FatFS::Error::INVALID_OBJECT);
+	});
+
+	it("dir_cache_begin+append populates entries findable by dir_cache_lookup", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG2.XML", &fakeFs, 7, 200, 3000);
+
+		const auto* entry = deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG2.XML");
+		expect(entry != nullptr).to_equal(true);
+		expect(entry->fs).to_equal(&fakeFs);
+		expect(entry->id).to_equal(static_cast<WORD>(7));
+		expect(entry->sclust).to_equal(static_cast<DWORD>(200));
+		expect(entry->objsize).to_equal(static_cast<FSIZE_t>(3000));
+	});
+
+	it("dir_cache_lookup misses on a directory that doesn't match", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SAMPLES/SONG1.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup misses on a filename that isn't cached", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG_MISSING.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_append no-ops if handle doesn't match the active scan", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handleA = reinterpret_cast<const void*>(0x1000);
+		const void* handleB = reinterpret_cast<const void*>(0x2000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handleA);
+		deluge::fatfs_adapter::dir_cache_append(handleB, "INTRUDER.XML", &fakeFs, 7, 999, 999);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/INTRUDER.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup returns nullptr when the cache was never populated", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG1.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup handles a root-level (no-slash) path", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "ROOT.XML", &fakeFs, 3, 50, 500);
+
+		const auto* entry = deluge::fatfs_adapter::dir_cache_lookup("ROOT.XML");
+		expect(entry != nullptr).to_equal(true);
+		expect(entry->sclust).to_equal(static_cast<DWORD>(50));
+	});
+
+	it("dir_cache_append silently drops entries beyond kDirCacheCapacity", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("BIGDIR", handle);
+		char name[16];
+		for (size_t i = 0; i < deluge::fatfs_adapter::kDirCacheCapacity + 5; i++) {
+			std::snprintf(name, sizeof(name), "F%zu.WAV", i);
+			deluge::fatfs_adapter::dir_cache_append(handle, name, &fakeFs, 1, static_cast<DWORD>(i + 100), 10);
+		}
+		expect(deluge::fatfs_adapter::g_dir_cache.entry_count).to_equal(deluge::fatfs_adapter::kDirCacheCapacity);
+
+		// The first kDirCacheCapacity entries are still found; nothing crashed on overflow.
+		const auto* first = deluge::fatfs_adapter::dir_cache_lookup("BIGDIR/F0.WAV");
+		expect(first != nullptr).to_equal(true);
+	});
+
+	it("deluge_file_open takes the fast path on a cache hit", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+		size_t hits_before = deluge::fatfs_adapter::g_dir_cache_hits;
+
+		DelugeFile* file = nullptr;
+		DelugeStatus status = deluge_file_open("SONGS/SONG1.XML", DELUGE_FILE_READ, &file);
+		expect(status).to_equal(DELUGE_OK);
+		expect(deluge::fatfs_adapter::g_dir_cache_hits).to_equal(hits_before + 1);
+
+		uint32_t size = 0;
+		expect(deluge_file_size(file, &size)).to_equal(DELUGE_OK);
+		expect(size).to_equal(2000u);
+
+		// fakeFs isn't really mounted, so closing correctly reports an error
+		// rather than crashing -- same reasoning as Task 1's open_by_locator test.
+		DelugeStatus closeStatus = deluge_file_close(file);
+		expect(closeStatus).to_equal(DELUGE_ERR_IO);
+	});
+
+	it("deluge_file_open falls through to the normal path on a cache miss", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		size_t misses_before = deluge::fatfs_adapter::g_dir_cache_misses;
+
+		DelugeFile* file = nullptr;
+		// No real mounted disk in this test target, so this will fail --
+		// what matters is that it took the miss path (counter incremented)
+		// and returned a defined error rather than crashing.
+		DelugeStatus status = deluge_file_open("NOWHERE/MISSING.XML", DELUGE_FILE_READ, &file);
+		expect(status != DELUGE_OK).to_equal(true);
+		expect(deluge::fatfs_adapter::g_dir_cache_misses).to_equal(misses_before + 1);
+	});
+
+	it("a write-create open invalidates the cache", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+		expect(deluge::fatfs_adapter::g_dir_cache.valid).to_equal(true);
+
+		DelugeFile* file = nullptr;
+		(void)deluge_file_open("SONGS/NEWFILE.XML", DELUGE_FILE_WRITE_CREATE, &file);
+		expect(deluge::fatfs_adapter::g_dir_cache.valid).to_equal(false);
+	});
+
+	it("mkdir/unlink/rename each invalidate the cache", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		(void)deluge_file_mkdir("SONGS/NEWDIR");
+		expect(deluge::fatfs_adapter::g_dir_cache.valid).to_equal(false);
+
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		(void)deluge_file_unlink("SONGS/SONG1.XML");
+		expect(deluge::fatfs_adapter::g_dir_cache.valid).to_equal(false);
+
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		(void)deluge_file_rename("SONGS/SONG1.XML", "SONGS/SONG2.XML");
+		expect(deluge::fatfs_adapter::g_dir_cache.valid).to_equal(false);
+	});
 });
 
 CPPSPEC_SPEC(file_io)

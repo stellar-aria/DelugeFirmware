@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the single-slot "last-scanned-directory" cache inside the FatFS adapter (no new `file_io.h` surface), and migrate `instrument_clip_view.cpp`'s directory scan to `deluge::io::Directory`. This is Tier 2's *entire* real scope — see the design doc's scope note for why `browser.cpp`/`sample_browser.cpp`/`audio_file_manager.cpp` are explicitly excluded.
+**Goal:** Build the single-slot "last-scanned-directory" cache inside the FatFS adapter, close the stale-cache hazard Task 3's own review found in five call sites that bypass `file_io.h` (Task 4, added mid-execution — see that task's own explanation), and migrate `instrument_clip_view.cpp`'s directory scan to `deluge::io::Directory`. This is Tier 2's *entire* real scope — see the design doc's scope note for why `browser.cpp`/`sample_browser.cpp`/`audio_file_manager.cpp` are explicitly excluded.
 
 **Architecture:** `FatFS::File` gains a fast, non-I/O `open_by_locator` factory (mirrors `StorageManager::openFilePointer`'s existing raw-FIL-construction contract, moved to where FatFS internals belong). The adapter (`src/fatfs/file_io.cpp`) gains a bounded, single-slot cache populated as a side effect of normal directory iteration and consulted by `deluge_file_open` for read opens, invalidated wholesale by any write-shaped call.
 
@@ -577,7 +577,172 @@ git commit -m "file_io: consult the adapter directory cache in deluge_file_open,
 
 ---
 
-### Task 4: `instrument_clip_view.cpp` migration
+### Task 4: close the stale-cache hazard from raw-FatFS writers outside `file_io.h`
+
+**Why this task exists — read before starting:** Task 3's own review found a real, live wrong-file-open hazard, not anticipated when this plan was written. `smsysex.cpp` (migrated in an earlier, separate plan) already lets a companion app list a directory through `file_io.h` — which now populates the Task 2/3 cache — and later reopen a file from it by path, benefiting from Task 3's fast path. But five files elsewhere in the app mutate the filesystem via **raw FatFS calls that bypass `file_io.h` entirely** (not even through the `FatFS::` C++ wrapper) and never invalidate the cache. If one of them deletes, renames, or creates a file in a directory the cache has stashed, a subsequent SysEx-driven open can silently return stale or wrong-file data. Before Task 3, the cache was inert (populated but never consulted) — this gap was latent. Task 3 made it live. This task closes it: a minimal safety-net call, not a migration of these five files to `file_io.h` (that's separate, larger work, out of scope here).
+
+**Files:**
+- Modify: `include/libdeluge/file_io.h`
+- Modify: `src/fatfs/file_io.cpp`
+- Modify: `src/deluge/gui/context_menu/delete_file.cpp`
+- Modify: `src/deluge/gui/ui/save/save_song_ui.cpp`
+- Modify: `src/deluge/model/sample/sample_recorder.cpp`
+- Modify: `src/deluge/processing/stem_export/stem_export.cpp`
+- Modify: `src/deluge/deluge.cpp`
+
+**Interfaces:**
+- Produces: `deluge_file_invalidate_cache(void)` — a new, minimal, public `file_io.h` boundary function. Wraps the already-existing `deluge::fatfs_adapter::dir_cache_invalidate()` (Task 2) so app code can trigger invalidation without reaching into the adapter's internal namespace (`file_io_internal.hpp` is not meant to be included outside `src/fatfs/`).
+
+- [ ] **Step 1: add the boundary function**
+
+`include/libdeluge/file_io.h` — add after `deluge_file_rename`'s declaration (the last function in the file, before the closing `#ifdef __cplusplus`/`}`/`#endif` block):
+
+```c
+/// Invalidates any internal caching this boundary maintains for directory
+/// contents. Call this after performing a filesystem write through some
+/// mechanism OTHER than this boundary's own write functions (mkdir/unlink/
+/// rename/write-create open, which already invalidate internally) -- e.g.
+/// legacy code that still calls the underlying filesystem library directly.
+/// Cannot fail. New code should prefer this boundary's own write functions,
+/// which need no separate call. [task]
+void deluge_file_invalidate_cache(void);
+```
+
+- [ ] **Step 2: implement it**
+
+`src/fatfs/file_io.cpp` — add to the `extern "C"` block, after `deluge_file_rename` (the last function before the block's closing brace):
+
+```cpp
+void deluge_file_invalidate_cache(void) {
+	deluge::fatfs_adapter::dir_cache_invalidate();
+}
+```
+
+- [ ] **Step 3: call it from the five bypass sites**
+
+For each site below: add `#include "libdeluge/file_io.h"` (as the file's second `#include`, right after its own primary header — clang-format will settle final ordering on commit) if not already present, and add `deluge_file_invalidate_cache();` as the line immediately before the raw FatFS write call, matching Task 3's established "invalidate first, unconditionally, before the operation" convention.
+
+**`src/deluge/gui/context_menu/delete_file.cpp`** — add the include after line 18 (`#include "gui/context_menu/delete_file.h"`):
+```cpp
+#include "libdeluge/file_io.h"
+```
+Then at line 63, before `FRESULT result = f_unlink(filePath.c_str());`:
+```cpp
+		deluge_file_invalidate_cache();
+		FRESULT result = f_unlink(filePath.c_str());
+```
+
+**`src/deluge/gui/ui/save/save_song_ui.cpp`** — add the include after line 17 (`#include "gui/ui/save/save_song_ui.h"`):
+```cpp
+#include "libdeluge/file_io.h"
+```
+Then at line 187, before the `f_rename` call:
+```cpp
+					deluge_file_invalidate_cache();
+					FRESULT result = f_rename(sample.tempFilePathForRecording.c_str(), audioFile->filePath.c_str());
+```
+Then at lines 474/482 (the save-overwrite sequence — both calls need their own invalidation, since each is an independent write):
+```cpp
+		// Delete the old file
+		deluge_file_invalidate_cache();
+		FRESULT result = f_unlink(filePath.c_str());
+		if (result != FR_OK) {
+cardError:
+			error = fresultToDelugeErrorCode(result);
+			goto gotError;
+		}
+
+		// Rename the new file
+		deluge_file_invalidate_cache();
+		result = f_rename(filePathDuringWrite.c_str(), filePath.c_str());
+		if (result != FR_OK) {
+			goto cardError;
+		}
+```
+
+**`src/deluge/model/sample/sample_recorder.cpp`** — add the include after line 18 (`#include "model/sample/sample_recorder.h"`):
+```cpp
+#include "libdeluge/file_io.h"
+```
+Then at line 387, before the `f_unlink` call:
+```cpp
+			deluge_file_invalidate_cache();
+			FRESULT result = f_unlink(filePathCreated.c_str());
+```
+
+**`src/deluge/processing/stem_export/stem_export.cpp`** — this file already includes `fatfs/ff.h` directly (line 21); add the new include right after it:
+```cpp
+#include "libdeluge/file_io.h"
+```
+Then at each of the three `f_mkdir` call sites (lines 923, 946, 995):
+```cpp
+	// try to create the STEMS folder if it doesn't exist
+	deluge_file_invalidate_cache();
+	FRESULT result = f_mkdir(tempPath.c_str());
+```
+```cpp
+	// try to create folder
+	deluge_file_invalidate_cache();
+	result = f_mkdir(tempPath.c_str());
+```
+```cpp
+			// try to create folder
+			deluge_file_invalidate_cache();
+			result = f_mkdir(tempPathForSearch.c_str());
+```
+
+**`src/deluge/deluge.cpp`** — add the include after line 18 (`#include "deluge.h"`):
+```cpp
+#include "libdeluge/file_io.h"
+```
+Then at each of the three `f_unlink(failSafePath.c_str());` call sites (lines 451, 463, 482), replace with:
+```cpp
+					deluge_file_invalidate_cache();
+					f_unlink(failSafePath.c_str());
+```
+(matching each occurrence's own existing indentation level — the three sites are at different nesting depths in the surrounding `if`/`else`/`switch`; match what's already there, don't force identical indentation across all three).
+
+- [ ] **Step 4: build and test**
+
+```bash
+./dbt build Debug
+cmake --build build-sim-cpp --target deluge_host deluge_render deluge_loadcheck
+NO_BUILD=1 scripts/golden_mixdown.sh check
+cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
+```
+
+Expected: all clean, golden-master bit-exact (none of these five call sites are on the render path; `deluge_file_invalidate_cache()` is a pure state-reset with no I/O, matching `dir_cache_invalidate`'s existing behavior).
+
+Confirm none of the five call sites were missed:
+
+```bash
+grep -n "f_unlink\|f_rename\|f_mkdir" src/deluge/gui/context_menu/delete_file.cpp src/deluge/gui/ui/save/save_song_ui.cpp src/deluge/model/sample/sample_recorder.cpp src/deluge/processing/stem_export/stem_export.cpp src/deluge/deluge.cpp
+```
+
+For every line this prints, confirm (by reading the surrounding context) that the immediately preceding non-blank line is `deluge_file_invalidate_cache();`.
+
+- [ ] **Step 5: commit**
+
+```bash
+git add include/libdeluge/file_io.h src/fatfs/file_io.cpp \
+  src/deluge/gui/context_menu/delete_file.cpp src/deluge/gui/ui/save/save_song_ui.cpp \
+  src/deluge/model/sample/sample_recorder.cpp src/deluge/processing/stem_export/stem_export.cpp \
+  src/deluge/deluge.cpp
+git commit -m "file_io: add deluge_file_invalidate_cache, call it from raw-FatFS writers outside the boundary
+
+Task 3's own review found that activating the directory cache exposes a
+real wrong-file-open hazard: five call sites elsewhere in the app mutate
+the filesystem via raw FatFS calls that bypass file_io.h entirely, and
+never invalidated the cache smsysex.cpp's already-migrated directory
+listing/open calls now populate and consult. Adds a minimal public
+boundary function these five sites call as a safety net -- not a
+migration of these files to file_io.h, which remains separate, larger,
+future work."
+```
+
+---
+
+### Task 5: `instrument_clip_view.cpp` migration
 
 **Files:**
 - Modify: `src/deluge/gui/views/instrument_clip_view.cpp`
@@ -662,7 +827,102 @@ git commit -m "instrument_clip_view: migrate the randomize-drum-sample scan to d
 
 ---
 
-### Task 5: Full regression check
+### Task 7: close the second cache-coherency gap (final review finding)
+
+**Why this task exists — read before starting:** the final whole-branch review (after Task 6's regression check already passed) independently swept the tree for write-shaped operations beyond Task 4's `f_unlink|f_rename|f_mkdir` grep pattern, and found four more real bypass sites — all mutate the filesystem via `FatFS::File::open`/`FatFS::mkdir` (the C++ wrapper) or raw `f_open`, none through `file_io.h`, none invalidating the cache:
+
+- `src/deluge/storage/storage_manager.cpp` — `StorageManager::createFile`'s `FatFS::File::open(filePath, mode)` (the primary song/preset save path; `mode` includes `FA_CREATE_ALWAYS` when `mayOverwrite` is true — a genuine overwrite-in-place of a possibly-cached name) **and** its retry-path `FatFS::mkdir(folderPath.c_str())`.
+- `src/deluge/model/sample/sample_recorder.cpp:1528` — `this->file->open(sample->filePath.c_str(), FA_WRITE)`, opened for an in-place truncate (changes the file's `objsize`).
+- `src/deluge/deluge.cpp:437` — the startup canary, raw `f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE)`.
+
+Same fix shape as Task 4: add `deluge_file_invalidate_cache()` immediately before each write, no migration of these files to `file_io.h` more broadly.
+
+**Files:**
+- Modify: `src/deluge/storage/storage_manager.cpp`
+- Modify: `src/deluge/model/sample/sample_recorder.cpp`
+- Modify: `src/deluge/deluge.cpp`
+
+**Interfaces:**
+- Consumes: `deluge_file_invalidate_cache()` (Task 4, already exists). All three files already include what's needed (`storage_manager.cpp` includes `io/file.hpp`, `sample_recorder.cpp` and `deluge.cpp` both already include `libdeluge/file_io.h`) — no new includes required.
+
+- [ ] **Step 1: `storage_manager.cpp`'s `createFile`**
+
+Find `StorageManager::createFile` (search for `BYTE mode = FA_WRITE;`). Add one line before the `tryAgain:`-labeled open (this single statement is re-executed on the folder-creation retry via `goto tryAgain`, so one insertion covers both the first attempt and the retry):
+
+```cpp
+tryAgain:
+	deluge_file_invalidate_cache();
+	auto opened = FatFS::File::open(filePath, mode);
+```
+
+Then, further down in the same function's folder-creation retry block, add one line before the `mkdir` call:
+
+```cpp
+			// Try making the folder
+			deluge_file_invalidate_cache();
+			auto made_dir = FatFS::mkdir(folderPath.c_str());
+```
+
+- [ ] **Step 2: `sample_recorder.cpp`'s truncate-open**
+
+At line 1528 (search for `this->file->open(sample->filePath.c_str(), FA_WRITE);`):
+
+```cpp
+		if (action != MonitoringAction::NONE || capturedTooMuch) {
+
+			deluge_file_invalidate_cache();
+			auto opened = this->file->open(sample->filePath.c_str(), FA_WRITE);
+```
+
+- [ ] **Step 3: `deluge.cpp`'s startup canary**
+
+At line 437 (search for `FIL f;` followed by `f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE)`):
+
+```cpp
+		// Create canary
+		FIL f;
+		deluge_file_invalidate_cache();
+		if (f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
+```
+
+- [ ] **Step 4: build and test**
+
+```bash
+./dbt build Debug
+cmake --build build-sim-cpp --target deluge_host deluge_render deluge_loadcheck
+NO_BUILD=1 scripts/golden_mixdown.sh check
+cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
+```
+
+Expected: all clean, golden-master bit-exact (`deluge_file_invalidate_cache()` is a pure state-reset with no I/O, same as Task 4).
+
+Confirm every write-shaped FatFS entry point in the tree — not just the four named here, and not just Task 4's original five — is now covered. Run both sweeps:
+
+```bash
+grep -n "f_unlink\|f_rename\|f_mkdir" -r src/deluge/
+grep -n "FatFS::File::open\|FatFS::mkdir\|f_open(" -r src/deluge/
+```
+
+For every match from either command, confirm (by reading the surrounding context) that the immediately preceding non-blank line is `deluge_file_invalidate_cache();`, **or** that the call is read-only (`FA_READ` mode, no `FA_WRITE`/`FA_CREATE_ALWAYS`/`FA_CREATE_NEW` flags) and therefore doesn't need invalidation at all. Flag anything that's neither.
+
+- [ ] **Step 5: commit**
+
+```bash
+git add src/deluge/storage/storage_manager.cpp src/deluge/model/sample/sample_recorder.cpp src/deluge/deluge.cpp
+git commit -m "file_io: close a second cache-coherency gap (final review finding)
+
+The final whole-branch review swept beyond Task 4's f_unlink|f_rename|f_mkdir
+pattern and found four more real bypass sites, all mutating the filesystem
+via FatFS::File::open/FatFS::mkdir or raw f_open without invalidating the
+cache: StorageManager::createFile's primary save path (including a genuine
+overwrite-in-place when mayOverwrite is true) and its mkdir retry,
+sample_recorder.cpp's in-place truncate-open, and deluge.cpp's startup
+canary. Same minimal safety-net shape as Task 4."
+```
+
+---
+
+### Task 8: Full regression check (post-Task-7)
 
 **Files:** none (verification only)
 

@@ -22,6 +22,7 @@
 #include "gui/ui/root_ui.h"
 #include "gui/ui_timer_manager.h"
 #include "libdeluge/control_surface.h"
+#include "libdeluge/file_io.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/audio_clip.h"
 #include "model/sample/sample.h"
@@ -384,6 +385,7 @@ aborted:
 		// Delete the file if one was created
 		if (!filePathCreated.empty()) {
 
+			deluge_file_invalidate_cache();
 			FRESULT result = f_unlink(filePathCreated.c_str());
 
 			// If this was the most recent recording in this category, tick the counter backwards - so long as
@@ -1523,6 +1525,7 @@ writeFailed:
 
 		if (action != MonitoringAction::NONE || capturedTooMuch) {
 
+			deluge_file_invalidate_cache();
 			auto opened = this->file->open(sample->filePath.c_str(), FA_WRITE);
 
 			if (!opened) {

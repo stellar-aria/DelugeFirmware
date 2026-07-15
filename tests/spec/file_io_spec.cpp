@@ -137,6 +137,87 @@ describe file_io("file_io adapter", $ {
 		expect(closed.has_value()).to_equal(false);
 		expect(closed.error()).to_equal(FatFS::Error::INVALID_OBJECT);
 	});
+
+	it("dir_cache_begin+append populates entries findable by dir_cache_lookup", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG2.XML", &fakeFs, 7, 200, 3000);
+
+		const auto* entry = deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG2.XML");
+		expect(entry != nullptr).to_equal(true);
+		expect(entry->fs).to_equal(&fakeFs);
+		expect(entry->id).to_equal(static_cast<WORD>(7));
+		expect(entry->sclust).to_equal(static_cast<DWORD>(200));
+		expect(entry->objsize).to_equal(static_cast<FSIZE_t>(3000));
+	});
+
+	it("dir_cache_lookup misses on a directory that doesn't match", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SAMPLES/SONG1.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup misses on a filename that isn't cached", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "SONG1.XML", &fakeFs, 7, 100, 2000);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG_MISSING.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_append no-ops if handle doesn't match the active scan", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handleA = reinterpret_cast<const void*>(0x1000);
+		const void* handleB = reinterpret_cast<const void*>(0x2000);
+		deluge::fatfs_adapter::dir_cache_begin("SONGS", handleA);
+		deluge::fatfs_adapter::dir_cache_append(handleB, "INTRUDER.XML", &fakeFs, 7, 999, 999);
+
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/INTRUDER.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup returns nullptr when the cache was never populated", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		expect(deluge::fatfs_adapter::dir_cache_lookup("SONGS/SONG1.XML") == nullptr).to_equal(true);
+	});
+
+	it("dir_cache_lookup handles a root-level (no-slash) path", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("", handle);
+		deluge::fatfs_adapter::dir_cache_append(handle, "ROOT.XML", &fakeFs, 3, 50, 500);
+
+		const auto* entry = deluge::fatfs_adapter::dir_cache_lookup("ROOT.XML");
+		expect(entry != nullptr).to_equal(true);
+		expect(entry->sclust).to_equal(static_cast<DWORD>(50));
+	});
+
+	it("dir_cache_append silently drops entries beyond kDirCacheCapacity", _ {
+		deluge::fatfs_adapter::dir_cache_reset_for_test();
+		FATFS fakeFs{};
+		const void* handle = reinterpret_cast<const void*>(0x1000);
+		deluge::fatfs_adapter::dir_cache_begin("BIGDIR", handle);
+		char name[16];
+		for (size_t i = 0; i < deluge::fatfs_adapter::kDirCacheCapacity + 5; i++) {
+			std::snprintf(name, sizeof(name), "F%zu.WAV", i);
+			deluge::fatfs_adapter::dir_cache_append(handle, name, &fakeFs, 1, static_cast<DWORD>(i + 100), 10);
+		}
+		expect(deluge::fatfs_adapter::g_dir_cache.entry_count).to_equal(deluge::fatfs_adapter::kDirCacheCapacity);
+
+		// The first kDirCacheCapacity entries are still found; nothing crashed on overflow.
+		const auto* first = deluge::fatfs_adapter::dir_cache_lookup("BIGDIR/F0.WAV");
+		expect(first != nullptr).to_equal(true);
+	});
 });
 
 CPPSPEC_SPEC(file_io)

@@ -77,6 +77,71 @@ void to_dir_entry(const FatFS::FileInfo& info, DelugeDirEntry& out, bool& out_ha
 	out.is_archive = (info.fattrib & AM_ARC) != 0;
 }
 
+DirCache g_dir_cache{};
+size_t g_dir_cache_hits = 0;
+size_t g_dir_cache_misses = 0;
+
+void dir_cache_reset_for_test() {
+	g_dir_cache = DirCache{};
+	g_dir_cache_hits = 0;
+	g_dir_cache_misses = 0;
+}
+
+void dir_cache_begin(std::string_view path, const void* handle) {
+	g_dir_cache.entry_count = 0;
+	g_dir_cache.active_handle = handle;
+	if (path.size() >= kDirCacheMaxPathLength) {
+		g_dir_cache.valid = false;
+		return;
+	}
+	std::memcpy(g_dir_cache.directory_path, path.data(), path.size());
+	g_dir_cache.directory_path[path.size()] = 0;
+	g_dir_cache.directory_path_length = path.size();
+	g_dir_cache.valid = true;
+}
+
+void dir_cache_append(const void* handle, std::string_view name, FATFS* fs, WORD id, DWORD sclust, FSIZE_t objsize) {
+	if (!g_dir_cache.valid || g_dir_cache.active_handle != handle) {
+		return;
+	}
+	if (g_dir_cache.entry_count >= kDirCacheCapacity) {
+		return;
+	}
+	DirCacheEntry& entry = g_dir_cache.entries[g_dir_cache.entry_count];
+	size_t copy_length = name.size() < DELUGE_MAX_FILENAME - 1 ? name.size() : DELUGE_MAX_FILENAME - 1;
+	std::memcpy(entry.name, name.data(), copy_length);
+	entry.name[copy_length] = 0;
+	entry.fs = fs;
+	entry.id = id;
+	entry.sclust = sclust;
+	entry.objsize = objsize;
+	g_dir_cache.entry_count++;
+}
+
+const DirCacheEntry* dir_cache_lookup(std::string_view path) {
+	if (!g_dir_cache.valid) {
+		return nullptr;
+	}
+	size_t slash = path.rfind('/');
+	std::string_view dirname = slash == std::string_view::npos ? std::string_view{} : path.substr(0, slash);
+	std::string_view basename = slash == std::string_view::npos ? path : path.substr(slash + 1);
+	if (dirname != std::string_view{g_dir_cache.directory_path, g_dir_cache.directory_path_length}) {
+		return nullptr;
+	}
+	for (size_t i = 0; i < g_dir_cache.entry_count; i++) {
+		if (basename == std::string_view{g_dir_cache.entries[i].name}) {
+			return &g_dir_cache.entries[i];
+		}
+	}
+	return nullptr;
+}
+
+void dir_cache_invalidate() {
+	g_dir_cache.valid = false;
+	g_dir_cache.entry_count = 0;
+	g_dir_cache.active_handle = nullptr;
+}
+
 } // namespace deluge::fatfs_adapter
 
 extern "C" {
@@ -156,17 +221,23 @@ DelugeStatus deluge_dir_open(const char* path, DelugeDir** out) {
 		return deluge::fatfs_adapter::to_deluge_status(opened.error());
 	}
 	*out = reinterpret_cast<DelugeDir*>(new FatFS::Directory(std::move(opened.value())));
+	deluge::fatfs_adapter::dir_cache_begin(path, *out);
 	return DELUGE_OK;
 }
 
 DelugeStatus deluge_dir_read(DelugeDir* dir, DelugeDirEntry* out, bool* out_has_entry) {
 	auto* d = reinterpret_cast<FatFS::Directory*>(dir);
-	auto result = d->read();
+	auto result = d->read_and_get_filepointer();
 	if (!result) {
 		*out_has_entry = false;
 		return deluge::fatfs_adapter::to_deluge_status(result.error());
 	}
-	deluge::fatfs_adapter::to_dir_entry(*result, *out, *out_has_entry);
+	const auto& [info, file_pointer] = *result;
+	deluge::fatfs_adapter::to_dir_entry(info, *out, *out_has_entry);
+	if (*out_has_entry) {
+		deluge::fatfs_adapter::dir_cache_append(dir, out->name, d->inner().obj.fs, d->inner().obj.id,
+		                                        file_pointer.sclust, file_pointer.objsize);
+	}
 	return DELUGE_OK;
 }
 

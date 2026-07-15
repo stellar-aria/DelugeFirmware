@@ -21,6 +21,7 @@
 #include "gui/l10n/l10n.h"
 #include "gui/ui/browser/browser.h"
 #include "hid/display/display.h"
+#include "libdeluge/file_io.h"
 
 extern "C" {
 #include "fatfs/ff.h"
@@ -60,6 +61,7 @@ bool DeleteFile::acceptCurrentOption() {
 	if (toDelete->maybeExistsOnCard) {
 		std::string filePath = browser->getCurrentFilePath();
 
+		deluge_file_invalidate_cache();
 		FRESULT result = f_unlink(filePath.c_str());
 
 		// The file might not exist on the card in the first place, in which case whatever

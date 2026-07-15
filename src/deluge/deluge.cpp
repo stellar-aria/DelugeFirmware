@@ -51,6 +51,7 @@
 #include "libdeluge/board.h"
 #include "libdeluge/control_surface.h"
 #include "libdeluge/display.h"
+#include "libdeluge/file_io.h"
 #include "libdeluge/signals.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/instrument_clip.h"
@@ -448,6 +449,7 @@ void setupStartupSong() {
 				// we tried to create it earlier, but didn't happen?
 				display->consoleText("Startup fault F3");
 				// cleanup, this wasn't a crash
+				deluge_file_invalidate_cache();
 				f_unlink(failSafePath.c_str());
 				return;
 			}
@@ -460,6 +462,7 @@ void setupStartupSong() {
 			}
 			else {
 				// cleanup, this wasn't a crash
+				deluge_file_invalidate_cache();
 				f_unlink(failSafePath.c_str());
 				return;
 			}
@@ -479,6 +482,7 @@ void setupStartupSong() {
 			display->consoleText("Startup fault F4");
 		}
 		// ...but we got this far, cleanup
+		deluge_file_invalidate_cache();
 		f_unlink(failSafePath.c_str());
 	} break;
 	case StartupSongMode::BLANK:

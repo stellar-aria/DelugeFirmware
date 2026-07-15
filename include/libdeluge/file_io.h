@@ -110,6 +110,15 @@ DelugeStatus deluge_file_unlink(const char* path);
 /// Rename/move a file or directory. [task]
 DelugeStatus deluge_file_rename(const char* old_path, const char* new_path);
 
+/// Invalidates any internal caching this boundary maintains for directory
+/// contents. Call this after performing a filesystem write through some
+/// mechanism OTHER than this boundary's own write functions (mkdir/unlink/
+/// rename/write-create open, which already invalidate internally) -- e.g.
+/// legacy code that still calls the underlying filesystem library directly.
+/// Cannot fail. New code should prefer this boundary's own write functions,
+/// which need no separate call. [task]
+void deluge_file_invalidate_cache(void);
+
 #ifdef __cplusplus
 }
 #endif

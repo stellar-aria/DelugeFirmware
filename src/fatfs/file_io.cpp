@@ -290,4 +290,8 @@ DelugeStatus deluge_file_rename(const char* old_path, const char* new_path) {
 	return DELUGE_OK;
 }
 
+void deluge_file_invalidate_cache(void) {
+	deluge::fatfs_adapter::dir_cache_invalidate();
+}
+
 } // extern "C"

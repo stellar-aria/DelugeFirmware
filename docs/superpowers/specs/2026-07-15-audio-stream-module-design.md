@@ -53,9 +53,14 @@ behind a "give me this file" API) becomes a mechanical port rather than a redesi
 are **not** the gate; correctness is ear-check + hardware, leaving room for caching/performance
 improvement.
 
-**Language / boundary decision (settled):** idiomatic C++23, in-tree. Reuse the *existing* C ABIs as
-the module's seams — `stream_io.h` below, the `deluge_resource` Source-callback + resident-chunk-
-pointer contract above. **Do not** hand-roll a new C ABI in the middle. Rationale: a C ABI is a
+**Language / boundary decision (settled):** idiomatic C++23, in-tree. The module's seams are the two
+*existing* boundaries — I/O below, residency above — and **no new C ABI is introduced in the middle.**
+For I/O the module consumes the **`deluge::io::Stream` C++ RAII API**; `stream_io.h`'s C ABI is the
+*portability boundary beneath that wrapper* (what lets a future Rust/POSIX backend slot in), never
+called directly from app code. Above, the residency seam is the `deluge_resource` Source-callback +
+resident-chunk-pointer contract; `getCluster` dispatch calls that C ABI directly, and a thin C++
+facade over it is **explicitly out of scope** for this increment (orthogonal ergonomic sugar, not
+required). Rationale: a C ABI is a
 commitment that must sit on stable ground; the durable seams are the bottom (`stream_io.h`) and the
 top-ish (`deluge_resource`), while the middle (the de-overloaded cache types, `getCluster` dispatch,
 and above all the RT reader that reads `clusters[0]->data` directly per-sample) is still churning and
@@ -64,7 +69,8 @@ units keeps the eventual Rust reimplementation a mechanical swap behind the call
 already exists.
 
 **Non-negotiables carried into every step:**
-- C++23 in-tree; seamed on `stream_io.h` + `deluge_resource`; no new C ABI.
+- C++23 in-tree; I/O via `deluge::io::Stream` (C ABI as the boundary beneath, not called directly),
+  residency via the `deluge_resource` callback / resident-chunk-pointer seam; no new C ABI.
 - Reconstruction + dispatch as pure, dependency-light, POD-shaped units (the Rust-port target).
 - FAT-cluster-sized, DMA-aligned transfers preserved (physical model unchanged).
 - RT reader keeps reading resident bytes by pointer; the render thread never does I/O.
@@ -195,6 +201,13 @@ a boundary.
 block-read fallback, the separate `numReasonsHeldBySampleRecorder` hold layered on top of the manager
 lease) are carried through faithfully on `StreamedChunk` as a first-class case, not an afterthought —
 this path is behavior-sensitive.
+
+**Open question (resolve in the plan) — the raw-block fallback.** `readClusterData` today has a
+fallback *below* `stream_io.h`: `deluge_block_read` against `SampleCluster::sdAddress`, for samples
+with no open `deluge::io::Stream` (a recording still being written). This is the one place raw
+C-level I/O leaks into the module. Decide during planning whether it can be routed through
+`deluge::io::Stream` / `File` (open the recording file) or must stay raw because a readable stream
+doesn't exist mid-record. Lean toward the wrapper; keep raw only if recording forces it.
 
 ---
 

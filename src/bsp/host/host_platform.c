@@ -143,54 +143,6 @@ void disk_timerproc(UINT msPassed) {
 	(void)msPassed;
 }
 
-// App-side cluster-streaming wrappers (declared in audio_file_manager.cpp). These
-// do the real sector I/O against the image; FatFS's disk_read/disk_write and the
-// sample streamer both funnel here.
-DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, UINT count) {
-	(void)pdrv;
-	if (host_img_fd < 0) {
-		return RES_NOTRDY;
-	}
-	if ((uint64_t)sector + count > host_img_sectors) {
-		return RES_PARERR;
-	}
-	size_t total = (size_t)count * HOST_SECTOR_SIZE;
-	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
-	size_t done = 0;
-	while (done < total) {
-		ssize_t n = pread(host_img_fd, buff + done, total - done, base + (off_t)done);
-		if (n <= 0) {
-			return RES_ERROR;
-		}
-		done += (size_t)n;
-	}
-	return RES_OK;
-}
-
-DRESULT disk_write_without_streaming_first(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count) {
-	(void)pdrv;
-	if (host_img_fd < 0) {
-		return RES_NOTRDY;
-	}
-	if (!host_img_writable) {
-		return RES_WRPRT;
-	}
-	if ((uint64_t)sector + count > host_img_sectors) {
-		return RES_PARERR;
-	}
-	size_t total = (size_t)count * HOST_SECTOR_SIZE;
-	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
-	size_t done = 0;
-	while (done < total) {
-		ssize_t n = pwrite(host_img_fd, buff + done, total - done, base + (off_t)done);
-		if (n <= 0) {
-			return RES_ERROR;
-		}
-		done += (size_t)n;
-	}
-	return RES_OK;
-}
-
 DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count) {
 	(void)unit;
 	if (host_img_fd < 0) {

@@ -48,6 +48,7 @@
 extern "C" {
 #include "fatfs/diskio.h"
 #include "fatfs/ff.h"
+#include "libdeluge/block_device.h"
 
 DWORD get_fat_from_fs(                      /* 0xFFFFFFFF:Disk error, 1:Internal error, 2..0x7FFFFFFF:Cluster status */
                       FATFS* fs, DWORD clst /* Cluster number to get the value */
@@ -58,32 +59,33 @@ LBA_t clst2sect(           /* !=0:Sector number, 0:Failed (invalid cluster#) */
                 DWORD clst /* Cluster# to be converted */
 );
 
-DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, UINT count);
-DRESULT disk_write_without_streaming_first(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count);
-
 extern uint8_t currentlyAccessingCard;
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
 
 // FatFs porting symbols. Service the audio cluster-streaming queue before every FatFs
-// sector access (an app priority concern), then do the plain sector I/O. Inverts what
-// used to be a HAL->app upcall (diskio.c calling loadAnyEnqueuedClustersRoutine): the
-// streaming policy now lives in the app and calls *down* into the block device.
+// sector access (an app priority concern), then do the plain sector I/O via the
+// libdeluge block-device boundary. Inverts what used to be a HAL->app upcall (diskio.c
+// calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
+// calls *down* into the block device.
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
 
-	DRESULT result = disk_read_without_streaming_first(pdrv, buff, sector, count);
+	DelugeStatus status =
+	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 
 	if (currentlySearchingForCluster) {
 		pendingGlobalMIDICommandNumClustersWritten++;
 	}
 
-	return result;
+	return status == DELUGE_OK ? RES_OK : RES_ERROR;
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
 	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
-	return disk_write_without_streaming_first(pdrv, buff, sector, count);
+	DelugeStatus status =
+	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
+	return status == DELUGE_OK ? RES_OK : RES_ERROR;
 }
 }
 
@@ -982,8 +984,9 @@ getOutEarly:
 	}
 #endif
 
-	DRESULT result = disk_read_without_streaming_first(deluge_block_sd_unit(), (BYTE*)cluster.data,
-	                                                   sample->clusters[cluster.clusterIndex].sdAddress, numSectors);
+	DelugeStatus status =
+	    deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(cluster.data),
+	                      sample->clusters[cluster.clusterIndex].sdAddress, static_cast<uint32_t>(numSectors));
 
 #if REPORT_LOAD_TIME
 	uint16_t endTime = MTU2.TCNT_0;
@@ -1008,7 +1011,7 @@ getOutEarly:
 #endif
 
 	// If that failed, get out
-	if (result != 0u) {
+	if (status != DELUGE_OK) {
 		goto getOutEarly;
 	}
 

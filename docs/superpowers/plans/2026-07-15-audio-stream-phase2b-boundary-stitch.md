@@ -12,6 +12,7 @@
 
 - **Naming (house convention):** snake_case functions/methods/variables; CamelCase types; UPPER_CASE enum constants; lower_case members (`_`-suffixed). Port EVERY legacy camelCase local to snake_case (the source is legacy camelCase) — grep the new function for lowercase-then-uppercase and confirm zero remain.
 - **Idiomatic C++23**, dependency-light: `stitch.cpp` includes only `stitch.h` + `convert.h` + std headers — NOT AudioEngine/Sample/Cluster. The pure function takes spans + PODs + flag pointers.
+- **No C-style callbacks.** Use a template callable (`template <class Yield> … (Yield yield)`), never `void(*)(void*)` + ctx — zero-alloc and idiomatic. (Task 0 converts Phase 2a's `convert_cluster_data` to this; `stitch_boundaries` itself needs no callback — the stitch is short and doesn't yield.)
 - **No `goto`** in the port: model the `copy7ToMe` label as a `bool need_copy7` funneling to one shared tail memcpy (see the control-flow sketch in this plan).
 - **Preserve the load-bearing ordering subtlety** (§ port notes): in the other-formats misaligned branch, `start_pos` can reach `cluster_size-1`, so the straddling `int32` word overlaps the overhang `[cluster_size, cluster_size+7)`; the overhang MUST be populated (from `next` head or the transient pre-conversion staging) BEFORE `convert_word` reads that word, and then finalized from `next` head. Model as `stage_overhang → convert_straddle_word → finalize_overhang`, not incidental statement order.
 - **Behavior-preserving.** Gate: golden **bit-exact** (cordae + icoustic) + unit specs. `highsiderr` KNOWN-STALE (A/B if it fails, don't block). Keep structs byte-stable.
@@ -66,6 +67,41 @@ void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, Ra
                        StitchPrevEdge* prev, StitchNextEdge* next);
 
 } // namespace deluge::audio::stream
+```
+
+---
+
+## Task 0: rework `convert_cluster_data` yield to a template callable (+ TODO note)
+
+Phase 2a's `convert_cluster_data` takes a C-style `void(*)(void*)` yield + `void* ctx`. The ctx is dead weight in production (the real yield lambda is captureless; ctx is only used by the test), and the C-ism is out of place. Convert it to a template callable. The yield itself is a cooperative-scheduling shim — it exists only because the conversion runs cooperatively on the audio context; under preemptive audio (the Embassy `InterruptExecutor`) it's unnecessary — so also record its removal in TODO.md. Behavior-identical (golden bit-exact).
+
+**Files:**
+- Modify: `src/deluge/storage/audio/stream/convert.h`, `src/deluge/storage/audio/stream/convert.cpp`
+- Modify: `src/deluge/storage/cluster/cluster.cpp` (the wrapper's yield lambda)
+- Modify: `tests/spec_audio_stream/convert_cluster_spec.cpp` (the yield-counter case)
+- Modify: `TODO.md`
+
+**Interfaces:**
+- Produces: `template <class Yield> void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawDataFormat format, ConvertGeometry geometry, size_t cluster_size, size_t cluster_size_magnitude, std::span<std::byte, 3> unconverted_head_out, Yield yield);` — the definition moves INTO `convert.h` (templates are header-defined). The `YieldFn` typedef and the `void* yield_ctx` param are removed. Body calls `yield();` at the two former yield sites (no null check — callers always pass a callable; pass `[]{}` for no-op).
+
+- [ ] **Step 1: Move `convert_cluster_data` into `convert.h` as a template.** Cut its definition from `convert.cpp` and paste into `convert.h` as `template <class Yield> void convert_cluster_data(...)`, replacing the two `if (yield) yield(yield_ctx);` sites with `yield();`. Delete the `using YieldFn = ...;` typedef. `convert.h` will need the includes the body uses (`<algorithm>`, `<bit>`, `<cstdint>`, `<span>`, `<cstddef>`); it still must NOT include AudioEngine/Sample/Cluster. `convert.cpp` keeps only `convert_word` (the template calls `convert_word`, declared in the same header — link resolves it). Add a doc comment on `convert_cluster_data`: the `yield` is a cooperative-scheduling shim, called ~every 1024 bytes to pump the audio routine during a long conversion; unnecessary (and removable) once audio is preemptively scheduled — see TODO.md.
+
+- [ ] **Step 2: Update the wrapper** in `cluster.cpp` (`Cluster::convertDataIfNecessary`): change the yield argument from `[](void*) { AudioEngine::logAction("from convert-data"); AudioEngine::runRoutine(); }, nullptr` to `[] { AudioEngine::logAction("from convert-data"); AudioEngine::runRoutine(); }` (captureless, no ctx arg). Keep the existing comment about the deliberate log widening.
+
+- [ ] **Step 3: Update the spec** `convert_cluster_spec.cpp`: the yield-counter case becomes `int count = 0; convert_cluster_data(..., [&] { count++; });` (capturing lambda); the other cases pass `[] {}` (no-op). Confirm the counter assertion still holds.
+
+- [ ] **Step 4: Add the TODO.md note.** Append to `TODO.md`:
+```
+- [] remove convert_cluster_data's `yield` callback + the AudioEngine pump lambda in Cluster::convertDataIfNecessary once AudioEngine::routine()/runRoutine() runs on the preemptive Embassy InterruptExecutor task — the cooperative mid-conversion yield is unnecessary under preemption (see src/deluge/storage/audio/stream/convert.h)
+```
+
+- [ ] **Step 5: Build, test, golden.** `dbt build Debug` clean; `./dbt test` (19/19 — convert_cluster cases still green with the new lambda-based yield); `scripts/golden_mixdown.sh check` (cordae bit-exact) + `FIXTURE=icoustic scripts/golden_mixdown.sh check` (bit-exact). Template-vs-fnptr and the identical lambda body make this behavior-identical.
+
+- [ ] **Step 6: Commit.**
+```bash
+git add src/deluge/storage/audio/stream/convert.h src/deluge/storage/audio/stream/convert.cpp \
+        src/deluge/storage/cluster/cluster.cpp tests/spec_audio_stream/convert_cluster_spec.cpp TODO.md
+git commit -m "refactor(audio-stream): convert_cluster_data yield -> template callable; TODO note re preemption"
 ```
 
 ---

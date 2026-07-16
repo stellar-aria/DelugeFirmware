@@ -40,11 +40,9 @@ public:
 	enum class Type {
 		EMPTY,
 		SAMPLE,
-		GENERAL_MEMORY,
 		SAMPLE_CACHE,
 		PERC_CACHE_FORWARDS,
 		PERC_CACHE_REVERSED,
-		OTHER,
 	};
 
 	void destroy();

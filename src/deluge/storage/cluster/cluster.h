@@ -66,6 +66,12 @@ public:
 inline constexpr size_t kFrontSlackBytes = 4;    // the `-4 + byte_depth` frame-cursor front-underread
 inline constexpr size_t kTrailingSlackBytes = 7; // the stitch `Cluster::size + 7` / recorder `+5` over-reads
 
+// deluge_resource_request/acquire take a `size` argument that BACKING_SLAB assets ignore — the slab
+// always hands back its fixed slot_size (computed once in general_memory_allocator.cpp), never the
+// caller's value. Every StreamedChunk/ComputedChunk asset is slab-backed, so call sites requesting one
+// pass this rather than a `sizeof(chunk) + Cluster::size` figure that reads as load-bearing but isn't.
+inline constexpr size_t kSlabBackedSizeIgnored = 0;
+
 /// A file-backed streamed sample-audio chunk (the streamed SAMPLE role). Its backing comes from the
 /// resource-manager cluster slab; the actual cluster data lives in the same allocation, after this
 /// struct — allocate Cluster::size bytes past it with enough padding to absorb an offset of at least

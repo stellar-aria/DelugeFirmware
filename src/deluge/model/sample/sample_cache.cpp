@@ -219,7 +219,7 @@ bool SampleCache::setupNewCluster(int32_t clusterIndex) {
 	// + leases it; release immediately so it's resident-but-unleased (evictable from birth).
 	// The cache writes into it; reads check the pointer.
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	void* p = deluge_resource_request(mgr, resourceAssetId, clusterIndex, sizeof(ComputedChunk) + Cluster::size);
+	void* p = deluge_resource_request(mgr, resourceAssetId, clusterIndex, kSlabBackedSizeIgnored);
 	if (p == nullptr) {
 		D_PRINTLN("allocation fail");
 		return false;

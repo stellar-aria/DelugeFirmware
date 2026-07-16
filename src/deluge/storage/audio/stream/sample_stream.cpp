@@ -313,7 +313,7 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 			deluge_resource_add_lease(mgr, table_[index].cluster);
 		}
 		else {
-			void* p = deluge_resource_request(mgr, asset, index, sizeof(StreamedChunk) + Cluster::size);
+			void* p = deluge_resource_request(mgr, asset, index, kSlabBackedSizeIgnored);
 			if (p == nullptr) {
 				if (error != nullptr) {
 					*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
@@ -330,7 +330,7 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 		// Async prefetch: construct + lease now (NO I/O), then schedule the read on the loader
 		// (the existing loadingQueue, pumped off the audio thread) so the audio thread never
 		// blocks on SD. Returns the cluster (loaded==false until the loader reads it).
-		void* p = deluge_resource_request(mgr, asset, index, sizeof(StreamedChunk) + Cluster::size);
+		void* p = deluge_resource_request(mgr, asset, index, kSlabBackedSizeIgnored);
 		if (p == nullptr) {
 			if (error != nullptr) {
 				*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
@@ -346,7 +346,7 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 
 	// CLUSTER_LOAD_IMMEDIATELY / _OR_ENQUEUE: must have it loaded now → acquire (full
 	// materialize on a miss; this may block on I/O, which is the must-load-now contract).
-	void* p = deluge_resource_acquire(mgr, asset, index, sizeof(StreamedChunk) + Cluster::size);
+	void* p = deluge_resource_acquire(mgr, asset, index, kSlabBackedSizeIgnored);
 	if (p == nullptr) {
 		if (error != nullptr) {
 			*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::UNSPECIFIED;

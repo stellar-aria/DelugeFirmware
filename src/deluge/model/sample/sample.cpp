@@ -605,8 +605,8 @@ doLoading:
 				// resident-but-unleased (the TimeStretcher re-leases the nearby ones via
 				// deluge::cluster::add_lease).
 				DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-				void* p = deluge_resource_request(mgr, percCacheAssetId[reversed], percClusterIndex,
-				                                  sizeof(ComputedChunk) + Cluster::size);
+				void* p =
+				    deluge_resource_request(mgr, percCacheAssetId[reversed], percClusterIndex, kSlabBackedSizeIgnored);
 				if (p == nullptr) {
 					error = Error::INSUFFICIENT_RAM;
 					goto getOut;

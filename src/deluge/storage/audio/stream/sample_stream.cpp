@@ -31,12 +31,9 @@
 
 namespace deluge::audio::stream {
 
-// === Resource-manager Source for SAMPLE clusters =============================
-// See the doc comments in sample_stream.h. Bodies moved verbatim from sample.cpp's former
-// file-static clusterMaterialize/clusterConstruct/clusterEvict; `owner` is the Sample*, and the
-// residency table now lives on that Sample's own SampleStream (`sample->stream().table_`) --
-// reached here via `sample->stream()` since these are SampleStream statics, not members, so they
-// don't have an implicit `sample_`/`table_` of their own to fall back on.
+// Resource-manager Source callbacks (contract documented in sample_stream.h). `owner` is the Sample*
+// registered by ensure_resource_asset(); being statics, these reach the residency table through that
+// sample's own SampleStream via `sample->stream().table_`.
 
 bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
 	auto* sample = static_cast<Sample*>(owner);
@@ -140,11 +137,7 @@ std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 	return std::make_unique<BlockReadSource>(sample_);
 }
 
-// === Cluster residency dispatch + table accessors (Phase 4, Task 2; table internalized Task 5) ===
-// Moved verbatim from the former SampleCluster::getCluster (sample_cluster.cpp:63-146), rebased onto
-// `table_[index]` -- see sample_stream.h's doc comment.
-//
-// Calling this will add a reason to the loaded Cluster! priority_rating is only relevant if enqueuing.
+// Cluster residency dispatch + table accessors (contract documented in sample_stream.h).
 StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instruction, uint32_t priority_rating,
                                          Error* error) {
 

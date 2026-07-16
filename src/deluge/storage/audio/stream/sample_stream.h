@@ -20,7 +20,7 @@
 #include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "io/stream.hpp"
 #include "libdeluge/stream_io.h"         // DelugeStreamMode
-#include "model/sample/sample_cluster.h" // table_'s element type -- SampleStream owns the residency table
+#include "model/sample/sample_cluster.h" // SampleCluster, the residency table's element type
 #include "storage/audio/stream/read_source.h"
 #include "util/containers.h" // deluge::fast_vector
 #include <cstddef>
@@ -32,128 +32,188 @@
 class Sample;
 struct StreamedChunk;
 
-// The audio-stream module's per-Sample orchestrator (design spec §4/§8 step 3). SampleStream owns
-// the read-stream handle, the resource-manager Asset + its materialize/construct/evict callbacks,
-// the ReadSource selection, and (as of Phase 4 Task 5) the cluster residency table itself --
-// SampleCluster is now a passive entry type, with no knowledge of how it's dispatched.
 namespace deluge::audio::stream {
 
+/// @brief Per-`Sample` orchestrator for streaming a sample's audio off the SD card in FAT-cluster-sized
+///        chunks.
+///
+/// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
+/// streaming state:
+///   - the **residency table** (`table_`): one `SampleCluster` entry per cluster of the file, each
+///     holding the resident `StreamedChunk*` (null when the chunk is not in RAM) plus the entry's
+///     physical sector address and waveform min/max cache;
+///   - the open **read-stream handle** (`deluge::io::Stream`) used to pull cluster bytes off the card;
+///   - the sample's **resource-manager Asset** and the materialize / construct / evict callbacks the
+///     manager invokes to reconstruct a cluster on demand or drop one under memory pressure;
+///   - **read-source selection** — the single place the stream-vs-raw-block decision is made.
+///
+/// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident
+/// one through chunk_at(); no caller indexes the table directly, and none branches on how a cluster's
+/// bytes are read.
+///
+/// @note **Real-time contract.** The audio render thread never calls into `SampleStream` per sample —
+///       it reads already-resident chunk bytes by pointer from its own lookahead array. It only touches
+///       this class at cluster-boundary crossings, to enqueue the next cluster, and get_cluster() with
+///       CLUSTER_ENQUEUE never blocks on I/O.
+///
+/// @warning Non-copyable and non-movable: it holds a back-reference to its owning `Sample` and owns the
+///          read stream and Asset. This transitively makes `Sample` non-movable.
 class SampleStream {
 public:
+	/// @param sample The owning sample; the reference is retained for this object's whole lifetime.
 	explicit SampleStream(Sample& sample) : sample_{sample} {}
 
-	// Owned member holding a back-reference plus an owned stream/Asset -- not copyable or movable.
 	SampleStream(const SampleStream&) = delete;
 	SampleStream& operator=(const SampleStream&) = delete;
 	SampleStream(SampleStream&&) = delete;
 	SampleStream& operator=(SampleStream&&) = delete;
 
-	// Defensive: if ~Sample's explicit ordered stream_.release_asset() call already ran (the normal
-	// path -- see sample.cpp's ~Sample), this is a no-op. Do NOT rely on this call alone for
-	// correctness: the asset must be released while Sample + this SampleStream are still fully
-	// alive (on_evict reaches back through `sample->stream()`), which the mere fact that `table_`
-	// destructs after this destructor's body runs does not by itself guarantee -- see the
-	// release_asset() doc comment.
+	/// Releases the Asset as a defensive backstop; a no-op on the normal path, where `~Sample` has
+	/// already released it (see release_asset() for why that explicit, earlier release is required).
 	~SampleStream() { release_asset(); }
 
-	/// Lazily define this Sample's resource-manager Asset (its SAMPLE clusters are the Asset's
-	/// Chunks: materialize = readClusterData, on_evict = drop + ~StreamedChunk). Returns the asset
-	/// id. The manager is the sole SDRAM evictor, so this never returns NO_ASSET -- a missing
-	/// manager / full asset table is fatal (FREEZE), no legacy fallback.
+	/// @name Resource-manager Asset lifecycle
+	/// @{
+
+	/// @brief Lazily define this sample's resource-manager Asset, whose Chunks are its SAMPLE clusters.
+	///
+	/// Idempotent: returns the existing id on later calls. The manager is the sole SDRAM evictor, so a
+	/// missing manager or an exhausted asset table is fatal (`FREEZE`) — there is no legacy fallback,
+	/// hence this never returns DELUGE_RESOURCE_NO_ASSET.
+	/// @return The Asset id.
 	uint32_t ensure_resource_asset();
+
+	/// @return This sample's Asset id, or DELUGE_RESOURCE_NO_ASSET if not yet defined.
 	[[nodiscard]] uint32_t resource_asset_id() const { return resource_asset_id_; }
 
-	/// Releases the Asset (if defined), evicting every resident cluster via the manager's on_evict
-	/// callback first -- this nulls `table_[i].cluster` for every resident entry. Idempotent (a
-	/// no-op if already released / never defined). ~Sample calls this explicitly, at the very top of
-	/// its body, BEFORE any of Sample's members (incl. this `stream_`, and so `table_`) begin
-	/// destructing, so on_evict always finds a live, fully-constructed Sample + SampleStream to null
-	/// entries on. That ordering is load-bearing; it is NOT redundant with ~SampleStream's own
-	/// (defensive) call to this below -- see that call's comment.
+	/// @brief Release the Asset, evicting every resident cluster first.
+	///
+	/// Releasing runs the manager's evict callback for each resident Chunk, which nulls the
+	/// corresponding `table_[i].cluster`. Idempotent (a no-op if the Asset was never defined or is
+	/// already released).
+	/// @warning The eviction callbacks reach back through `sample->stream()`, so the Asset must be
+	///          released while the `Sample` and this `SampleStream` are both still fully alive.
+	///          `~Sample` therefore calls this explicitly, before any `Sample` member (including this
+	///          object, and hence `table_`) is destructed. That ordering is load-bearing and is why the
+	///          call is not left to `~SampleStream` alone.
 	void release_asset();
 
-	/// Opens the read-stream handle used by every subsequent readClusterData call for this Sample's
-	/// lifetime (AudioFileManager::buildAudioFileFromCard, DELUGE_STREAM_READ mode), and populates
-	/// each of the first `num_clusters` entries' sdAddress in `table_` from the newly-opened stream
-	/// (best-effort; only meaningful on FatFS-family backends). Returns false, leaving the stream
-	/// disengaged, if the underlying open fails; the caller maps that to Error::FILE_NOT_FOUND,
-	/// matching prior behavior.
+	/// @}
+	/// @name Read stream
+	/// @{
+
+	/// @brief Open the read stream used for every subsequent cluster read, and seed sector addresses.
+	///
+	/// Opens the handle once (typically from `AudioFileManager::buildAudioFileFromCard`) for the rest of
+	/// the sample's life, and fills the first @p num_clusters entries' `sdAddress` from the freshly
+	/// opened stream (best-effort; only meaningful on FatFS-family backends).
+	/// @param path         Path to open.
+	/// @param mode         Open mode (e.g. DELUGE_STREAM_READ).
+	/// @param num_clusters Number of leading table entries whose `sdAddress` to seed.
+	/// @return `true` on success; `false` if the open failed, leaving the stream disengaged (callers map
+	///         this to `Error::FILE_NOT_FOUND`).
 	bool open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters);
 
-	/// Selects the read source from this Sample's backing state: an open read stream (normal,
-	/// loaded-from-card sample) -> StreamReadSource; otherwise (a recording still being written) ->
-	/// BlockReadSource. This is the single place the block-vs-stream decision is made -- no caller
-	/// branches on it.
+	/// @brief Select the read source from this sample's backing state.
+	///
+	/// This is the single point where the stream-vs-raw-block decision is made; no caller branches on it.
+	/// @return A `StreamReadSource` when a read stream is open (a normal card-loaded sample), otherwise a
+	///         `BlockReadSource` reading physical sectors directly (a sample still being recorded).
 	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source();
 
-	// === Cluster residency dispatch + table accessors (Phase 4, Task 2; internalized Task 5) =====
-	// `table_` (declared below, private) is this Sample's residency table -- every accessor here
-	// reaches it directly, no back-reference through `Sample` needed. Bodies live in the .cpp: they
-	// need `Sample` complete for the callbacks below (only forward-declared above, since `sample.h`
-	// includes this header).
+	/// @}
+	/// @name Cluster residency
+	/// @{
 
-	/// The getCluster dispatch (moved verbatim from the former SampleCluster::getCluster,
-	/// sample_cluster.cpp:63-146, rebased onto `table_[index]`): CLUSTER_DONT_LOAD
-	/// pins/constructs without I/O (recorder write target, held dirty); CLUSTER_ENQUEUE constructs +
-	/// leases and schedules an async read on the loader (the audio thread never blocks); CLUSTER_
-	/// LOAD_IMMEDIATELY[_OR_ENQUEUE] acquires (materializing on a miss, which may block on I/O) and
-	/// reads synchronously on an unloaded hit. Adds a manager lease on every non-null return. `error`,
-	/// if non-null, is set to Error::NONE up front and only overwritten on a failure path (matches the
-	/// original's out-param contract; `std::expected` is out of scope here -- see plan DD4).
+	/// @brief Ensure cluster @p index is resident (or scheduled to load) and return it, taking a lease.
+	///
+	/// The dispatch always takes a manager lease on a non-null return; the caller is responsible for
+	/// releasing it. Behaviour depends on @p load_instruction:
+	///   - CLUSTER_DONT_LOAD — pin or construct the cluster without any I/O and hold it *dirty* (the
+	///     recorder / convert write target); the manager will not evict the unflushed data until it is
+	///     written to the card.
+	///   - CLUSTER_ENQUEUE — construct and lease immediately with no I/O, then schedule the read on the
+	///     background loader. Returns at once; the returned chunk may still be unloaded. Never blocks —
+	///     this is the real-time-safe path.
+	///   - CLUSTER_LOAD_IMMEDIATELY / CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE — acquire the cluster,
+	///     materializing it on a miss (which may block on I/O), and read a prefetched-but-unloaded hit
+	///     synchronously. On a read failure the `_OR_ENQUEUE` form falls back to the loader; the plain
+	///     form returns `nullptr`, leaving the cluster resident and leased so the caller can retry.
+	/// @param index           Cluster index within the sample.
+	/// @param load_instruction One of the `CLUSTER_*` load modes above.
+	/// @param priority_rating  Loader priority; used only when the read is enqueued.
+	/// @param error            If non-null, set to `Error::NONE` on entry and overwritten only on a
+	///                         failure path.
+	/// @return The resident (or scheduled) chunk, leased; `nullptr` on failure.
 	StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction = CLUSTER_ENQUEUE,
 	                           uint32_t priority_rating = 0xFFFFFFFF, Error* error = nullptr);
 
-	/// Resident chunk pointer for `index`, no lease taken (stitch neighbor edges, fillPercCache,
-	/// crossfade sampling, ALPHA bug-checks). nullptr if not currently resident.
+	/// @brief Peek at the resident chunk for @p index without taking a lease.
+	///
+	/// For read-only, non-owning uses (stitching neighbouring cluster edges, perc-cache fills, crossfade
+	/// sampling, debug checks).
+	/// @return The resident chunk, or `nullptr` if @p index is not currently resident.
 	[[nodiscard]] StreamedChunk* chunk_at(uint32_t index) const;
 
-	/// The raw table entry (waveform min/max cache, recorder re-fetch-after-write).
+	/// @brief Access the raw table entry for @p index (its sector address and waveform min/max cache).
 	[[nodiscard]] SampleCluster& entry(uint32_t index);
+	/// @copydoc entry(uint32_t)
 	[[nodiscard]] const SampleCluster& entry(uint32_t index) const;
 
+	/// @return The physical sector address recorded for cluster @p index.
 	[[nodiscard]] uint32_t sd_address_at(uint32_t index) const;
 
+	/// @return The number of entries in the residency table.
 	[[nodiscard]] size_t num_clusters() const;
+
+	/// @brief Resize the residency table to @p n entries (grows the table as a recording extends).
 	void resize(size_t n);
-	/// Erases every entry from `index` to the end (recorder table shrink on record-stop/truncate).
+
+	/// @brief Erase every entry from @p index to the end (shrinks the table on record-stop / truncate).
 	void erase_from(size_t index);
 
+	/// @}
+
 private:
-	// === Resource-manager Source for SAMPLE clusters =========================================
-	// These are the materialize / on_evict callbacks the manager calls for a Sample's Asset. A
-	// Chunk's backing is a uniform slab slot; materialize placement-news a StreamedChunk into it and
-	// fills it via the Step-1 reader; on_evict drops the Sample's pointer and destructs the
-	// StreamedChunk (the manager frees the slot). The Chunk records its chunk-slot handle
-	// (resource_slot) here -- the manager already leased the slot before calling us (leases >= 1), so
-	// slot_of(dest) is valid and deluge::cluster::lease_count(resource_slot) reports the reason count
-	// immediately. Bodies are a verbatim move from the former file-static clusterMaterialize /
-	// clusterConstruct / clusterEvict in sample.cpp -- `owner` is still the Sample* (not the
-	// SampleStream*), so the callback contract with the resource manager (defined in
-	// ensure_resource_asset() below, which passes `&sample_` as owner) is unchanged.
+	/// @name Resource-manager Source callbacks (SAMPLE clusters)
+	/// The manager invokes these to reconstruct or drop a cluster. A Chunk's backing is a uniform slab
+	/// slot; each callback receives the owning `Sample*` (registered by ensure_resource_asset()) and
+	/// reaches its residency table via `sample->stream()`.
+	/// @{
+
+	/// @brief Reconstruct cluster @p index synchronously: placement-new a `StreamedChunk` into @p dest
+	///        and read its data. On read failure the chunk is destructed and the slot freed.
+	/// @return `true` if the cluster was materialized and stored in the table.
 	static bool cluster_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
-	// Async construct (the manager's `request`/prefetch path): init the StreamedChunk object but do
-	// NOT read the data -- an external loader (loadAnyEnqueuedClusters -> readClusterData) fills it
-	// later, so the audio thread never blocks on I/O. Mirror of cluster_materialize minus the read;
-	// the Sample's pointer is set immediately so the requester holds a valid (loaded==false) chunk.
+
+	/// @brief Prefetch counterpart to cluster_materialize(): construct the `StreamedChunk` but do not
+	///        read it (`loaded` stays false), so the audio thread never blocks — the background loader
+	///        fills it later. The table pointer is set immediately so the requester holds a valid chunk.
 	static void cluster_construct(void* ctx, void* owner, uint32_t index, void* dest);
+
+	/// @brief Evict cluster @p index: null its table pointer, de-queue it from the loader, and destruct
+	///        the `StreamedChunk` (the manager frees the slab slot).
 	static void cluster_evict(void* ctx, void* owner, uint32_t index);
 
+	/// @}
+
 	Sample& sample_;
-	// DELUGE_RESOURCE_NO_ASSET until defined on first stream. 0xFFFFFFFF is kept as a literal here
-	// (rather than pulling in deluge_resource.h) since this header is reached transitively by every
-	// includer of sample.h.
+
+	/// This sample's Asset id, DELUGE_RESOURCE_NO_ASSET until defined on first use. The sentinel is a
+	/// literal (rather than including `deluge_resource.h`) because this header is pulled in transitively
+	/// by every includer of `sample.h`.
 	uint32_t resource_asset_id_ = 0xFFFFFFFFu;
-	// Opened once by AudioFileManager::buildAudioFileFromCard, used by readClusterData for every
-	// cluster read thereafter; closed (via the optional's destructor) when this SampleStream is
-	// destructed. Disengaged for a Sample that isn't backed by a stream_io.h read (e.g. one still
-	// being recorded).
+
+	/// The read stream, opened once by open_read_stream() and used for every cluster read thereafter;
+	/// closed by its destructor when this object is destroyed. Disengaged for a sample not backed by a
+	/// readable stream (e.g. one still being recorded), which is what steers make_read_source() to a
+	/// `BlockReadSource`.
 	std::optional<deluge::io::Stream> read_stream_;
 
-	// The cluster residency table (Phase 4, Task 5: internalized from `Sample::clusters`). Each
-	// entry is a passive `SampleCluster` (sdAddress, StreamedChunk* cluster, waveform min/max); this
-	// is the sole place that names it now. `~SampleStream` destructs `table_` after `~Sample`'s
-	// explicit `stream_.release_asset()` call has already nulled every entry's `cluster` pointer --
-	// see `release_asset()`'s doc comment and `~Sample`'s body for why that ordering is load-bearing.
+	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
+	/// sole owner of the table.
+	/// @warning `~SampleStream` destructs `table_` only after `~Sample`'s explicit release_asset() has
+	///          nulled every entry's `cluster` pointer; see release_asset().
 	deluge::fast_vector<SampleCluster> table_{};
 };
 

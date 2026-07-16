@@ -106,57 +106,11 @@ Error Sample::initialize(int32_t newNumClusters) {
 	return Error::NONE;
 }
 
-// === Resource-manager Source for SAMPLE clusters =============================
-// These are the materialize / on_evict callbacks the manager calls for a Sample's
-// Asset. A Chunk's backing is a uniform slab slot; materialize placement-news a
-// Cluster into it and fills it via the Step-1 reader; on_evict drops the Sample's
-// pointer and destructs the Cluster (the manager frees the slot). The Cluster records its
-// chunk-slot handle (resource_slot) here — the manager already leased the slot before calling us
-// (leases >= 1), so slot_of(dest) is valid and deluge::cluster::lease_count(resource_slot) reports
-// the reason count immediately.
-
-static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-
-	bool ok = audioFileManager.readClusterData(*cluster, 0);
-	if (ok) {
-		sample->clusters[index].cluster = cluster;
-	}
-	else {
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-	return ok;
-}
-
-// Async construct (the manager's `request`/prefetch path): init the Cluster object but do
-// NOT read the data — an external loader (loadAnyEnqueuedClusters → readClusterData) fills it
-// later, so the audio thread never blocks on I/O. Mirror of clusterMaterialize minus the read;
-// the Sample's pointer is set immediately so the requester holds a valid (loaded==false) Cluster.
-static void clusterConstruct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-	// cluster->loaded stays false — the loader reads it.
-	sample->clusters[index].cluster = cluster;
-}
-
-static void clusterEvict(void* /*ctx*/, void* owner, uint32_t index) {
-	auto* sample = static_cast<Sample*>(owner);
-	StreamedChunk* cluster = sample->clusters[index].cluster;
-	sample->clusters[index].cluster = nullptr;
-	if (cluster != nullptr) {
-		// A constructed-but-not-yet-loaded chunk may still be in the loader queue — de-queue it so the
-		// queue can't dangle onto freed memory. (Eviction also resets the slot, but be explicit.)
-		deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot);
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-}
+// The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks) and
+// ensureResourceAsset now live on deluge::audio::stream::SampleStream (Phase 4 Task 1) --
+// storage/audio/stream/sample_stream.{h,cpp}. This Sample still owns `clusters` (the residency
+// table itself; a later migration task internalizes it too), so those callbacks still reach it via
+// `sample->clusters[index]`.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========
 // Perc clusters are written incrementally by the time-stretcher (no materialize), and
@@ -184,49 +138,17 @@ static void percCacheEvict(void* ctx, void* owner, uint32_t index) {
 	}
 }
 
-uint32_t Sample::ensureResourceAsset() {
-	if (resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
-		return resourceAssetId;
-	}
-	// The manager is the sole SDRAM evictor now, so every Sample (playback or recording) is
-	// manager-owned. A missing manager / full asset table is fatal — no legacy fallback.
-	// Cost reflects rebuild expense: a converted sample (float / wrong-endian) costs a read PLUS a
-	// format re-conversion, so it's kept resident longer than a native one (one plain read).
-	uint32_t clusterCost =
-	    (rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	resourceAssetId = (mgr != nullptr)
-	                      ? deluge_resource_define_asset(mgr, this, clusterMaterialize, clusterEvict, nullptr,
-	                                                     clusterCost, DELUGE_RESOURCE_BACKING_SLAB)
-	                      : DELUGE_RESOURCE_NO_ASSET;
-	if (resourceAssetId == DELUGE_RESOURCE_NO_ASSET) {
-		FREEZE_WITH_ERROR("RSA1"); // resource asset table exhausted (raise kAssetCap)
-	}
-	// Attach the async-prefetch path so CLUSTER_ENQUEUE can request (construct now, load later).
-	deluge_resource_set_construct(mgr, resourceAssetId, clusterConstruct);
-	// If the sample is already project-relevant (a holder gained it before its first stream), apply the
-	// soft-reference now — numReasonsIncreasedFromZero fired before the asset existed, so it was a no-op.
-	if (isProjectReferenced()) {
-		deluge_resource_reference(mgr, resourceAssetId);
-	}
-	return resourceAssetId;
-}
-
 Sample::~Sample() {
-	// readStream_'s std::optional<deluge::io::Stream> destructor closes the handle automatically
-	// (a disengaged optional does nothing; an engaged one destructs its Stream, closing it).
+	// stream_'s read-stream handle (a std::optional<deluge::io::Stream>) closes automatically when
+	// stream_ destructs below (a disengaged optional does nothing; an engaged one destructs its
+	// Stream, closing it).
 
 	// Retire our Asset first (frees any clusters the manager still has resident, via
-	// clusterEvict, which nulls our clusters[] entries) so the SampleCluster destructors
-	// below see nothing to free. No-op if we never defined one. The manager must exist if
-	// the id is set (ensureResourceAsset created it), so this never stands one up here.
-	if (resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
-		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-		if (mgr != nullptr) {
-			deluge_resource_release_asset(mgr, resourceAssetId);
-		}
-		resourceAssetId = DELUGE_RESOURCE_NO_ASSET;
-	}
+	// SampleStream::cluster_evict, which nulls our clusters[] entries) so the SampleCluster
+	// destructors below see nothing to free. No-op if we never defined one. This ordering is
+	// load-bearing -- see sample_stream.h's release_asset() doc comment -- so it's an explicit call
+	// here rather than left to stream_'s own (member-order-dependent) destruction.
+	stream_.release_asset();
 
 	deletePercCache(true);
 
@@ -1888,7 +1810,7 @@ void Sample::applyProjectReference(bool on) {
 			deluge_resource_unreference(mgr, asset);
 		}
 	};
-	toggle(resourceAssetId);
+	toggle(stream_.resource_asset_id());
 	toggle(percCacheAssetId[0]);
 	toggle(percCacheAssetId[1]);
 	for (SampleCacheElement& element : caches) {

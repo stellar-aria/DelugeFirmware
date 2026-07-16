@@ -18,17 +18,16 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
-#include "io/stream.hpp"
 #include "model/sample/sample_cluster.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
 #include "storage/audio/stream/convert.h"
+#include "storage/audio/stream/sample_stream.h"
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <array>
 #include <cstdint>
-#include <optional>
 
 #define SAMPLE_DO_LOCKS (ALPHA_OR_BETA_VERSION)
 
@@ -84,15 +83,15 @@ public:
 	bool getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int32_t crossfadeLengthSamples,
 	                             int32_t playDirection, int32_t lengthToAverageEach);
 	void convertDataOnAnyClustersIfNecessary();
-	/// Lazily define this Sample's resource-manager Asset (its SAMPLE clusters are the Asset's
-	/// Chunks: materialize = readClusterData, on_evict = drop + ~Cluster). Returns the asset id. The
-	/// manager is the sole SDRAM evictor, so this never returns NO_ASSET — a missing manager / full
-	/// asset table is fatal (FREEZE), no legacy fallback.
-	uint32_t ensureResourceAsset();
 	int32_t getMaxPeakFromZero();
 	int32_t getFoundValueCentrePoint();
 	int32_t getValueSpan();
 	void finalizeAfterLoad(uint32_t fileSize) override;
+
+	/// The audio-stream module's per-Sample orchestrator: owns the read-stream handle, the
+	/// resource-manager Asset for this Sample's clusters, and the ReadSource selection. See
+	/// storage/audio/stream/sample_stream.h.
+	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
 
 	// Floating point
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }
@@ -156,17 +155,10 @@ public:
 
 	deluge::fast_vector<SampleCluster> clusters{};
 
-	// Resource-manager Asset id for this Sample's SAMPLE clusters (DELUGE_RESOURCE_NO_ASSET
-	// until defined on first stream). Owns raw-cluster residency once routed through the
-	// manager; released in ~Sample. 0xFFFFFFFF == DELUGE_RESOURCE_NO_ASSET (kept as a literal
-	// here so the widely-included header needn't pull in deluge_resource.h).
-	uint32_t resourceAssetId{0xFFFFFFFFu};
-
-	// Opened once by AudioFileManager::buildAudioFileFromCard (DELUGE_STREAM_READ mode), used by
-	// readClusterData for every cluster read thereafter; closed (via the optional's destructor) in
-	// ~Sample. Disengaged for a Sample that isn't backed by a stream_io.h read (e.g. one still being
-	// recorded).
-	std::optional<deluge::io::Stream> readStream_;
+	// Owns the read-stream handle + the resource-manager Asset for `clusters` above (COEXISTENCE:
+	// the residency table itself stays here on Sample until a later migration task internalizes it).
+	// ~Sample releases the Asset explicitly, before `clusters` destructs -- see ~Sample's body.
+	deluge::audio::stream::SampleStream stream_{*this};
 
 protected:
 	// Project-relevance hooks (the object's hard-lease 0↔1 transitions): toggle the soft-reference on

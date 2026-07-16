@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <memory>
 #include <span>
 
 extern "C" {
@@ -53,9 +52,9 @@ private:
 	const Sample& sample_;
 };
 
-// Selects the read source from the sample's backing state: an open read stream (normal, loaded-from-card
-// sample) -> StreamReadSource; otherwise (a recording still being written) -> BlockReadSource. This is the
-// single place the block-vs-stream decision is made — no caller branches on it.
-std::unique_ptr<ReadSource> make_read_source(Sample& sample);
+// The block-vs-stream ReadSource selection lives on deluge::audio::stream::SampleStream
+// (SampleStream::make_read_source(), storage/audio/stream/sample_stream.h) as of Phase 4 Task 1 --
+// it owns the Sample's read-stream handle, so it's the only place that can make the selection
+// without a caller branching on Sample internals.
 
 } // namespace deluge::audio::stream

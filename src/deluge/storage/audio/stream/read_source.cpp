@@ -1,7 +1,5 @@
 #include "storage/audio/stream/read_source.h"
 #include "model/sample/sample.h"
-#include "storage/cluster/cluster.h" // Cluster::size_magnitude
-#include <memory>
 
 extern "C" {
 #include "libdeluge/block_device.h"
@@ -25,14 +23,6 @@ std::expected<uint32_t, DelugeStatus> BlockReadSource::read(uint32_t cluster_ind
 		return std::unexpected(status);
 	}
 	return static_cast<uint32_t>(num_sectors) * 512u;
-}
-
-std::unique_ptr<ReadSource> make_read_source(Sample& sample) {
-	if (sample.readStream_.has_value()) {
-		return std::make_unique<StreamReadSource>(sample.readStream_.value(),
-		                                          static_cast<uint8_t>(Cluster::size_magnitude));
-	}
-	return std::make_unique<BlockReadSource>(sample);
 }
 
 } // namespace deluge::audio::stream

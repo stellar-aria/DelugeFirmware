@@ -81,7 +81,7 @@ void StreamedChunk::convert_data_if_necessary() {
 // The resource-manager Asset that owns this chunk's residency (the sample's asset), or NO_ASSET if
 // it has no sample. Used to route a reason to a manager lease.
 uint32_t StreamedChunk::resource_lease_asset_id() const {
-	return (sample != nullptr) ? sample->resourceAssetId : DELUGE_RESOURCE_NO_ASSET;
+	return (sample != nullptr) ? sample->stream().resource_asset_id() : DELUGE_RESOURCE_NO_ASSET;
 }
 
 // The resource-manager Asset that owns this chunk's residency for the *leased* (reason-tracked) perc

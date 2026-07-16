@@ -68,11 +68,11 @@ StreamedChunk* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, 
 	}
 
 	// Manager-owned residency. The manager is the sole SDRAM evictor: every Sample (playback or
-	// recording) is manager-owned (ensureResourceAsset FREEZEs if the asset table is exhausted — no
-	// legacy fallback). The hard-lease count lives in the manager's chunk slot (the construct/
-	// materialize callback records the slot handle); add_lease/request take the lease. non-null
-	// `cluster` <=> manager-resident (on_evict nulls it).
-	uint32_t asset = sample->ensureResourceAsset();
+	// recording) is manager-owned (SampleStream::ensure_resource_asset FREEZEs if the asset table is
+	// exhausted — no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
+	// construct/materialize callback records the slot handle); add_lease/request take the lease.
+	// non-null `cluster` <=> manager-resident (on_evict nulls it).
+	uint32_t asset = sample->stream().ensure_resource_asset();
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	bool wasResident = (cluster != nullptr);
 

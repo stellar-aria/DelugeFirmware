@@ -807,21 +807,10 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
-		auto openedStream = deluge::io::Stream::open(pathToOpen, DELUGE_STREAM_READ);
-		if (!openedStream) {
+		if (!sampleFile->stream().open_read_stream(pathToOpen, DELUGE_STREAM_READ, numClusters)) {
 			*error = Error::FILE_NOT_FOUND;
 			destroyAudioFileObject(*audioFile);
 			return nullptr;
-		}
-		sampleFile->readStream_ = std::move(openedStream.value());
-		for (uint32_t i = 0; i < numClusters; i++) {
-			uint32_t sector = 0;
-			auto sectorResult = sampleFile->readStream_->sector_of(i); // best-effort; only meaningful
-			                                                           // on FatFS-family backends
-			if (sectorResult) {
-				sector = *sectorResult;
-			}
-			sampleFile->clusters[i].sdAddress = sector;
 		}
 
 		// The byte source streams the clusters; its destructor releases the held cluster's reason.
@@ -984,10 +973,10 @@ getOutEarly:
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
 	{
-		// Read seam: make_read_source owns source selection (Stream for a loaded sample, Block for a
-		// still-being-written recording). Selection ownership moves onto SampleStream in Phase 4.
-		// See storage/audio/stream/read_source.h and design §6/§7.
-		auto source = deluge::audio::stream::make_read_source(*sample);
+		// Read seam: SampleStream::make_read_source owns source selection (Stream for a loaded
+		// sample, Block for a still-being-written recording). See storage/audio/stream/
+		// sample_stream.h and design §6/§7.
+		auto source = sample->stream().make_read_source();
 		auto readResult =
 		    source->read(static_cast<uint32_t>(clusterIndex),
 		                 std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
@@ -1181,7 +1170,7 @@ performActionsAndGetOut:
 		// Do the actual loading
 		allowSomeUserActionsEvenWhenInCardRoutine = true; // Sorry!!
 		bool success;
-		if (cluster->sample != nullptr && cluster->sample->resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
+		if (cluster->sample != nullptr && cluster->sample->stream().resource_asset_id() != DELUGE_RESOURCE_NO_ASSET) {
 			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
 			// read directly. NOT loadCluster — its add_lease/removeReason would desync the manager
 			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render

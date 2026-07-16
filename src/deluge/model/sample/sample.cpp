@@ -106,11 +106,10 @@ Error Sample::initialize(int32_t newNumClusters) {
 	return Error::NONE;
 }
 
-// The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks) and
-// ensureResourceAsset now live on deluge::audio::stream::SampleStream (Phase 4 Task 1) --
-// storage/audio/stream/sample_stream.{h,cpp}. This Sample still owns `clusters` (the residency
-// table itself; a later migration task internalizes it too), so those callbacks still reach it via
-// `sample->clusters[index]`.
+// The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks),
+// ensureResourceAsset, and the residency table itself all live on
+// deluge::audio::stream::SampleStream (Phase 4; table internalized Task 5) --
+// storage/audio/stream/sample_stream.{h,cpp}.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========
 // Perc clusters are written incrementally by the time-stretcher (no materialize), and
@@ -144,9 +143,10 @@ Sample::~Sample() {
 	// Stream, closing it).
 
 	// Retire our Asset first (frees any clusters the manager still has resident, via
-	// SampleStream::cluster_evict, which nulls our clusters[] entries) so the SampleCluster
-	// destructors below see nothing to free. No-op if we never defined one. This ordering is
-	// load-bearing -- see sample_stream.h's release_asset() doc comment -- so it's an explicit call
+	// SampleStream::cluster_evict, which nulls the residency table's entries) so the SampleCluster
+	// destructors (which run when `stream_` -- and so its table -- destructs below) see nothing to
+	// free. No-op if we never defined one. This ordering is load-bearing -- see sample_stream.h's
+	// release_asset() doc comment -- so it's an explicit call
 	// here rather than left to stream_'s own (member-order-dependent) destruction.
 	stream_.release_asset();
 

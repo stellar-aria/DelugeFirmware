@@ -19,8 +19,10 @@
 
 #include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "io/stream.hpp"
-#include "libdeluge/stream_io.h" // DelugeStreamMode
+#include "libdeluge/stream_io.h"         // DelugeStreamMode
+#include "model/sample/sample_cluster.h" // table_'s element type -- SampleStream owns the residency table
 #include "storage/audio/stream/read_source.h"
+#include "util/containers.h" // deluge::fast_vector
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -28,14 +30,12 @@
 #include <string_view>
 
 class Sample;
-class SampleCluster;
 struct StreamedChunk;
 
-// The audio-stream module's per-Sample orchestrator (design spec §4/§8 step 3). This is a
-// COEXISTENCE migration (Phase 4, Task 1 of the plan): SampleStream owns the read-stream handle,
-// the resource-manager Asset + its materialize/construct/evict callbacks, and the ReadSource
-// selection. The cluster residency table (Sample::clusters) stays on Sample until a later task
-// internalizes it here (see docs/superpowers/plans/2026-07-15-audio-stream-phase4-sample-stream.md).
+// The audio-stream module's per-Sample orchestrator (design spec §4/§8 step 3). SampleStream owns
+// the read-stream handle, the resource-manager Asset + its materialize/construct/evict callbacks,
+// the ReadSource selection, and (as of Phase 4 Task 5) the cluster residency table itself --
+// SampleCluster is now a passive entry type, with no knowledge of how it's dispatched.
 namespace deluge::audio::stream {
 
 class SampleStream {
@@ -49,9 +49,11 @@ public:
 	SampleStream& operator=(SampleStream&&) = delete;
 
 	// Defensive: if ~Sample's explicit ordered stream_.release_asset() call already ran (the normal
-	// path -- see sample.cpp's ~Sample), this is a no-op. Do NOT rely on this for correctness: the
-	// asset must be released BEFORE the residency table's entries destruct, which member-destruction
-	// order alone cannot guarantee here (see the release_asset() doc comment).
+	// path -- see sample.cpp's ~Sample), this is a no-op. Do NOT rely on this call alone for
+	// correctness: the asset must be released while Sample + this SampleStream are still fully
+	// alive (on_evict reaches back through `sample->stream()`), which the mere fact that `table_`
+	// destructs after this destructor's body runs does not by itself guarantee -- see the
+	// release_asset() doc comment.
 	~SampleStream() { release_asset(); }
 
 	/// Lazily define this Sample's resource-manager Asset (its SAMPLE clusters are the Asset's
@@ -62,21 +64,20 @@ public:
 	[[nodiscard]] uint32_t resource_asset_id() const { return resource_asset_id_; }
 
 	/// Releases the Asset (if defined), evicting every resident cluster via the manager's on_evict
-	/// callback first -- this nulls the Sample's clusters[i].cluster entries. Idempotent (a no-op if
-	/// already released / never defined). ~Sample calls this explicitly, at the very top of its body,
-	/// BEFORE the cluster table (still owned by Sample this task) destructs, so on_evict always finds
-	/// live SampleCluster entries to null. That ordering is load-bearing and is NOT guaranteed by
-	/// ~SampleStream's own (defensive) call to this, since Sample::stream_ and Sample::clusters are
-	/// both plain data members and destruct in declaration order regardless of which is declared
-	/// first -- the explicit call in ~Sample's body is what guarantees correctness.
+	/// callback first -- this nulls `table_[i].cluster` for every resident entry. Idempotent (a
+	/// no-op if already released / never defined). ~Sample calls this explicitly, at the very top of
+	/// its body, BEFORE any of Sample's members (incl. this `stream_`, and so `table_`) begin
+	/// destructing, so on_evict always finds a live, fully-constructed Sample + SampleStream to null
+	/// entries on. That ordering is load-bearing; it is NOT redundant with ~SampleStream's own
+	/// (defensive) call to this below -- see that call's comment.
 	void release_asset();
 
 	/// Opens the read-stream handle used by every subsequent readClusterData call for this Sample's
-	/// lifetime (AudioFileManager::buildAudioFileFromCard, DELUGE_STREAM_READ mode), and -- since the
-	/// residency table is still owned by Sample this task -- populates each of the first
-	/// `num_clusters` entries' sdAddress from the newly-opened stream (best-effort; only meaningful on
-	/// FatFS-family backends). Returns false, leaving the stream disengaged, if the underlying open
-	/// fails; the caller maps that to Error::FILE_NOT_FOUND, matching prior behavior.
+	/// lifetime (AudioFileManager::buildAudioFileFromCard, DELUGE_STREAM_READ mode), and populates
+	/// each of the first `num_clusters` entries' sdAddress in `table_` from the newly-opened stream
+	/// (best-effort; only meaningful on FatFS-family backends). Returns false, leaving the stream
+	/// disengaged, if the underlying open fails; the caller maps that to Error::FILE_NOT_FOUND,
+	/// matching prior behavior.
 	bool open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters);
 	[[nodiscard]] bool has_read_stream() const { return read_stream_.has_value(); }
 
@@ -86,15 +87,14 @@ public:
 	/// branches on it.
 	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source() const;
 
-	// === Cluster residency dispatch + table accessors (Phase 4, Task 2; design plan DD3) ========
-	// Additive over the still-Sample-owned residency table (`Sample::clusters`) during the
-	// COEXISTENCE migration -- SampleCluster::getCluster forwards here so not-yet-migrated callers
-	// (the recorder, Task 3; SampleHolder + the RT reader, Task 4) keep compiling unchanged. Bodies
-	// live in the .cpp: they need `Sample` complete (only forward-declared above, since `sample.h`
+	// === Cluster residency dispatch + table accessors (Phase 4, Task 2; internalized Task 5) =====
+	// `table_` (declared below, private) is this Sample's residency table -- every accessor here
+	// reaches it directly, no back-reference through `Sample` needed. Bodies live in the .cpp: they
+	// need `Sample` complete for the callbacks below (only forward-declared above, since `sample.h`
 	// includes this header).
 
 	/// The getCluster dispatch (moved verbatim from the former SampleCluster::getCluster,
-	/// sample_cluster.cpp:63-146, rebased onto `sample_.clusters[index]`): CLUSTER_DONT_LOAD
+	/// sample_cluster.cpp:63-146, rebased onto `table_[index]`): CLUSTER_DONT_LOAD
 	/// pins/constructs without I/O (recorder write target, held dirty); CLUSTER_ENQUEUE constructs +
 	/// leases and schedules an async read on the loader (the audio thread never blocks); CLUSTER_
 	/// LOAD_IMMEDIATELY[_OR_ENQUEUE] acquires (materializing on a miss, which may block on I/O) and
@@ -119,11 +119,6 @@ public:
 	void resize(size_t n);
 	/// Erases every entry from `index` to the end (recorder table shrink on record-stop/truncate).
 	void erase_from(size_t index);
-
-	/// ALPHA debug bug-check: FREEZEs if the entry at `index` still holds a manager lease. Every call
-	/// site is currently commented out (see sample.cpp/sample_recorder.cpp); kept for parity with the
-	/// former SampleCluster::ensureNoReason, deletion deferred to Task 5 (plan DD4).
-	void ensure_no_reason(uint32_t index);
 
 private:
 	// === Resource-manager Source for SAMPLE clusters =========================================
@@ -156,6 +151,13 @@ private:
 	// being recorded). `mutable`: make_read_source() is logically const (it doesn't change which
 	// source a caller would observe), but StreamReadSource needs a mutable Stream& to read through.
 	mutable std::optional<deluge::io::Stream> read_stream_;
+
+	// The cluster residency table (Phase 4, Task 5: internalized from `Sample::clusters`). Each
+	// entry is a passive `SampleCluster` (sdAddress, StreamedChunk* cluster, waveform min/max); this
+	// is the sole place that names it now. `~SampleStream` destructs `table_` after `~Sample`'s
+	// explicit `stream_.release_asset()` call has already nulled every entry's `cluster` pointer --
+	// see `release_asset()`'s doc comment and `~Sample`'s body for why that ordering is load-bearing.
+	deluge::fast_vector<SampleCluster> table_{};
 };
 
 } // namespace deluge::audio::stream

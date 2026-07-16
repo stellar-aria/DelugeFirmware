@@ -22,10 +22,11 @@
 
 struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
-class Sample;
 
 // This is a quick list item within Sample storing minimal info about one Cluster (which often won't be loaded yet) of
-// audio data for that Sample.
+// audio data for that Sample. A passive entry: SampleStream (storage/audio/stream/sample_stream.h)
+// owns the residency table and all dispatch logic; this type holds no behavior of its own beyond
+// move-semantics and freeing `cluster` on destruction.
 class SampleCluster {
 public:
 	SampleCluster() = default;
@@ -45,11 +46,6 @@ public:
 		std::swap(investigatedWholeLength, other.investigatedWholeLength);
 		return *this;
 	}
-
-	// TODO: This should return a std::expected<StreamedChunk*, Error), removing the last parameter
-	StreamedChunk* getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction = CLUSTER_ENQUEUE,
-	                          uint32_t priorityRating = 0xFFFFFFFF, Error* error = nullptr);
-	void ensureNoReason(Sample* sample);
 
 	// In sectors. (Those 512 byte things. Not to be confused with clusters.)
 	// 0 means invalid, and we check for this as a last resort before writing

@@ -156,11 +156,10 @@ public:
 
 	uint32_t waveTableCycleSize{0}; // In case this later gets used for a WaveTable
 
-	deluge::fast_vector<SampleCluster> clusters{};
-
-	// Owns the read-stream handle + the resource-manager Asset for `clusters` above (COEXISTENCE:
-	// the residency table itself stays here on Sample until a later migration task internalizes it).
-	// ~Sample releases the Asset explicitly, before `clusters` destructs -- see ~Sample's body.
+	// Owns the read-stream handle, the resource-manager Asset, and (as of Phase 4 Task 5) the
+	// cluster residency table itself -- see storage/audio/stream/sample_stream.h. ~Sample releases
+	// the Asset explicitly, before `stream_` (and so the table it owns) destructs -- see ~Sample's
+	// body.
 	deluge::audio::stream::SampleStream stream_{*this};
 
 protected:

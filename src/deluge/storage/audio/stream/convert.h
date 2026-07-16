@@ -1,6 +1,8 @@
 #pragma once
 #include "storage/audio/audio_file_format.h" // RawDataFormat
 #include <algorithm>
+#include <argon.hpp>
+#include <argon/helpers/size.hpp> // argon::helpers::vectorizeable_size (not pulled in by argon.hpp itself)
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -61,10 +63,46 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 	}
 }
 
+// Vectorized transform over the 16-byte-aligned prefix of [begin, end), for the formats that have a
+// SIMD path (currently just UNSIGNED_8; the remaining formats join in a later pass — see
+// docs/superpowers/plans/2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 3/4).
+// Bytewise XOR 0x80 is exactly equivalent to the scalar path's word-wise `word ^ 0x80808080`
+// (convert_word) for every byte position regardless of host endianness, since every byte of the XOR
+// key is the same — so this is bit-exact to the scalar reference, not just an approximation of it.
+// Yields roughly every 1024 bytes (64 lanes), matching convert_word_range's cadence. Returns the
+// (16-byte-aligned) point where the caller's scalar tail should pick up; formats with no SIMD path
+// yet are returned unchanged so the caller's scalar loop covers the whole range as before.
+template <class Yield>
+std::byte* convert_range_simd(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
+	if (format != RawDataFormat::UNSIGNED_8) {
+		return begin;
+	}
+
+	auto* p = reinterpret_cast<uint8_t*>(begin);
+	uint8_t* const vec_end = p + argon::helpers::vectorizeable_size<uint8_t>(static_cast<size_t>(end - begin));
+	Argon<uint8_t> const xor_key{uint8_t{0x80}};
+
+	size_t bytes_since_yield = 0;
+	for (; p < vec_end; p += Argon<uint8_t>::lanes) {
+		(Argon<uint8_t>::Load(p) ^ xor_key).StoreTo(p);
+
+		bytes_since_yield += Argon<uint8_t>::lanes;
+		if (bytes_since_yield >= 1024) {
+			yield();
+			bytes_since_yield = 0;
+		}
+	}
+	return reinterpret_cast<std::byte*>(p);
+}
+
 // The other-bit-depths word loop: converts every 4-byte word in [begin, end) in place via
-// convert_word_in_place, yielding on a 1024-byte address-aligned cadence.
+// convert_word_in_place, yielding on a 1024-byte address-aligned cadence. Formats with a SIMD path
+// (convert_range_simd) run vectorized over their 16-byte-aligned prefix first; this loop then only
+// covers the (< 16-byte) scalar tail for those, and the whole range for everything else.
 template <class Yield>
 void convert_word_range(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
+	begin = convert_range_simd(begin, end, format, yield);
+
 	for (; begin < end; begin += 4) {
 
 		if (!((uintptr_t)begin & 0b1111111100)) {

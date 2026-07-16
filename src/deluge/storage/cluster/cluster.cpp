@@ -82,8 +82,8 @@ void StreamedChunk::convert_data_if_necessary() {
 	    Cluster::size, Cluster::size_magnitude,
 	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(first_three_bytes_pre_data_conversion), 3),
 	    // Cooperative yield during long conversions. Both of convert_cluster_data's yield sites route
-	    // here, so the "from convert-data" marker now also fires on the non-24-bit path (originally only
-	    // the 24-bit path logged it) — a deliberate, audio-neutral widening (goldens bit-exact).
+	    // here, so the "from convert-data" log marker fires on every raw-data-format path, not just
+	    // the 24-bit one.
 	    [] {
 		    AudioEngine::logAction("from convert-data");
 		    AudioEngine::runRoutine();

@@ -30,8 +30,8 @@ class VoiceSample;
 class Voice;
 class VoiceSamplePlaybackGuide;
 class VoiceUnisonPartSource;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
-struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
+struct StreamedChunk; ///< File-backed streamed sample-audio chunk (see storage/cluster/cluster.h).
+struct ComputedChunk; ///< Computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h).
 class Sample;
 class SampleCache;
 
@@ -51,6 +51,11 @@ public:
 	            int32_t timeStretchRatio, int32_t phaseIncrement, uint64_t combinedIncrement, int32_t playDirection,
 	            LoopType loopingType, int32_t priorityRating);
 
+	/// @brief Record @p cluster as one of the two most-recently-needed perc-cache chunks, taking a lease.
+	///
+	/// No-op if already remembered; otherwise releases the lease on the older of the two remembered
+	/// chunks before recording the new one.
+	/// @param cluster The computed chunk to remember.
 	void rememberPercCacheCluster(ComputedChunk* cluster);
 	void updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection);
 
@@ -94,12 +99,13 @@ public:
 	uint64_t bufferSamplesWritten; // Hopefully we can do away with the need for this
 #endif
 
-	// Misnamed (not perc cache) — despite living in the perc-lookahead machinery, this holds source-audio
-	// SAMPLE chunks fed via Sample::stream().get_cluster() (see updateClustersForPercLookahead).
+	/// @note Misnamed (not perc cache) — despite living in the perc-lookahead machinery, this holds
+	///       source-audio SAMPLE chunks fed via Sample::stream().get_cluster() (see
+	///       updateClustersForPercLookahead).
 	StreamedChunk* clustersForPercLookahead[kNumClustersLoadedAhead]{};
 
-	ComputedChunk* percCacheClustersNearby[2]{}; // Remembers and acts as a "reason" for the two most recently needed /
-	                                             // accessed Clusters, basically
+	ComputedChunk* percCacheClustersNearby[2]{}; ///< Reason-holder for the two most recently needed/accessed
+	                                             ///< perc-cache chunks.
 
 private:
 	bool setupNewPlayHead(Sample* sample, VoiceSample* voiceSample, SamplePlaybackGuide* guide, int32_t newHeadBytePos,

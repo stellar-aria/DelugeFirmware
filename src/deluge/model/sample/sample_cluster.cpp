@@ -26,8 +26,8 @@ SampleCluster::~SampleCluster() {
 	if (cluster) {
 
 #if ALPHA_OR_BETA_VERSION
-		// No in-flight extra lease exists for manager-owned clusters, so the leftover-reason assertion
-		// holds without any discount.
+		// Manager-owned clusters never carry an in-flight extra lease at destruction time, so the
+		// leftover-reason check below needs no adjustment.
 		uint32_t reasons = deluge::cluster::lease_count(cluster->resource_slot);
 		if (reasons) {
 			D_PRINTLN("uh oh, some reasons left...  %d", reasons);

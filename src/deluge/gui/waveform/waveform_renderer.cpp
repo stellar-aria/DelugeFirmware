@@ -428,12 +428,10 @@ cantReadData:
 			StreamedChunk* nextCluster = nullptr;
 			if (endByteWithinCluster <= startByteWithinCluster && clusterIndexToDo < endClusters - 1) {
 				endByteWithinCluster += overshoot;
-				// NOTE (Phase 4 Task 2, deliberate behavior change -- waveform-only, not golden-covered):
-				// the pre-migration code read `&sample->clusters[clusterIndexToDo + 1]` (the entry) but
-				// passed the getCluster() index arg as plain `clusterIndexToDo` (missing the `+1`) -- a
-				// latent entry/index mismatch. The unified get_cluster(index) API couples entry and index
-				// by construction, so exact reproduction of that mismatch is impossible; this resolves to
-				// the entry-consistent index (the evident intent).
+				// NOTE: this deliberately indexes clusterIndexToDo + 1 (the *next* cluster), not
+				// clusterIndexToDo. The old two-argument getCluster(sample, index, ...) call let the
+				// looked-up entry and the index argument drift out of sync; get_cluster() takes a single
+				// index for both, so fetching the next cluster means indexing by clusterIndexToDo + 1.
 				nextCluster = sample->stream().get_cluster(clusterIndexToDo + 1, CLUSTER_LOAD_IMMEDIATELY);
 
 				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {

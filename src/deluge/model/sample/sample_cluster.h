@@ -20,13 +20,15 @@
 #include "definitions_cxx.hpp"
 #include <utility>
 
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
-struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
+struct StreamedChunk; ///< File-backed streamed sample-audio chunk (see storage/cluster/cluster.h).
+struct ComputedChunk; ///< Computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h).
 
-// This is a quick list item within Sample storing minimal info about one Cluster (which often won't be loaded yet) of
-// audio data for that Sample. A passive entry: SampleStream (storage/audio/stream/sample_stream.h)
-// owns the residency table and all dispatch logic; this type holds no behavior of its own beyond
-// move-semantics and freeing `cluster` on destruction.
+/// @brief Quick-list entry within `Sample` holding minimal info about one (often not-yet-resident)
+///        cluster of that sample's audio data.
+///
+/// A passive entry: SampleStream (storage/audio/stream/sample_stream.h) owns the residency table
+/// and all dispatch logic; this type holds no behavior of its own beyond move-semantics and freeing
+/// `cluster` on destruction.
 class SampleCluster {
 public:
 	SampleCluster() = default;
@@ -51,8 +53,9 @@ public:
 	// 0 means invalid, and we check for this as a last resort before writing
 	uint32_t sdAddress = 0;
 
-	StreamedChunk* cluster = nullptr; // May automatically be set to NULL if the Cluster needs to be deallocated (can
-	                                  // only happen if it has no "reasons" left)
+	StreamedChunk* cluster = nullptr; ///< Null when not resident. May be automatically nulled if the manager needs
+	                                  ///< to deallocate the chunk (can only happen once it has no leases
+	                                  ///< ("reasons") left).
 	int8_t minValue = 127;
 	int8_t maxValue = -128;
 	bool investigatedWholeLength = false;

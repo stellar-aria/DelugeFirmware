@@ -71,10 +71,10 @@ bool GeneralMemoryAllocator::ensureClusterSystem() {
 	// before we size the slab. Uniform slots of that size accommodate every cluster for the session;
 	// a smaller reinserted card simply under-fills its slots.
 	audioFileManager.setCardRead();
-	// Explicit slot geometry (cluster.h): [chunk header][front guard][Cluster::size payload][trailing
-	// guard]. kChunkPayloadOffset already covers the larger header + a cache-line front guard, so this is
+	// Slot geometry (cluster.h): [chunk header][front guard][Cluster::size payload][trailing guard].
+	// kChunkPayloadOffset already covers the larger header + a cache-line front guard, so this is
 	// the full slot and is >= the payload region for BOTH chunk types by construction (payload_ = base +
-	// kChunkPayloadOffset never reaches past base + slot). No longer sizeof-based (the headers shrank).
+	// kChunkPayloadOffset never reaches past base + slot).
 	size_t slot = kChunkPayloadOffset + Cluster::size + kChunkTrailingGuard;
 	size_t slabCapacity = (deluge::memory::sdram_size() / slot) + 1; // table never the limiter
 	clusterSlab_ = deluge_slab_create_unmanaged(deluge::memory::sdram_heap(), slot, slabCapacity);

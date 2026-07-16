@@ -31,11 +31,13 @@ namespace deluge::audio::stream::loader {
 ///        reconstruct each one, up to `max_num` per call.
 ///
 /// Bails out immediately (without touching the card) if a card access is already underway, the audio
-/// routine is locked, or the card is unavailable — in the
-/// card-unavailable case it optionally runs `PlaybackHandler::slowRoutine()` first so pending user
-/// actions (undo/redo etc.) still get serviced while the card is down. Never called from the render
-/// thread's hot path; this is the cooperative, re-entrant pump that both the FatFs `disk_read`/
-/// `disk_write` hooks and the various UI/engine idle points call to keep streaming caught up.
+/// routine is locked, or the card is unavailable; in the card-unavailable case it optionally runs
+/// `PlaybackHandler::slowRoutine()` first so pending user actions (undo/redo etc.) still get serviced
+/// while the card is down.
+///
+/// @note Never called from the render thread's hot path. This is the cooperative, re-entrant pump
+///       that both the FatFs `disk_read`/`disk_write` hooks and the various UI/engine idle points
+///       call to keep streaming caught up.
 ///
 /// @param max_num Maximum number of clusters to load in this call (keeps a single pump bounded).
 /// @param may_process_user_actions If true, `PlaybackHandler::slowRoutine()` runs between each

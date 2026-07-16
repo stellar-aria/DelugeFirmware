@@ -243,8 +243,8 @@ getOutEarly:
 	}
 #endif
 
-	// Gather the neighbor edge spans and hand off to the pure stitch core (Phase 2b). A neighbor is
-	// only passed when present AND loaded, matching the original inline gates exactly.
+	// Gather the neighbor edge spans and hand off to the pure stitch core. A neighbor is only
+	// passed when it is both present and loaded.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
 		StreamedChunk* prevCluster = chunk_at(cluster.cluster_index - 1);

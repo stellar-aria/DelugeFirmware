@@ -149,8 +149,9 @@ void stitch_next(std::span<std::byte> self_data, StitchNextEdge& next, RawDataFo
 }
 } // namespace
 
-// Faithful port of the inter-cluster boundary-stitch block from the original monolithic
-// per-cluster reconstruction (now SampleStream::read_cluster_data). See stitch.h for the
+// Fixes up the raw bytes straddling a cluster boundary (byte-swap for ENDIANNESS_WRONG_24, or the
+// general word convert otherwise) using the neighboring cluster's overhang, then keeps both clusters'
+// overhang copies in sync. Called from SampleStream::read_cluster_data. See stitch.h for the
 // edge-struct index bases.
 void stitch_boundaries(std::span<std::byte> self_data, int32_t cluster_index, RawDataFormat format,
                        uint32_t audio_data_start_pos_bytes, size_t cluster_size, bool& self_start_boundary_converted,

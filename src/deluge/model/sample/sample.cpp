@@ -106,13 +106,12 @@ Error Sample::initialize(int32_t newNumClusters) {
 }
 
 // The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks),
-// ensureResourceAsset, and the residency table itself all live on
-// deluge::audio::stream::SampleStream (Phase 4; table internalized Task 5) --
-// storage/audio/stream/sample_stream.{h,cpp}.
+// ensure_resource_asset(), and the residency table itself all live on
+// deluge::audio::stream::SampleStream -- storage/audio/stream/sample_stream.{h,cpp}.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========
 // Perc clusters are written incrementally by the time-stretcher (no materialize), and
-// leased-while-nearby (TimeStretcher deluge::cluster::add_lease/removeReason via resource_lease_asset_id).
+// leased-while-nearby (TimeStretcher deluge::cluster::add_lease/remove_reason via resource_lease_asset_id).
 // ctx carries the play-direction (0=forwards, 1=reversed). Per-cluster independent (no
 // tail-first); self_protect so the fill can't evict its own just-written cluster.
 static void percCacheConstruct(void* ctx, void* owner, uint32_t index, void* dest) {

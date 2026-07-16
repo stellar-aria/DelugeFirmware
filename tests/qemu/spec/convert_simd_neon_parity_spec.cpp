@@ -1,16 +1,15 @@
 // Parity check: the argon SIMD conversion primitives used by convert.h must be bit-exact to their
-// scalar references on REAL ARM NEON (as opposed to SIMDe's software emulation, which convert.h's doc
-// comment documents as diverging for the FLOAT case -- see docs/superpowers/plans/
-// 2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 4).
+// scalar references on REAL ARM NEON (as opposed to SIMDe's software emulation, which diverges for
+// the FLOAT case -- see convert.h's doc comment on convert_range_simd).
 //
 // This spec runs under qemu-arm with -mfpu=neon (cortex-a9), so argon compiles against a real
 // <arm_neon.h> backend (no SIMDe, no compat shim -- see tests/qemu/spec/CMakeLists.txt). Two groups:
 //
-//  - FLOAT (the decision gate for Phase 2d Task 4b's Task 2): Argon<float>::ConvertTo<int32_t,31>()
-//    (vcvtq_n_s32_f32) vs the scalar q31_from_float() from util/fixedpoint.h. Under this arm-linux
-//    cross build __arm__ is defined, so q31_from_float() itself compiles to the VFP `vcvt.s32.f32 #31`
-//    instruction (see fixedpoint.h) -- i.e. this is a real-hardware NEON-vs-VFP comparison, executed
-//    via qemu's instruction-accurate emulation of both instruction families, not a software model.
+//  - FLOAT (the decision gate): Argon<float>::ConvertTo<int32_t,31>() (vcvtq_n_s32_f32) vs the scalar
+//    q31_from_float() from util/fixedpoint.h. Under this arm-linux cross build __arm__ is defined, so
+//    q31_from_float() itself compiles to the VFP `vcvt.s32.f32 #31` instruction (see fixedpoint.h) --
+//    i.e. this is a real-hardware NEON-vs-VFP comparison, executed via qemu's instruction-accurate
+//    emulation of both instruction families, not a software model.
 //
 //  - Integer ops (the dual-arch net for the rest of convert_range_simd / convert_24bit_range_simd):
 //    Reverse32bit/Reverse16bit vs swapEndianness32/swapEndianness2x16 (util/audio_format_helpers.h),

@@ -29,9 +29,9 @@
 
 namespace deluge::audio::stream::loader {
 
-// Instrumentation only, and compile-disabled (kept for future debugging; carried over verbatim from
-// the pre-move code). `timeLastFinish` was always a translation-unit-scope variable, never an
-// AudioFileManager member, so it moves here with no dangling-reference concern.
+// Instrumentation only, compile-disabled by default (kept for future debugging). `timeLastFinish` is
+// deliberately a translation-unit-scope variable rather than a class member — nothing else needs it, and
+// it carries no lifetime dependency on any particular owning object.
 #define REPORT_AWAY_TIME 0
 
 #if REPORT_AWAY_TIME

@@ -88,11 +88,16 @@ public:
 	int32_t getValueSpan();
 	void finalizeAfterLoad(uint32_t fileSize) override;
 
-	/// The audio-stream module's per-Sample orchestrator: owns the read-stream handle, the
-	/// resource-manager Asset for this Sample's clusters, and the ReadSource selection. See
-	/// storage/audio/stream/sample_stream.h.
+	/// @brief This Sample's audio-stream orchestrator.
+	///
+	/// Owns the read-stream handle, the resource-manager Asset for this Sample's clusters, and the
+	/// ReadSource selection.
+	/// @return The owned SampleStream, by reference.
+	/// @see storage/audio/stream/sample_stream.h
 	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
-	/// const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
+	/// @copydoc stream()
+	///
+	/// Const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
 	/// accessors (sd_address_at et al.) without dropping const.
 	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
 
@@ -156,10 +161,11 @@ public:
 
 	uint32_t waveTableCycleSize{0}; // In case this later gets used for a WaveTable
 
-	// Owns the read-stream handle, the resource-manager Asset, and (as of Phase 4 Task 5) the
-	// cluster residency table itself -- see storage/audio/stream/sample_stream.h. ~Sample releases
-	// the Asset explicitly, before `stream_` (and so the table it owns) destructs -- see ~Sample's
-	// body.
+	/// Owns the read-stream handle, the resource-manager Asset, and the cluster residency table
+	/// itself. See storage/audio/stream/sample_stream.h.
+	///
+	/// @note ~Sample releases the Asset explicitly, before `stream_` (and so the table it owns)
+	///       destructs -- see ~Sample's definition.
 	deluge::audio::stream::SampleStream stream_{*this};
 
 protected:

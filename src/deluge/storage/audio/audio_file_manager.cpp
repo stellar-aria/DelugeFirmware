@@ -37,6 +37,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/cluster_byte_source.h"
 #include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/audio/stream/read_source.h"
 #include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"
@@ -65,7 +66,7 @@ extern int currentlySearchingForCluster;
 // calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
 // calls *down* into the block device.
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
+	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 
 	DelugeStatus status =
 	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
@@ -78,7 +79,7 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
+	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 	DelugeStatus status =
 	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 	return status == DELUGE_OK ? RES_OK : RES_ERROR;
@@ -325,7 +326,7 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 			staticDIR = *maybeDIR;
 
 			while (true) {
-				loadAnyEnqueuedClusters();
+				deluge::audio::stream::loader::pump();
 				/* Read a directory item */
 				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
 					return Error::SD_CARD; // error if invalid
@@ -944,131 +945,8 @@ void AudioFileManager::slowRoutine() {
 	// for a copy if ever needed
 }
 
-#define REPORT_AWAY_TIME 0
-
-#if REPORT_AWAY_TIME
-uint16_t timeLastFinish;
-#endif
-
-void AudioFileManager::loadAnyEnqueuedClusters(int32_t maxNum, bool mayProcessUserActionsBetween) {
-
-	if (currentlyAccessingCard) {
-		return;
-	}
-	if (clusterBeingLoaded) {
-		return; // One might be having stuff done to it, like having its data converted, but not actually reading
-		        // the card right now
-	}
-	if (AudioEngine::audioRoutineLocked) {
-		return; // Not sure if this should be neccesary?
-	}
-
-	// Cannot call any functions in here which will read the SD card, other than loadCluster(), otherwise that'll
-	// re-call this function!
-
-	if (cardEjected || cardDisabled) {
-
-performActionsAndGetOut:
-		if (mayProcessUserActionsBetween) {
-			playbackHandler.slowRoutine();
-		}
-		return;
-	}
-
-	if (!StorageManager::checkSDInitialized()) {
-		goto performActionsAndGetOut; // In case the card somehow died
-	}
-
-	int32_t count = 0;
-
-#if REPORT_AWAY_TIME
-	uint16_t startTime = MTU2.TCNT_0;
-	uint16_t awayTime = startTime - timeLastFinish;
-	int32_t uSecAway = timerCountToUS(awayTime);
-	if (uSecAway > 1000) {
-		D_PRINTLN("away  %d", uSecAway);
-	}
-#endif
-
-	while (true) {
-
-		// We now have an opportunity, since we're not reading the card, to process any pending user actions like
-		// undo / redo.
-		if (mayProcessUserActionsBetween) {
-			playbackHandler.slowRoutine();
-		}
-
-		// Pop the most-urgent queued + still-leased cluster's backing (the manager skips/de-queues
-		// abandoned-unleased ones). This prevents loading clusters quickly culled after enqueue.
-		void* p = deluge_resource_loader_next(GeneralMemoryAllocator::get().resourceManager());
-
-		// no more clusters to load, so exit
-		if (p == nullptr) {
-			return;
-		}
-		StreamedChunk* cluster = reinterpret_cast<StreamedChunk*>(p);
-
-		// The unloadable domain-filter stays here (the manager doesn't know it). markAsUnloadable
-		// already de-queues, so this is the safety net — loader_next has cleared its queued flag, so
-		// skipping won't loop.
-		if (cluster->unloadable) {
-			continue;
-		}
-
-		// cluster has at least 1 "reason". If it didn't, it would have been removed from the load-queue
-
-		// Do the actual loading
-		allowSomeUserActionsEvenWhenInCardRoutine = true; // Sorry!!
-		bool success;
-		if (cluster->sample != nullptr && cluster->sample->stream().resource_asset_id() != DELUGE_RESOURCE_NO_ASSET) {
-			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
-			// read directly. NOT loadCluster — its add_lease/removeReason would desync the manager
-			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render
-			// (the headless-render streaming starvation we're fixing). The lease persists; the read
-			// just flips loaded=true (or fails, handled below as for legacy).
-			success = cluster->sample->stream().read_cluster_data(*cluster, 0);
-		}
-		else {
-			success = loadCluster(*cluster);
-		}
-		allowSomeUserActionsEvenWhenInCardRoutine = false;
-
-		// If that didn't work, presumably because the SD card got ejected...
-		if (!success) {
-			D_PRINTLN("load Cluster fail");
-
-			// If the Cluster is now down to 0 reasons (i.e. it lost a reason while being loaded), then it's already
-			// been made "available" and we don't have a problem
-			if (!deluge::cluster::lease_count(cluster->resource_slot)) {}
-
-			// Otherwise, there are still "reasons" waiting for this Cluster to become loaded, so we need to put it
-			// back in the loading queue. Presumably it won't actually get loaded for a while - only when the user
-			// re-inserts the card
-			else {
-
-				// TODO: If that fails, it'll just get awkwardly forgotten about
-				deluge_resource_loader_enqueue(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot,
-				                               0xFFFFFFFF); // lowest priority
-
-				// Also, return now. Normally we stay here til there's nothing left in the load-queue, but now that
-				// would leave us in an infinite loop!
-				break;
-			}
-		}
-
-		count++;
-		if (count >= maxNum) {
-			break; // Keep things sane?
-		}
-	}
-
-#if REPORT_AWAY_TIME
-	timeLastFinish = MTU2.TCNT_0;
-#endif
-}
-
-bool AudioFileManager::loadingQueueHasAnyLowestPriorityElements() {
-	return deluge_resource_loader_has_lowest(GeneralMemoryAllocator::get().resourceManager());
+bool AudioFileManager::cardUnavailableForStreaming() const {
+	return cardEjected || cardDisabled || !StorageManager::checkSDInitialized();
 }
 
 // Caller must also set alternateAudioFileLoadPath.

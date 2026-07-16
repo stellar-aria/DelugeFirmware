@@ -35,6 +35,7 @@
 #include "model/song/song.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/storage_manager.h"
 #include "util/functions.h"
@@ -266,7 +267,7 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 	while (true) {
 		AudioEngine::logAction("while loop");
 
-		audioFileManager.loadAnyEnqueuedClusters();
+		deluge::audio::stream::loader::pump();
 		FilePointer thisFilePointer;
 
 		std::tie(staticFNO, thisFilePointer) = D_TRY_CATCH(staticDIR.read_and_get_filepointer(), error, {

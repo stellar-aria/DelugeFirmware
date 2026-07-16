@@ -23,6 +23,14 @@ use embassy_executor::{Executor, InterruptExecutor, Spawner};
 // (TLSF/slab, docs/dev/allocator_redesign.md) is a later, separately-gated step.
 use deluge_alloc as allocator;
 
+// Link-only: the C++ app (archived into this image by build.rs) calls the
+// deluge_resource_* residency C ABI and the deluge_{alloc,slab_*} allocator C ABI.
+// `extern crate` forces both rlibs onto the link line so those #[no_mangle]
+// symbols resolve; nothing here references them from Rust. deluge_alloc arrives
+// transitively via deluge_resource (a distinct crate from the `deluge_alloc`
+// aliased above — that one is the sibling deluge-sdk allocator).
+extern crate deluge_resource;
+
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
 /// service functions are defined in [`ffi`]).
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]

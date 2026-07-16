@@ -30,6 +30,17 @@ deluge-bsp = { path = "../../../../deluge-sdk/crates/deluge-bsp", features = ["f
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
 rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 
+# DelugeFirmware's own Rust crate providing the residency/eviction engine + the
+# GeneralMemoryAllocator backing (TLSF + slab), both as C ABIs the C++ app calls.
+# Linked here (not via the `deluge_rust` umbrella crate, which carries its own
+# #[panic_handler] and would collide with ours) so the archived deluge_app object
+# closure resolves its deluge_resource_* AND deluge_{alloc,slab_*} symbols. This is
+# a distinct allocator from the sibling `deluge-alloc` above: disjoint memory,
+# disjoint consumers (C++ app vs. Rust BSP), no C-symbol overlap. deluge_alloc
+# rides in transitively (deluge_resource depends on it), so it stays out of this
+# bin's extern prelude and doesn't clash with `use deluge_alloc` (the sibling).
+deluge_resource = { path = "../../../crates/deluge_resource" }
+
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }

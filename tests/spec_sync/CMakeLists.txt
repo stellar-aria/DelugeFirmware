@@ -15,6 +15,7 @@ function(create_specs_driver driver_name spec_dir)
   add_executable(${driver_name}
     ${specs}
     ../../src/deluge/sync/storage_op.cpp
+    ../../src/deluge/sync/sd_access.cpp
   )
   target_link_libraries(${driver_name} PRIVATE c++spec)
   target_include_directories(${driver_name} PRIVATE

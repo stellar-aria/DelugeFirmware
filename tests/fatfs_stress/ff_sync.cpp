@@ -3,7 +3,7 @@
 // code). Backed by std::mutex: the host proxy for the Embassy volume mutex
 // that will guard the real firmware's FF_FS_REENTRANT=1 build. TSan
 // understands std::mutex as a happens-before edge, so under the concurrent
-// workload (Task 2) it only flags accesses this grant fails to actually
+// workload it only flags accesses this grant fails to actually
 // cover -- the property under test.
 #include "ff.h"
 

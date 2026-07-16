@@ -2,13 +2,11 @@
 // disk, built with FF_FS_REENTRANT=1 (see ffconf.h) and run under
 // ThreadSanitizer.
 //
-// Task 1 (single-threaded smoke, still run first as a cheap pre-check):
-// mount -> f_mkfs -> write a known pattern -> close -> reopen -> read back ->
-// assert byte-equal -> unlink. Proves the whole FatFS-on-host-with-reentrancy
-// toolchain works before the concurrent workload below runs.
-//
-// Task 2 (this file's main content): concurrent workload exercising the
-// FF_FS_REENTRANT=1 volume grant under real thread concurrency.
+// A single-threaded smoke (mount -> f_mkfs -> write a known pattern -> close ->
+// reopen -> read back -> assert byte-equal -> unlink) runs first as a cheap
+// pre-check that the FatFS-on-host-with-reentrancy toolchain works, then the
+// concurrent workload exercises the FF_FS_REENTRANT=1 volume grant under real
+// thread concurrency.
 //
 //   - Distinct-file workers: N threads x M iterations, each writing to its
 //     OWN files ("/w<t>_<i>.bin"), then reading back and verifying. Distinct
@@ -77,7 +75,7 @@ bool check(FRESULT fr, const std::string& what) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 1: single-thread smoke (unchanged from the Task 1 scaffold)
+// Single-thread smoke: a cheap pre-check before the concurrent workload
 // ---------------------------------------------------------------------------
 
 constexpr const char* kSmokeFile = "smoke.bin";
@@ -142,7 +140,7 @@ bool runSmoke() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 2 workload configuration
+// Concurrent workload configuration
 // ---------------------------------------------------------------------------
 
 constexpr int kWriteThreads = 8;
@@ -167,7 +165,7 @@ std::vector<uint8_t> makePattern(int t, int i) {
 }
 
 // ---------------------------------------------------------------------------
-// Distinct-file write/read-back workers (Step 1)
+// Distinct-file write/read-back workers
 // ---------------------------------------------------------------------------
 
 void writeReadWorker(int t) {
@@ -226,7 +224,7 @@ void writeReadWorker(int t) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared-path metadata contention workers (Step 2)
+// Shared-path metadata contention workers
 // ---------------------------------------------------------------------------
 
 struct SharedFile {
@@ -333,7 +331,7 @@ void metadataWorker(const std::vector<SharedFile>& shared, unsigned seed) {
 }
 
 // ---------------------------------------------------------------------------
-// Watchdog (Step 3)
+// Watchdog
 // ---------------------------------------------------------------------------
 
 std::atomic<bool> g_allJoined{false};

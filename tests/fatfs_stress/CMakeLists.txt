@@ -10,7 +10,7 @@
 # Backed by a RAM-disk diskio shim (ram_diskio.cpp) and std::mutex-backed
 # FatFS sync stubs (ff_sync.cpp) that replace src/fatfs/ffsystem.c's Win32
 # sample code (ffsystem.c is deliberately NOT compiled here). Built with
-# -fsanitize=thread so the concurrent workload added in Task 2 gets real
+# -fsanitize=thread so the concurrent workload gets real
 # data-race detection.
 #
 # --- Why the sources are staged into the build tree (not compiled in place) ---

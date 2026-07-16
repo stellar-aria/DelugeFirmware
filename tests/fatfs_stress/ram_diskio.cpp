@@ -2,7 +2,7 @@
 //
 // FatFS's own volume grant (ff_req_grant/ff_rel_grant, see ff_sync.cpp)
 // serializes every call into this file, so there is no locking here -- TSan
-// running over the multi-threaded workload (Task 2) is what confirms that
+// running over the multi-threaded workload is what confirms that
 // serialization actually holds.
 #include "diskio.h"
 

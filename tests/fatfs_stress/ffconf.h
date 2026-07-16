@@ -1,7 +1,7 @@
 /*---------------------------------------------------------------------------/
 /  Harness copy of the firmware ffconf (src/fatfs/ffconf.h).
 /
-/  Intended diffs vs firmware (per the harness plan):
+/  Intended diffs vs firmware:
 /    - FF_FS_REENTRANT = 1  (the Phase-2b change under test)
 /    - FF_USE_MKFS     = 1  (test setup; orthogonal to reentrancy)
 /    - FF_SYNC_t       = void*  (harness sync-object handle; firmware uses
@@ -23,8 +23,7 @@
 /  STACK, ~(FF_MAX_LFN+1)*2 = 512 bytes per call that needs it) is the
 /  minimal change that keeps FF_FS_REENTRANT=1 buildable and is itself
 /  reentrancy-safe (no cross-call shared state) -- see ff.c:526. This is a
-/  significant finding for the real Phase-2b design, not just this harness:
-/  flagged in the Task 1 report, not silently absorbed.
+/  significant finding for the real Phase-2b design, not just this harness.
 /
 /  All OTHER reentrancy-relevant settings (FF_VOLUMES=1, FF_FS_LOCK=0,
 /  FF_FS_TINY=0, FF_FS_NORTC=0, sector sizes) match firmware exactly.

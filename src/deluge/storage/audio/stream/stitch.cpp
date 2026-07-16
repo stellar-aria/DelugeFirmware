@@ -1,182 +1,150 @@
 #include "storage/audio/stream/stitch.h"
 #include "storage/audio/stream/convert.h"
+#include <algorithm>
 #include <cstddef>
-#include <cstring>
+#include <utility>
 
 namespace deluge::audio::stream {
 
 namespace {
 // Swaps byte 0 and byte 2 of a 3-byte group in place (the ENDIANNESS_WRONG_24 fixup).
-void byteswap3(std::byte* bytes) {
-	std::byte temp = bytes[0];
-	bytes[0] = bytes[2];
-	bytes[2] = temp;
+void byteswap3(std::byte* group) {
+	std::swap(group[0], group[2]);
 }
 
-// Give extra bytes to the previous cluster.
+// Give extra bytes to the previous cluster: refresh its overhang from our own head (unconditionally),
+// then -- the first time either half of this boundary visits it -- finish converting whichever word
+// straddles the boundary.
 void stitch_prev(std::span<std::byte> self_data, StitchPrevEdge& prev, RawDataFormat format, int32_t misalignment,
                  int32_t cluster_index, uint32_t audio_data_start_pos_bytes, size_t cluster_size) {
-	// We first copy our first 7 bytes from here to the end of the prev cluster's overhang
-	// (prev.tail[4..11) == prevCluster->data[cluster_size..cluster_size+7))...
-	std::memcpy(&prev.tail[4], self_data.data(), 7);
+	// prev.tail[4..11) mirrors prevCluster->data[cluster_size..cluster_size+7) -- kept in sync with our
+	// own head regardless of format or whether this boundary was already converted.
+	auto prev_overhang = prev.tail.subspan<4, 7>();
+	std::ranges::copy(self_data.first<7>(), prev_overhang.begin());
 
-	// If 24-bit wrong-endian data...
 	if (format == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-		// If we hadn't previously written the "extra" bytes to the end of the prev cluster and
-		// converted them, do so now...
-		if (!*prev.end_boundary_converted) {
-
-			uint32_t bytes_before_start_of_cluster =
-			    static_cast<uint32_t>(cluster_index) * static_cast<uint32_t>(cluster_size) - audio_data_start_pos_bytes;
-			int32_t bytes_unconverted_before_cluster = static_cast<int32_t>(bytes_before_start_of_cluster % 3);
-			if (bytes_unconverted_before_cluster != 0) {
-
-				// There'll be one word in there which hasn't yet been converted. Do it now. (We've
-				// probably just copied over the next one and a bit, which already was converted)
-				int32_t start_pos = 4 - bytes_unconverted_before_cluster;
-				byteswap3(&prev.tail[start_pos]);
-
-				// And now, copy 2 bytes back to this cluster (that's the maximum that the float
-				// could have been overhanging the boundary)
-				std::memcpy(self_data.data(), &prev.tail[4], 2);
-			}
-
-			*prev.end_boundary_converted = true;
+		if (*prev.end_boundary_converted) {
+			return; // Already finished the straddling group on an earlier visit.
 		}
-	}
 
-	// Or, all other types of raw data conversion
+		uint32_t bytes_before_cluster =
+		    static_cast<uint32_t>(cluster_index) * static_cast<uint32_t>(cluster_size) - audio_data_start_pos_bytes;
+		int32_t straddle_offset = static_cast<int32_t>(bytes_before_cluster % 3);
+
+		// straddle_offset == 0: no 3-byte group straddles the boundary -- nothing to convert.
+		if (straddle_offset != 0) {
+			// The straddling group starts this far into prev.tail; convert it now (we've probably just
+			// copied over the group after it too, which was already converted).
+			byteswap3(&prev.tail[4 - straddle_offset]);
+
+			// Copy back the (at most 2) converted bytes that land in our own head -- the maximum a
+			// 24-bit group can overhang the boundary.
+			std::ranges::copy(prev_overhang.first(2), self_data.begin());
+		}
+
+		*prev.end_boundary_converted = true;
+	}
 	else if (format != RawDataFormat::NATIVE) {
-
-		// If we haven't previously written the "extra" bytes to the end of the prev cluster and
-		// converted them, do so now...
-		if (!*prev.end_boundary_converted) {
-
-			// If misaligned from the 4-byte boundary
-			if (misalignment != 0) {
-
-				// There'll be one word in there which hasn't yet been converted. Do it now. (We've
-				// probably also just moved over the next one too, which already was converted)
-				convert_word_in_place(&prev.tail[misalignment], format);
-
-				// And now, copy 3 bytes back to this cluster (that's the maximum that the float
-				// could have been overhanging the boundary)
-				std::memcpy(self_data.data(), &prev.tail[4], 3);
-			}
-
-			*prev.end_boundary_converted = true;
+		if (*prev.end_boundary_converted) {
+			return; // Already finished the straddling word on an earlier visit.
 		}
+
+		// misalignment == 0: the boundary falls on a word boundary -- nothing straddles it.
+		if (misalignment != 0) {
+			// The straddling word starts this far into prev.tail; convert it now (we've probably just
+			// moved over the word after it too, which was already converted).
+			convert_word_in_place(&prev.tail[misalignment], format);
+
+			// Copy back the (at most 3) converted bytes that land in our own head -- the maximum a word
+			// can overhang the boundary.
+			std::ranges::copy(prev_overhang.first(3), self_data.begin());
+		}
+
+		*prev.end_boundary_converted = true;
 	}
-	// NATIVE: nothing to convert.
+	// NATIVE: nothing to convert; end_boundary_converted is left untouched.
 }
 
-// Grab extra bytes from the next cluster.
+// Grab extra bytes from the next cluster: finish converting whichever word straddles the boundary (the
+// first time either half of this boundary visits it), then finalize this cluster's overhang from the
+// next cluster's head.
 void stitch_next(std::span<std::byte> self_data, StitchNextEdge& next, RawDataFormat format, int32_t misalignment,
                  int32_t cluster_index, uint32_t audio_data_start_pos_bytes, size_t cluster_size) {
+	auto self_overhang = self_data.last<7>(); // self_data[cluster_size..cluster_size+7)
 	bool need_copy7 = false;
 
-	// If 24-bit wrong-endian data...
 	if (format == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-		uint32_t bytes_before_start_of_next_cluster =
+		uint32_t bytes_before_next_cluster =
 		    static_cast<uint32_t>(cluster_index + 1) * static_cast<uint32_t>(cluster_size) - audio_data_start_pos_bytes;
-		int32_t bytes_unconverted_before_next_cluster = static_cast<int32_t>(bytes_before_start_of_next_cluster % 3);
+		int32_t straddle_offset = static_cast<int32_t>(bytes_before_next_cluster % 3);
 
-		// If one word missed conversion...
-		if (bytes_unconverted_before_next_cluster != 0) {
+		// straddle_offset == 0: no 3-byte group straddles the boundary -- just finalize the overhang.
+		if (straddle_offset == 0) {
+			need_copy7 = true;
+		}
+		else {
+			bool const already_converted = *next.start_boundary_converted;
 
-			// If we hadn't previously converted the first couple of bytes of the next cluster...
-			if (!*next.start_boundary_converted) {
-				// We first copy the next cluster's first 7 bytes to the end of this cluster
-				std::memcpy(&self_data[cluster_size], next.head.data(), 7);
+			// Stage the bytes the straddling group needs: the full head if this is the first visit, or
+			// just the 2 bytes we backed up if we've already converted (and overwritten) next.head.
+			if (!already_converted) {
+				std::ranges::copy(next.head, self_overhang.begin());
 			}
-			// Or, if we *had* previously converted the first bytes of the next cluster...
 			else {
-				// Grab the unconverted bytes back from where we backed them up to
-				std::memcpy(&self_data[cluster_size], next.unconverted_head.data(), 2);
+				std::ranges::copy(next.unconverted_head.first(2), self_overhang.begin());
 			}
 
-			// There'll be one word in there which hasn't yet been converted. Do it now. (We've
-			// probably just copied over the next one and a bit, which already was converted)
-			int32_t start_pos = static_cast<int32_t>(cluster_size) - bytes_unconverted_before_next_cluster;
+			// The straddling group starts this far into our overhang; convert it now.
+			int32_t start_pos = static_cast<int32_t>(cluster_size) - straddle_offset;
 			byteswap3(&self_data[start_pos]);
 
-			// If we hadn't previously converted the first couple of bytes of the next cluster, do so
-			// now...
-			if (!*next.start_boundary_converted) {
+			if (!already_converted) {
 				*next.start_boundary_converted = true;
-
-				// And now, copy 2 bytes back to the next cluster (that's the maximum that the 24-bit
-				// int32_t could have been overhanging the boundary)
-				std::memcpy(next.head.data(), &self_data[cluster_size], 2);
+				// Copy back the (at most 2) converted bytes that land in the next cluster's head.
+				std::ranges::copy(self_overhang.first(2), next.head.begin());
 			}
-			// Or, if we *had* previously converted the first bytes of the next cluster...
 			else {
 				need_copy7 = true;
 			}
 		}
-
-		// Or if no words missed conversion
-		else {
-			need_copy7 = true;
-		}
 	}
-
-	// Or, all other types of raw data conversion
 	else if (format != RawDataFormat::NATIVE) {
-
-		// If one word missed conversion...
-		if (misalignment != 0) {
+		// misalignment == 0: the boundary falls on a word boundary -- just finalize the overhang.
+		if (misalignment == 0) {
+			need_copy7 = true;
+		}
+		else {
 			int32_t start_pos = static_cast<int32_t>(cluster_size) - 4 + misalignment;
+			bool const already_converted = *next.start_boundary_converted;
 
-			// If we hadn't previously converted the first couple of bytes of the next cluster, do so
-			// now...
-			if (!*next.start_boundary_converted) {
-
-				// We first copy the next cluster's first 7 bytes to the end of this cluster. This
-				// MUST happen before the convert below: start_pos can reach cluster_size-1, so the
-				// straddling word overlaps this freshly-staged overhang.
-				std::memcpy(&self_data[cluster_size], next.head.data(), 7);
-
-				// There'll be one word in there which hasn't yet been converted from float. Do it now
+			if (!already_converted) {
+				// Stage the next cluster's first 7 bytes. This MUST happen before the convert below:
+				// start_pos can reach cluster_size-1, so the straddling word overlaps this freshly
+				// staged overhang.
+				std::ranges::copy(next.head, self_overhang.begin());
 				convert_word_in_place(&self_data[start_pos], format);
 
-				// And now, copy 3 bytes back to the next cluster (that's the maximum that the float
-				// could have been overhanging the boundary)
-				std::memcpy(next.head.data(), &self_data[cluster_size], 3);
-
+				// Copy back the (at most 3) converted bytes that land in the next cluster's head.
+				std::ranges::copy(self_overhang.first(3), next.head.begin());
 				*next.start_boundary_converted = true;
 			}
-
-			// Or, if we *had* previously converted the first bytes of the next cluster...
 			else {
-				// Grab the unconverted bytes back from where we backed them up to (transient staging
-				// — the straddling word can still overlap this range — the need_copy7 finalize below
-				// overwrites it with the real next.head regardless)
-				std::memcpy(&self_data[cluster_size], next.unconverted_head.data(), 3);
-
-				// There'll be one word in there which hasn't yet been converted from float. Do it now
+				// Stage from the backed-up unconverted bytes (transient -- the straddling word can
+				// still overlap this range, but the need_copy7 finalize below overwrites it with the
+				// real next.head regardless).
+				std::ranges::copy(next.unconverted_head, self_overhang.begin());
 				convert_word_in_place(&self_data[start_pos], format);
-
-				// And now just copy the converted-from-float first bytes from the next cluster to the
-				// end of this one
 				need_copy7 = true;
 			}
 		}
-		else {
-			need_copy7 = true;
-		}
 	}
-
-	// NATIVE
 	else {
-		need_copy7 = true;
+		need_copy7 = true; // NATIVE
 	}
 
 	if (need_copy7) {
-		// We copy the next cluster's first 7 bytes to the end of this cluster
-		std::memcpy(&self_data[cluster_size], next.head.data(), 7);
+		// Finalize this cluster's overhang wholesale from the next cluster's first 7 bytes.
+		std::ranges::copy(next.head, self_overhang.begin());
 	}
 }
 } // namespace

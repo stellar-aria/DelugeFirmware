@@ -93,7 +93,7 @@ add_subdirectory(unit)
 # FatFS reentrancy stress harness (host-only, requires a ThreadSanitizer-capable
 # compiler -- Clang or GCC on a UNIX-y host; this whole tests/ project only ever
 # builds for the host anyway, but TSan itself isn't available on every toolchain).
-if (UNIX AND (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU"))
+if (UNIX AND NOT APPLE AND (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU"))
     add_subdirectory(fatfs_stress)
 endif ()
 

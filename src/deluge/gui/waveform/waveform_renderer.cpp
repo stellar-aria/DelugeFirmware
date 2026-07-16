@@ -442,7 +442,7 @@ cantReadData:
 				}
 
 				if (nextCluster == nullptr) {
-					audioFileManager.removeReasonFromCluster(*cluster, "po8w");
+					deluge::cluster::remove_reason(*cluster, "po8w");
 					goto cantReadData;
 				}
 			}
@@ -549,9 +549,9 @@ cantReadData:
 			data->maxPerCol[col] = maxThisCol;
 			data->minPerCol[col] = minThisCol;
 
-			audioFileManager.removeReasonFromCluster(*cluster, "E340"); // Ron R got this, when error was "iiuh"
+			deluge::cluster::remove_reason(*cluster, "E340"); // Ron R got this, when error was "iiuh"
 			if (nextCluster != nullptr) {
-				audioFileManager.removeReasonFromCluster(*nextCluster, "9700");
+				deluge::cluster::remove_reason(*nextCluster, "9700");
 			}
 			AudioEngine::routineWithClusterLoading();
 		}

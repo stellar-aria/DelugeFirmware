@@ -67,7 +67,7 @@ void SampleHolder::beenClonedFrom(SampleHolder const* other, bool reversed) {
 void SampleHolder::unassignAllClusterReasons(bool beingDestructed) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForStart[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clustersForStart[l], "E123");
+			deluge::cluster::remove_reason(*clustersForStart[l], "E123");
 			if (!beingDestructed) {
 				clustersForStart[l] = nullptr;
 			}
@@ -237,7 +237,7 @@ void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32
 	// Replace old list
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E146");
+			deluge::cluster::remove_reason(*clusters[l], "E146");
 		}
 		clusters[l] = newClusters[l];
 	}

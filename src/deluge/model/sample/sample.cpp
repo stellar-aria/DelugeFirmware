@@ -1419,7 +1419,7 @@ continueWhileLoop:
 		if (!nextCluster && currentClusterIndex + 1 < getFirstClusterIndexWithNoAudioData()) {
 			nextCluster = stream().get_cluster(currentClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY);
 			if (!nextCluster) {
-				audioFileManager.removeReasonFromCluster(*cluster, "imcwn4o");
+				deluge::cluster::remove_reason(*cluster, "imcwn4o");
 				D_PRINTLN("failed to load next");
 				goto getOut;
 			}
@@ -1453,7 +1453,7 @@ continueWhileLoop:
 			if (newClusterIndex != currentClusterIndex) {
 				currentClusterIndex = newClusterIndex;
 
-				audioFileManager.removeReasonFromCluster(*cluster, "hset");
+				deluge::cluster::remove_reason(*cluster, "hset");
 				cluster = nextCluster;
 				nextCluster = nullptr; // It'll soon get filled
 			}
@@ -1506,9 +1506,9 @@ continueWhileLoop:
 	}
 
 doneReading:
-	audioFileManager.removeReasonFromCluster(*cluster, "kncd");
+	deluge::cluster::remove_reason(*cluster, "kncd");
 	if (nextCluster != nullptr) {
-		audioFileManager.removeReasonFromCluster(*nextCluster, "ljpp");
+		deluge::cluster::remove_reason(*nextCluster, "ljpp");
 	}
 
 	// If we didn't find any sound...
@@ -1746,7 +1746,7 @@ void Sample::convertDataOnAnyClustersIfNecessary() {
 
 				cluster->convert_data_if_necessary();
 
-				audioFileManager.removeReasonFromCluster(*cluster, "E231");
+				deluge::cluster::remove_reason(*cluster, "E231");
 			}
 		}
 	}

@@ -417,7 +417,7 @@ tryGettingFFTConfig:
 
 					// First, unload the old Cluster if there was one
 					if (cluster) {
-						audioFileManager.removeReasonFromCluster(*cluster, "E385");
+						deluge::cluster::remove_reason(*cluster, "E385");
 					}
 
 					cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0, &error);
@@ -765,7 +765,7 @@ transformBandToTimeDomain:
 
 	// There could be a Cluster with a reason we still need to remove.
 	if (cluster != nullptr) {
-		audioFileManager.removeReasonFromCluster(*cluster, "E385");
+		deluge::cluster::remove_reason(*cluster, "E385");
 	}
 
 	if (numCycles > 1) {

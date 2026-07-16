@@ -28,10 +28,10 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 
-void SampleLowLevelReader::unassignAllReasons(bool wontBeUsedAgain) {
+void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E027", wontBeUsedAgain);
+			deluge::cluster::remove_reason(*clusters[l], "E027");
 			clusters[l] = nullptr;
 		}
 	}
@@ -336,7 +336,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	int32_t oldClusterIndex = clusters[0]->cluster_index;
 
 	int32_t bytePosWithinOldCluster = currentPlayPos - clusters[0]->data;
-	audioFileManager.removeReasonFromCluster(*clusters[0], "E035");
+	deluge::cluster::remove_reason(*clusters[0], "E035");
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead - 1; l++) {
 		clusters[l] = clusters[l + 1];
@@ -1212,7 +1212,7 @@ bool SampleLowLevelReader::readSamplesForTimeStretching(
 void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stealReasons) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E131", false);
+			deluge::cluster::remove_reason(*clusters[l], "E131");
 		}
 
 		clusters[l] = other.clusters[l];

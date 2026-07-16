@@ -26,7 +26,7 @@ ClusterByteSource::ClusterByteSource(Sample& sample, uint32_t fileSize)
 
 ClusterByteSource::~ClusterByteSource() {
 	if (currentCluster_ != nullptr) {
-		audioFileManager.removeReasonFromCluster(*currentCluster_, "E030");
+		deluge::cluster::remove_reason(*currentCluster_, "E030");
 	}
 }
 
@@ -47,7 +47,7 @@ Error ClusterByteSource::advanceClustersIfNecessary() {
 	byteIndexWithinCluster_ &= Cluster::size - 1;
 
 	if (currentCluster_ != nullptr) {
-		audioFileManager.removeReasonFromCluster(*currentCluster_, "E031");
+		deluge::cluster::remove_reason(*currentCluster_, "E031");
 	}
 	currentCluster_ = sample_.stream().get_cluster(currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
 	if (currentCluster_ == nullptr) {

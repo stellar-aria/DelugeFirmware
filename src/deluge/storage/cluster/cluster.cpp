@@ -129,4 +129,24 @@ uint32_t lease_count(uint32_t resource_slot) {
 	return (mgr != nullptr) ? deluge_resource_lease_count_by_slot(mgr, resource_slot) : 0;
 }
 
+// Shared reason-drop body for either chunk role. Every cluster is a manager-owned chunk — SAMPLE /
+// PERC leased via the owner's Asset, SAMPLE_CACHE resident via the cache's Asset (and leased by the
+// low-level reader while it streams it). A removed reason is just a manager lease drop: the cluster
+// stays resident (cached, evictable under pressure), never enqueued/destroyed here. Only the chunk's
+// own address + resource_slot are needed, so this is role-agnostic (the two chunk types share no base).
+static void remove_reason_impl(void* chunk, uint32_t resource_slot, [[maybe_unused]] char const* error_code) {
+	if (ALPHA_OR_BETA_VERSION && lease_count(resource_slot) == 0) {
+		FREEZE_WITH_ERROR(error_code); // removing a reason that was never there
+	}
+	release_lease(chunk); // unlease (backing ptr == the chunk's own address)
+}
+
+void remove_reason(StreamedChunk& chunk, char const* error_code) {
+	remove_reason_impl(&chunk, chunk.resource_slot, error_code);
+}
+
+void remove_reason(ComputedChunk& chunk, char const* error_code) {
+	remove_reason_impl(&chunk, chunk.resource_slot, error_code);
+}
+
 } // namespace deluge::cluster

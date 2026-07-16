@@ -90,11 +90,6 @@ public:
 	                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts = false);
 	bool loadCluster(StreamedChunk& cluster, int32_t minNumReasonsAfter = 0);
 	void loadAnyEnqueuedClusters(int32_t maxNum = 128, bool mayProcessUserActionsBetween = false);
-	// Shared/generic reason-drop entry point — both chunk roles route through it (it only touches the
-	// role-agnostic lease surface: the chunk's address + resource_slot). One overload per chunk type
-	// since StreamedChunk / ComputedChunk no longer share a payload base.
-	void removeReasonFromCluster(StreamedChunk& cluster, char const* errorCode, bool deletingSong = false);
-	void removeReasonFromCluster(ComputedChunk& cluster, char const* errorCode, bool deletingSong = false);
 
 	bool ensureEnoughMemoryForOneMoreAudioFile();
 

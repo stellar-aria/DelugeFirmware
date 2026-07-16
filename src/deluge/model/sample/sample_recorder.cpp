@@ -82,7 +82,7 @@ void SampleRecorder::detachSample() {
 			}
 			cluster->num_reasons_held_by_sample_recorder--;
 
-			audioFileManager.removeReasonFromCluster(*cluster, "E257");
+			deluge::cluster::remove_reason(*cluster, "E257");
 		}
 	}
 
@@ -105,7 +105,7 @@ void SampleRecorder::detachSample() {
 		}
 		cluster->num_reasons_held_by_sample_recorder--;
 
-		audioFileManager.removeReasonFromCluster(*cluster, "E249");
+		deluge::cluster::remove_reason(*cluster, "E249");
 		firstUnwrittenClusterIndex++;
 	}
 
@@ -641,7 +641,7 @@ Error SampleRecorder::writeOneCompletedCluster() {
 		}
 		cluster->num_reasons_held_by_sample_recorder--;
 
-		audioFileManager.removeReasonFromCluster(*cluster, "E015");
+		deluge::cluster::remove_reason(*cluster, "E015");
 	}
 
 	// If there was an error, we can only return now after removing that reason, because we'd already incremented
@@ -703,7 +703,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 			}
 			currentRecordCluster->num_reasons_held_by_sample_recorder--;
 
-			audioFileManager.removeReasonFromCluster(*currentRecordCluster, "E047");
+			deluge::cluster::remove_reason(*currentRecordCluster, "E047");
 		}
 		currentRecordClusterIndex++;    // We've finished with that cluster
 		currentRecordCluster = nullptr; // But currentRecordClusterIndex now refers to a cluster that'll never exist
@@ -830,7 +830,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 				}
 				cluster->num_reasons_held_by_sample_recorder--;
 
-				audioFileManager.removeReasonFromCluster(*cluster, "E026");
+				deluge::cluster::remove_reason(*cluster, "E026");
 			}
 		}
 	}
@@ -1282,7 +1282,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 			}
 			currentReadCluster->num_reasons_held_by_sample_recorder--;
 
-			audioFileManager.removeReasonFromCluster(*currentReadCluster, "E017");
+			deluge::cluster::remove_reason(*currentReadCluster, "E017");
 			return Error::SD_CARD;
 		}
 
@@ -1407,7 +1407,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 			}
 			currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
-			audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E023");
+			deluge::cluster::remove_reason(*currentWriteCluster, "E023");
 			currentWriteCluster = nullptr;
 
 			// If write operation failed, now's the time to get out
@@ -1421,7 +1421,7 @@ writeFailed:
 				}
 				currentReadCluster->num_reasons_held_by_sample_recorder--;
 
-				audioFileManager.removeReasonFromCluster(*currentReadCluster, "E024");
+				deluge::cluster::remove_reason(*currentReadCluster, "E024");
 
 				if (nextReadCluster) {
 					// Some bug-hunting
@@ -1430,7 +1430,7 @@ writeFailed:
 					}
 					nextReadCluster->num_reasons_held_by_sample_recorder--;
 
-					audioFileManager.removeReasonFromCluster(*nextReadCluster, "E025");
+					deluge::cluster::remove_reason(*nextReadCluster, "E025");
 				}
 				return Error::SD_CARD;
 			}
@@ -1482,7 +1482,7 @@ writeFailed:
 			}
 			currentReadCluster->num_reasons_held_by_sample_recorder--;
 
-			audioFileManager.removeReasonFromCluster(*currentReadCluster, "E020");
+			deluge::cluster::remove_reason(*currentReadCluster, "E020");
 			currentReadClusterIndex++;
 			currentReadCluster = nextReadCluster;
 
@@ -1500,7 +1500,7 @@ writeFailed:
 					}
 					currentReadCluster->num_reasons_held_by_sample_recorder--;
 
-					audioFileManager.removeReasonFromCluster(*currentReadCluster, "E021");
+					deluge::cluster::remove_reason(*currentReadCluster, "E021");
 
 					// Some bug-hunting
 					if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
@@ -1508,7 +1508,7 @@ writeFailed:
 					}
 					currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
-					audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E022");
+					deluge::cluster::remove_reason(*currentWriteCluster, "E022");
 					currentWriteCluster = nullptr;
 					return Error::SD_CARD;
 				}
@@ -1532,7 +1532,7 @@ writeFailed:
 	}
 	currentReadCluster->num_reasons_held_by_sample_recorder--;
 
-	audioFileManager.removeReasonFromCluster(*currentReadCluster, "E018");
+	deluge::cluster::remove_reason(*currentReadCluster, "E018");
 	// We know that finishedAlteringFile must be NULL
 
 	currentWriteCluster->loaded = true;
@@ -1567,7 +1567,7 @@ writeFailed:
 		}
 		currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
-		audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E019");
+		deluge::cluster::remove_reason(*currentWriteCluster, "E019");
 		currentWriteCluster = nullptr;
 
 		// If writing disk failed, above, we've now removed that "reason", so we can get out
@@ -1604,7 +1604,7 @@ writeFailed:
 		}
 		currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
-		audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E238");
+		deluge::cluster::remove_reason(*currentWriteCluster, "E238");
 		currentWriteCluster = nullptr;
 	}
 

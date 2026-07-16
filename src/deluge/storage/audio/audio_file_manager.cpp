@@ -901,7 +901,7 @@ bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasons
 	bool ok = cluster.sample->stream().read_cluster_data(cluster, minNumReasonsAfter);
 
 	clusterBeingLoaded = nullptr;
-	removeReasonFromCluster(cluster, ok ? "E034" : "E033");
+	deluge::cluster::remove_reason(cluster, ok ? "E034" : "E033");
 
 #if ALPHA_OR_BETA_VERSION
 	if (ok) {
@@ -1065,29 +1065,6 @@ performActionsAndGetOut:
 #if REPORT_AWAY_TIME
 	timeLastFinish = MTU2.TCNT_0;
 #endif
-}
-
-// Shared reason-drop body for either chunk role. Every cluster is a manager-owned chunk — SAMPLE /
-// PERC leased via the owner's Asset, SAMPLE_CACHE resident via the cache's Asset (and leased by the
-// low-level reader while it streams it). A removed reason is just a manager lease drop: the cluster
-// stays resident (cached, evictable under pressure), never enqueued/destroyed here. The lease count
-// lives in the manager's chunk slot, read via deluge::cluster::lease_count(). Only the chunk's own
-// address + resource_slot are needed, so this is role-agnostic (the two chunk types share no base).
-static void removeReasonFromChunkImpl(void* chunk, uint32_t resource_slot, [[maybe_unused]] char const* errorCode) {
-	if (ALPHA_OR_BETA_VERSION && deluge::cluster::lease_count(resource_slot) == 0) {
-		FREEZE_WITH_ERROR(errorCode); // removing a reason that was never there
-	}
-	deluge::cluster::release_lease(chunk); // unlease (backing ptr == the chunk's own address)
-}
-
-void AudioFileManager::removeReasonFromCluster(StreamedChunk& cluster, char const* errorCode,
-                                               [[maybe_unused]] bool deletingSong) {
-	removeReasonFromChunkImpl(&cluster, cluster.resource_slot, errorCode);
-}
-
-void AudioFileManager::removeReasonFromCluster(ComputedChunk& cluster, char const* errorCode,
-                                               [[maybe_unused]] bool deletingSong) {
-	removeReasonFromChunkImpl(&cluster, cluster.resource_slot, errorCode);
 }
 
 bool AudioFileManager::loadingQueueHasAnyLowestPriorityElements() {

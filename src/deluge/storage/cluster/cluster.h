@@ -128,7 +128,8 @@ namespace deluge::cluster {
 void add_lease(void* chunk);
 
 /// Drop one lease on the resident chunk at `chunk` (its own backing pointer). No-op if the resource
-/// manager isn't up yet (mirrors the former AudioFileManager::removeReasonFromCluster null-check).
+/// manager isn't up yet. Most callers want remove_reason() instead, which also does the
+/// ALPHA/BETA zero-lease freeze-check.
 void release_lease(void* chunk);
 
 /// Hard-lease ("reason") count for the chunk resident in slot `resource_slot` — the single source of
@@ -139,4 +140,18 @@ void release_lease(void* chunk);
 /// Release a chunk (StreamedChunk or ComputedChunk) back to the backing slab so its slab-table entry
 /// is cleared. Both chunk structs are trivially destructible, so this is a role-agnostic free.
 void free_chunk(void* chunk);
+
+/// Drop one lease ("reason") on `chunk`, freezing (ALPHA/BETA only) if it already had zero leases —
+/// i.e. a reason removed that was never held. The single reason-drop entry point for the streamed
+/// SAMPLE role; forwards to release_lease().
+/// @param chunk The resident StreamedChunk to drop a lease on.
+/// @param error_code FREEZE_WITH_ERROR code reported (ALPHA/BETA only) if `chunk` had zero leases.
+void remove_reason(StreamedChunk& chunk, char const* error_code);
+
+/// Drop one lease ("reason") on `chunk`, freezing (ALPHA/BETA only) if it already had zero leases —
+/// i.e. a reason removed that was never held. The single reason-drop entry point for the computed/
+/// cached chunk role; forwards to release_lease().
+/// @param chunk The resident ComputedChunk to drop a lease on.
+/// @param error_code FREEZE_WITH_ERROR code reported (ALPHA/BETA only) if `chunk` had zero leases.
+void remove_reason(ComputedChunk& chunk, char const* error_code);
 } // namespace deluge::cluster

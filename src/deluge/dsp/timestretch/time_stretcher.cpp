@@ -179,7 +179,7 @@ void TimeStretcher::beenUnassigned() {
 void TimeStretcher::unassignAllReasonsForPercLookahead() {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForPercLookahead[l]) {
-			audioFileManager.removeReasonFromCluster(*clustersForPercLookahead[l], "E130");
+			deluge::cluster::remove_reason(*clustersForPercLookahead[l], "E130");
 			clustersForPercLookahead[l] = nullptr;
 		}
 	}
@@ -188,7 +188,7 @@ void TimeStretcher::unassignAllReasonsForPercLookahead() {
 void TimeStretcher::unassignAllReasonsForPercCacheClusters() {
 	for (int32_t l = 0; l < 2; l++) {
 		if (percCacheClustersNearby[l]) {
-			audioFileManager.removeReasonFromCluster(*percCacheClustersNearby[l], "E132");
+			deluge::cluster::remove_reason(*percCacheClustersNearby[l], "E132");
 			percCacheClustersNearby[l] = nullptr;
 		}
 	}
@@ -1116,7 +1116,7 @@ void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 
 	if (percCacheClustersNearby[0]) {
 		// Steven G got this on V3.1.5, Feb 2021!
-		audioFileManager.removeReasonFromCluster(*percCacheClustersNearby[0], "E133");
+		deluge::cluster::remove_reason(*percCacheClustersNearby[0], "E133");
 	}
 	percCacheClustersNearby[0] = percCacheClustersNearby[1];
 

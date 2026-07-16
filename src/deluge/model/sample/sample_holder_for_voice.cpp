@@ -45,7 +45,7 @@ SampleHolderForVoice::~SampleHolderForVoice() {
 	// overriding of that virtual function won't happen as we've already been destructed!
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForLoopStart[l]) {
-			audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E247");
+			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E247");
 		}
 	}
 }
@@ -55,7 +55,7 @@ void SampleHolderForVoice::unassignAllClusterReasons(bool beingDestructed) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForLoopStart[l]) {
 			// Happened to me while auto-pilot testing, I think
-			audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E320");
+			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E320");
 			if (!beingDestructed) {
 				clustersForLoopStart[l] = nullptr;
 			}
@@ -104,7 +104,7 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 	else {
 		for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 			if (clustersForLoopStart[l]) {
-				audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E246");
+				deluge::cluster::remove_reason(*clustersForLoopStart[l], "E246");
 				clustersForLoopStart[l] = nullptr;
 			}
 		}

@@ -109,6 +109,34 @@ git commit -m "refactor(audio-stream): idiomatic C++23 rewrite of stitch_prev/st
 
 ---
 
+## Task 6: idiomatic C++23 rewrite of `convert_cluster_data` + its range helpers
+
+Same idiomatic treatment as Task 5's stitch rewrite, applied to `convert_cluster_data`, `convert_24bit_range`, and `convert_word_range` in `convert.h`. Improve the variable names and modernize the C-ish style — while PRESERVING the SIMD integration (Tasks 2-4b) and exact conversion behavior. Behavior-identical; the net is the strengthened x86 specs + the qemu-arm parity spec + golden bit-exact.
+
+**Files:** Modify `src/deluge/storage/audio/stream/convert.h`.
+
+- [ ] **Step 1: Rewrite `convert_cluster_data`'s body + the scalar range loops idiomatically.**
+  - Replace the `char* char_data = reinterpret_cast<char*>(data.data())` alias + raw pointer arithmetic with `std::span<std::byte>` subviews / offsets where it clarifies (the byte-offset geometry is easier to read as span indices than `char*` pointer math). Keep `data.data()` byte pointers only where the SIMD loop / `convert_word_in_place` genuinely needs them.
+  - **Improve the names:** e.g. `char_data` (eliminate or rename), `bytes_eating_into_another_3byte` → something like `bytes_into_prev_group`, `end_at_byte_pos`/`end_at_pos_within_cluster` → clearer audio-region-end names, `start_cluster` → e.g. `first_audio_cluster` if clearer. Make the geometry computation (start_pos, the first-audio-cluster check, the per-format begin/end) read cleanly.
+  - `convert_24bit_range` (scalar 3-byte swap loop) and `convert_word_range` (scalar word loop) — modernize their bodies (span/clearer locals; keep `byteswap3`/`convert_word_in_place`), same behavior.
+  - Structured control flow + clear intermediate names for the early-outs, the 3-byte backup, the format dispatch.
+
+- [ ] **Step 2: PRESERVE (hard constraints):**
+  - The SIMD paths: `convert_range_simd` (the 16-byte prefix for UNSIGNED_8/WRONG_32/16 + NEON-gated FLOAT) and `convert_24bit_range_simd` (the vld3/vst3 prefix) — called from `convert_word_range`/`convert_24bit_range` exactly as now. Don't disturb the `#if defined(__ARM_NEON)...` FLOAT gate.
+  - The scalar tails, the ~1024-byte yield cadence + the template `Yield` param, the `unconverted_head_out` backup, the two early-outs (`audio_data_start_pos_bytes == 0`; `cluster_index < start_cluster`), and every begin/end offset value (the arithmetic must stay identical — golden bit-exact).
+  - Dependency-light (no AudioEngine/Sample/Cluster); snake_case; header templates stay non-anonymous.
+
+- [ ] **Step 3: Verify BOTH arches.** `dbt build Debug` clean; `./dbt test` (all convert/convert_cluster specs green — the strengthened per-format straddling cases are the primary net); `scripts/golden_mixdown.sh check` (cordae) + `FIXTURE=icoustic` bit-exact. Rebuild + rerun the qemu-arm parity suite (per Task 4b) to confirm the SIMD paths still match real NEON.
+- [ ] **Step 4: Commit.**
+```bash
+git add src/deluge/storage/audio/stream/convert.h
+git commit -m "refactor(audio-stream): idiomatic C++23 rewrite of convert_cluster_data + range helpers (names, span, structure)"
+```
+
+If any spec or golden diverges, an offset/order changed — do NOT commit; report BLOCKED with the divergence.
+
+---
+
 ## Roadmap — after 2d
 
 Fold the deferred 2c cosmetics opportunistically (byteswap3 dedup, the `detail` sub-namespace). Then Phase 3 (de-overload `Cluster` → `StreamedChunk`/`ComputedChunk`), and the batched test-hygiene ticket, per the module design spec.

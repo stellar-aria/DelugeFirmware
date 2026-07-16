@@ -103,12 +103,13 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 // yet are returned unchanged so the caller's scalar loop covers the whole range as before.
 template <class Yield>
 std::byte* convert_range_simd(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
+	// Integer formats always take the SIMD path; FLOAT only on real NEON (the #if below).
+	bool const has_int_simd_path = format == RawDataFormat::UNSIGNED_8 || format == RawDataFormat::ENDIANNESS_WRONG_32
+	                               || format == RawDataFormat::ENDIANNESS_WRONG_16;
 #if defined(__ARM_NEON) || defined(__ARM_FEATURE_MVE)
-	bool const has_simd_path = format == RawDataFormat::UNSIGNED_8 || format == RawDataFormat::ENDIANNESS_WRONG_32
-	                           || format == RawDataFormat::ENDIANNESS_WRONG_16 || format == RawDataFormat::FLOAT;
+	bool const has_simd_path = has_int_simd_path || format == RawDataFormat::FLOAT;
 #else
-	bool const has_simd_path = format == RawDataFormat::UNSIGNED_8 || format == RawDataFormat::ENDIANNESS_WRONG_32
-	                           || format == RawDataFormat::ENDIANNESS_WRONG_16;
+	bool const has_simd_path = has_int_simd_path;
 #endif
 	if (!has_simd_path) {
 		return begin;

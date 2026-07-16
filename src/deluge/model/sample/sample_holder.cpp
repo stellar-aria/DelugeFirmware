@@ -215,9 +215,10 @@ void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32
 		}
 		*/
 
-		SampleCluster* sampleCluster = &((Sample*)audioFile)->clusters[clusterIndex];
-
-		newClusters[l] = sampleCluster->getCluster(((Sample*)audioFile), clusterIndex, clusterLoadInstruction);
+		// Boundary-crossing lease: one stream() hop per lookahead slot here, not per-sample -- this
+		// runs only when (re)claiming the head/loop-start lookahead window, never in the per-sample
+		// hot loop.
+		newClusters[l] = ((Sample*)audioFile)->stream().get_cluster(clusterIndex, clusterLoadInstruction);
 
 		if (!newClusters[l]) {
 			D_PRINTLN("NULL!!");

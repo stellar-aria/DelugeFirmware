@@ -199,8 +199,9 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 
-		// Grab it.
-		newClusters[l] = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_ENQUEUE);
+		// Grab it. Boundary-crossing refill (late sample-start attempt): one stream() hop per
+		// lookahead slot, not per sample.
+		newClusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE);
 
 		// If failure (would only happen in insanely rare case where there's no free RAM)
 		if (l == 0 && !newClusters[l]) {
@@ -844,8 +845,9 @@ readCachedWindow:
 
 				int32_t nextUncachedClusterIndex = uncachedClusterIndex;
 				for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-					clusters[l] = sample->clusters[nextUncachedClusterIndex].getCluster(
-					    sample, nextUncachedClusterIndex, CLUSTER_ENQUEUE);
+					// Boundary-crossing refill (cache-resync when the uncached Cluster changes): one
+					// stream() hop per lookahead slot here, not per sample.
+					clusters[l] = sample->stream().get_cluster(nextUncachedClusterIndex, CLUSTER_ENQUEUE);
 					if (!clusters[l]) {
 						break;
 					}

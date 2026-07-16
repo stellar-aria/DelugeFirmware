@@ -105,7 +105,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
 	if ((clusterIndex - finalClusterIndex) * guide->playDirection > 0) {
 		D_PRINTLN("saving from being past finalCluster");
-		StreamedChunk* finalCluster = sample->clusters[finalClusterIndex].cluster;
+		StreamedChunk* finalCluster = sample->stream().chunk_at(finalClusterIndex);
 		if (!finalCluster) {
 			return false;
 		}
@@ -300,8 +300,10 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 
-		// Grab it.
-		clusters[l] = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_ENQUEUE, priorityRating);
+		// Grab it. Boundary-crossing refill: one stream() hop per lookahead slot, at reassessment /
+		// cluster-boundary time, NOT per sample -- the per-sample inner render loop below only ever
+		// reads the local `clusters[]` array filled here.
+		clusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE, priorityRating);
 
 		// The first one is required to not only have returned an object to us (which it might not have if insufficient
 		// RAM or maybe other reasons), but also to be fully loaded.
@@ -375,9 +377,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 		// Or if there is...
 		else {
 
-			// Grab it.
+			// Grab it. Boundary-crossing refill: one stream() hop, once per cluster of playback (we've
+			// just moved on to the next Cluster), NOT per sample.
 			clusters[kNumClustersLoadedAhead - 1] =
-			    sample->clusters[newClusterIndex].getCluster(sample, newClusterIndex, CLUSTER_ENQUEUE, priorityRating);
+			    sample->stream().get_cluster(newClusterIndex, CLUSTER_ENQUEUE, priorityRating);
 
 			// If that failed (because no free RAM), no damage gets done.
 		}

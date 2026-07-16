@@ -52,4 +52,11 @@ private:
 	bool prev_permit_;
 };
 
+/// @brief Whether user-action handlers may run during the in-progress storage operation.
+///
+/// True exactly while a `StorageOp` is alive. The UI action handlers query this to decide
+/// whether to proceed or defer with `ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE` when the
+/// card routine is active.
+bool user_actions_permitted();
+
 } // namespace deluge::sync

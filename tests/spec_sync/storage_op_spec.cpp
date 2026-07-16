@@ -26,6 +26,20 @@ describe storage_op("deluge::sync::StorageOp", $ {
 		// Inner's destructor must restore to true (outer still active), not false.
 		expect(allowSomeUserActionsEvenWhenInCardRoutine).to_be_truthy();
 	});
+
+	it("user_actions_permitted() is false with no StorageOp active", _ {
+		expect(deluge::sync::user_actions_permitted()).to_be_falsy();
+	});
+
+	it("user_actions_permitted() is true while a StorageOp is alive", _ {
+		deluge::sync::StorageOp op;
+		expect(deluge::sync::user_actions_permitted()).to_be_truthy();
+	});
+
+	it("user_actions_permitted() returns to false after the scope closes", _ {
+		{ deluge::sync::StorageOp op; }
+		expect(deluge::sync::user_actions_permitted()).to_be_falsy();
+	});
 });
 
 CPPSPEC_SPEC(storage_op)

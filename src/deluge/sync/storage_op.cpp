@@ -20,3 +20,9 @@
 // its owning module. Global namespace, C++ linkage — matches the declaration in
 // extern.h (extern.h:25) and sync/storage_op.h.
 bool allowSomeUserActionsEvenWhenInCardRoutine = false;
+
+namespace deluge::sync {
+bool user_actions_permitted() {
+	return allowSomeUserActionsEvenWhenInCardRoutine;
+}
+} // namespace deluge::sync

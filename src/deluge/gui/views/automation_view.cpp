@@ -91,6 +91,7 @@
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multi_range.h"
 #include "storage/storage_manager.h"
+#include "sync/storage_op.h"
 #include "util/cfunctions.h"
 #include "util/comparison.h"
 #include "util/functions.h"
@@ -2033,7 +2034,7 @@ ActionResult AutomationView::handleAuditionPadAction(InstrumentClip* instrumentC
 // not used with Audio Clip Automation View or Arranger Automation View
 ActionResult AutomationView::auditionPadAction(InstrumentClip* clip, Output* output, OutputType outputType,
                                                int32_t yDisplay, int32_t velocity, bool shiftButtonDown) {
-	if (isSDRoutineActive() && !allowSomeUserActionsEvenWhenInCardRoutine) {
+	if (isSDRoutineActive() && !deluge::sync::user_actions_permitted()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allowable sometimes if in card routine.
 	}
 

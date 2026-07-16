@@ -49,6 +49,7 @@
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/flash_storage.h"
+#include "sync/storage_op.h"
 
 extern "C" {
 extern uint8_t currentlyAccessingCard;
@@ -837,7 +838,7 @@ ActionResult AudioClipView::editClipLengthWithoutTimestretching(int32_t offset) 
 
 ActionResult AudioClipView::verticalEncoderAction(int32_t offset, bool inCardRoutine) {
 	if (!currentUIMode && Buttons::isShiftButtonPressed() && !Buttons::isButtonPressed(deluge::hid::button::Y_ENC)) {
-		if (inCardRoutine && !allowSomeUserActionsEvenWhenInCardRoutine) {
+		if (inCardRoutine && !deluge::sync::user_actions_permitted()) {
 			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow sometimes.
 		}
 

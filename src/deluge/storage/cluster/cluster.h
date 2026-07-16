@@ -20,6 +20,7 @@
 #include "definitions.h"
 #include "definitions_cxx.hpp"
 #include "memory/general_memory_allocator.h"
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -91,11 +92,12 @@ struct StreamedChunk final {
 	Sample* sample = nullptr;
 	char first_three_bytes_pre_data_conversion[3]{};
 
-	/// The cached payload base, set at construction. Coexistence stepping stone: currently always
-	/// `&data` (byte-identical); a later step re-homes it onto explicit slot geometry and drops `data`.
+	/// The cluster's audio payload base. Set at construction from the slab-slot base (`dest`) plus
+	/// kChunkPayloadOffset, giving it whole-slot provenance — the FAM over-read is gone. Every
+	/// construction path is a placement-`new` in an asset construct callback that sets this.
 	std::byte* payload_ = nullptr;
 
-	StreamedChunk() { payload_ = reinterpret_cast<std::byte*>(data); }
+	StreamedChunk() = default;
 	void convert_data_if_necessary();
 
 	// The resource-manager Asset that owns this chunk's residency (the sample's asset), or
@@ -126,19 +128,6 @@ struct StreamedChunk final {
 	[[nodiscard]] std::span<std::byte> payload_with_trailing_slack() {
 		return {payload().data(), Cluster::size + kTrailingSlackBytes};
 	}
-
-	// The guards below serve two distinct jobs:
-	//   (a) DMA cache-line rounding absorption — `data` is not cache-line-aligned, and the SD read's
-	//       cache maintenance rounds the buffer range OUT to CACHE_LINE_SIZE-byte lines, so each guard
-	//       must be >= CACHE_LINE_SIZE to keep that rounding off live neighbour data (the header before
-	//       `dummy`, the next slab slot after the trailing gap).
-	//   (b) Application edge-slack — kFrontSlackBytes/kTrailingSlackBytes, the boundary-straddle frame
-	//       reads (frame_read_origin / payload_with_trailing_slack). The DMA guard (a) dominates (b),
-	//       so the app slack rides for free.
-	// MUST BE THE LAST TWO MEMBERS (the FAM over-allocation past `data` requires it; enforced below by
-	// the static_asserts in cluster.cpp).
-	alignas(4) char dummy[CACHE_LINE_SIZE]{};
-	alignas(4) char data[CACHE_LINE_SIZE]{};
 };
 
 /// A computed/cached chunk (Cluster::Type::SAMPLE_CACHE / PERC_CACHE_FORWARDS / PERC_CACHE_REVERSED)
@@ -152,11 +141,12 @@ struct ComputedChunk final {
 	Sample* sample = nullptr;
 	SampleCache* sampleCache = nullptr; // written by sampleCacheConstruct; currently no reads
 
-	/// The cached payload base, set at construction. Coexistence stepping stone: currently always
-	/// `&data` (byte-identical); a later step re-homes it onto explicit slot geometry and drops `data`.
+	/// The cluster's audio payload base. Set at construction from the slab-slot base (`dest`) plus
+	/// kChunkPayloadOffset, giving it whole-slot provenance — the FAM over-read is gone. Every
+	/// construction path is a placement-`new` in an asset construct callback that sets this.
 	std::byte* payload_ = nullptr;
 
-	ComputedChunk() { payload_ = reinterpret_cast<std::byte*>(data); }
+	ComputedChunk() = default;
 
 	// The resource-manager Asset that owns this chunk's residency for the *leased* (reason-tracked)
 	// perc kinds (the sample's per-direction perc asset), or DELUGE_RESOURCE_NO_ASSET otherwise.
@@ -187,20 +177,21 @@ struct ComputedChunk final {
 	[[nodiscard]] std::span<std::byte> payload_with_trailing_slack() {
 		return {payload().data(), Cluster::size + kTrailingSlackBytes};
 	}
-
-	// The guards below serve two distinct jobs:
-	//   (a) DMA cache-line rounding absorption — `data` is not cache-line-aligned, and the SD read's
-	//       cache maintenance rounds the buffer range OUT to CACHE_LINE_SIZE-byte lines, so each guard
-	//       must be >= CACHE_LINE_SIZE to keep that rounding off live neighbour data (the header before
-	//       `dummy`, the next slab slot after the trailing gap).
-	//   (b) Application edge-slack — kFrontSlackBytes/kTrailingSlackBytes, the boundary-straddle frame
-	//       reads (frame_read_origin / payload_with_trailing_slack). The DMA guard (a) dominates (b),
-	//       so the app slack rides for free.
-	// MUST BE THE LAST TWO MEMBERS (the FAM over-allocation past `data` requires it; enforced below by
-	// the static_asserts in cluster.cpp).
-	alignas(4) char dummy[CACHE_LINE_SIZE]{};
-	alignas(4) char data[CACHE_LINE_SIZE]{};
 };
+
+// Slot geometry for the chunk payload, defined here (after both struct definitions, so `sizeof` sees
+// the pure-header size). A slab slot is laid out: [chunk header][front guard][Cluster::size payload]
+// [trailing guard]. The payload sits at kChunkPayloadOffset from the slot base; the construct callbacks
+// set payload_ = dest + kChunkPayloadOffset (whole-slot provenance — no FAM over-read).
+//
+// kChunkPayloadOffset = the larger header + one cache line, so the front guard
+// (kChunkPayloadOffset - sizeof(header)) is >= CACHE_LINE_SIZE for BOTH chunk types BY CONSTRUCTION
+// (covers the DMA cache-maintenance range-rounding AND the application front-underread). Auto-fits any
+// ABI, since it is expressed in sizeof. It stays >= 4-byte aligned (both header sizeofs are >= 4-aligned,
+// CACHE_LINE_SIZE == 32, and dest is >= 16-byte aligned), so the ALPHA `data & 0b11` check still passes.
+inline constexpr size_t kChunkPayloadOffset = std::max(sizeof(StreamedChunk), sizeof(ComputedChunk)) + CACHE_LINE_SIZE;
+// One cache line of trailing guard past the payload (DMA end-rounding + the app trailing over-read).
+inline constexpr size_t kChunkTrailingGuard = CACHE_LINE_SIZE;
 
 // Shared lease bookkeeping, lifted off Cluster as free functions so it can be shared once
 // StreamedChunk/ComputedChunk become independent types (neither needs a common base for this).

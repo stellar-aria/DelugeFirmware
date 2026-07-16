@@ -35,6 +35,7 @@
 static void sampleCacheConstruct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
 	auto* sampleCache = static_cast<SampleCache*>(owner);
 	auto* cluster = new (dest) ComputedChunk();
+	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
 	cluster->type = Cluster::Type::SAMPLE_CACHE;
 	cluster->sampleCache = sampleCache;
 	cluster->cluster_index = index;

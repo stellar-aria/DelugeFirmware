@@ -24,9 +24,9 @@
 #include "io/debug/log.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // setCardRead() — commit the cluster size before slab sizing
-#include "storage/cluster/cluster.h"          // sizeof(Streamed/ComputedChunk) + Cluster::size for the slab slot
-#include <algorithm>                          // std::max for the slab slot size
-#include <cstdlib>                            // getenv/strtol for the sim-only DELUGE_SIM_HEAP_PAD knob
+#include "storage/cluster/cluster.h"          // kChunkPayloadOffset/kChunkTrailingGuard + Cluster::size: slab slot
+#include <algorithm>
+#include <cstdlib> // getenv/strtol for the sim-only DELUGE_SIM_HEAP_PAD knob
 #include <cstring>
 
 namespace {
@@ -71,7 +71,11 @@ bool GeneralMemoryAllocator::ensureClusterSystem() {
 	// before we size the slab. Uniform slots of that size accommodate every cluster for the session;
 	// a smaller reinserted card simply under-fills its slots.
 	audioFileManager.setCardRead();
-	size_t slot = std::max(sizeof(StreamedChunk), sizeof(ComputedChunk)) + Cluster::size;
+	// Explicit slot geometry (cluster.h): [chunk header][front guard][Cluster::size payload][trailing
+	// guard]. kChunkPayloadOffset already covers the larger header + a cache-line front guard, so this is
+	// the full slot and is >= the payload region for BOTH chunk types by construction (payload_ = base +
+	// kChunkPayloadOffset never reaches past base + slot). No longer sizeof-based (the headers shrank).
+	size_t slot = kChunkPayloadOffset + Cluster::size + kChunkTrailingGuard;
 	size_t slabCapacity = (deluge::memory::sdram_size() / slot) + 1; // table never the limiter
 	clusterSlab_ = deluge_slab_create_unmanaged(deluge::memory::sdram_heap(), slot, slabCapacity);
 	if (clusterSlab_ == nullptr) {

@@ -119,6 +119,7 @@ static void percCacheConstruct(void* ctx, void* owner, uint32_t index, void* des
 	auto* sample = static_cast<Sample*>(owner);
 	int32_t reversed = static_cast<int32_t>(reinterpret_cast<intptr_t>(ctx));
 	auto* cluster = new (dest) ComputedChunk();
+	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
 	cluster->type = reversed ? Cluster::Type::PERC_CACHE_REVERSED : Cluster::Type::PERC_CACHE_FORWARDS;
 	cluster->sample = sample;
 	cluster->cluster_index = index;

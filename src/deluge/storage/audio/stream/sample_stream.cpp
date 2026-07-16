@@ -41,11 +41,12 @@ namespace deluge::audio::stream {
 bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
 	auto* sample = static_cast<Sample*>(owner);
 	auto* cluster = new (dest) StreamedChunk();
+	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
 	cluster->sample = sample;
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
 
-	bool ok = sample->stream().read_cluster_data(*cluster, 0);
+	bool ok = sample->stream().read_cluster_data(*cluster, 0); // uses payload() — payload_ set above
 	if (ok) {
 		sample->stream().table_[index].cluster = cluster;
 	}
@@ -58,6 +59,7 @@ bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t inde
 void SampleStream::cluster_construct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
 	auto* sample = static_cast<Sample*>(owner);
 	auto* cluster = new (dest) StreamedChunk();
+	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
 	cluster->sample = sample;
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);

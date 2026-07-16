@@ -31,23 +31,22 @@
 #include <cstring>
 #include <type_traits>
 
-// Both chunk payloads must stay standard-layout + non-polymorphic: they're placement-new'd into raw
-// slab slots and their `data[]` tail is over-allocated by Cluster::size extra bytes.
+// Both chunk types must stay standard-layout + non-polymorphic: they're placement-new'd into raw slab
+// slots (as pure metadata headers) and their payload lives, via payload_, elsewhere in the same slot.
 static_assert(std::is_standard_layout_v<StreamedChunk> && !std::is_polymorphic_v<StreamedChunk>);
 static_assert(std::is_standard_layout_v<ComputedChunk> && !std::is_polymorphic_v<ComputedChunk>);
 
-// The edge-slack contract, static_assert-enforced (see cluster.h): `data` must be the last member and
-// `dummy` must immediately precede it (the FAM over-allocation past `data` relies on both), and the
-// guards must each be >= CACHE_LINE_SIZE to cover the DMA cache-line rounding AND the application edge
-// slack (kFrontSlackBytes/kTrailingSlackBytes). These are offsetof-relative (not a hardcoded sizeof),
-// so they hold on both the ARM32 firmware and the x86-64 sim despite differing struct sizes.
-static_assert(offsetof(StreamedChunk, data) + CACHE_LINE_SIZE == sizeof(StreamedChunk));
-static_assert(offsetof(StreamedChunk, dummy) + CACHE_LINE_SIZE == offsetof(StreamedChunk, data));
-static_assert(CACHE_LINE_SIZE >= kFrontSlackBytes && CACHE_LINE_SIZE >= kTrailingSlackBytes);
-
-static_assert(offsetof(ComputedChunk, data) + CACHE_LINE_SIZE == sizeof(ComputedChunk));
-static_assert(offsetof(ComputedChunk, dummy) + CACHE_LINE_SIZE == offsetof(ComputedChunk, data));
-static_assert(CACHE_LINE_SIZE >= kFrontSlackBytes && CACHE_LINE_SIZE >= kTrailingSlackBytes);
+// The slot-geometry guard proof (see cluster.h). The payload sits at kChunkPayloadOffset from the slot
+// base, so the front guard is (kChunkPayloadOffset - sizeof(header)). Each guard must be >= CACHE_LINE_SIZE
+// to keep the SD-read cache-maintenance range-rounding off live neighbour data (the header below the
+// front guard, the next slot above the trailing guard), AND >= the application edge-slack reach
+// (kFrontSlackBytes/kTrailingSlackBytes). These use sizeof, so they hold on both the ARM32 firmware and
+// the x86-64 sim despite differing header sizes (kChunkPayloadOffset auto-fits via std::max(sizeof)).
+static_assert(kChunkPayloadOffset - sizeof(StreamedChunk) >= CACHE_LINE_SIZE);  // front guard >= a cache line (DMA)
+static_assert(kChunkPayloadOffset - sizeof(StreamedChunk) >= kFrontSlackBytes); // ... and covers the app front reach
+static_assert(kChunkPayloadOffset - sizeof(ComputedChunk) >= CACHE_LINE_SIZE);
+static_assert(kChunkPayloadOffset - sizeof(ComputedChunk) >= kFrontSlackBytes);
+static_assert(kChunkTrailingGuard >= CACHE_LINE_SIZE && kChunkTrailingGuard >= kTrailingSlackBytes); // trailing guard
 
 // The universal size of all clusters
 size_t Cluster::size = 32768;

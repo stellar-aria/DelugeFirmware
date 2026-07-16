@@ -56,42 +56,42 @@ public:
 
 	static size_t size;
 	static size_t size_magnitude;
-	static void setSize(size_t size);
+	static void set_size(size_t size);
 
 	/// Warning! do not call this constructor directly! It must be called via placement `new`
 	/// after allocating a region with the General Memory Allocator!
 	Cluster() = default;
-	void convertDataIfNecessary();
-	void addReason();
+	void convert_data_if_necessary();
+	void add_reason();
 
 	// The resource-manager Asset that owns this cluster's residency for the *leased* (reason-
 	// tracked) kinds — SAMPLE (the sample's asset) and PERC_CACHE_* (the sample's per-direction
-	// perc asset) — or DELUGE_RESOURCE_NO_ASSET otherwise. Used by addReason /
+	// perc asset) — or DELUGE_RESOURCE_NO_ASSET otherwise. Used by add_reason /
 	// removeReasonFromCluster to route a reason to a manager lease. SAMPLE_CACHE clusters are
 	// unleased (never reasoned), so they're excluded here and managed via the cache's Asset.
-	uint32_t resourceLeaseAssetId() const;
+	uint32_t resource_lease_asset_id() const;
 
 	// Hard-lease ("reason") count for this cluster — the single source of truth lives in the resource
-	// manager's chunk slot, read O(1) via `resourceSlot` (the slot handle, set at creation). Replaces
+	// manager's chunk slot, read O(1) via `resource_slot` (the slot handle, set at creation). Replaces
 	// the old `numReasonsToBeLoaded` mirror field. 0 if the cluster isn't a manager chunk yet.
-	[[nodiscard]] uint32_t leaseCount() const;
+	[[nodiscard]] uint32_t lease_count() const;
 
 	Cluster::Type type;
-	uint32_t clusterIndex = 0;
+	uint32_t cluster_index = 0;
 
 	// Handle to this cluster's chunk slot in the resource manager (set at creation via
 	// deluge_resource_slot_of). 0xFFFFFFFF == DELUGE_RESOURCE_NO_SLOT (literal here so this widely-
 	// included header needn't pull in deluge_resource.h).
-	uint32_t resourceSlot = 0xFFFFFFFF;
-	int8_t numReasonsHeldBySampleRecorder = 0;
+	uint32_t resource_slot = 0xFFFFFFFF;
+	int8_t num_reasons_held_by_sample_recorder = 0;
 	bool unloadable = false;
-	bool extraBytesAtStartConverted = false;
-	bool extraBytesAtEndConverted = false;
+	bool extra_bytes_at_start_converted = false;
+	bool extra_bytes_at_end_converted = false;
 
 	Sample* sample = nullptr;
 	SampleCache* sampleCache = nullptr;
 
-	char firstThreeBytesPreDataConversion[3]{};
+	char first_three_bytes_pre_data_conversion[3]{};
 	bool loaded = false;
 
 	// MUST BE THE LAST TWO MEMBERS

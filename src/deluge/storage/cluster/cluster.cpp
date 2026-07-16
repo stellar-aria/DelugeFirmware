@@ -34,7 +34,7 @@
 size_t Cluster::size = 32768;
 size_t Cluster::size_magnitude = 15;
 
-void Cluster::setSize(size_t size) {
+void Cluster::set_size(size_t size) {
 	Cluster::size = size;
 
 	// Find the highest bit set
@@ -58,14 +58,14 @@ void Cluster::operator delete(void* ptr) {
  * @brief This function goes through the contents of the cluster,
  *        and converts them to the Deluge's native PCM 24-bit format if needed
  */
-void Cluster::convertDataIfNecessary() {
+void Cluster::convert_data_if_necessary() {
 	deluge::audio::stream::convert_cluster_data(
-	    std::span<std::byte>(reinterpret_cast<std::byte*>(data), Cluster::size), clusterIndex, sample->rawDataFormat,
+	    std::span<std::byte>(reinterpret_cast<std::byte*>(data), Cluster::size), cluster_index, sample->rawDataFormat,
 	    {.audio_data_start_pos_bytes = sample->audioDataStartPosBytes,
 	     .audio_data_length_bytes = sample->audioDataLengthBytes,
 	     .first_cluster_index_with_no_audio_data = sample->getFirstClusterIndexWithNoAudioData()},
 	    Cluster::size, Cluster::size_magnitude,
-	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(firstThreeBytesPreDataConversion), 3),
+	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(first_three_bytes_pre_data_conversion), 3),
 	    // Cooperative yield during long conversions. Both of convert_cluster_data's yield sites route
 	    // here, so the "from convert-data" marker now also fires on the non-24-bit path (originally only
 	    // the 24-bit path logged it) — a deliberate, audio-neutral widening (goldens bit-exact).
@@ -79,7 +79,7 @@ void Cluster::convertDataIfNecessary() {
 // kinds — SAMPLE (the sample's asset) and PERC_CACHE_* (the sample's per-direction perc asset).
 // SAMPLE_CACHE clusters are unleased (never reasoned), so they return NO_ASSET here and are managed
 // via their cache's own Asset instead.
-uint32_t Cluster::resourceLeaseAssetId() const {
+uint32_t Cluster::resource_lease_asset_id() const {
 	switch (type) {
 	case Type::SAMPLE:
 		return (sample != nullptr) ? sample->resourceAssetId : DELUGE_RESOURCE_NO_ASSET;
@@ -92,17 +92,17 @@ uint32_t Cluster::resourceLeaseAssetId() const {
 	}
 }
 
-void Cluster::addReason() {
+void Cluster::add_reason() {
 	// Manager-owned leased clusters (SAMPLE / PERC) are pinned by a resource-manager lease (they're
 	// never on a stealable queue). Take a lease so the manager won't evict a cluster the caller still
-	// holds. The lease count lives in the manager's chunk slot (read via leaseCount()).
+	// holds. The lease count lives in the manager's chunk slot (read via lease_count()).
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	if (mgr != nullptr) {
 		deluge_resource_add_lease(mgr, this); // hit-only lease bump on this resident chunk
 	}
 }
 
-uint32_t Cluster::leaseCount() const {
+uint32_t Cluster::lease_count() const {
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	return (mgr != nullptr) ? deluge_resource_lease_count_by_slot(mgr, resourceSlot) : 0;
+	return (mgr != nullptr) ? deluge_resource_lease_count_by_slot(mgr, resource_slot) : 0;
 }

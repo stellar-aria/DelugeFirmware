@@ -30,7 +30,7 @@ SampleCluster::~SampleCluster() {
 	if (cluster) {
 
 #if ALPHA_OR_BETA_VERSION
-		uint32_t reasons = cluster->leaseCount();
+		uint32_t reasons = cluster->lease_count();
 		if (cluster == audioFileManager.clusterBeingLoaded && reasons > 0) {
 			reasons--;
 		}
@@ -49,8 +49,8 @@ SampleCluster::~SampleCluster() {
 
 void SampleCluster::ensureNoReason(Sample* sample) {
 	if (cluster) {
-		if (cluster->leaseCount()) {
-			D_PRINTLN("Cluster has reason!  %d %d", cluster->leaseCount(), sample->filePath.c_str());
+		if (cluster->lease_count()) {
+			D_PRINTLN("Cluster has reason!  %d %d", cluster->lease_count(), sample->filePath.c_str());
 			FREEZE_WITH_ERROR("E068");
 			delayMS(50);
 		}
@@ -110,7 +110,7 @@ Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_
 		}
 		cluster = reinterpret_cast<Cluster*>(p);
 		if (!cluster->loaded) {
-			deluge_resource_loader_enqueue(mgr, cluster->resourceSlot, priorityRating);
+			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priorityRating);
 		}
 		return cluster;
 	}
@@ -128,10 +128,10 @@ Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_
 	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
 	if (!cluster->loaded) {
 		bool ok = audioFileManager.readClusterData(*cluster, 0);
-		deluge_resource_loader_remove(mgr, cluster->resourceSlot); // it no longer needs the loader
+		deluge_resource_loader_remove(mgr, cluster->resource_slot); // it no longer needs the loader
 		if (!ok) {
 			if (loadInstruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
-				deluge_resource_loader_enqueue(mgr, cluster->resourceSlot, priorityRating); // fall back to async
+				deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priorityRating); // fall back to async
 			}
 			else {
 				if (error != nullptr) {

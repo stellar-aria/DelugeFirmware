@@ -839,7 +839,7 @@ readCachedWindow:
 			}
 
 			// If uncached Cluster has changed, update queue
-			if (!clusters[0] || clusters[0]->clusterIndex != uncachedClusterIndex) {
+			if (!clusters[0] || clusters[0]->cluster_index != uncachedClusterIndex) {
 				unassignAllReasons(false); // We're going to set new "reasons".
 
 				int32_t nextUncachedClusterIndex = uncachedClusterIndex;

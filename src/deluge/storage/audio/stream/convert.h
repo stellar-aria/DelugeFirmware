@@ -171,10 +171,10 @@ void convert_word_range(std::byte* begin, std::byte* end, RawDataFormat format, 
 	}
 }
 
-// Pure core of Cluster::convertDataIfNecessary: converts data[0..cluster_size) in place from `format` to
+// Pure core of Cluster::convert_data_if_necessary: converts data[0..cluster_size) in place from `format` to
 // native, given this cluster's index and the sample's audio-data geometry. On format != NATIVE, backs up
 // the pre-conversion first 3 bytes of `data` into unconverted_head_out (mirrors
-// Cluster::firstThreeBytesPreDataConversion, used to undo the 24-bit swap on a scan reversal) before doing
+// Cluster::first_three_bytes_pre_data_conversion, used to undo the 24-bit swap on a scan reversal) before doing
 // any conversion.
 //
 // `yield` is a cooperative-scheduling shim: it's called (as `yield()`, no args) roughly every 1024 bytes
@@ -194,7 +194,7 @@ void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawD
 		return;
 	}
 
-	// Back up the pre-conversion first 3 bytes (mirrors Cluster::firstThreeBytesPreDataConversion, used to
+	// Back up the pre-conversion first 3 bytes (mirrors Cluster::first_three_bytes_pre_data_conversion, used to
 	// undo the 24-bit swap on a scan reversal) before doing any conversion.
 	std::ranges::copy(data.first<3>(), unconverted_head_out.begin());
 

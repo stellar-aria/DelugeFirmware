@@ -149,7 +149,7 @@ void AudioFileManager::init() {
 
 	Error error = StorageManager::initSD();
 	if (error == Error::NONE) {
-		Cluster::setSize(fileSystem.csize * 512);
+		Cluster::set_size(fileSystem.csize * 512);
 
 		D_PRINTLN("Cluster::size  %d clusterSizeMagnitude  %d", Cluster::size, Cluster::size_magnitude);
 		cardEjected = false;
@@ -157,7 +157,7 @@ void AudioFileManager::init() {
 	}
 
 	else {
-		Cluster::setSize(Cluster::kSizeFAT16Max);
+		Cluster::set_size(Cluster::kSizeFAT16Max);
 		cardEjected = true;
 	}
 
@@ -210,7 +210,7 @@ clusterSizeChangedButItsOk:
 		}
 
 		// That was all a pain, but now we can update the cluster size
-		Cluster::setSize(fileSystem.csize * 512);
+		Cluster::set_size(fileSystem.csize * 512);
 	}
 
 	// Or if cluster size stayed the same...
@@ -901,7 +901,7 @@ bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter)
 	}
 
 #if ALPHA_OR_BETA_VERSION
-	if (cluster.leaseCount() == 0) {
+	if (cluster.lease_count() == 0) {
 		// Ok, I think we know there's at least 1 reason at the point this function's called, because
 		FREEZE_WITH_ERROR("E204");
 	}
@@ -913,7 +913,7 @@ bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter)
 
 	// So that it can't accidentally hit 0 reasons while we're loading it,
 	// cos then it might get deallocated.
-	cluster.addReason();
+	cluster.add_reason();
 
 	bool ok = readClusterData(cluster, minNumReasonsAfter);
 
@@ -922,10 +922,10 @@ bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter)
 
 #if ALPHA_OR_BETA_VERSION
 	if (ok) {
-		if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter) {
+		if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter) {
 			FREEZE_WITH_ERROR("i037");
 		}
-		if (cluster.sample->clusters[cluster.clusterIndex].cluster != &cluster) {
+		if (cluster.sample->clusters[cluster.cluster_index].cluster != &cluster) {
 			FREEZE_WITH_ERROR("E438");
 		}
 	}
@@ -941,7 +941,7 @@ bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter)
 // manager will use as a materialize Source. `minNumReasonsAfter` only feeds the ALPHA sanity checks.
 bool AudioFileManager::readClusterData(Cluster& cluster, [[maybe_unused]] int32_t minNumReasonsAfter) {
 	Sample* sample = cluster.sample;
-	int32_t clusterIndex = cluster.clusterIndex;
+	int32_t clusterIndex = cluster.cluster_index;
 
 	// Failure exits jump here (kept above the local inits so the backward gotos don't cross them).
 	if (false) {
@@ -983,7 +983,7 @@ getOutEarly:
 		FREEZE_WITH_ERROR("i023"); // Happened to me while thrash testing with reduced RAM
 	}
 
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i039"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1025,7 +1025,7 @@ getOutEarly:
 		FREEZE_WITH_ERROR("E208");
 	}
 
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1035,10 +1035,10 @@ getOutEarly:
 		goto getOutEarly;
 	}
 
-	cluster.convertDataIfNecessary();
+	cluster.convert_data_if_necessary();
 
 #if ALPHA_OR_BETA_VERSION
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1047,11 +1047,11 @@ getOutEarly:
 	// only passed when present AND loaded, matching the original inline gates exactly.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
-		Cluster* prevCluster = sample->clusters[cluster.clusterIndex - 1].cluster;
+		Cluster* prevCluster = sample->clusters[cluster.cluster_index - 1].cluster;
 		if (prevCluster && prevCluster->loaded) {
 			prev_edge = deluge::audio::stream::StitchPrevEdge{
 			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
-			    .end_boundary_converted = &prevCluster->extraBytesAtEndConverted,
+			    .end_boundary_converted = &prevCluster->extra_bytes_at_end_converted,
 			};
 		}
 	}
@@ -1059,13 +1059,13 @@ getOutEarly:
 
 	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
 	if (clusterIndex < static_cast<int32_t>(sample->clusters.size()) - 1) {
-		Cluster* nextCluster = sample->clusters[cluster.clusterIndex + 1].cluster;
+		Cluster* nextCluster = sample->clusters[cluster.cluster_index + 1].cluster;
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{
 			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),
 			    .unconverted_head = std::span<const std::byte, 3>(
-			        reinterpret_cast<const std::byte*>(nextCluster->firstThreeBytesPreDataConversion), 3),
-			    .start_boundary_converted = &nextCluster->extraBytesAtStartConverted,
+			        reinterpret_cast<const std::byte*>(nextCluster->first_three_bytes_pre_data_conversion), 3),
+			    .start_boundary_converted = &nextCluster->extra_bytes_at_start_converted,
 			};
 		}
 	}
@@ -1074,7 +1074,7 @@ getOutEarly:
 	std::span<std::byte> self_span(reinterpret_cast<std::byte*>(cluster.data), Cluster::size + 7);
 	deluge::audio::stream::stitch_boundaries(
 	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
-	    cluster.extraBytesAtStartConverted, cluster.extraBytesAtEndConverted, prev_ptr, next_ptr);
+	    cluster.extra_bytes_at_start_converted, cluster.extra_bytes_at_end_converted, prev_ptr, next_ptr);
 
 	cluster.loaded = true;
 	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in
@@ -1199,7 +1199,7 @@ performActionsAndGetOut:
 		if (cluster->type == Cluster::Type::SAMPLE && cluster->sample != nullptr
 		    && cluster->sample->resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
 			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
-			// read directly. NOT loadCluster — its addReason/removeReason would desync the manager
+			// read directly. NOT loadCluster — its add_reason/removeReason would desync the manager
 			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render
 			// (the headless-render streaming starvation we're fixing). The lease persists; the read
 			// just flips loaded=true (or fails, handled below as for legacy).
@@ -1216,7 +1216,7 @@ performActionsAndGetOut:
 
 			// If the Cluster is now down to 0 reasons (i.e. it lost a reason while being loaded), then it's already
 			// been made "available" and we don't have a problem
-			if (!cluster->leaseCount()) {}
+			if (!cluster->lease_count()) {}
 
 			// Otherwise, there are still "reasons" waiting for this Cluster to become loaded, so we need to put it
 			// back in the loading queue. Presumably it won't actually get loaded for a while - only when the user
@@ -1228,7 +1228,7 @@ performActionsAndGetOut:
 				}
 
 				// TODO: If that fails, it'll just get awkwardly forgotten about
-				deluge_resource_loader_enqueue(GeneralMemoryAllocator::get().resourceManager(), cluster->resourceSlot,
+				deluge_resource_loader_enqueue(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot,
 				                               0xFFFFFFFF); // lowest priority
 
 				// Also, return now. Normally we stay here til there's nothing left in the load-queue, but now that
@@ -1255,7 +1255,7 @@ void AudioFileManager::removeReasonFromCluster(Cluster& cluster, [[maybe_unused]
 	// resident via the cache's Asset (and leased by the low-level reader while it streams it). A removed
 	// reason is just a manager lease drop: the cluster stays resident (cached, evictable under pressure),
 	// never enqueued/destroyed here. The lease count lives in the manager's chunk slot (leaseCount()).
-	if (ALPHA_OR_BETA_VERSION && cluster.leaseCount() == 0) {
+	if (ALPHA_OR_BETA_VERSION && cluster.lease_count() == 0) {
 		FREEZE_WITH_ERROR(errorCode); // removing a reason that was never there
 	}
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();

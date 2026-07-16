@@ -77,10 +77,10 @@ void SampleRecorder::detachSample() {
 			Cluster* cluster = sample->clusters[l].cluster;
 
 			// Some bug-hunting
-			if (!cluster->numReasonsHeldBySampleRecorder) {
+			if (!cluster->num_reasons_held_by_sample_recorder) {
 				FREEZE_WITH_ERROR("E345");
 			}
-			cluster->numReasonsHeldBySampleRecorder--;
+			cluster->num_reasons_held_by_sample_recorder--;
 
 			audioFileManager.removeReasonFromCluster(*cluster, "E257");
 		}
@@ -100,10 +100,10 @@ void SampleRecorder::detachSample() {
 		}
 
 		// Some bug-hunting
-		if (!cluster->numReasonsHeldBySampleRecorder) {
+		if (!cluster->num_reasons_held_by_sample_recorder) {
 			FREEZE_WITH_ERROR("E346");
 		}
-		cluster->numReasonsHeldBySampleRecorder--;
+		cluster->num_reasons_held_by_sample_recorder--;
 
 		audioFileManager.removeReasonFromCluster(*cluster, "E249");
 		firstUnwrittenClusterIndex++;
@@ -145,10 +145,10 @@ gotError:
 	}
 
 	// Bug hunting - newly gotten Cluster
-	if (currentRecordCluster->numReasonsHeldBySampleRecorder) {
+	if (currentRecordCluster->num_reasons_held_by_sample_recorder) {
 		FREEZE_WITH_ERROR("E360");
 	}
-	currentRecordCluster->numReasonsHeldBySampleRecorder++;
+	currentRecordCluster->num_reasons_held_by_sample_recorder++;
 
 	// Give the sample some stuff
 	sample->audioDataStartPosBytes = recordingExtraMargins ? 112 : 44;
@@ -618,7 +618,7 @@ Error SampleRecorder::writeOneCompletedCluster() {
 #if ALPHA_OR_BETA_VERSION
 	// Trying to pin down E347 which Leo got, below
 	Cluster* cluster = sample->clusters[writingClusterIndex].cluster;
-	if (!cluster->numReasonsHeldBySampleRecorder) {
+	if (!cluster->num_reasons_held_by_sample_recorder) {
 		FREEZE_WITH_ERROR("E374");
 	}
 #endif
@@ -634,12 +634,12 @@ Error SampleRecorder::writeOneCompletedCluster() {
 		Cluster* cluster = sample->clusters[writingClusterIndex].cluster;
 
 		// Some bug-hunting
-		if (!cluster->numReasonsHeldBySampleRecorder) {
+		if (!cluster->num_reasons_held_by_sample_recorder) {
 			// Leo got!!! And Vinz, and keyman. May be solved now that fixed so detachSample() doesn't get called during
 			// card routine.
 			FREEZE_WITH_ERROR("E347");
 		}
-		cluster->numReasonsHeldBySampleRecorder--;
+		cluster->num_reasons_held_by_sample_recorder--;
 
 		audioFileManager.removeReasonFromCluster(*cluster, "E015");
 	}
@@ -698,10 +698,10 @@ Error SampleRecorder::finalizeRecordedFile() {
 		if (!keepingReasonsForFirstClusters || currentRecordClusterIndex >= kNumClustersLoadedAhead) {
 
 			// Some bug-hunting
-			if (!currentRecordCluster->numReasonsHeldBySampleRecorder) {
+			if (!currentRecordCluster->num_reasons_held_by_sample_recorder) {
 				FREEZE_WITH_ERROR("E348");
 			}
-			currentRecordCluster->numReasonsHeldBySampleRecorder--;
+			currentRecordCluster->num_reasons_held_by_sample_recorder--;
 
 			audioFileManager.removeReasonFromCluster(*currentRecordCluster, "E047");
 		}
@@ -805,7 +805,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 			if (cluster) {
 
 				// Bug hunting - newly gotten Cluster
-				cluster->numReasonsHeldBySampleRecorder++;
+				cluster->num_reasons_held_by_sample_recorder++;
 
 				// Do a last-ditch check that the SD address doesn't look invalid
 				if (firstSampleCluster->sdAddress == 0) {
@@ -825,10 +825,10 @@ Error SampleRecorder::finalizeRecordedFile() {
 				// If that failed, well, that's a shame, but we don't need to do anything
 
 				// Some bug-hunting
-				if (!cluster->numReasonsHeldBySampleRecorder) {
+				if (!cluster->num_reasons_held_by_sample_recorder) {
 					FREEZE_WITH_ERROR("E349");
 				}
-				cluster->numReasonsHeldBySampleRecorder--;
+				cluster->num_reasons_held_by_sample_recorder--;
 
 				audioFileManager.removeReasonFromCluster(*cluster, "E026");
 			}
@@ -948,10 +948,10 @@ Error SampleRecorder::createNextCluster() {
 	}
 
 	// Bug hunting - newly gotten Cluster
-	if (currentRecordCluster->numReasonsHeldBySampleRecorder) {
+	if (currentRecordCluster->num_reasons_held_by_sample_recorder) {
 		FREEZE_WITH_ERROR("E362");
 	}
-	currentRecordCluster->numReasonsHeldBySampleRecorder++;
+	currentRecordCluster->num_reasons_held_by_sample_recorder++;
 
 	// Copy those extra bytes from the end of the old record cluster to the start of the new cluster
 	memcpy(currentRecordCluster->data, &oldRecordCluster->data[Cluster::size],
@@ -1264,7 +1264,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	}
 
 	// Bug hunting - newly gotten Cluster
-	currentReadCluster->numReasonsHeldBySampleRecorder++;
+	currentReadCluster->num_reasons_held_by_sample_recorder++;
 
 	int32_t numClustersBeforeAction = ((idealFileSizeBeforeAction - 1) >> Cluster::size_magnitude) + 1; // Rounds up
 	if (ALPHA_OR_BETA_VERSION && numClustersBeforeAction > static_cast<int32_t>(sample->clusters.size())) {
@@ -1279,17 +1279,17 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 		if (!nextReadCluster) {
 
 			// Some bug-hunting
-			if (!currentReadCluster->numReasonsHeldBySampleRecorder) {
+			if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
 				FREEZE_WITH_ERROR("E350");
 			}
-			currentReadCluster->numReasonsHeldBySampleRecorder--;
+			currentReadCluster->num_reasons_held_by_sample_recorder--;
 
 			audioFileManager.removeReasonFromCluster(*currentReadCluster, "E017");
 			return Error::SD_CARD;
 		}
 
 		// Bug hunting - newly gotten Cluster
-		nextReadCluster->numReasonsHeldBySampleRecorder++;
+		nextReadCluster->num_reasons_held_by_sample_recorder++;
 	}
 
 	Cluster* currentWriteCluster =
@@ -1297,7 +1297,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	// That one can't fail, fortunately, cos we already grabbed Cluster 0 above, so it exists
 
 	// Bug hunting - newly gotten Cluster
-	currentWriteCluster->numReasonsHeldBySampleRecorder++;
+	currentWriteCluster->num_reasons_held_by_sample_recorder++;
 
 	uint32_t data32;
 	uint16_t data16;
@@ -1404,10 +1404,10 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 			// We don't need that old Cluster anymore
 
 			// Some bug-hunting
-			if (!currentWriteCluster->numReasonsHeldBySampleRecorder) {
+			if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
 				FREEZE_WITH_ERROR("E351");
 			}
-			currentWriteCluster->numReasonsHeldBySampleRecorder--;
+			currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
 			audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E023");
 			currentWriteCluster = nullptr;
@@ -1418,19 +1418,19 @@ writeFailed:
 				// Before we get out, remove "reasons" from the clusters we've been reading from
 
 				// Some bug-hunting
-				if (!currentReadCluster->numReasonsHeldBySampleRecorder) {
+				if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
 					FREEZE_WITH_ERROR("E352");
 				}
-				currentReadCluster->numReasonsHeldBySampleRecorder--;
+				currentReadCluster->num_reasons_held_by_sample_recorder--;
 
 				audioFileManager.removeReasonFromCluster(*currentReadCluster, "E024");
 
 				if (nextReadCluster) {
 					// Some bug-hunting
-					if (!nextReadCluster->numReasonsHeldBySampleRecorder) {
+					if (!nextReadCluster->num_reasons_held_by_sample_recorder) {
 						FREEZE_WITH_ERROR("E353");
 					}
-					nextReadCluster->numReasonsHeldBySampleRecorder--;
+					nextReadCluster->num_reasons_held_by_sample_recorder--;
 
 					audioFileManager.removeReasonFromCluster(*nextReadCluster, "E025");
 				}
@@ -1451,7 +1451,7 @@ writeFailed:
 			}
 
 			// Bug hunting - newly gotten Cluster
-			currentWriteCluster->numReasonsHeldBySampleRecorder++;
+			currentWriteCluster->num_reasons_held_by_sample_recorder++;
 
 			// Ok, and those extra bytes that we grabbed from the end of the previous Cluster - paste them into the
 			// beginning of the new current Cluster
@@ -1479,10 +1479,10 @@ writeFailed:
 			int32_t overshot = readPos - &currentReadCluster->data[Cluster::size];
 
 			// Some bug-hunting
-			if (!currentReadCluster->numReasonsHeldBySampleRecorder) {
+			if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
 				FREEZE_WITH_ERROR("E354");
 			}
-			currentReadCluster->numReasonsHeldBySampleRecorder--;
+			currentReadCluster->num_reasons_held_by_sample_recorder--;
 
 			audioFileManager.removeReasonFromCluster(*currentReadCluster, "E020");
 			currentReadClusterIndex++;
@@ -1497,18 +1497,18 @@ writeFailed:
 				if (!nextReadCluster) {
 
 					// Some bug-hunting
-					if (!currentReadCluster->numReasonsHeldBySampleRecorder) {
+					if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
 						FREEZE_WITH_ERROR("E355");
 					}
-					currentReadCluster->numReasonsHeldBySampleRecorder--;
+					currentReadCluster->num_reasons_held_by_sample_recorder--;
 
 					audioFileManager.removeReasonFromCluster(*currentReadCluster, "E021");
 
 					// Some bug-hunting
-					if (!currentWriteCluster->numReasonsHeldBySampleRecorder) {
+					if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
 						FREEZE_WITH_ERROR("E356");
 					}
-					currentWriteCluster->numReasonsHeldBySampleRecorder--;
+					currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
 					audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E022");
 					currentWriteCluster = nullptr;
@@ -1516,7 +1516,7 @@ writeFailed:
 				}
 
 				// Bug hunting - newly gotten Cluster
-				nextReadCluster->numReasonsHeldBySampleRecorder++;
+				nextReadCluster->num_reasons_held_by_sample_recorder++;
 			}
 			else { // Not sure these are strictly necessary...
 				nextReadCluster = nullptr;
@@ -1529,10 +1529,10 @@ writeFailed:
 	// We got to the end, so wrap everything up
 
 	// Some bug-hunting
-	if (!currentReadCluster->numReasonsHeldBySampleRecorder) {
+	if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
 		FREEZE_WITH_ERROR("E357");
 	}
-	currentReadCluster->numReasonsHeldBySampleRecorder--;
+	currentReadCluster->num_reasons_held_by_sample_recorder--;
 
 	audioFileManager.removeReasonFromCluster(*currentReadCluster, "E018");
 	// We know that finishedAlteringFile must be NULL
@@ -1564,10 +1564,10 @@ writeFailed:
 		DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->data, sdAddress, numSectorsToWrite);
 
 		// Some bug-hunting
-		if (!currentWriteCluster->numReasonsHeldBySampleRecorder) {
+		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
 			FREEZE_WITH_ERROR("E358");
 		}
-		currentWriteCluster->numReasonsHeldBySampleRecorder--;
+		currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
 		audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E019");
 		currentWriteCluster = nullptr;
@@ -1601,10 +1601,10 @@ writeFailed:
 	else { // Or if there was nothing further to write (very rare)...
 
 		// Some bug-hunting
-		if (!currentWriteCluster->numReasonsHeldBySampleRecorder) {
+		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
 			FREEZE_WITH_ERROR("E359");
 		}
-		currentWriteCluster->numReasonsHeldBySampleRecorder--;
+		currentWriteCluster->num_reasons_held_by_sample_recorder--;
 
 		audioFileManager.removeReasonFromCluster(*currentWriteCluster, "E238");
 		currentWriteCluster = nullptr;

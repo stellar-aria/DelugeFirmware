@@ -248,7 +248,7 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 #if ALPHA_OR_BETA_VERSION
 	// Trying to track down Steven's E133 - percCacheClusterNearby pointing to things with no reasons left
 	for (int32_t l = 0; l < 2; l++) {
-		if (percCacheClustersNearby[l] && !percCacheClustersNearby[l]->leaseCount()) {
+		if (percCacheClustersNearby[l] && !percCacheClustersNearby[l]->lease_count()) {
 			FREEZE_WITH_ERROR("i036");
 		}
 	}
@@ -1112,7 +1112,7 @@ void TimeStretcher::rememberPercCacheCluster(Cluster* cluster) {
 		return;
 	}
 
-	cluster->addReason();
+	cluster->add_reason();
 
 	if (percCacheClustersNearby[0]) {
 		// Steven G got this on V3.1.5, Feb 2021!
@@ -1129,7 +1129,7 @@ void TimeStretcher::rememberPercCacheCluster(Cluster* cluster) {
 void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection) {
 	int32_t clusterIndex = sourceBytePos >> Cluster::size_magnitude;
 
-	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->clusterIndex != clusterIndex) {
+	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->cluster_index != clusterIndex) {
 		unassignAllReasonsForPercLookahead();
 
 		int32_t nextClusterIndex = clusterIndex;

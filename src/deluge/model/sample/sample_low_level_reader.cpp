@@ -51,7 +51,7 @@ int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlayback
 			// the new hop, in time stretching
 			withinCluster += extraSamples * sample->numChannels * sample->byteDepth * guide->playDirection;
 		}
-		return (clusters[0]->clusterIndex << Cluster::size_magnitude) + withinCluster;
+		return (clusters[0]->cluster_index << Cluster::size_magnitude) + withinCluster;
 	}
 	// Hopefully this won't go negative, cos we're returning as unsigned...
 	return (int32_t)guide->endPlaybackAtByte + (int32_t)(uintptr_t)currentPlayPos * guide->playDirection;
@@ -97,7 +97,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 
 	realignPlaybackParameters(sample);
 
-	int32_t clusterIndex = clusters[0]->clusterIndex;
+	int32_t clusterIndex = clusters[0]->cluster_index;
 
 	// We may have ended up past the finalClusterIndex if we've just switched from using a cache.
 	// This needs correcting, so "looping" can occur at next render. Must happen before setupReassessmentLocation() is
@@ -142,7 +142,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 
 	int32_t bytesPerSample = (sample->byteDepth * sample->numChannels);
 
-	int32_t currentClusterIndex = clusters[0]->clusterIndex;
+	int32_t currentClusterIndex = clusters[0]->cluster_index;
 
 	int32_t endPlaybackAtByte;
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers(), &endPlaybackAtByte);
@@ -331,7 +331,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	}
 #endif
 
-	int32_t oldClusterIndex = clusters[0]->clusterIndex;
+	int32_t oldClusterIndex = clusters[0]->cluster_index;
 
 	int32_t bytePosWithinOldCluster = currentPlayPos - clusters[0]->data;
 	audioFileManager.removeReasonFromCluster(*clusters[0], "E035");
@@ -350,7 +350,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	}
 
 	if (!clusters[0]->loaded) {
-		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->clusterIndex);
+		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->cluster_index);
 
 		return false;
 	}
@@ -362,7 +362,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	Cluster* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
 
 	if (oldLastCluster) {
-		int32_t prevClusterIndex = oldLastCluster->clusterIndex;
+		int32_t prevClusterIndex = oldLastCluster->cluster_index;
 
 		int32_t newClusterIndex = prevClusterIndex + guide->playDirection;
 
@@ -1219,7 +1219,7 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 				other.clusters[l] = nullptr;
 			}
 			else {
-				clusters[l]->addReason();
+				clusters[l]->add_reason();
 			}
 		}
 	}

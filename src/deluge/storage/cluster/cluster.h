@@ -21,7 +21,9 @@
 #include "definitions_cxx.hpp"
 #include "memory/general_memory_allocator.h"
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 class Sample;
 class SampleCluster;
@@ -58,6 +60,12 @@ public:
 // operator delete (which frees the heap block but leaks the slab slot — exhausting the slab table
 // and breaking later allocations).
 
+// The edge-slack contract shared by both chunk structs: the application's boundary-straddle reach
+// past the payload edges (a multi-byte sample frame that spans a cluster boundary). This is distinct
+// from — and covered by — the DMA cache-line guard documented on the structs below.
+inline constexpr size_t kFrontSlackBytes = 4;    // the `-4 + byte_depth` frame-cursor front-underread
+inline constexpr size_t kTrailingSlackBytes = 7; // the stitch `Cluster::size + 7` / recorder `+5` over-reads
+
 /// A file-backed streamed sample-audio chunk (the streamed SAMPLE role). Its backing comes from the
 /// resource-manager cluster slab; the actual cluster data lives in the same allocation, after this
 /// struct — allocate Cluster::size bytes past it with enough padding to absorb an offset of at least
@@ -86,7 +94,41 @@ struct StreamedChunk final {
 
 	static void operator delete(void* ptr); // slab-release safety net (see above)
 
-	// MUST BE THE LAST TWO MEMBERS
+	/// @brief The cluster's audio payload — Cluster::size bytes DMA'd from the card, living in the
+	///        slab slot after this header. `data` is a placeholder; the real region is over-allocated
+	///        (see the guard note below).
+	[[nodiscard]] std::span<std::byte> payload() { return {reinterpret_cast<std::byte*>(data), Cluster::size}; }
+	[[nodiscard]] std::span<const std::byte> payload() const {
+		return {reinterpret_cast<const std::byte*>(data), Cluster::size};
+	}
+
+	/// @brief Byte pointer positioned so a 32-bit word read yields the `byte_depth`-byte little-endian
+	///        sample frame at `pos`, left-justified per the Deluge fixed-point convention.
+	/// @note For the first frame of a cluster (`pos == 0`) this points up to kFrontSlackBytes BEFORE
+	///       the payload, into the leading guard — those bytes are don't-care (masked out of the
+	///       read). Called at cluster-boundary cadence, not per sample.
+	[[nodiscard]] std::byte* frame_read_origin(uint32_t pos, uint8_t byte_depth) {
+		return payload().data() + pos - 4 + byte_depth;
+	}
+
+	/// @brief The payload plus its trailing edge-slack — for the boundary stitch + recorder overshoot
+	///        that read/write up to kTrailingSlackBytes past the nominal payload end (a frame
+	///        straddling into the next cluster). The slack is guard bytes, guaranteed by the trailing
+	///        guard.
+	[[nodiscard]] std::span<std::byte> payload_with_trailing_slack() {
+		return {payload().data(), Cluster::size + kTrailingSlackBytes};
+	}
+
+	// The guards below serve two distinct jobs:
+	//   (a) DMA cache-line rounding absorption — `data` is not cache-line-aligned, and the SD read's
+	//       cache maintenance rounds the buffer range OUT to CACHE_LINE_SIZE-byte lines, so each guard
+	//       must be >= CACHE_LINE_SIZE to keep that rounding off live neighbour data (the header before
+	//       `dummy`, the next slab slot after the trailing gap).
+	//   (b) Application edge-slack — kFrontSlackBytes/kTrailingSlackBytes, the boundary-straddle frame
+	//       reads (frame_read_origin / payload_with_trailing_slack). The DMA guard (a) dominates (b),
+	//       so the app slack rides for free.
+	// MUST BE THE LAST TWO MEMBERS (the FAM over-allocation past `data` requires it; enforced below by
+	// the static_asserts in cluster.cpp).
 	alignas(4) char dummy[CACHE_LINE_SIZE]{};
 	alignas(4) char data[CACHE_LINE_SIZE]{};
 };
@@ -111,7 +153,41 @@ struct ComputedChunk final {
 
 	static void operator delete(void* ptr); // slab-release safety net (see above)
 
-	// MUST BE THE LAST TWO MEMBERS
+	/// @brief The cluster's audio payload — Cluster::size bytes DMA'd from the card, living in the
+	///        slab slot after this header. `data` is a placeholder; the real region is over-allocated
+	///        (see the guard note below).
+	[[nodiscard]] std::span<std::byte> payload() { return {reinterpret_cast<std::byte*>(data), Cluster::size}; }
+	[[nodiscard]] std::span<const std::byte> payload() const {
+		return {reinterpret_cast<const std::byte*>(data), Cluster::size};
+	}
+
+	/// @brief Byte pointer positioned so a 32-bit word read yields the `byte_depth`-byte little-endian
+	///        sample frame at `pos`, left-justified per the Deluge fixed-point convention.
+	/// @note For the first frame of a cluster (`pos == 0`) this points up to kFrontSlackBytes BEFORE
+	///       the payload, into the leading guard — those bytes are don't-care (masked out of the
+	///       read). Called at cluster-boundary cadence, not per sample.
+	[[nodiscard]] std::byte* frame_read_origin(uint32_t pos, uint8_t byte_depth) {
+		return payload().data() + pos - 4 + byte_depth;
+	}
+
+	/// @brief The payload plus its trailing edge-slack — for the boundary stitch + recorder overshoot
+	///        that read/write up to kTrailingSlackBytes past the nominal payload end (a frame
+	///        straddling into the next cluster). The slack is guard bytes, guaranteed by the trailing
+	///        guard.
+	[[nodiscard]] std::span<std::byte> payload_with_trailing_slack() {
+		return {payload().data(), Cluster::size + kTrailingSlackBytes};
+	}
+
+	// The guards below serve two distinct jobs:
+	//   (a) DMA cache-line rounding absorption — `data` is not cache-line-aligned, and the SD read's
+	//       cache maintenance rounds the buffer range OUT to CACHE_LINE_SIZE-byte lines, so each guard
+	//       must be >= CACHE_LINE_SIZE to keep that rounding off live neighbour data (the header before
+	//       `dummy`, the next slab slot after the trailing gap).
+	//   (b) Application edge-slack — kFrontSlackBytes/kTrailingSlackBytes, the boundary-straddle frame
+	//       reads (frame_read_origin / payload_with_trailing_slack). The DMA guard (a) dominates (b),
+	//       so the app slack rides for free.
+	// MUST BE THE LAST TWO MEMBERS (the FAM over-allocation past `data` requires it; enforced below by
+	// the static_asserts in cluster.cpp).
 	alignas(4) char dummy[CACHE_LINE_SIZE]{};
 	alignas(4) char data[CACHE_LINE_SIZE]{};
 };

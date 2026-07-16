@@ -91,7 +91,11 @@ struct StreamedChunk final {
 	Sample* sample = nullptr;
 	char first_three_bytes_pre_data_conversion[3]{};
 
-	StreamedChunk() = default;
+	/// The cached payload base, set at construction. Coexistence stepping stone: currently always
+	/// `&data` (byte-identical); a later step re-homes it onto explicit slot geometry and drops `data`.
+	std::byte* payload_ = nullptr;
+
+	StreamedChunk() { payload_ = reinterpret_cast<std::byte*>(data); }
 	void convert_data_if_necessary();
 
 	// The resource-manager Asset that owns this chunk's residency (the sample's asset), or
@@ -103,10 +107,8 @@ struct StreamedChunk final {
 	/// @brief The cluster's audio payload — Cluster::size bytes DMA'd from the card, living in the
 	///        slab slot after this header. `data` is a placeholder; the real region is over-allocated
 	///        (see the guard note below).
-	[[nodiscard]] std::span<std::byte> payload() { return {reinterpret_cast<std::byte*>(data), Cluster::size}; }
-	[[nodiscard]] std::span<const std::byte> payload() const {
-		return {reinterpret_cast<const std::byte*>(data), Cluster::size};
-	}
+	[[nodiscard]] std::span<std::byte> payload() { return {payload_, Cluster::size}; }
+	[[nodiscard]] std::span<const std::byte> payload() const { return {payload_, Cluster::size}; }
 
 	/// @brief Byte pointer positioned so a 32-bit word read yields the `byte_depth`-byte little-endian
 	///        sample frame at `pos`, left-justified per the Deluge fixed-point convention.
@@ -150,7 +152,11 @@ struct ComputedChunk final {
 	Sample* sample = nullptr;
 	SampleCache* sampleCache = nullptr; // written by sampleCacheConstruct; currently no reads
 
-	ComputedChunk() = default;
+	/// The cached payload base, set at construction. Coexistence stepping stone: currently always
+	/// `&data` (byte-identical); a later step re-homes it onto explicit slot geometry and drops `data`.
+	std::byte* payload_ = nullptr;
+
+	ComputedChunk() { payload_ = reinterpret_cast<std::byte*>(data); }
 
 	// The resource-manager Asset that owns this chunk's residency for the *leased* (reason-tracked)
 	// perc kinds (the sample's per-direction perc asset), or DELUGE_RESOURCE_NO_ASSET otherwise.
@@ -162,10 +168,8 @@ struct ComputedChunk final {
 	/// @brief The cluster's audio payload — Cluster::size bytes DMA'd from the card, living in the
 	///        slab slot after this header. `data` is a placeholder; the real region is over-allocated
 	///        (see the guard note below).
-	[[nodiscard]] std::span<std::byte> payload() { return {reinterpret_cast<std::byte*>(data), Cluster::size}; }
-	[[nodiscard]] std::span<const std::byte> payload() const {
-		return {reinterpret_cast<const std::byte*>(data), Cluster::size};
-	}
+	[[nodiscard]] std::span<std::byte> payload() { return {payload_, Cluster::size}; }
+	[[nodiscard]] std::span<const std::byte> payload() const { return {payload_, Cluster::size}; }
 
 	/// @brief Byte pointer positioned so a 32-bit word read yields the `byte_depth`-byte little-endian
 	///        sample frame at `pos`, left-justified per the Deluge fixed-point convention.

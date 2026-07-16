@@ -38,26 +38,48 @@ namespace deluge::audio::stream::loader {
 uint16_t timeLastFinish;
 #endif
 
-void pump(int32_t max_num, bool may_process_user_actions) {
+// Lowest loader-queue priority — a cluster that is still wanted but not currently loadable (e.g. the card
+// was pulled mid-read) is re-queued here so it waits behind everything else. Matches the value
+// deluge_resource_loader_has_lowest() looks for.
+constexpr uint32_t kLowestLoaderPriority = 0xFFFFFFFF;
 
-	if (currentlyAccessingCard) {
+namespace {
+/// Reconstruct one popped, manager-owned cluster. Opens the user-action gate for the duration of the card
+/// read (see `allowSomeUserActionsEvenWhenInCardRoutine`, extern.h) so the handful of safe UI actions can
+/// run while it blocks. Every queued cluster is manager-owned — get_cluster() ran ensure_resource_asset()
+/// and construct/materialize set `cluster->sample` before it was enqueued — so it is already constructed +
+/// leased; the read just flips `loaded` true (or fails).
+/// @return `true` to keep draining; `false` only when the read failed while the cluster is still wanted
+///         (callers still hold reasons), in which case the caller re-queues it and stops.
+bool reconstruct_one(StreamedChunk* cluster) {
+	allowSomeUserActionsEvenWhenInCardRoutine = true;
+	bool ok = cluster->sample->stream().read_cluster_data(*cluster, 0);
+	allowSomeUserActionsEvenWhenInCardRoutine = false;
+	if (ok) {
+		return true;
+	}
+
+	D_PRINTLN("load Cluster fail"); // most likely the card was ejected mid-read
+	// If the cluster dropped to 0 reasons while loading, it has already been made available — nothing to do,
+	// keep draining. Otherwise callers still want it, so the caller re-queues it and stops.
+	return deluge::cluster::lease_count(cluster->resource_slot) == 0;
+}
+} // namespace
+
+void pump(int32_t max_num, bool may_process_user_actions) {
+	// Admission. Nothing below may touch the SD card except read_cluster_data(), or it would re-enter here.
+	// Refuse while the card is mid-access or the audio routine holds the lock (the latter guards the
+	// cooperative convert-yield re-entrancy; its necessity is unverified but retained).
+	if (currentlyAccessingCard || AudioEngine::audioRoutineLocked) {
 		return;
 	}
-	if (AudioEngine::audioRoutineLocked) {
-		return; // Not sure if this should be neccesary?
-	}
-
-	// Cannot call any functions in here which will read the SD card, other than read_cluster_data(), otherwise
-	// that'll re-call this function!
-
+	// Card gone / uninitialised: nothing to load, but still let queued user actions (undo/redo) breathe.
 	if (audioFileManager.cardUnavailableForStreaming()) {
 		if (may_process_user_actions) {
 			playbackHandler.slowRoutine();
 		}
 		return;
 	}
-
-	int32_t count = 0;
 
 #if REPORT_AWAY_TIME
 	uint16_t startTime = MTU2.TCNT_0;
@@ -68,69 +90,34 @@ void pump(int32_t max_num, bool may_process_user_actions) {
 	}
 #endif
 
-	while (true) {
-
-		// We now have an opportunity, since we're not reading the card, to process any pending user actions like
-		// undo / redo.
+	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
+	for (int32_t count = 0; count < max_num;) {
+		// Between reads is a safe point to process pending user actions (undo/redo).
 		if (may_process_user_actions) {
 			playbackHandler.slowRoutine();
 		}
 
-		// Pop the most-urgent queued + still-leased cluster's backing (the manager skips/de-queues
-		// abandoned-unleased ones). This prevents loading clusters quickly culled after enqueue.
-		void* p = deluge_resource_loader_next(GeneralMemoryAllocator::get().resourceManager());
-
-		// no more clusters to load, so exit
-		if (p == nullptr) {
+		// Pop the most-urgent queued + still-leased cluster (the manager de-queues abandoned-unleased ones
+		// itself). Empty queue → done.
+		auto* cluster = reinterpret_cast<StreamedChunk*>(deluge_resource_loader_next(mgr));
+		if (cluster == nullptr) {
 			return;
 		}
-		StreamedChunk* cluster = reinterpret_cast<StreamedChunk*>(p);
 
-		// The unloadable domain-filter stays here (the manager doesn't know it). markAsUnloadable
-		// already de-queues, so this is the safety net — loader_next has cleared its queued flag, so
-		// skipping won't loop.
+		// Safety net: markAsUnloadable already de-queued this and loader_next cleared its queued flag, so
+		// skipping can't loop. An unloadable cluster doesn't count against max_num.
 		if (cluster->unloadable) {
 			continue;
 		}
 
-		// cluster has at least 1 "reason". If it didn't, it would have been removed from the load-queue
-
-		// Do the actual loading
-		allowSomeUserActionsEvenWhenInCardRoutine = true; // Sorry!!
-		// Every queued cluster is manager-owned: it was enqueued via SampleStream::get_cluster, which
-		// calls ensure_resource_asset() (asset != NO_ASSET) before enqueueing, and construct/materialize
-		// set cluster->sample = the owner. So it's already constructed + leased (via request); just do the
-		// read directly. The lease persists; the read just flips loaded=true (or fails, handled below).
-		bool success = cluster->sample->stream().read_cluster_data(*cluster, 0);
-		allowSomeUserActionsEvenWhenInCardRoutine = false;
-
-		// If that didn't work, presumably because the SD card got ejected...
-		if (!success) {
-			D_PRINTLN("load Cluster fail");
-
-			// If the Cluster is now down to 0 reasons (i.e. it lost a reason while being loaded), then it's already
-			// been made "available" and we don't have a problem
-			if (!deluge::cluster::lease_count(cluster->resource_slot)) {}
-
-			// Otherwise, there are still "reasons" waiting for this Cluster to become loaded, so we need to put it
-			// back in the loading queue. Presumably it won't actually get loaded for a while - only when the user
-			// re-inserts the card
-			else {
-
-				// TODO: If that fails, it'll just get awkwardly forgotten about
-				deluge_resource_loader_enqueue(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot,
-				                               0xFFFFFFFF); // lowest priority
-
-				// Also, return now. Normally we stay here til there's nothing left in the load-queue, but now that
-				// would leave us in an infinite loop!
-				break;
-			}
+		if (!reconstruct_one(cluster)) {
+			// Read failed while still wanted — re-queue at lowest priority and stop, else we'd keep
+			// re-popping the same cluster until the card is back.
+			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, kLowestLoaderPriority);
+			break;
 		}
 
 		count++;
-		if (count >= max_num) {
-			break; // Keep things sane?
-		}
 	}
 
 #if REPORT_AWAY_TIME

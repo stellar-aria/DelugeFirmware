@@ -10,9 +10,11 @@ target = "armv7a-none-eabihf"
 # archive (libdeluge_app.a) and its runtime (libstdc++/libsupc++/libgcc/libm/
 # newlib) and the correct hard-float NEON multilib resolve automatically.
 # `-nostartfiles`: our entry is rza1l-hal's `_start`, not gcc's crt0.
-# BRING-UP: absolute path to the in-repo toolchain (this machine). Parametrize
-# later via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER from the build driver.
-linker = "/home/kate/GitHub/DelugeFirmware/toolchain/v22/linux-x86_64/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
+# BRING-UP: absolute path to the in-repo toolchain (this machine). Uses the
+# `current` symlink (-> the active toolchain version) so it survives version
+# bumps. Parametrize later via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER from the
+# build driver.
+linker = "/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
 rustflags = [
   "-C", "target-cpu=cortex-a9",
   "-C", "target-feature=+neon",

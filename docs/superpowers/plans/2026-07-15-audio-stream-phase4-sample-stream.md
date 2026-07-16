@@ -31,16 +31,16 @@
   - `uint32_t ensure_resource_asset();` — moves off `Sample`; owns `resource_asset_id_` + defines the Asset with the callbacks.
   - `deluge::audio::stream::ReadSource make_read_source() const;` (or an internal read entry `read(index, span)`) — internalizes the `StreamReadSource`-vs-`BlockReadSource` selection (afm:986).
   - stream lifecycle: `void open_read_stream(...)`, `bool has_read_stream() const`, the `std::optional<deluge::io::Stream>` moves inside.
-- **DD4 — Decomposition (4 tasks, each independently gated bit-exact).** T1 stream/asset/ReadSource half → T2 `getCluster` dispatch → T3 the table + accessors → T4 SampleHolder + RT reader. Recorder edits are distributed across T2 (its `getCluster` calls) and T3 (its `entry`/`sd_address`/`resize`); each recorder-touching task carries an explicit ear-check note. `std::expected<StreamedChunk*, Error>` return (flagged at `sample_cluster.h:49`) is OUT OF SCOPE — keep the `Error*` out-param, behavior-preserving.
+- **DD4 — Decomposition (5 tasks, each independently gated bit-exact; COEXISTENCE migration).** Reviewed with the human: the recorder gets a **dedicated task** (it is the heaviest, most behavior-sensitive consumer), and the residency-table migration stays coherent (introduced once, internalized once — not split self-vs-external). To isolate the recorder into its own commit while keeping *every intermediate build green*, the `SampleStream` API is introduced **additively**: `Sample::clusters` stays public and `SampleCluster::getCluster` becomes a thin forwarder during migration, consumers move group-by-group, and a final cleanup task internalizes the table. Order: **T1** stream/Asset/ReadSource half → **T2** add the `SampleStream` API (get_cluster + table accessors, coexisting) + migrate the bulk non-recorder/non-reader consumers → **T3** dedicated recorder migration → **T4** SampleHolder + RT reader → **T5** cleanup (physically internalize `table_`, delete `Sample::clusters` + the `SampleCluster::getCluster` forwarder + `ensureNoReason`). `std::expected<StreamedChunk*, Error>` return (flagged at `sample_cluster.h:49`) is OUT OF SCOPE — keep the `Error*` out-param, behavior-preserving.
 
 ---
 
 ## File Structure
 
-- **Create:** `src/deluge/storage/audio/stream/sample_stream.{h,cpp}` — `deluge::audio::stream::SampleStream`. Owns the residency table, read stream, Asset id + callbacks, `getCluster` dispatch, `ReadSource` selection.
-- **Modify:** `src/deluge/model/sample/sample.{h,cpp}` — hold `SampleStream stream_` (DD1); relocate `clusters`/`readStream_`/`resourceAssetId`/asset-callbacks/`ensureResourceAsset` into `SampleStream` incrementally; `Sample::stream()` accessor.
-- **Modify:** `src/deluge/model/sample/sample_cluster.{h,cpp}` — strip the `getCluster`/`ensureNoReason` dispatch (moves to `SampleStream`); keep it a passive entry.
-- **Modify (consumers, per the migration map):** `sample_low_level_reader.cpp`, `voice_sample.cpp`, `time_stretcher.cpp`, `sample_holder.cpp`, `sample_holder_for_voice.cpp`, `waveform_renderer.cpp`, `sample_recorder.cpp`, `wave_table.cpp`, `storage/audio/cluster_byte_source.cpp`, `storage/audio/stream/read_source.cpp`, `storage/audio/audio_file_manager.cpp` (readClusterData stitch edges + sdAddress population), `sample.cpp` (self-uses: pitch detection, `fillPercCache`, `getAveragesForCrossfade`, `markAsUnloadable`, `convertDataOnAnyClustersIfNecessary`).
+- **Create (T1):** `src/deluge/storage/audio/stream/sample_stream.{h,cpp}` — `deluge::audio::stream::SampleStream`. Ends up owning (by T5) the residency table, read stream, Asset id + callbacks, `get_cluster` dispatch, `ReadSource` selection.
+- **Modify:** `src/deluge/model/sample/sample.{h,cpp}` — hold `SampleStream stream_` + `Sample::stream()` (T1); relocate `readStream_`/`resourceAssetId`/asset-callbacks/`ensureResourceAsset` into `SampleStream` (T1); `clusters` stays public through the migration and is internalized in T5.
+- **Modify:** `src/deluge/model/sample/sample_cluster.{h,cpp}` — `getCluster` becomes a forwarder (T2), deleted in T5; `SampleCluster` ends a passive entry (`sdAddress`, `cluster`, waveform min/max).
+- **Modify (consumers, per the migration map — grouped by task):** T2 bulk (`sample.cpp` self-uses, `time_stretcher.cpp`, `waveform_renderer.cpp`, `wave_table.cpp`, `cluster_byte_source.cpp`, `read_source.cpp`, `audio_file_manager.cpp` stitch edges + sdAddress); T3 (`sample_recorder.cpp`); T4 (`sample_holder.cpp`, `sample_holder_for_voice.cpp`, `sample_low_level_reader.cpp`, `voice_sample.cpp`).
 
 ---
 
@@ -63,65 +63,81 @@ Introduce the class and move the STREAM / RESIDENCY-DEFINITION half onto it (the
 - [ ] **Step 4:** Run the spec (PASS); `dbt build Debug` clean; `./dbt test` 20/20; `scripts/golden_mixdown.sh check` (cordae) + `FIXTURE=icoustic` bit-exact; `padsweep` (Sample struct size changes — expect layout-invariant, re-baseline only if a fixture shifts deterministically with no behavior change).
 - [ ] **Step 5:** Commit `refactor(audio-stream): introduce SampleStream; move read-stream + Asset + ReadSource selection onto it`.
 
-## Task 2: move the `getCluster` dispatch onto `SampleStream`
+## Task 2: add the `SampleStream` API (coexisting) + migrate the bulk consumers
 
-`SampleCluster::getCluster(Sample*, index, …)` → `SampleStream::get_cluster(index, …)` (the stream knows its Sample). Repoint all ~20 callers (see the migration map §4). `SampleCluster` keeps being the entry; the table stays on `Sample` this task (`get_cluster` reaches `sample_.clusters[index]` internally).
-
-**Files:**
-- Modify: `sample_stream.{h,cpp}` (add `StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction, uint32_t priority_rating, Error* error)`; body = `sample_cluster.cpp:63-146` verbatim, `sample->` → `sample_.`, `this->cluster` → `sample_.clusters[index].cluster`; also move `ensureNoReason`)
-- Modify: `sample_cluster.{h,cpp}` (delete `getCluster`:50-51/63-146 + `ensureNoReason`:52/50-59)
-- Modify (repoint callers — exact sites from map §4): `sample.cpp:1474,1500`; `sample_low_level_reader.cpp:304,380`; `voice_sample.cpp:203,847`; `time_stretcher.cpp:1142`; `waveform_renderer.cpp:407,433`; `sample_holder.cpp:220`; `cluster_byte_source.cpp:53`; `sample_recorder.cpp:141,804,943,1262,1279,1297,1446,1494`; `wave_table.cpp:423`. Transform `X->clusters[i].getCluster(X, i, INSTR, prio, &err)` → `X->stream().get_cluster(i, INSTR, prio, &err)`.
-
-**Interfaces:**
-- Consumes: `Sample::stream()` (Task 1). Produces: `SampleStream::get_cluster(...)`.
-
-- [ ] **Step 1:** Move `get_cluster` + `ensureNoReason` onto `SampleStream` (bodies verbatim, rebased on `sample_.clusters[index]`). Delete from `SampleCluster`.
-- [ ] **Step 2:** Repoint every caller in the list above (mechanical; the compiler catches a miss since `SampleCluster::getCluster` no longer exists).
-- [ ] **Step 3:** `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact. **Ear-check note:** this task touches the recorder's `getCluster` calls (`sample_recorder.cpp` sites) — after goldens, do a recording round-trip ear-check before merge (§9 NEEDS-HARDWARE for recording).
-- [ ] **Step 4:** Commit `refactor(audio-stream): move getCluster dispatch onto SampleStream`.
-
-## Task 3: move the residency table into `SampleStream` + expose accessors
-
-Move `clusters` (`fast_vector<SampleCluster>`) off `Sample` into `SampleStream::table_`; add the `chunk_at`/`entry`/`sd_address_at`/`num_clusters`/`resize`/`erase_from` accessors (DD3); repoint every raw `sample->clusters[...]` site (map §3).
+Introduce the full consumer surface — `get_cluster` + the table accessors (DD3) — **additively**, over the still-public `Sample::clusters`. Turn `SampleCluster::getCluster` into a thin forwarder so un-migrated callers keep compiling. Migrate every consumer EXCEPT the recorder (Task 3) and SampleHolder + RT reader (Task 4).
 
 **Files:**
-- Modify: `sample_stream.{h,cpp}` (own `deluge::fast_vector<SampleCluster> table_;`; add `chunk_at`, `entry` (×const), `sd_address_at`/`set_sd_address_at`, `num_clusters`, `resize`, `erase_from`; rebase `get_cluster`/callbacks/`ensureNoReason` onto `table_`)
-- Modify: `sample.{h,cpp}` (remove `clusters`:157; `initialize`:102 `resize` → `stream_.resize`; self-uses at `sample.cpp:715,937,1151-1152,1821,1914-1954` → `stream_.chunk_at(...)`/`num_clusters()`)
-- Modify (raw-access repoints, exact sites from map §3): `sample_low_level_reader.cpp:108` (`chunk_at`); `time_stretcher.cpp:727` (`chunk_at`); `waveform_renderer.cpp:241,382,432-433` (`num_clusters`/`entry`); `sample_recorder.cpp:73,77,96,620,634,802,873,885,937,1218,1246,1383,1555,1624-1625` (`entry`/`sd_address`/`chunk_at`/`num_clusters`/`resize`/`erase_from`); `cluster_byte_source.cpp` (via `get_cluster` already); `read_source.cpp:23` (`BlockReadSource` → `sample_.stream().sd_address_at(i)`); `audio_file_manager.cpp:250,824,924,1039,1050-1051` (sdAddress population + stitch neighbor-edge `chunk_at(idx±1)` + `num_clusters` bound)
+- Modify: `sample_stream.{h,cpp}` (add `StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction = CLUSTER_ENQUEUE, uint32_t priority_rating = 0xFFFFFFFF, Error* error = nullptr)` — body = `sample_cluster.cpp:63-146` verbatim, `sample->` → `sample_.`, `this->cluster` → `sample_.clusters[index].cluster`; add `chunk_at`, `entry` (×const), `sd_address_at`/`set_sd_address_at`, `num_clusters`, `resize`, `erase_from`, `ensure_no_reason` — all over `sample_.clusters` this task; the accessors are one-liners into `sample_.clusters[index]`)
+- Modify: `sample_cluster.{h,cpp}` (`SampleCluster::getCluster` body → `return sample->stream().get_cluster(clusterIndex, loadInstruction, priorityRating, error);` — a thin forwarder kept only for the not-yet-migrated Task-3/4 callers; `Sample::clusters` stays public)
+- Modify (repoint the bulk non-recorder / non-holder / non-reader consumers): `sample.cpp` self-uses (`1474,1500` get_cluster; `715,937` `chunk_at`; `1151-1152` `num_clusters`; `1821,1914-1954` `chunk_at`; `102` `resize`); `time_stretcher.cpp` (`1142` get_cluster; `727` `chunk_at`); `waveform_renderer.cpp` (`407,433` get_cluster; `241` `num_clusters`; `382,432` `entry`); `wave_table.cpp:423` get_cluster; `cluster_byte_source.cpp:53` get_cluster; `read_source.cpp:23` (`BlockReadSource` → `sample_.stream().sd_address_at(i)`); `audio_file_manager.cpp` (`250,824` sdAddress via `sd_address_at`/`set_sd_address_at`; `924` consistency check via `chunk_at`; `1039,1050-1051` stitch neighbor-edge `chunk_at(idx±1)` + `num_clusters` bound)
 
 **Interfaces:**
-- Consumes: `SampleStream` (Tasks 1–2). Produces: the table accessors (DD3).
+- Consumes: `Sample::stream()` (Task 1). Produces: `SampleStream::get_cluster` + all table accessors (DD3), consumed by Tasks 3–4.
 
-- [ ] **Step 1:** Add a CppSpec for the stitch neighbor-edge path exercising `chunk_at(index±1)` returning the correct resident/null pointer (mock table), guarding the §6 boundary-conversion coupling. Run; verify it fails.
-- [ ] **Step 2:** Move `table_` into `SampleStream`; add the accessors; rebase `get_cluster`/callbacks/`ensureNoReason` onto `table_`.
-- [ ] **Step 3:** Repoint every raw site in the list (the compiler catches misses — `Sample::clusters` no longer exists). Preserve the recorder's re-fetch-after-write pattern (`sample_recorder.cpp:873,885` re-takes `entry` after a write because the audio routine may reallocate the table — keep that reacquire through `entry()`).
-- [ ] **Step 4:** Spec PASS; `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact; `padsweep` (Sample loses the vector member — size changes; expect layout-invariant). **Ear-check note:** heavy recorder-table changes (grow/shrink/sdAddress) — recording round-trip + `alterFile` ear-check before merge.
-- [ ] **Step 5:** Commit `refactor(audio-stream): move the residency table into SampleStream + accessors`.
+- [ ] **Step 1:** Add a CppSpec (extend `tests/spec_audio_stream/`) for the stitch neighbor-edge path: `chunk_at(index±1)` returns the correct resident/null pointer over a mock table — guards the §6 boundary-conversion coupling. Run; verify it fails (no accessor yet).
+- [ ] **Step 2:** Add `get_cluster` + the accessors + `ensure_no_reason` to `SampleStream` (bodies over `sample_.clusters`). Make `SampleCluster::getCluster` forward to `stream().get_cluster`.
+- [ ] **Step 3:** Repoint the bulk-consumer sites in the list above. (Un-migrated recorder + holder + reader keep working via the forwarder / still-public `clusters`.)
+- [ ] **Step 4:** Spec PASS; `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact; `padsweep` (Sample gains the `SampleStream` member — size changes; expect layout-invariant, re-baseline only on a deterministic shift with no behavior change).
+- [ ] **Step 5:** Commit `refactor(audio-stream): add the SampleStream API; migrate the bulk consumers`.
+
+## Task 3: dedicated recorder migration
+
+Migrate every `sample_recorder.cpp` site onto the `SampleStream` API in one isolated, ear-checkable commit — the recorder is the heaviest and most behavior-sensitive consumer (§7, §10). Coexistence keeps this the only file changed.
+
+**Files:**
+- Modify (all recorder sites — map §3/§4): `sample_recorder.cpp` — `get_cluster`: `141,804,943,1262,1279,1297,1446,1494`; raw/entry access: `73,77,96,620,634,802,873,885,937,1218,1246,1383,1555,1624-1625` → `entry(i)` (waveform/`.cluster` peeks + `.sdAddress` writes), `sd_address_at`/`set_sd_address_at` (`1383,1555` disk-write sector target), `chunk_at(i)` (no-lease `.cluster` reads), `num_clusters()`/`resize()`/`erase_from()` (`937,1624-1625` table grow/shrink).
+
+**Interfaces:**
+- Consumes: the full `SampleStream` API (Task 2).
+
+- [ ] **Step 1:** Transform each `sample->clusters[i].getCluster(sample, i, INSTR, prio, &err)` → `sample->stream().get_cluster(i, INSTR, prio, &err)`, and each raw `sample->clusters[i].<field>` → the matching accessor (`entry(i).<field>` for writes/waveform, `chunk_at(i)` for no-lease chunk reads, `sd_address_at`/`set_sd_address_at`, `num_clusters`/`resize`/`erase_from`).
+- [ ] **Step 2:** Preserve the re-fetch-after-write pattern (`sample_recorder.cpp:873,885` re-takes the entry after a write because the audio routine may reallocate the table) — keep that reacquire, now through `entry(i)`. Carry `CLUSTER_DONT_LOAD` / dirty-pin / `numReasonsHeldBySampleRecorder` faithfully.
+- [ ] **Step 3:** `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact. **Ear-check note:** recording round-trip + `alterFile` reprocessing — §9 NEEDS-HARDWARE (recording); flag for the human's hardware pass before merge.
+- [ ] **Step 4:** Commit `refactor(audio-stream): migrate SampleRecorder onto the SampleStream API`.
 
 ## Task 4: `SampleHolder` + RT reader lease/refill through `SampleStream`
 
-Repoint the always-resident head/loop leasing and the RT reader's boundary-crossing refill onto `SampleStream` accessors. Behavior-preserving; the reader keeps its own local `clusters[]` array (hot loop untouched — map §6).
+Repoint the always-resident head/loop leasing and the RT reader's boundary-crossing refill onto the `SampleStream` API. Behavior-preserving; the reader keeps its own local `clusters[]` array (hot loop untouched — map §6).
 
 **Files:**
-- Modify: `sample_holder.cpp:218,220` (`((Sample*)audioFile)->clusters[clusterIndex]` → `((Sample*)audioFile)->stream()`, `get_cluster(clusterIndex, …)`); `sample_holder_for_voice.cpp:96` (`->clusters.size()` → `->stream().num_clusters()`)
-- Modify: `sample_low_level_reader.cpp:304,380` already repointed in Task 2 (getCluster); confirm the refill points read via `stream()`; `:108` raw peek via `chunk_at` (Task 3). Verify no per-sample-loop site now touches `stream()`.
-- Modify: `voice_sample.cpp:203,847` already repointed in Task 2; confirm.
+- Modify: `sample_holder.cpp:218,220` (`((Sample*)audioFile)->clusters[clusterIndex].getCluster(...)` → `((Sample*)audioFile)->stream().get_cluster(clusterIndex, …)`); `sample_holder_for_voice.cpp:96` (`->clusters.size()` → `->stream().num_clusters()`)
+- Modify: `sample_low_level_reader.cpp:304,380` (refill get_cluster → `stream()`); `:108` raw peek → `stream().chunk_at(...)`
+- Modify: `voice_sample.cpp:203,847` (get_cluster → `stream()`)
 
 **Interfaces:**
-- Consumes: `SampleStream::get_cluster`/`num_clusters`/`chunk_at` (Tasks 2–3).
+- Consumes: `SampleStream::get_cluster`/`num_clusters`/`chunk_at` (Task 2).
 
 - [ ] **Step 1:** Repoint the SampleHolder direct-index leasing (`claimClusterReasonsForMarker`:218-220, the `clusters.size() <= 4` short-sample fallback:96) onto `stream()`.
-- [ ] **Step 2:** Audit the RT reader + VoiceSample: confirm every `Sample::clusters` touch now goes through `stream()` and lives only at boundary-crossing/refill points (`assignClusters`, `moveOnToNextCluster`, `attemptLateSampleStart`, cache-resync, the `:108` peek) — NOT in the per-sample inner loop. Add a code comment at the refill sites noting the one-hop-per-boundary cost is intentional.
-- [ ] **Step 3:** `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact. **Ear-check note:** streaming-under-load + loop-start leasing behavior — play a looping, streamed (non-fully-resident) sample and confirm no dropouts (§9 NEEDS-HARDWARE: streaming-under-load).
+- [ ] **Step 2:** Repoint the RT reader + VoiceSample refill points; confirm every `Sample::clusters` touch now goes through `stream()` and lives only at boundary-crossing/refill sites (`assignClusters`, `moveOnToNextCluster`, `attemptLateSampleStart`, cache-resync, the `:108` peek) — NOT in the per-sample inner loop (which uses the reader's own local array). Add a code comment at the refill sites noting the one-hop-per-boundary cost is intentional.
+- [ ] **Step 3:** `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact. **Ear-check note:** streaming-under-load + loop-start leasing — play a looping, streamed (non-fully-resident) sample and confirm no dropouts (§9 NEEDS-HARDWARE: streaming-under-load).
 - [ ] **Step 4:** Commit `refactor(audio-stream): SampleHolder + RT reader lease through SampleStream`.
+
+## Task 5: cleanup — internalize the table; delete the migration shims
+
+Every consumer now goes through `stream()`. Physically move the residency table into `SampleStream` and delete the coexistence shims. Contained: only `SampleStream` (and `Sample`'s own construction/destruction) still names the table.
+
+**Files:**
+- Modify: `sample_stream.{h,cpp}` (own `deluge::fast_vector<SampleCluster> table_;`; repoint the accessors + `get_cluster` + the asset callbacks + `ensure_no_reason` from `sample_.clusters` → `table_`)
+- Modify: `sample.{h,cpp}` (delete `clusters`:157; `initialize`:102 already routes through `stream_.resize` from Task 2 — confirm; `~Sample`/`markAsUnloadable`/`convertDataOnAnyClustersIfNecessary` reach the table only via `stream_` now)
+- Modify: `sample_cluster.{h,cpp}` (delete the `SampleCluster::getCluster` forwarder:50-51 + `ensureNoReason`:52 now that `SampleStream` owns them; `SampleCluster` is a passive entry — `sdAddress`, `cluster`, waveform min/max)
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–4. Produces: the final shape — `SampleStream` owns `table_`; `SampleCluster` is a passive entry.
+
+- [ ] **Step 1:** Move `table_` into `SampleStream`; flip every internal `sample_.clusters` reference to `table_`.
+- [ ] **Step 2:** Delete `Sample::clusters` and the `SampleCluster::getCluster` forwarder + `ensureNoReason`. Build — the compiler confirms nothing outside `SampleStream`/`Sample`-construction still names the table (any hit is a missed Task-2/3/4 migration; fix by routing through `stream()`).
+- [ ] **Step 3:** `dbt build Debug` clean; `./dbt test`; goldens (cordae + icoustic) bit-exact; `padsweep` (Sample/SampleCluster sizes settle — expect layout-invariant).
+- [ ] **Step 4:** Commit `refactor(audio-stream): internalize the residency table into SampleStream; drop migration shims`.
 
 ---
 
 ## Verification (whole increment)
 
-- Per-task: `dbt build Debug` + `./dbt test` (20/20) + cordae/icoustic bit-exact; `padsweep` on the struct-size-changing tasks (T1, T3).
+- Per-task: `dbt build Debug` + `./dbt test` (20/20) + cordae/icoustic bit-exact; `padsweep` on the struct-size-changing tasks (T2: Sample gains the `SampleStream` member; T5: table internalized, `SampleCluster`/`Sample` sizes settle).
 - The reconstruction-core specs (`tests/spec_audio_stream/`, `tests/qemu/spec/`) stay green — `SampleStream` only relocates the orchestration around the already-pure core.
-- **NEEDS-HARDWARE before merge** (§9): recording round-trip + `alterFile`, memory-pressure eviction, streaming-under-load (looping non-resident sample), non-native-format (24-bit) sample load. Hardware gating is the user's call — do not treat it as a blocking next step.
+- Coexistence keeps EVERY intermediate commit build-green and golden-bit-exact; the final shape isn't reached until T5.
+- **NEEDS-HARDWARE before merge** (§9): recording round-trip + `alterFile` (T3), memory-pressure eviction, streaming-under-load (looping non-resident sample, T4), non-native-format (24-bit) sample load. Hardware gating is the user's call — do not treat it as a blocking next step.
 
 ## After Phase 4
 
@@ -129,5 +145,6 @@ Phase 5 (design-spec §8 step 4): consolidate the `loader` pump into the module 
 
 ## Self-Review notes (author)
 
-- Spec coverage: §4 (SampleStream shape) → all 4 tasks; §6 (ReadSource selection ownership) → T1; §7 (getCluster dispatch, RT contract) → T2/T4; §8 step 3 → the whole plan. §6 stitch coupling is guarded by the T3 `chunk_at` spec.
-- Open risks to surface at review: (a) DD1 places `SampleStream` in `storage/audio/stream/` while it holds a `Sample&` — a slight layering inversion vs. the pure core in the same dir; alternative is `model/sample/`. (b) The recorder is spread across T2+T3; if its behavior-sensitivity warrants isolation, split a dedicated recorder-migration task. (c) T3 is the largest blast radius — could split Sample-self-uses vs. external consumers if a reviewer finds it too big for one gate.
+- Spec coverage: §4 (SampleStream shape) → all 5 tasks; §6 (ReadSource selection ownership) → T1; §7 (getCluster dispatch, RT contract) → T2/T4; §8 step 3 → the whole plan. §6 stitch coupling is guarded by the T2 `chunk_at` spec.
+- **Decisions settled with the human (2026-07-16 review):** DD1 home = `storage/audio/stream/` (spec §4). Recorder = its own dedicated task (T3). Residency-table migration kept coherent (introduced once in T2, internalized once in T5 — not split self-vs-external). Coexistence adopted to satisfy dedicated-recorder + all-green-builds simultaneously.
+- Residual open item for the second review: whether the T2 bulk-consumer group is itself too large (it carries the stitch/afm + timestretch + waveform + wavetable + header-parse repoints in one commit) — could split the afm stitch-edge repoint (the §6/§10 risk area) into its own gate if desired.

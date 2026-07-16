@@ -413,7 +413,7 @@ cantReadData:
 				continue;
 			}
 
-			if (cluster->lease_count() == 0) {
+			if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 				// Branko V got this. Trying to catch E340 below, which Ron R got while recording
 				FREEZE_WITH_ERROR(errorCode);
 			}
@@ -432,7 +432,7 @@ cantReadData:
 				SampleCluster* nextSampleCluster = &sample->clusters[clusterIndexToDo + 1];
 				nextCluster = nextSampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
 
-				if (cluster->lease_count() == 0) {
+				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 					FREEZE_WITH_ERROR("E342"); // Trying to catch E340 below, which Ron R got while recording
 				}
 

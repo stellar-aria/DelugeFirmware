@@ -248,7 +248,7 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 #if ALPHA_OR_BETA_VERSION
 	// Trying to track down Steven's E133 - percCacheClusterNearby pointing to things with no reasons left
 	for (int32_t l = 0; l < 2; l++) {
-		if (percCacheClustersNearby[l] && !percCacheClustersNearby[l]->lease_count()) {
+		if (percCacheClustersNearby[l] && !deluge::cluster::lease_count(percCacheClustersNearby[l]->resource_slot)) {
 			FREEZE_WITH_ERROR("i036");
 		}
 	}
@@ -1112,7 +1112,7 @@ void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 		return;
 	}
 
-	cluster->add_reason();
+	deluge::cluster::add_lease(cluster);
 
 	if (percCacheClustersNearby[0]) {
 		// Steven G got this on V3.1.5, Feb 2021!

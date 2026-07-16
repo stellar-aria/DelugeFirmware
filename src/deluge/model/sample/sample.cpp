@@ -112,7 +112,8 @@ Error Sample::initialize(int32_t newNumClusters) {
 // Cluster into it and fills it via the Step-1 reader; on_evict drops the Sample's
 // pointer and destructs the Cluster (the manager frees the slot). The Cluster records its
 // chunk-slot handle (resource_slot) here — the manager already leased the slot before calling us
-// (leases >= 1), so slot_of(dest) is valid and lease_count() reports the reason count immediately.
+// (leases >= 1), so slot_of(dest) is valid and deluge::cluster::lease_count(resource_slot) reports
+// the reason count immediately.
 
 static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
 	auto* sample = static_cast<Sample*>(owner);
@@ -161,7 +162,7 @@ static void clusterEvict(void* /*ctx*/, void* owner, uint32_t index) {
 
 // === Resource-manager Source for the perc cache (per play-direction) =========
 // Perc clusters are written incrementally by the time-stretcher (no materialize), and
-// leased-while-nearby (TimeStretcher add_reason/removeReason via resource_lease_asset_id).
+// leased-while-nearby (TimeStretcher deluge::cluster::add_lease/removeReason via resource_lease_asset_id).
 // ctx carries the play-direction (0=forwards, 1=reversed). Per-cluster independent (no
 // tail-first); self_protect so the fill can't evict its own just-written cluster.
 static void percCacheConstruct(void* ctx, void* owner, uint32_t index, void* dest) {
@@ -682,7 +683,8 @@ doLoading:
 				//  discovered Jan 2021. (Manager path: the asset's self_protect provides the same guarantee.)
 				// Manager-owned: request constructs the Cluster (percCacheConstruct sets
 				// type/sample/index + percCacheClusters[reversed][index]) + leases; release so it's
-				// resident-but-unleased (the TimeStretcher re-leases the nearby ones via add_reason).
+				// resident-but-unleased (the TimeStretcher re-leases the nearby ones via
+				// deluge::cluster::add_lease).
 				DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 				void* p = deluge_resource_request(mgr, percCacheAssetId[reversed], percClusterIndex,
 				                                  sizeof(ComputedChunk) + Cluster::size);
@@ -1054,7 +1056,7 @@ void Sample::percCacheClusterStolen(ComputedChunk* cluster) {
 	if (!percCacheClusters[reversed][cluster->cluster_index]) {
 		FREEZE_WITH_ERROR("i034"); // Trying to track down Steven G's E133 (Feb 2021).
 	}
-	if (percCacheClusters[reversed][cluster->cluster_index]->lease_count()) {
+	if (deluge::cluster::lease_count(percCacheClusters[reversed][cluster->cluster_index]->resource_slot)) {
 		FREEZE_WITH_ERROR("i035"); // Trying to track down Steven G's E133 (Feb 2021).
 	}
 #endif
@@ -1822,7 +1824,7 @@ void Sample::convertDataOnAnyClustersIfNecessary() {
 			if (cluster != nullptr) {
 
 				// Add reason in case it would get stolen
-				cluster->add_reason();
+				deluge::cluster::add_lease(cluster);
 
 				cluster->convert_data_if_necessary();
 
@@ -1921,7 +1923,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 				FREEZE_WITH_ERROR(errorCode);
 			}
 
-			numClusterReasons += static_cast<int32_t>(cluster->lease_count());
+			numClusterReasons += static_cast<int32_t>(deluge::cluster::lease_count(cluster->resource_slot));
 
 			if (cluster == audioFileManager.clusterBeingLoaded) {
 				numClusterReasons--;
@@ -1936,7 +1938,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 
 			StreamedChunk* cluster = clusters[c].cluster;
 			if (cluster) {
-				D_PRINT("cluster->lease_count[%d]", cluster->lease_count());
+				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
 
 				if (cluster == audioFileManager.clusterBeingLoaded) {
 					D_PRINTLN(" (loading)");

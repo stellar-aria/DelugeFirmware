@@ -901,7 +901,7 @@ bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasons
 	}
 
 #if ALPHA_OR_BETA_VERSION
-	if (cluster.lease_count() == 0) {
+	if (deluge::cluster::lease_count(cluster.resource_slot) == 0) {
 		// Ok, I think we know there's at least 1 reason at the point this function's called, because
 		FREEZE_WITH_ERROR("E204");
 	}
@@ -913,7 +913,7 @@ bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasons
 
 	// So that it can't accidentally hit 0 reasons while we're loading it,
 	// cos then it might get deallocated.
-	cluster.add_reason();
+	deluge::cluster::add_lease(&cluster);
 
 	bool ok = readClusterData(cluster, minNumReasonsAfter);
 
@@ -922,7 +922,7 @@ bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasons
 
 #if ALPHA_OR_BETA_VERSION
 	if (ok) {
-		if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter) {
+		if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter) {
 			FREEZE_WITH_ERROR("i037");
 		}
 		if (cluster.sample->clusters[cluster.cluster_index].cluster != &cluster) {
@@ -983,7 +983,7 @@ getOutEarly:
 		FREEZE_WITH_ERROR("i023"); // Happened to me while thrash testing with reduced RAM
 	}
 
-	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i039"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1025,7 +1025,7 @@ getOutEarly:
 		FREEZE_WITH_ERROR("E208");
 	}
 
-	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1038,7 +1038,7 @@ getOutEarly:
 	cluster.convert_data_if_necessary();
 
 #if ALPHA_OR_BETA_VERSION
-	if (static_cast<int32_t>(cluster.lease_count()) < minNumReasonsAfter + 1) {
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter + 1) {
 		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
@@ -1199,7 +1199,7 @@ performActionsAndGetOut:
 		if (cluster->type == Cluster::Type::SAMPLE && cluster->sample != nullptr
 		    && cluster->sample->resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
 			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
-			// read directly. NOT loadCluster — its add_reason/removeReason would desync the manager
+			// read directly. NOT loadCluster — its add_lease/removeReason would desync the manager
 			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render
 			// (the headless-render streaming starvation we're fixing). The lease persists; the read
 			// just flips loaded=true (or fails, handled below as for legacy).
@@ -1216,7 +1216,7 @@ performActionsAndGetOut:
 
 			// If the Cluster is now down to 0 reasons (i.e. it lost a reason while being loaded), then it's already
 			// been made "available" and we don't have a problem
-			if (!cluster->lease_count()) {}
+			if (!deluge::cluster::lease_count(cluster->resource_slot)) {}
 
 			// Otherwise, there are still "reasons" waiting for this Cluster to become loaded, so we need to put it
 			// back in the loading queue. Presumably it won't actually get loaded for a while - only when the user
@@ -1254,14 +1254,13 @@ void AudioFileManager::removeReasonFromCluster(Cluster& cluster, [[maybe_unused]
 	// Every cluster is a manager-owned chunk — SAMPLE / PERC leased via the owner's Asset, SAMPLE_CACHE
 	// resident via the cache's Asset (and leased by the low-level reader while it streams it). A removed
 	// reason is just a manager lease drop: the cluster stays resident (cached, evictable under pressure),
-	// never enqueued/destroyed here. The lease count lives in the manager's chunk slot (leaseCount()).
-	if (ALPHA_OR_BETA_VERSION && cluster.lease_count() == 0) {
+	// never enqueued/destroyed here. The lease count lives in the manager's chunk slot, read via
+	// deluge::cluster::lease_count(). `cluster` stays a `Cluster&` here (rather than the chunk's own
+	// type) since this is the shared/generic entry point both future chunk types route through.
+	if (ALPHA_OR_BETA_VERSION && deluge::cluster::lease_count(cluster.resource_slot) == 0) {
 		FREEZE_WITH_ERROR(errorCode); // removing a reason that was never there
 	}
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	if (mgr != nullptr) {
-		deluge_resource_release(mgr, &cluster); // unlease (backing ptr == the Cluster slot)
-	}
+	deluge::cluster::release_lease(&cluster); // unlease (backing ptr == the Cluster's own address)
 }
 
 bool AudioFileManager::loadingQueueHasAnyLowestPriorityElements() {

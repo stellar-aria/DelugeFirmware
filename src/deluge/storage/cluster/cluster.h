@@ -62,19 +62,13 @@ public:
 	/// after allocating a region with the General Memory Allocator!
 	Cluster() = default;
 	void convert_data_if_necessary();
-	void add_reason();
 
 	// The resource-manager Asset that owns this cluster's residency for the *leased* (reason-
 	// tracked) kinds — SAMPLE (the sample's asset) and PERC_CACHE_* (the sample's per-direction
-	// perc asset) — or DELUGE_RESOURCE_NO_ASSET otherwise. Used by add_reason /
+	// perc asset) — or DELUGE_RESOURCE_NO_ASSET otherwise. Used by deluge::cluster::add_lease /
 	// removeReasonFromCluster to route a reason to a manager lease. SAMPLE_CACHE clusters are
 	// unleased (never reasoned), so they're excluded here and managed via the cache's Asset.
 	uint32_t resource_lease_asset_id() const;
-
-	// Hard-lease ("reason") count for this cluster — the single source of truth lives in the resource
-	// manager's chunk slot, read O(1) via `resource_slot` (the slot handle, set at creation). Replaces
-	// the old `numReasonsToBeLoaded` mirror field. 0 if the cluster isn't a manager chunk yet.
-	[[nodiscard]] uint32_t lease_count() const;
 
 	Cluster::Type type;
 	uint32_t cluster_index = 0;
@@ -107,3 +101,24 @@ using StreamedChunk = Cluster;
 // — repitch SampleCache + perc-cache scratch. Alias today (Cluster is still one overloaded type);
 // becomes a distinct struct once the split from StreamedChunk lands.
 using ComputedChunk = Cluster;
+
+// Shared lease bookkeeping, lifted off Cluster as free functions so it can be shared once
+// StreamedChunk/ComputedChunk become independent types (neither needs a common base for this).
+// add_lease/release_lease take the chunk's own backing pointer (the resource manager identifies a
+// lease by the chunk address); lease_count is queried by resource_slot instead, since callers that
+// only need the count (freeze-checks, eviction gates) commonly don't have the chunk pointer handy
+// (e.g. right after a slot lookup) — matching the underlying C ABI's two lookup shapes.
+namespace deluge::cluster {
+/// Take a lease on the resident chunk at `chunk` (its own backing pointer). No-op if the resource
+/// manager isn't up yet (mirrors the former Cluster::add_reason null-check).
+void add_lease(void* chunk);
+
+/// Drop one lease on the resident chunk at `chunk` (its own backing pointer). No-op if the resource
+/// manager isn't up yet (mirrors the former AudioFileManager::removeReasonFromCluster null-check).
+void release_lease(void* chunk);
+
+/// Hard-lease ("reason") count for the chunk resident in slot `resource_slot` — the single source of
+/// truth lives in the resource manager's chunk slot. 0 if the resource manager isn't up yet (mirrors
+/// the former Cluster::lease_count null-check).
+[[nodiscard]] uint32_t lease_count(uint32_t resource_slot);
+} // namespace deluge::cluster

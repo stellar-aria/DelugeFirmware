@@ -92,17 +92,28 @@ uint32_t Cluster::resource_lease_asset_id() const {
 	}
 }
 
-void Cluster::add_reason() {
+namespace deluge::cluster {
+
+void add_lease(void* chunk) {
 	// Manager-owned leased clusters (SAMPLE / PERC) are pinned by a resource-manager lease (they're
-	// never on a stealable queue). Take a lease so the manager won't evict a cluster the caller still
-	// holds. The lease count lives in the manager's chunk slot (read via lease_count()).
+	// never on a stealable queue). Take a lease so the manager won't evict a chunk the caller still
+	// holds. The lease count lives in the manager's chunk slot (read via deluge::cluster::lease_count()).
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	if (mgr != nullptr) {
-		deluge_resource_add_lease(mgr, this); // hit-only lease bump on this resident chunk
+		deluge_resource_add_lease(mgr, chunk); // hit-only lease bump on this resident chunk
 	}
 }
 
-uint32_t Cluster::lease_count() const {
+void release_lease(void* chunk) {
+	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
+	if (mgr != nullptr) {
+		deluge_resource_release(mgr, chunk); // unlease (backing ptr == the chunk's own address)
+	}
+}
+
+uint32_t lease_count(uint32_t resource_slot) {
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	return (mgr != nullptr) ? deluge_resource_lease_count_by_slot(mgr, resource_slot) : 0;
 }
+
+} // namespace deluge::cluster

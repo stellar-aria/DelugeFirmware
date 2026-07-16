@@ -1219,7 +1219,7 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 				other.clusters[l] = nullptr;
 			}
 			else {
-				clusters[l]->add_reason();
+				deluge::cluster::add_lease(clusters[l]);
 			}
 		}
 	}

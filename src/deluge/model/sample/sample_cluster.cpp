@@ -30,7 +30,7 @@ SampleCluster::~SampleCluster() {
 	if (cluster) {
 
 #if ALPHA_OR_BETA_VERSION
-		uint32_t reasons = cluster->lease_count();
+		uint32_t reasons = deluge::cluster::lease_count(cluster->resource_slot);
 		if (cluster == audioFileManager.clusterBeingLoaded && reasons > 0) {
 			reasons--;
 		}
@@ -49,8 +49,9 @@ SampleCluster::~SampleCluster() {
 
 void SampleCluster::ensureNoReason(Sample* sample) {
 	if (cluster) {
-		if (cluster->lease_count()) {
-			D_PRINTLN("Cluster has reason!  %d %d", cluster->lease_count(), sample->filePath.c_str());
+		if (deluge::cluster::lease_count(cluster->resource_slot)) {
+			D_PRINTLN("Cluster has reason!  %d %d", deluge::cluster::lease_count(cluster->resource_slot),
+			          sample->filePath.c_str());
 			FREEZE_WITH_ERROR("E068");
 			delayMS(50);
 		}

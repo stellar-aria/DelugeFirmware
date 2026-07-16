@@ -70,11 +70,11 @@ void SampleRecorder::detachSample() {
 	// If we were holding onto the reasons for the first couple of Clusters, release them now
 	if (keepingReasonsForFirstClusters) {
 		int32_t numClustersToRemoveFor =
-		    std::min(kNumClustersLoadedAhead, static_cast<int32_t>(sample->clusters.size()));
+		    std::min(kNumClustersLoadedAhead, static_cast<int32_t>(sample->stream().num_clusters()));
 		numClustersToRemoveFor = std::min(numClustersToRemoveFor, firstUnwrittenClusterIndex);
 
 		for (int32_t l = 0; l < numClustersToRemoveFor; l++) {
-			StreamedChunk* cluster = sample->clusters[l].cluster;
+			StreamedChunk* cluster = sample->stream().chunk_at(l);
 
 			// Some bug-hunting
 			if (!cluster->num_reasons_held_by_sample_recorder) {
@@ -93,7 +93,7 @@ void SampleRecorder::detachSample() {
 	}
 
 	while (firstUnwrittenClusterIndex < removeForClustersUntilIndex) {
-		StreamedChunk* cluster = sample->clusters[firstUnwrittenClusterIndex].cluster;
+		StreamedChunk* cluster = sample->stream().chunk_at(firstUnwrittenClusterIndex);
 
 		if (!cluster) {
 			FREEZE_WITH_ERROR("E363");
@@ -138,7 +138,7 @@ gotError:
 		return error;
 	}
 
-	currentRecordCluster = sample->clusters[0].getCluster(sample, 0, CLUSTER_DONT_LOAD); // Adds a "reason" to it, too
+	currentRecordCluster = sample->stream().get_cluster(0, CLUSTER_DONT_LOAD); // Adds a "reason" to it, too
 	if (!currentRecordCluster) {
 		error = Error::INSUFFICIENT_RAM;
 		goto gotError;
@@ -617,7 +617,7 @@ Error SampleRecorder::writeOneCompletedCluster() {
 
 #if ALPHA_OR_BETA_VERSION
 	// Trying to pin down E347 which Leo got, below
-	StreamedChunk* cluster = sample->clusters[writingClusterIndex].cluster;
+	StreamedChunk* cluster = sample->stream().chunk_at(writingClusterIndex);
 	if (!cluster->num_reasons_held_by_sample_recorder) {
 		FREEZE_WITH_ERROR("E374");
 	}
@@ -631,7 +631,7 @@ Error SampleRecorder::writeOneCompletedCluster() {
 
 	// We no longer have a reason to require this Cluster to be kept in memory
 	if (!keepingReasonsForFirstClusters || writingClusterIndex >= kNumClustersLoadedAhead) {
-		StreamedChunk* cluster = sample->clusters[writingClusterIndex].cluster;
+		StreamedChunk* cluster = sample->stream().chunk_at(writingClusterIndex);
 
 		// Some bug-hunting
 		if (!cluster->num_reasons_held_by_sample_recorder) {
@@ -799,19 +799,19 @@ Error SampleRecorder::finalizeRecordedFile() {
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
 
 			// Update data length as written in first cluster
-			SampleCluster* firstSampleCluster = &sample->clusters[0];
+			SampleCluster& firstSampleCluster = sample->stream().entry(0);
 			StreamedChunk* cluster =
-			    firstSampleCluster->getCluster(sample, 0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+			    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
 			if (cluster) {
 
 				// Bug hunting - newly gotten Cluster
 				cluster->num_reasons_held_by_sample_recorder++;
 
 				// Do a last-ditch check that the SD address doesn't look invalid
-				if (firstSampleCluster->sdAddress == 0) {
+				if (firstSampleCluster.sdAddress == 0) {
 					FREEZE_WITH_ERROR("E268");
 				}
-				if ((firstSampleCluster->sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
+				if ((firstSampleCluster.sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
 					FREEZE_WITH_ERROR("E269");
 				}
 
@@ -820,7 +820,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 				updateDataLengthInFirstCluster(cluster);
 
 				// Write just that one first sector back to the card
-				disk_write(0, (BYTE*)cluster->data, firstSampleCluster->sdAddress, 1);
+				disk_write(0, (BYTE*)cluster->data, firstSampleCluster.sdAddress, 1);
 
 				// If that failed, well, that's a shame, but we don't need to do anything
 
@@ -870,7 +870,7 @@ extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	// D_PRINTLN("writeCluster");
 
-	SampleCluster* sampleCluster = &sample->clusters[clusterIndex];
+	SampleCluster* sampleCluster = &sample->stream().entry(clusterIndex);
 
 	uint32_t byteOffset = static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude;
 	auto writeResult = file->write_at(
@@ -882,7 +882,7 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 
 	// MUST re-get this - while writing above, the audio routine is being called, and that could
 	// allocate new SampleClusters and move them around!
-	sampleCluster = &sample->clusters[clusterIndex];
+	sampleCluster = &sample->stream().entry(clusterIndex);
 
 	// Grab the SD address, for later
 	uint32_t sector = 0;
@@ -934,13 +934,12 @@ Error SampleRecorder::createNextCluster() {
 
 	// We need to allocate our next Cluster
 	try {
-		sample->clusters.resize(sample->clusters.size() + 1);
+		sample->stream().resize(sample->stream().num_clusters() + 1);
 	} catch (deluge::exception&) {
 		return Error::INSUFFICIENT_RAM;
 	}
 
-	currentRecordCluster =
-	    sample->clusters[currentRecordClusterIndex].getCluster(sample, currentRecordClusterIndex, CLUSTER_DONT_LOAD);
+	currentRecordCluster = sample->stream().get_cluster(currentRecordClusterIndex, CLUSTER_DONT_LOAD);
 
 	// If couldn't allocate cluster (would normally only happen if no SD card present so recording only to RAM)
 	if (!currentRecordCluster) {
@@ -1215,9 +1214,8 @@ void SampleRecorder::totalSampleLengthNowKnown(uint32_t totalLengthSamples, uint
 
 	// If we haven't written the first cluster yet, quick - update it with the actual length
 	if (firstUnwrittenClusterIndex == 0) {
-		SampleCluster* firstSampleCluster = &sample->clusters[0];
 		StreamedChunk* cluster =
-		    firstSampleCluster->cluster; // It should still be there, cos it hasn't been written to card yet
+		    sample->stream().chunk_at(0); // It should still be there, cos it hasn't been written to card yet
 		if (ALPHA_OR_BETA_VERSION && !cluster) {
 			FREEZE_WITH_ERROR("E274");
 		}
@@ -1243,7 +1241,7 @@ void SampleRecorder::setExtraBytesOnPreviousCluster(StreamedChunk* currentCluste
 		return;
 	}
 
-	StreamedChunk* prevCluster = sample->clusters[currentClusterIndex - 1].cluster;
+	StreamedChunk* prevCluster = sample->stream().chunk_at(currentClusterIndex - 1);
 
 	// It might have since been deallocated, which is just fine. But if not...
 	if (prevCluster) {
@@ -1259,7 +1257,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	int32_t currentWriteClusterIndex = 0;
 
 	StreamedChunk* currentReadCluster =
-	    sample->clusters[0].getCluster(sample, 0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+	    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
 	if (!currentReadCluster) {
 		return Error::SD_CARD;
 	}
@@ -1268,15 +1266,14 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	currentReadCluster->num_reasons_held_by_sample_recorder++;
 
 	int32_t numClustersBeforeAction = ((idealFileSizeBeforeAction - 1) >> Cluster::size_magnitude) + 1; // Rounds up
-	if (ALPHA_OR_BETA_VERSION && numClustersBeforeAction > static_cast<int32_t>(sample->clusters.size())) {
+	if (ALPHA_OR_BETA_VERSION && numClustersBeforeAction > static_cast<int32_t>(sample->stream().num_clusters())) {
 		FREEZE_WITH_ERROR("E286");
 	}
 
 	StreamedChunk* nextReadCluster = nullptr;
 
 	if (numClustersBeforeAction >= 2) {
-		nextReadCluster =
-		    sample->clusters[1].getCluster(sample, 1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+		nextReadCluster = sample->stream().get_cluster(1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
 		if (!nextReadCluster) {
 
 			// Some bug-hunting
@@ -1294,7 +1291,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	}
 
 	StreamedChunk* currentWriteCluster =
-	    sample->clusters[0].getCluster(sample, 0, CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
+	    sample->stream().get_cluster(0, CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
 	// That one can't fail, fortunately, cos we already grabbed Cluster 0 above, so it exists
 
 	// Bug hunting - newly gotten Cluster
@@ -1380,7 +1377,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 
 			currentWriteCluster->loaded = true; // I don't think this is necessary anymore
 
-			uint32_t sdAddress = sample->clusters[currentWriteClusterIndex].sdAddress;
+			uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
 
 			// Do a last-ditch check that the SD address doesn't look invalid
 			if (sdAddress == 0) {
@@ -1443,8 +1440,8 @@ writeFailed:
 
 			// Get the new / next Cluster, but don't insist on actually reading from the card, cos we're gonna
 			// overwrite it with new data anyway
-			currentWriteCluster = sample->clusters[currentWriteClusterIndex].getCluster(
-			    sample, currentWriteClusterIndex, CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
+			currentWriteCluster = sample->stream().get_cluster(currentWriteClusterIndex,
+			                                                   CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
 
 			// That could only fail if no RAM, but juuuust in case...
 			if (!currentWriteCluster) {
@@ -1491,8 +1488,8 @@ writeFailed:
 
 			// If there are further read Clusters...
 			if (currentReadClusterIndex < numClustersBeforeAction - 1) {
-				nextReadCluster = sample->clusters[currentReadClusterIndex + 1].getCluster(
-				    sample, currentReadClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+				nextReadCluster = sample->stream().get_cluster(
+				    currentReadClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
 
 				// If that failed, remove other reasons and get out
 				if (!nextReadCluster) {
@@ -1552,7 +1549,7 @@ writeFailed:
 			FREEZE_WITH_ERROR("E239");
 		}
 
-		uint32_t sdAddress = sample->clusters[currentWriteClusterIndex].sdAddress;
+		uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
 
 		// Do a last-ditch check that the SD address doesn't look invalid
 		if (sdAddress == 0) {
@@ -1621,8 +1618,8 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 
 	uint64_t numClustersAfterAction = ((newFileSize - 1) >> Cluster::size_magnitude) + 1;
 
-	if (numClustersAfterAction < sample->clusters.size()) {
-		sample->clusters.erase(sample->clusters.begin() + numClustersAfterAction, sample->clusters.end());
+	if (numClustersAfterAction < sample->stream().num_clusters()) {
+		sample->stream().erase_from(numClustersAfterAction);
 	}
 
 	auto truncateResult = file->truncate(newFileSize);

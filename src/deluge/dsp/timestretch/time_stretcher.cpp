@@ -724,7 +724,7 @@ startSearch:
 				}
 
 				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				Cluster* cluster = sample->clusters[whichCluster].cluster;
+				StreamedChunk* cluster = sample->clusters[whichCluster].cluster;
 				if (!cluster || !cluster->loaded) {
 					goto skipSearch;
 				}

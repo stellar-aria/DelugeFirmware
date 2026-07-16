@@ -105,7 +105,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
 	if ((clusterIndex - finalClusterIndex) * guide->playDirection > 0) {
 		D_PRINTLN("saving from being past finalCluster");
-		Cluster* finalCluster = sample->clusters[finalClusterIndex].cluster;
+		StreamedChunk* finalCluster = sample->clusters[finalClusterIndex].cluster;
 		if (!finalCluster) {
 			return false;
 		}
@@ -359,7 +359,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	bytePosWithinOldCluster = bytePosWithinOldCluster + 4 - sample->byteDepth;
 
 	// And for the one at the far end, just grab the next one
-	Cluster* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
+	StreamedChunk* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
 
 	if (oldLastCluster) {
 		int32_t prevClusterIndex = oldLastCluster->cluster_index;

@@ -59,8 +59,8 @@ void SampleCluster::ensureNoReason(Sample* sample) {
 
 // Calling this will add a reason to the loaded Cluster!
 // priorityRating is only relevant if enqueuing.
-Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction,
-                                   uint32_t priorityRating, Error* error) {
+StreamedChunk* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction,
+                                         uint32_t priorityRating, Error* error) {
 
 	if (error != nullptr) {
 		*error = Error::NONE;
@@ -84,14 +84,14 @@ Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_
 			deluge_resource_add_lease(mgr, cluster);
 		}
 		else {
-			void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(Cluster) + Cluster::size);
+			void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
 			if (p == nullptr) {
 				if (error != nullptr) {
 					*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
 				}
 				return nullptr;
 			}
-			cluster = reinterpret_cast<Cluster*>(p);
+			cluster = reinterpret_cast<StreamedChunk*>(p);
 		}
 		deluge_resource_mark_dirty(mgr, cluster, true);
 		return cluster;
@@ -101,14 +101,14 @@ Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_
 		// Async prefetch: construct + lease now (NO I/O), then schedule the read on the loader
 		// (the existing loadingQueue, pumped off the audio thread) so the audio thread never
 		// blocks on SD. Returns the cluster (loaded==false until the loader reads it).
-		void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(Cluster) + Cluster::size);
+		void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
 		if (p == nullptr) {
 			if (error != nullptr) {
 				*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
 			}
 			return nullptr;
 		}
-		cluster = reinterpret_cast<Cluster*>(p);
+		cluster = reinterpret_cast<StreamedChunk*>(p);
 		if (!cluster->loaded) {
 			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priorityRating);
 		}
@@ -117,14 +117,14 @@ Cluster* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_
 
 	// CLUSTER_LOAD_IMMEDIATELY / _OR_ENQUEUE: must have it loaded now → acquire (full
 	// materialize on a miss; this may block on I/O, which is the must-load-now contract).
-	void* p = deluge_resource_acquire(mgr, asset, clusterIndex, sizeof(Cluster) + Cluster::size);
+	void* p = deluge_resource_acquire(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
 	if (p == nullptr) {
 		if (error != nullptr) {
 			*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::UNSPECIFIED;
 		}
 		return nullptr;
 	}
-	cluster = reinterpret_cast<Cluster*>(p);
+	cluster = reinterpret_cast<StreamedChunk*>(p);
 	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
 	if (!cluster->loaded) {
 		bool ok = audioFileManager.readClusterData(*cluster, 0);

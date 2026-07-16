@@ -195,7 +195,7 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 
 	// We load our new Clusters into a secondary array first, to preserve the reason-holding power of whatever is
 	// already in our main one until we unassign them below
-	std::array<Cluster*, kNumClustersLoadedAhead> newClusters{};
+	std::array<StreamedChunk*, kNumClustersLoadedAhead> newClusters{};
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 

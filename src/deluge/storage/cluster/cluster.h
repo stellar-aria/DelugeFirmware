@@ -98,3 +98,7 @@ public:
 	alignas(4) char dummy[CACHE_LINE_SIZE]{};
 	alignas(4) char data[CACHE_LINE_SIZE]{};
 };
+
+// A file-backed streamed sample-audio chunk (Cluster::Type::SAMPLE). Alias today (Cluster is still
+// one overloaded type); becomes a distinct struct once the cache/perc role (ComputedChunk) splits off.
+using StreamedChunk = Cluster;

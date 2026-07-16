@@ -187,15 +187,15 @@ void SampleHolder::claimClusterReasons(bool reversed, int32_t clusterLoadInstruc
 	claimClusterReasonsForMarker(clustersForStart, startPlaybackAtByte, playDirection, clusterLoadInstruction);
 }
 
-void SampleHolder::claimClusterReasonsForMarker(Cluster** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
-                                                int32_t clusterLoadInstruction) {
+void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte,
+                                                int32_t playDirection, int32_t clusterLoadInstruction) {
 
 	int32_t clusterIndex = startPlaybackAtByte >> Cluster::size_magnitude;
 
 	uint32_t posWithinCluster = startPlaybackAtByte & (Cluster::size - 1);
 
 	// Set up new temp list
-	Cluster* newClusters[kNumClustersLoadedAhead];
+	StreamedChunk* newClusters[kNumClustersLoadedAhead];
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		newClusters[l] = nullptr;
 	}

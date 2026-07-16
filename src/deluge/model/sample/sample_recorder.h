@@ -45,6 +45,7 @@ enum class RecorderStatus {
 
 class Sample;
 class Cluster;
+using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class AudioClip;
 class Output;
 struct RecorderConfig {
@@ -89,7 +90,7 @@ public:
 
 	// Note! If this is NULL, that means that currentRecordClusterIndex refers to a cluster that never got created (cos
 	// some error or max file size reached)
-	Cluster* currentRecordCluster = nullptr;
+	StreamedChunk* currentRecordCluster = nullptr;
 
 	uint32_t audioFileNumber{};
 	AudioRecordingFolder folderID;
@@ -162,7 +163,7 @@ public:
 	std::optional<deluge::io::Stream> file;
 
 private:
-	void setExtraBytesOnPreviousCluster(Cluster* currentCluster, int32_t currentClusterIndex);
+	void setExtraBytesOnPreviousCluster(StreamedChunk* currentCluster, int32_t currentClusterIndex);
 	Error writeCluster(int32_t clusterIndex, size_t numBytes);
 	Error alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
 
@@ -171,7 +172,7 @@ private:
 	Error createNextCluster();
 	Error writeAnyCompletedClusters();
 	void finishCapturing();
-	void updateDataLengthInFirstCluster(Cluster* cluster);
+	void updateDataLengthInFirstCluster(StreamedChunk* cluster);
 	void totalSampleLengthNowKnown(uint32_t totalLength, uint32_t loopEndPointSamples = 0);
 	void detachSample();
 	Error truncateFileDownToSize(uint32_t newFileSize);

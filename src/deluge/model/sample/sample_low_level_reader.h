@@ -30,6 +30,7 @@ class VoiceSamplePlaybackGuide;
 class Voice;
 class Sample;
 class Cluster;
+using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class TimeStretcher;
 class SamplePlaybackGuide;
 
@@ -103,7 +104,7 @@ public:
 
 	deluge::dsp::Interpolator interpolator_{};
 
-	std::array<Cluster*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
+	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
 
 private:
 	bool assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex, int32_t priorityRating);

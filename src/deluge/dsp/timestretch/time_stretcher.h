@@ -31,6 +31,7 @@ class Voice;
 class VoiceSamplePlaybackGuide;
 class VoiceUnisonPartSource;
 class Cluster;
+using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class Sample;
 class SampleCache;
 
@@ -93,7 +94,9 @@ public:
 	uint64_t bufferSamplesWritten; // Hopefully we can do away with the need for this
 #endif
 
-	Cluster* clustersForPercLookahead[kNumClustersLoadedAhead]{};
+	// Misnamed (not perc cache) — despite living in the perc-lookahead machinery, this holds source-audio
+	// SAMPLE chunks fed via Sample::clusters[].getCluster() (see updateClustersForPercLookahead).
+	StreamedChunk* clustersForPercLookahead[kNumClustersLoadedAhead]{};
 
 	Cluster* percCacheClustersNearby[2]{}; // Remembers and acts as a "reason" for the two most recently needed /
 	                                       // accessed Clusters, basically

@@ -875,7 +875,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 #define REPORT_LOAD_TIME 0
 
-bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter) {
+bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasonsAfter) {
 
 	if (currentlyAccessingCard) {
 		return false; // Could happen if we're trying to render a waveform but we're actually already inside the SD
@@ -939,7 +939,7 @@ bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter)
 // inter-cluster boundary fixups. No orchestration (the card-state guards, clusterBeingLoaded,
 // the loading "reason", and the loadingQueue stay in loadCluster). This is the seam the resource
 // manager will use as a materialize Source. `minNumReasonsAfter` only feeds the ALPHA sanity checks.
-bool AudioFileManager::readClusterData(Cluster& cluster, [[maybe_unused]] int32_t minNumReasonsAfter) {
+bool AudioFileManager::readClusterData(StreamedChunk& cluster, [[maybe_unused]] int32_t minNumReasonsAfter) {
 	Sample* sample = cluster.sample;
 	int32_t clusterIndex = cluster.cluster_index;
 
@@ -1047,7 +1047,7 @@ getOutEarly:
 	// only passed when present AND loaded, matching the original inline gates exactly.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
-		Cluster* prevCluster = sample->clusters[cluster.cluster_index - 1].cluster;
+		StreamedChunk* prevCluster = sample->clusters[cluster.cluster_index - 1].cluster;
 		if (prevCluster && prevCluster->loaded) {
 			prev_edge = deluge::audio::stream::StitchPrevEdge{
 			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
@@ -1059,7 +1059,7 @@ getOutEarly:
 
 	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
 	if (clusterIndex < static_cast<int32_t>(sample->clusters.size()) - 1) {
-		Cluster* nextCluster = sample->clusters[cluster.cluster_index + 1].cluster;
+		StreamedChunk* nextCluster = sample->clusters[cluster.cluster_index + 1].cluster;
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{
 			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),
@@ -1178,7 +1178,7 @@ performActionsAndGetOut:
 		if (p == nullptr) {
 			return;
 		}
-		Cluster* cluster = reinterpret_cast<Cluster*>(p);
+		StreamedChunk* cluster = reinterpret_cast<StreamedChunk*>(p);
 
 		// The unloadable domain-filter stays here (the manager doesn't know it). markAsUnloadable
 		// already de-queues, so this is the safety net — loader_next has cleared its queued flag, so

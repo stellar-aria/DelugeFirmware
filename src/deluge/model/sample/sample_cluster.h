@@ -21,6 +21,7 @@
 #include <utility>
 
 class Cluster;
+using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class Sample;
 
 // This is a quick list item within Sample storing minimal info about one Cluster (which often won't be loaded yet) of
@@ -45,17 +46,17 @@ public:
 		return *this;
 	}
 
-	// TODO: This should return a std::expected<Cluster*, Error), removing the last parameter
-	Cluster* getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction = CLUSTER_ENQUEUE,
-	                    uint32_t priorityRating = 0xFFFFFFFF, Error* error = nullptr);
+	// TODO: This should return a std::expected<StreamedChunk*, Error), removing the last parameter
+	StreamedChunk* getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction = CLUSTER_ENQUEUE,
+	                          uint32_t priorityRating = 0xFFFFFFFF, Error* error = nullptr);
 	void ensureNoReason(Sample* sample);
 
 	// In sectors. (Those 512 byte things. Not to be confused with clusters.)
 	// 0 means invalid, and we check for this as a last resort before writing
 	uint32_t sdAddress = 0;
 
-	Cluster* cluster = nullptr; // May automatically be set to NULL if the Cluster needs to be deallocated (can only
-	                            // happen if it has no "reasons" left)
+	StreamedChunk* cluster = nullptr; // May automatically be set to NULL if the Cluster needs to be deallocated (can
+	                                  // only happen if it has no "reasons" left)
 	int8_t minValue = 127;
 	int8_t maxValue = -128;
 	bool investigatedWholeLength = false;

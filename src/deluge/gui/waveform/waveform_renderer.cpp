@@ -404,7 +404,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 				                    // Malte P.
 			}
 
-			Cluster* cluster = sampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+			StreamedChunk* cluster = sampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
 			if (!cluster) {
 cantReadData:
 				D_PRINTLN("cant read");
@@ -426,7 +426,7 @@ cantReadData:
 
 			// However, if that's reduced us to 0 bytes to read, we know we're gonna have to load in the next Cluster to
 			// get its sample that's on the boundary
-			Cluster* nextCluster = nullptr;
+			StreamedChunk* nextCluster = nullptr;
 			if (endByteWithinCluster <= startByteWithinCluster && clusterIndexToDo < endClusters - 1) {
 				endByteWithinCluster += overshoot;
 				SampleCluster* nextSampleCluster = &sample->clusters[clusterIndexToDo + 1];

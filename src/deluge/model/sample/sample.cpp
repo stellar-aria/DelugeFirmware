@@ -116,7 +116,7 @@ Error Sample::initialize(int32_t newNumClusters) {
 
 static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
 	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) Cluster();
+	auto* cluster = new (dest) StreamedChunk();
 	cluster->type = Cluster::Type::SAMPLE;
 	cluster->sample = sample;
 	cluster->cluster_index = index;
@@ -127,7 +127,7 @@ static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void*
 		sample->clusters[index].cluster = cluster;
 	}
 	else {
-		cluster->~Cluster(); // manager frees the slab slot
+		cluster->~StreamedChunk(); // manager frees the slab slot
 	}
 	return ok;
 }
@@ -138,7 +138,7 @@ static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void*
 // the Sample's pointer is set immediately so the requester holds a valid (loaded==false) Cluster.
 static void clusterConstruct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
 	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) Cluster();
+	auto* cluster = new (dest) StreamedChunk();
 	cluster->type = Cluster::Type::SAMPLE;
 	cluster->sample = sample;
 	cluster->cluster_index = index;
@@ -149,13 +149,13 @@ static void clusterConstruct(void* /*ctx*/, void* owner, uint32_t index, void* d
 
 static void clusterEvict(void* /*ctx*/, void* owner, uint32_t index) {
 	auto* sample = static_cast<Sample*>(owner);
-	Cluster* cluster = sample->clusters[index].cluster;
+	StreamedChunk* cluster = sample->clusters[index].cluster;
 	sample->clusters[index].cluster = nullptr;
 	if (cluster != nullptr) {
 		// A constructed-but-not-yet-loaded chunk may still be in the loader queue — de-queue it so the
 		// queue can't dangle onto freed memory. (Eviction also resets the slot, but be explicit.)
 		deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot);
-		cluster->~Cluster(); // manager frees the slab slot
+		cluster->~StreamedChunk(); // manager frees the slab slot
 	}
 }
 
@@ -283,7 +283,7 @@ void Sample::markAsUnloadable() {
 	// If any Clusters in the load-queue, remove them from there
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
-		Cluster* cluster = clusters[c].cluster;
+		StreamedChunk* cluster = clusters[c].cluster;
 		if (cluster != nullptr) {
 			cluster->unloadable = true;
 			deluge_resource_loader_remove(mgr, cluster->resource_slot);
@@ -712,7 +712,7 @@ doLoading:
 		}
 
 		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff.
-		Cluster* cluster = clusters[sourceClusterIndex].cluster;
+		StreamedChunk* cluster = clusters[sourceClusterIndex].cluster;
 		if (!cluster || !cluster->loaded) {
 			goto getOut;
 		}
@@ -934,7 +934,7 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				FREEZE_WITH_ERROR("EEEE");
 			}
 
-			Cluster* cluster = clusters[whichCluster].cluster;
+			StreamedChunk* cluster = clusters[whichCluster].cluster;
 			if (!cluster || !cluster->loaded) {
 				return false;
 			}
@@ -1470,7 +1470,8 @@ startAgain:
 	uint32_t currentClusterIndex = currentOffset >> Cluster::size_magnitude;
 	int32_t writeIndex = 0;
 
-	Cluster* cluster = clusters[currentClusterIndex].getCluster(this, currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
+	StreamedChunk* cluster =
+	    clusters[currentClusterIndex].getCluster(this, currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
 	if (!cluster) {
 		D_PRINTLN("failed to load first");
 getOut:
@@ -1478,7 +1479,7 @@ getOut:
 		return 0;
 	}
 
-	Cluster* nextCluster = nullptr;
+	StreamedChunk* nextCluster = nullptr;
 
 	int32_t biggestValueFound = 0;
 
@@ -1817,7 +1818,7 @@ doneReading:
 void Sample::convertDataOnAnyClustersIfNecessary() {
 	if (rawDataFormat != RawDataFormat::NATIVE) {
 		for (int32_t c = getFirstClusterIndexWithAudioData(); c < getFirstClusterIndexWithNoAudioData(); c++) {
-			Cluster* cluster = clusters[c].cluster;
+			StreamedChunk* cluster = clusters[c].cluster;
 			if (cluster != nullptr) {
 
 				// Add reason in case it would get stolen
@@ -1912,7 +1913,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 	int32_t numClusterReasons = 0;
 	for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
 
-		Cluster* cluster = clusters[c].cluster;
+		StreamedChunk* cluster = clusters[c].cluster;
 		if (cluster) {
 
 			if (cluster->cluster_index != c) {
@@ -1933,7 +1934,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 		D_PRINTLN("reason dump---");
 		for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
 
-			Cluster* cluster = clusters[c].cluster;
+			StreamedChunk* cluster = clusters[c].cluster;
 			if (cluster) {
 				D_PRINT("cluster->lease_count[%d]", cluster->lease_count());
 

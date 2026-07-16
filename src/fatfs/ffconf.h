@@ -113,7 +113,10 @@
 */
 
 
-#define FF_USE_LFN		1 // Set by Rohan
+#define FF_USE_LFN		2 // Phase 2b: REQUIRED with FF_FS_REENTRANT=1 -- ff.c #errors on
+								// FF_FS_REENTRANT && FF_USE_LFN==1 (the mode-1 static LFN buffer
+								// is not thread-safe). Mode 2 puts the LFN working buffer on the
+								// STACK (~512 B/call) instead -- validate stack headroom on-device.
 #define FF_MAX_LFN		255
 /* The FF_USE_LFN switches the support for LFN (long file name).
 /
@@ -276,9 +279,12 @@
 
 
 /* #include <somertos.h>	// O/S definitions */
-#define FF_FS_REENTRANT	0
+#define FF_FS_REENTRANT	1 // Phase 2b: enables the volume grant hooks below. The grants are
+								// no-ops today (block_on has no concurrent FatFS entry on any
+								// BSP) -- this installs the primitive for the async-SD follow-on.
 #define FF_FS_TIMEOUT	1000
-#define FF_SYNC_t		HANDLE
+#define FF_SYNC_t		int // Dummy handle type: the ff_*_syncobj/grant hooks in ffsystem.c
+								// are no-ops for now, so no real O/S sync object is needed.
 /* The option FF_FS_REENTRANT switches the re-entrancy (thread safe) of the FatFs
 /  module itself. Note that regardless of this option, file access to different
 /  volume is always re-entrant and volume control functions, f_mount(), f_mkfs()

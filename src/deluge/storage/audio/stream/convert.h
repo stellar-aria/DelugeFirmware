@@ -79,13 +79,11 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 	begin = convert_24bit_range_simd(begin, end, yield);
 
 	while (true) {
-		char const* end_pos_now = begin + 1024; // Every this many bytes, we'll pause and do an audio routine
-		end_pos_now = std::min(end_pos_now, end);
+		// Every this many bytes, we'll pause and do an audio routine.
+		char const* chunk_end = std::min<char const*>(begin + 1024, end);
 
-		while (begin < end_pos_now) {
-			uint8_t temp = begin[0];
-			begin[0] = begin[2];
-			begin[2] = temp;
+		while (begin < chunk_end) {
+			std::swap(begin[0], begin[2]); // ENDIANNESS_WRONG_24: swap byte 0 and byte 2 of this 3-byte group
 			begin += 3;
 		}
 
@@ -160,9 +158,11 @@ template <class Yield>
 void convert_word_range(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
 	begin = convert_range_simd(begin, end, format, yield);
 
-	for (; begin < end; begin += 4) {
+	// Yield roughly every 1024 bytes (i.e. whenever `begin`'s address crosses a 1024-byte boundary).
+	constexpr uintptr_t yield_address_mask = 0b1111111100;
 
-		if (!((uintptr_t)begin & 0b1111111100)) {
+	for (; begin < end; begin += 4) {
+		if ((reinterpret_cast<uintptr_t>(begin) & yield_address_mask) == 0) {
 			yield();
 		}
 
@@ -185,76 +185,62 @@ template <class Yield>
 void convert_cluster_data(std::span<std::byte> data, int32_t cluster_index, RawDataFormat format,
                           ConvertGeometry geometry, size_t cluster_size, size_t cluster_size_magnitude,
                           std::span<std::byte, 3> unconverted_head_out, Yield yield) {
-	char* char_data = reinterpret_cast<char*>(data.data());
-
-	// We haven't yet figured out where the audio data starts
+	// We haven't yet figured out where the audio data starts.
 	if (geometry.audio_data_start_pos_bytes == 0) {
 		return;
 	}
+	if (format == RawDataFormat::NATIVE) {
+		return;
+	}
 
-	if (format != RawDataFormat::NATIVE) {
-		std::copy(char_data, &char_data[3], reinterpret_cast<char*>(unconverted_head_out.data()));
+	// Back up the pre-conversion first 3 bytes (mirrors Cluster::firstThreeBytesPreDataConversion, used to
+	// undo the 24-bit swap on a scan reversal) before doing any conversion.
+	std::ranges::copy(data.first<3>(), unconverted_head_out.begin());
 
-		int32_t start_pos = geometry.audio_data_start_pos_bytes;
-		int32_t start_cluster = start_pos >> cluster_size_magnitude;
+	int32_t const audio_start_pos = geometry.audio_data_start_pos_bytes;
+	int32_t const first_audio_cluster = audio_start_pos >> cluster_size_magnitude;
 
-		if (cluster_index < start_cluster) { // Hmm, there must have been a case where this happens...
-			return;
+	if (cluster_index < first_audio_cluster) { // Hmm, there must have been a case where this happens...
+		return;
+	}
+
+	bool const is_last_audio_cluster = cluster_index == geometry.first_cluster_index_with_no_audio_data - 1;
+
+	// The offset within this cluster where the sample's audio data ends, when it ends inside this cluster
+	// (only meaningful when is_last_audio_cluster).
+	auto const audio_region_end_offset = [&]() -> uint32_t {
+		uint32_t const audio_data_end_pos = geometry.audio_data_start_pos_bytes + geometry.audio_data_length_bytes;
+		return audio_data_end_pos & (cluster_size - 1);
+	};
+
+	// Special case for 24-bit with its uneven number of bytes.
+	if (format == RawDataFormat::ENDIANNESS_WRONG_24) {
+		size_t begin_offset;
+		if (cluster_index == first_audio_cluster) {
+			begin_offset = audio_start_pos & (cluster_size - 1);
 		}
-
-		// Special case for 24-bit with its uneven number of bytes
-		if (format == RawDataFormat::ENDIANNESS_WRONG_24) {
-			char* pos;
-
-			if (cluster_index == start_cluster) {
-				pos = &char_data[start_pos & (cluster_size - 1)];
-			}
-			else {
-				uint32_t bytes_before_start_of_cluster =
-				    cluster_index * cluster_size - geometry.audio_data_start_pos_bytes;
-				int32_t bytes_eating_into_another_3byte = bytes_before_start_of_cluster % 3;
-				if (bytes_eating_into_another_3byte == 0) {
-					bytes_eating_into_another_3byte = 3;
-				}
-				pos = &char_data[3 - bytes_eating_into_another_3byte];
-			}
-
-			char const* end_pos;
-			if (cluster_index == geometry.first_cluster_index_with_no_audio_data - 1) {
-				uint32_t end_at_byte_pos = geometry.audio_data_start_pos_bytes + geometry.audio_data_length_bytes;
-				uint32_t end_at_pos_within_cluster = end_at_byte_pos & (cluster_size - 1);
-				end_pos = &char_data[end_at_pos_within_cluster];
-			}
-			else {
-				end_pos = &char_data[cluster_size - 2];
-			}
-
-			convert_24bit_range(pos, end_pos, yield);
-		}
-
-		// Or, all other bit depths
 		else {
-			std::byte* pos;
-
-			if (cluster_index == start_cluster) {
-				pos = data.data() + (start_pos & (cluster_size - 1));
+			uint32_t const bytes_before_cluster_start =
+			    cluster_index * cluster_size - geometry.audio_data_start_pos_bytes;
+			int32_t bytes_into_prev_group = bytes_before_cluster_start % 3;
+			if (bytes_into_prev_group == 0) {
+				bytes_into_prev_group = 3;
 			}
-			else {
-				pos = data.data() + (start_pos & 0b11);
-			}
-
-			std::byte* end_pos;
-			if (cluster_index == geometry.first_cluster_index_with_no_audio_data - 1) {
-				uint32_t end_at_byte_pos = geometry.audio_data_start_pos_bytes + geometry.audio_data_length_bytes;
-				uint32_t end_at_pos_within_cluster = end_at_byte_pos & (cluster_size - 1);
-				end_pos = data.data() + end_at_pos_within_cluster;
-			}
-			else {
-				end_pos = data.data() + (cluster_size - 3);
-			}
-
-			convert_word_range(pos, end_pos, format, yield);
+			begin_offset = 3 - bytes_into_prev_group;
 		}
+		size_t const end_offset = is_last_audio_cluster ? audio_region_end_offset() : cluster_size - 2;
+
+		convert_24bit_range(reinterpret_cast<char*>(data.data() + begin_offset),
+		                    reinterpret_cast<char*>(data.data() + end_offset), yield);
+	}
+
+	// Or, all other bit depths.
+	else {
+		size_t const begin_offset =
+		    cluster_index == first_audio_cluster ? (audio_start_pos & (cluster_size - 1)) : (audio_start_pos & 0b11);
+		size_t const end_offset = is_last_audio_cluster ? audio_region_end_offset() : cluster_size - 3;
+
+		convert_word_range(data.data() + begin_offset, data.data() + end_offset, format, yield);
 	}
 }
 } // namespace deluge::audio::stream

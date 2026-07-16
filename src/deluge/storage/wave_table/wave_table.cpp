@@ -26,7 +26,6 @@
 #include "model/sample/sample.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/render_wave.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/audio/deserializer_byte_source.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
@@ -381,7 +380,7 @@ tryGettingFFTConfig:
 
 	uint32_t bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 
-	Cluster* cluster = nullptr;
+	StreamedChunk* cluster = nullptr;
 	int32_t clusterIndexCurrentlyLoaded = -1; // Initially, none is loaded yet.
 
 	uint32_t startedBandsYet = 0;
@@ -417,17 +416,16 @@ tryGettingFFTConfig:
 
 					// First, unload the old Cluster if there was one
 					if (cluster) {
-						audioFileManager.removeReasonFromCluster(*cluster, "E385");
+						deluge::cluster::remove_reason(*cluster, "E385");
 					}
 
-					cluster = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_LOAD_IMMEDIATELY,
-					                                                    0, &error);
+					cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0, &error);
 					if (!cluster) {
 						return error; // allocGuard frees both temp buffers + the bands.
 					}
 
 					clusterIndexCurrentlyLoaded = clusterIndex;
-					sourceBuffer = cluster->data;
+					sourceBuffer = reinterpret_cast<char const*>(cluster->payload().data());
 				}
 			}
 
@@ -766,7 +764,7 @@ transformBandToTimeDomain:
 
 	// There could be a Cluster with a reason we still need to remove.
 	if (cluster != nullptr) {
-		audioFileManager.removeReasonFromCluster(*cluster, "E385");
+		deluge::cluster::remove_reason(*cluster, "E385");
 	}
 
 	if (numCycles > 1) {

@@ -243,7 +243,7 @@ Error StorageManager::initSD() {
 	// actually initialise. The fs_type check matters where the block device can report "ready"
 	// before the FAT volume has ever been mounted (e.g. the host-sim opens its disk image
 	// eagerly): without it we'd take the delayed-mount path below, leaving fileSystem.csize == 0
-	// — and then Cluster::setSize(0) makes every file read request 0 bytes. On hardware the volume
+	// — and then Cluster::set_size(0) makes every file read request 0 bytes. On hardware the volume
 	// is always mounted by the time the card reports initialised, so this is a no-op there.
 	DSTATUS status = disk_status(deluge_block_sd_unit());
 	if ((status & STA_NOINIT) == 0 && fileSystem.fs_type != 0) {

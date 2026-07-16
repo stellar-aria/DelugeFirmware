@@ -88,13 +88,6 @@ public:
 	void init();
 	AudioFile* getAudioFileFromFilename(std::string& fileName, bool mayReadCard, Error* error, FilePointer* filePointer,
 	                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts = false);
-	bool loadCluster(Cluster& cluster, int32_t minNumReasonsAfter = 0);
-	// The pure data read extracted from loadCluster (the future resource-manager materialize Source):
-	// sector count + disk_read + conversion + inter-cluster boundary fixups, with no orchestration
-	// (card-state guards, clusterBeingLoaded, the loading reason, and the loadingQueue stay in loadCluster).
-	bool readClusterData(Cluster& cluster, [[maybe_unused]] int32_t minNumReasonsAfter);
-	void loadAnyEnqueuedClusters(int32_t maxNum = 128, bool mayProcessUserActionsBetween = false);
-	void removeReasonFromCluster(Cluster& cluster, char const* errorCode, bool deletingSong = false);
 
 	bool ensureEnoughMemoryForOneMoreAudioFile();
 
@@ -103,7 +96,10 @@ public:
 	Error setupAlternateAudioFilePath(std::string& newPath, int32_t dirPathLength, std::string& oldPath);
 	Error setupAlternateAudioFileDir(std::string& newPath, char const* rootDir,
 	                                 const char* songFilenameWithoutExtension);
-	bool loadingQueueHasAnyLowestPriorityElements();
+	/// @brief Whether the SD card is currently unusable for streaming (ejected, disabled, or not
+	///        initialized) — the loader pump's card-down gate.
+	/// @return `true` if the card cannot be read right now.
+	[[nodiscard]] bool cardUnavailableForStreaming() const;
 	/// If songname isn't supplied the file is placed in the main recording folder and named as samples/folder/REC###.
 	/// If song and channel are supplied then it's placed in samples/folder/song/channel_###
 	Error getUnusedAudioRecordingFilePath(std::string& filePath, std::string* tempFilePathForRecording,
@@ -125,10 +121,6 @@ public:
 
 	void setCardRead() { cardReadOnce = true; }
 	void setCardEjected() { cardEjected = true; }
-
-	Cluster* clusterBeingLoaded{};
-	int32_t minNumReasonsForClusterBeingLoaded{}; // Only valid when clusterBeingLoaded is set. And this exists for bug
-	                                              // hunting only.
 
 	std::string alternateAudioFileLoadPath{};
 	AlternateLoadDirStatus alternateLoadDirStatus = AlternateLoadDirStatus::NONE_SET;

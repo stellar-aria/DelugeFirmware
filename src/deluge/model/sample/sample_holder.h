@@ -29,7 +29,7 @@ extern "C" {
 }
 
 class Sample;
-class Cluster;
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 
 class SampleHolder : public AudioFileHolder {
 public:
@@ -75,10 +75,10 @@ public:
 
 	int32_t neutralPhaseIncrement{};
 
-	Cluster* clustersForStart[kNumClustersLoadedAhead]{};
+	StreamedChunk* clustersForStart[kNumClustersLoadedAhead]{};
 
 protected:
-	void claimClusterReasonsForMarker(Cluster** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
+	void claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
 	                                  int32_t clusterLoadInstruction);
 	virtual void sampleBeenSet(bool reversed, bool manuallySelected) {}
 };

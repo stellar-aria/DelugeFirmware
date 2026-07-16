@@ -22,7 +22,6 @@
 #include "model/sample/sample.h"
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 
@@ -67,7 +66,7 @@ void SampleHolder::beenClonedFrom(SampleHolder const* other, bool reversed) {
 void SampleHolder::unassignAllClusterReasons(bool beingDestructed) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForStart[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clustersForStart[l], "E123");
+			deluge::cluster::remove_reason(*clustersForStart[l], "E123");
 			if (!beingDestructed) {
 				clustersForStart[l] = nullptr;
 			}
@@ -187,15 +186,15 @@ void SampleHolder::claimClusterReasons(bool reversed, int32_t clusterLoadInstruc
 	claimClusterReasonsForMarker(clustersForStart, startPlaybackAtByte, playDirection, clusterLoadInstruction);
 }
 
-void SampleHolder::claimClusterReasonsForMarker(Cluster** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
-                                                int32_t clusterLoadInstruction) {
+void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte,
+                                                int32_t playDirection, int32_t clusterLoadInstruction) {
 
 	int32_t clusterIndex = startPlaybackAtByte >> Cluster::size_magnitude;
 
 	uint32_t posWithinCluster = startPlaybackAtByte & (Cluster::size - 1);
 
 	// Set up new temp list
-	Cluster* newClusters[kNumClustersLoadedAhead];
+	StreamedChunk* newClusters[kNumClustersLoadedAhead];
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		newClusters[l] = nullptr;
 	}
@@ -215,9 +214,10 @@ void SampleHolder::claimClusterReasonsForMarker(Cluster** clusters, uint32_t sta
 		}
 		*/
 
-		SampleCluster* sampleCluster = &((Sample*)audioFile)->clusters[clusterIndex];
-
-		newClusters[l] = sampleCluster->getCluster(((Sample*)audioFile), clusterIndex, clusterLoadInstruction);
+		// Boundary-crossing lease: one stream() hop per lookahead slot here, not per-sample -- this
+		// runs only when (re)claiming the head/loop-start lookahead window, never in the per-sample
+		// hot loop.
+		newClusters[l] = ((Sample*)audioFile)->stream().get_cluster(clusterIndex, clusterLoadInstruction);
 
 		if (!newClusters[l]) {
 			D_PRINTLN("NULL!!");
@@ -236,7 +236,7 @@ void SampleHolder::claimClusterReasonsForMarker(Cluster** clusters, uint32_t sta
 	// Replace old list
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E146");
+			deluge::cluster::remove_reason(*clusters[l], "E146");
 		}
 		clusters[l] = newClusters[l];
 	}

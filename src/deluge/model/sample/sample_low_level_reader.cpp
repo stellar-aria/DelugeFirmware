@@ -25,13 +25,12 @@
 #include "model/sample/sample.h"
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample_playback_guide.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 
-void SampleLowLevelReader::unassignAllReasons(bool wontBeUsedAgain) {
+void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E027", wontBeUsedAgain);
+			deluge::cluster::remove_reason(*clusters[l], "E027");
 			clusters[l] = nullptr;
 		}
 	}
@@ -42,8 +41,8 @@ void SampleLowLevelReader::unassignAllReasons(bool wontBeUsedAgain) {
 int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlaybackGuide* guide,
                                                   bool compensateForInterpolationBuffer) {
 	if (clusters[0] != nullptr) {
-		uint32_t withinCluster =
-		    (currentPlayPos - clusters[0]->data) + 4 - sample->byteDepth; // Remove deliberate misalignment
+		uint32_t withinCluster = (currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data())) + 4
+		                         - sample->byteDepth; // Remove deliberate misalignment
 
 		if (compensateForInterpolationBuffer && interpolationBufferSizeLastTime) {
 			int32_t extraSamples = -(interpolationBufferSizeLastTime >> 1);
@@ -51,7 +50,7 @@ int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlayback
 			// the new hop, in time stretching
 			withinCluster += extraSamples * sample->numChannels * sample->byteDepth * guide->playDirection;
 		}
-		return (clusters[0]->clusterIndex << Cluster::size_magnitude) + withinCluster;
+		return (clusters[0]->cluster_index << Cluster::size_magnitude) + withinCluster;
 	}
 	// Hopefully this won't go negative, cos we're returning as unsigned...
 	return (int32_t)guide->endPlaybackAtByte + (int32_t)(uintptr_t)currentPlayPos * guide->playDirection;
@@ -67,7 +66,7 @@ void SampleLowLevelReader::setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuid
 #endif
 
 	// Ok, now we've just moved the play-pos into a new Cluster, so do some setting up for that
-	currentPlayPos = clusters[0]->data + bytePosWithinNewCluster;
+	currentPlayPos = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinNewCluster;
 
 	setupReassessmentLocation(guide, sample);
 }
@@ -97,7 +96,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 
 	realignPlaybackParameters(sample);
 
-	int32_t clusterIndex = clusters[0]->clusterIndex;
+	int32_t clusterIndex = clusters[0]->cluster_index;
 
 	// We may have ended up past the finalClusterIndex if we've just switched from using a cache.
 	// This needs correcting, so "looping" can occur at next render. Must happen before setupReassessmentLocation() is
@@ -105,15 +104,15 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
 	if ((clusterIndex - finalClusterIndex) * guide->playDirection > 0) {
 		D_PRINTLN("saving from being past finalCluster");
-		Cluster* finalCluster = sample->clusters[finalClusterIndex].cluster;
+		StreamedChunk* finalCluster = sample->stream().chunk_at(finalClusterIndex);
 		if (!finalCluster) {
 			return false;
 		}
 
-		int32_t bytePosWithinCluster = currentPlayPos - clusters[0]->data;
+		int32_t bytePosWithinCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
 		bytePosWithinCluster += (clusterIndex - finalClusterIndex) * Cluster::size;
 
-		currentPlayPos = finalCluster->data + bytePosWithinCluster;
+		currentPlayPos = reinterpret_cast<char*>(finalCluster->payload().data()) + bytePosWithinCluster;
 		clusterIndex = finalClusterIndex;
 	}
 
@@ -142,7 +141,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 
 	int32_t bytesPerSample = (sample->byteDepth * sample->numChannels);
 
-	int32_t currentClusterIndex = clusters[0]->clusterIndex;
+	int32_t currentClusterIndex = clusters[0]->cluster_index;
 
 	int32_t endPlaybackAtByte;
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers(), &endPlaybackAtByte);
@@ -162,7 +161,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 		}
 
-		reassessmentLocation = &clusters[0]->data[bytePosWithinClusterToStopAt];
+		reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinClusterToStopAt;
 		reassessmentAction = REASSESSMENT_ACTION_STOP_OR_LOOP;
 	}
 
@@ -187,7 +186,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 				FREEZE_WITH_ERROR("E163");
 			}
 #endif
-			reassessmentLocation = clusters[0]->data + endPosWithinCurrentCluster;
+			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
 		}
 
 		// Playing backwards
@@ -202,7 +201,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 
 			int32_t endPosWithinCurrentCluster = -excess;
-			reassessmentLocation = clusters[0]->data + endPosWithinCurrentCluster;
+			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
 		}
 	}
 
@@ -211,10 +210,11 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	if (guide->playDirection == 1) {
 		int32_t firstClusterWithData = sample->getFirstClusterIndexWithAudioData();
 		if (currentClusterIndex == firstClusterWithData) {
-			clusterStartLocation = &clusters[0]->data[sample->audioDataStartPosBytes & (Cluster::size - 1)];
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data())
+			                       + (sample->audioDataStartPosBytes & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = clusters[0]->data;
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data());
 		}
 	}
 
@@ -227,10 +227,11 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 		int32_t highestClusterIndex = audioDataStopPos >> Cluster::size_magnitude;
 
 		if (currentClusterIndex == highestClusterIndex) {
-			clusterStartLocation = &clusters[0]->data[(audioDataStopPos - 1) & (Cluster::size - 1)];
+			clusterStartLocation =
+			    reinterpret_cast<char*>(clusters[0]->payload().data()) + ((audioDataStopPos - 1) & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = &clusters[0]->data[Cluster::size - 1];
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + (Cluster::size - 1);
 		}
 	}
 
@@ -300,8 +301,10 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 
-		// Grab it.
-		clusters[l] = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_ENQUEUE, priorityRating);
+		// Grab it. Boundary-crossing refill: one stream() hop per lookahead slot, at reassessment /
+		// cluster-boundary time, NOT per sample -- the per-sample inner render loop below only ever
+		// reads the local `clusters[]` array filled here.
+		clusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE, priorityRating);
 
 		// The first one is required to not only have returned an object to us (which it might not have if insufficient
 		// RAM or maybe other reasons), but also to be fully loaded.
@@ -331,10 +334,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	}
 #endif
 
-	int32_t oldClusterIndex = clusters[0]->clusterIndex;
+	int32_t oldClusterIndex = clusters[0]->cluster_index;
 
-	int32_t bytePosWithinOldCluster = currentPlayPos - clusters[0]->data;
-	audioFileManager.removeReasonFromCluster(*clusters[0], "E035");
+	int32_t bytePosWithinOldCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
+	deluge::cluster::remove_reason(*clusters[0], "E035");
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead - 1; l++) {
 		clusters[l] = clusters[l + 1];
@@ -350,7 +353,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	}
 
 	if (!clusters[0]->loaded) {
-		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->clusterIndex);
+		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->cluster_index);
 
 		return false;
 	}
@@ -359,10 +362,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	bytePosWithinOldCluster = bytePosWithinOldCluster + 4 - sample->byteDepth;
 
 	// And for the one at the far end, just grab the next one
-	Cluster* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
+	StreamedChunk* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
 
 	if (oldLastCluster) {
-		int32_t prevClusterIndex = oldLastCluster->clusterIndex;
+		int32_t prevClusterIndex = oldLastCluster->cluster_index;
 
 		int32_t newClusterIndex = prevClusterIndex + guide->playDirection;
 
@@ -375,9 +378,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 		// Or if there is...
 		else {
 
-			// Grab it.
+			// Grab it. Boundary-crossing refill: one stream() hop, once per cluster of playback (we've
+			// just moved on to the next Cluster), NOT per sample.
 			clusters[kNumClustersLoadedAhead - 1] =
-			    sample->clusters[newClusterIndex].getCluster(sample, newClusterIndex, CLUSTER_ENQUEUE, priorityRating);
+			    sample->stream().get_cluster(newClusterIndex, CLUSTER_ENQUEUE, priorityRating);
 
 			// If that failed (because no free RAM), no damage gets done.
 		}
@@ -1209,7 +1213,7 @@ bool SampleLowLevelReader::readSamplesForTimeStretching(
 void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stealReasons) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {
-			audioFileManager.removeReasonFromCluster(*clusters[l], "E131", false);
+			deluge::cluster::remove_reason(*clusters[l], "E131");
 		}
 
 		clusters[l] = other.clusters[l];
@@ -1219,7 +1223,7 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 				other.clusters[l] = nullptr;
 			}
 			else {
-				clusters[l]->addReason();
+				deluge::cluster::add_lease(clusters[l]);
 			}
 		}
 	}

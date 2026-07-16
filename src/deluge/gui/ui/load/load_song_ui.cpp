@@ -43,6 +43,7 @@
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
@@ -475,7 +476,7 @@ gotErrorAfterCreatingSong:
 	}
 
 	// Ensure all AudioFile Clusters needed for new song are loaded
-	yieldWithTimeout([]() { return !(audioFileManager.loadingQueueHasAnyLowestPriorityElements()); }, 5);
+	yieldWithTimeout([]() { return !(deluge::audio::stream::loader::has_lowest_priority_queued()); }, 5);
 
 	preLoadedSong->name = enteredText;
 
@@ -526,7 +527,7 @@ swapDone:
 	deluge::hid::display::OLED::displayWorkingAnimation("Loading");
 	// Ok, the swap's been done, the first tick of the new song has been done, and there are potentially loads of
 	// samples wanting some data loaded. So do that immediately
-	audioFileManager.loadAnyEnqueuedClusters(99999);
+	deluge::audio::stream::loader::pump(99999);
 
 	// Delete the old song
 	AudioEngine::logAction("deleting old song");

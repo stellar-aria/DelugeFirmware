@@ -195,12 +195,13 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 
 	// We load our new Clusters into a secondary array first, to preserve the reason-holding power of whatever is
 	// already in our main one until we unassign them below
-	std::array<Cluster*, kNumClustersLoadedAhead> newClusters{};
+	std::array<StreamedChunk*, kNumClustersLoadedAhead> newClusters{};
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 
-		// Grab it.
-		newClusters[l] = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_ENQUEUE);
+		// Grab it. Boundary-crossing refill (late sample-start attempt): one stream() hop per
+		// lookahead slot, not per sample.
+		newClusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE);
 
 		// If failure (would only happen in insanely rare case where there's no free RAM)
 		if (l == 0 && !newClusters[l]) {
@@ -706,12 +707,13 @@ readCachedWindow:
 		int32_t cachedClusterIndex = cacheBytePos >> Cluster::size_magnitude;
 		int32_t bytePosWithinCluster = cacheBytePos & (Cluster::size - 1);
 
-		Cluster* cacheCluster = cache->getCluster(cachedClusterIndex);
+		ComputedChunk* cacheCluster = cache->getCluster(cachedClusterIndex);
 		if (ALPHA_OR_BETA_VERSION
 		    && !cacheCluster) { // If it got stolen - but we should have already detected this above
 			FREEZE_WITH_ERROR("E157");
 		}
-		int32_t* __restrict__ readPos = (int32_t*)&cacheCluster->data[bytePosWithinCluster - 4 + kCacheByteDepth];
+		int32_t* __restrict__ readPos =
+		    (int32_t*)cacheCluster->frame_read_origin(bytePosWithinCluster, kCacheByteDepth);
 
 		int32_t sampleRead[2]; // Somehow works out a tiny bit faster having it as an array
 
@@ -839,13 +841,14 @@ readCachedWindow:
 			}
 
 			// If uncached Cluster has changed, update queue
-			if (!clusters[0] || clusters[0]->clusterIndex != uncachedClusterIndex) {
+			if (!clusters[0] || clusters[0]->cluster_index != uncachedClusterIndex) {
 				unassignAllReasons(false); // We're going to set new "reasons".
 
 				int32_t nextUncachedClusterIndex = uncachedClusterIndex;
 				for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-					clusters[l] = sample->clusters[nextUncachedClusterIndex].getCluster(
-					    sample, nextUncachedClusterIndex, CLUSTER_ENQUEUE);
+					// Boundary-crossing refill (cache-resync when the uncached Cluster changes): one
+					// stream() hop per lookahead slot here, not per sample.
+					clusters[l] = sample->stream().get_cluster(nextUncachedClusterIndex, CLUSTER_ENQUEUE);
 					if (!clusters[l]) {
 						break;
 					}
@@ -859,7 +862,7 @@ readCachedWindow:
 			if (clusters[0]) {
 				oscPos = uncachedSamplePosBig & 16777215;
 				int32_t uncachedBytePosWithinCluster = uncachedBytePos - uncachedClusterIndex * Cluster::size;
-				currentPlayPos = &clusters[0]->data[uncachedBytePosWithinCluster];
+				currentPlayPos = reinterpret_cast<char*>(clusters[0]->payload().data()) + uncachedBytePosWithinCluster;
 				currentPlayPos = currentPlayPos - 4 + sample->byteDepth;
 			}
 			else {
@@ -926,12 +929,12 @@ uncachedPlayback:
 				}
 			}
 
-			Cluster* cacheCluster = cache->getCluster(cacheClusterIndex);
+			ComputedChunk* cacheCluster = cache->getCluster(cacheClusterIndex);
 			if (ALPHA_OR_BETA_VERSION && !cacheCluster) {
 				// Check that the Cluster hasn't been stolen - but this should have been detected right at the start
 				FREEZE_WITH_ERROR("E166");
 			}
-			cacheWritePos = &cacheCluster->data[bytePosWithinCluster];
+			cacheWritePos = reinterpret_cast<char*>(cacheCluster->payload().data()) + bytePosWithinCluster;
 
 			int32_t cachingBytesTilClusterEnd = Cluster::size - bytePosWithinCluster;
 			int32_t cachingBytesTilUncachedReadEnd = std::min(cachingBytesTilClusterEnd, cachingBytesTilLoopEnd);

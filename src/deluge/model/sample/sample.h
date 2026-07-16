@@ -18,17 +18,16 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
-#include "io/stream.hpp"
 #include "model/sample/sample_cluster.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
+#include "storage/audio/stream/convert.h"
+#include "storage/audio/stream/sample_stream.h"
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <array>
-#include <bit>
 #include <cstdint>
-#include <optional>
 
 #define SAMPLE_DO_LOCKS (ALPHA_OR_BETA_VERSION)
 
@@ -77,49 +76,36 @@ public:
 	int32_t getFirstClusterIndexWithNoAudioData();
 	Error fillPercCache(TimeStretcher* timeStretcher, int32_t startPosSamples, int32_t endPosSamples,
 	                    int32_t playDirection, int32_t maxNumSamplesToProcess);
-	void percCacheClusterStolen(Cluster* cluster);
+	void percCacheClusterStolen(ComputedChunk* cluster);
 	void deletePercCache(bool beingDestructed = false);
 	uint8_t* prepareToReadPercCache(int32_t pixellatedPos, int32_t playDirection, int32_t* earliestPixellatedPos,
 	                                int32_t* latestPixellatedPos);
 	bool getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int32_t crossfadeLengthSamples,
 	                             int32_t playDirection, int32_t lengthToAverageEach);
 	void convertDataOnAnyClustersIfNecessary();
-	/// Lazily define this Sample's resource-manager Asset (its SAMPLE clusters are the Asset's
-	/// Chunks: materialize = readClusterData, on_evict = drop + ~Cluster). Returns the asset id. The
-	/// manager is the sole SDRAM evictor, so this never returns NO_ASSET — a missing manager / full
-	/// asset table is fatal (FREEZE), no legacy fallback.
-	uint32_t ensureResourceAsset();
 	int32_t getMaxPeakFromZero();
 	int32_t getFoundValueCentrePoint();
 	int32_t getValueSpan();
 	void finalizeAfterLoad(uint32_t fileSize) override;
 
+	/// @brief This Sample's audio-stream orchestrator.
+	///
+	/// Owns the read-stream handle, the resource-manager Asset for this Sample's clusters, and the
+	/// ReadSource selection.
+	/// @return The owned SampleStream, by reference.
+	/// @see storage/audio/stream/sample_stream.h
+	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
+	/// @copydoc stream()
+	///
+	/// Const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
+	/// accessors (sd_address_at et al.) without dropping const.
+	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
+
 	// Floating point
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }
 
 	[[nodiscard]] q31_t convertToNative(int32_t value) const {
-		switch (rawDataFormat) {
-		case RawDataFormat::FLOAT:
-			return q31_from_float(std::bit_cast<float>(value));
-
-		case RawDataFormat::ENDIANNESS_WRONG_32: // Or endianness swap
-			return swapEndianness32(value);
-
-		case RawDataFormat::ENDIANNESS_WRONG_16:
-			return swapEndianness2x16(value);
-
-		case RawDataFormat::UNSIGNED_8:
-			return value ^ 0x80808080;
-
-		case RawDataFormat::ENDIANNESS_WRONG_24:
-			// handled by caller
-			[[fallthrough]];
-
-		case RawDataFormat::NATIVE:
-			// nothing to be done
-			break;
-		}
-		return value;
+		return deluge::audio::stream::convert_word(value, rawDataFormat);
 	}
 
 	std::string tempFilePathForRecording{};
@@ -164,7 +150,7 @@ public:
 	// which would re-enter these arrays mid-modification.
 	deluge::vector<SamplePercCacheZone> percCacheZones[2]{};
 
-	Cluster** percCacheClusters[2]{nullptr, nullptr}; // One for each play-direction: 0=forwards; 1=reversed
+	ComputedChunk** percCacheClusters[2]{nullptr, nullptr}; // One for each play-direction: 0=forwards; 1=reversed
 	int32_t numPercCacheClusters{};
 	// Resource-manager Asset id per play-direction for the perc-cache clusters (construct-only,
 	// leased-while-nearby by the TimeStretcher). DELUGE_RESOURCE_NO_ASSET (0xFFFFFFFF) = legacy.
@@ -175,19 +161,12 @@ public:
 
 	uint32_t waveTableCycleSize{0}; // In case this later gets used for a WaveTable
 
-	deluge::fast_vector<SampleCluster> clusters{};
-
-	// Resource-manager Asset id for this Sample's SAMPLE clusters (DELUGE_RESOURCE_NO_ASSET
-	// until defined on first stream). Owns raw-cluster residency once routed through the
-	// manager; released in ~Sample. 0xFFFFFFFF == DELUGE_RESOURCE_NO_ASSET (kept as a literal
-	// here so the widely-included header needn't pull in deluge_resource.h).
-	uint32_t resourceAssetId{0xFFFFFFFFu};
-
-	// Opened once by AudioFileManager::buildAudioFileFromCard (DELUGE_STREAM_READ mode), used by
-	// readClusterData for every cluster read thereafter; closed (via the optional's destructor) in
-	// ~Sample. Disengaged for a Sample that isn't backed by a stream_io.h read (e.g. one still being
-	// recorded).
-	std::optional<deluge::io::Stream> readStream_;
+	/// Owns the read-stream handle, the resource-manager Asset, and the cluster residency table
+	/// itself. See storage/audio/stream/sample_stream.h.
+	///
+	/// @note ~Sample releases the Asset explicitly, before `stream_` (and so the table it owns)
+	///       destructs -- see ~Sample's definition.
+	deluge::audio::stream::SampleStream stream_{*this};
 
 protected:
 	// Project-relevance hooks (the object's hard-lease 0↔1 transitions): toggle the soft-reference on

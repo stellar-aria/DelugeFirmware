@@ -17,7 +17,6 @@
 
 #include "storage/audio/cluster_byte_source.h"
 #include "model/sample/sample.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 
 ClusterByteSource::ClusterByteSource(Sample& sample, uint32_t fileSize)
@@ -26,7 +25,7 @@ ClusterByteSource::ClusterByteSource(Sample& sample, uint32_t fileSize)
 
 ClusterByteSource::~ClusterByteSource() {
 	if (currentCluster_ != nullptr) {
-		audioFileManager.removeReasonFromCluster(*currentCluster_, "E030");
+		deluge::cluster::remove_reason(*currentCluster_, "E030");
 	}
 }
 
@@ -47,10 +46,9 @@ Error ClusterByteSource::advanceClustersIfNecessary() {
 	byteIndexWithinCluster_ &= Cluster::size - 1;
 
 	if (currentCluster_ != nullptr) {
-		audioFileManager.removeReasonFromCluster(*currentCluster_, "E031");
+		deluge::cluster::remove_reason(*currentCluster_, "E031");
 	}
-	currentCluster_ =
-	    sample_.clusters[currentClusterIndex_].getCluster(&sample_, currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
+	currentCluster_ = sample_.stream().get_cluster(currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
 	if (currentCluster_ == nullptr) {
 		return Error::SD_CARD; // Failed to load cluster from card.
 	}
@@ -65,7 +63,7 @@ Error ClusterByteSource::read(std::span<std::byte> dest) {
 		if (const Error error = advanceClustersIfNecessary(); error != Error::NONE) {
 			return error;
 		}
-		out = static_cast<std::byte>(currentCluster_->data[byteIndexWithinCluster_]);
+		out = currentCluster_->payload()[byteIndexWithinCluster_];
 		byteIndexWithinCluster_++;
 	}
 	return Error::NONE;

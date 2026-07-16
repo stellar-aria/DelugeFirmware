@@ -20,7 +20,7 @@
 #include "storage/audio/audio_byte_source.h"
 
 class Sample;
-class Cluster;
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 
 /// An AudioByteSource that streams a Sample's audio file off the SD card cluster-by-cluster, loading each
 /// cluster on demand (CLUSTER_LOAD_IMMEDIATELY) as the cursor crosses into it. Used for the one-time header
@@ -48,5 +48,5 @@ private:
 	uint32_t fileSize_;
 	int32_t currentClusterIndex_ = -1;
 	int32_t byteIndexWithinCluster_; // initialised to Cluster::size so the first read loads cluster 0
-	Cluster* currentCluster_ = nullptr;
+	StreamedChunk* currentCluster_ = nullptr;
 };

@@ -60,7 +60,7 @@
 #include "processing/sound/sound_instrument.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
-#include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
 #include "storage/storage_manager.h"
@@ -385,7 +385,7 @@ void routineWithClusterLoading(bool mayProcessUserActionsBetween) {
 
 	routineBeenCalled = false;
 
-	audioFileManager.loadAnyEnqueuedClusters(128, mayProcessUserActionsBetween);
+	deluge::audio::stream::loader::pump(128, mayProcessUserActionsBetween);
 
 	if (!routineBeenCalled) {
 		// bypassCulling = true; // yolo? Sean: not sure if this is necessary
@@ -1116,7 +1116,7 @@ void routine() {
 					}
 				}
 
-				audioFileManager.loadAnyEnqueuedClusters(128, false);
+				deluge::audio::stream::loader::pump(128, false);
 			}
 		}
 	}

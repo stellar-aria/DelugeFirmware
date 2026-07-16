@@ -18,7 +18,7 @@
 #include "model/sample/sample_holder_for_voice.h"
 #include "model/sample/sample.h"
 #include "processing/source.h"
-#include "storage/audio/audio_file_manager.h"
+#include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include <cmath>
 
@@ -45,7 +45,7 @@ SampleHolderForVoice::~SampleHolderForVoice() {
 	// overriding of that virtual function won't happen as we've already been destructed!
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForLoopStart[l]) {
-			audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E247");
+			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E247");
 		}
 	}
 }
@@ -55,7 +55,7 @@ void SampleHolderForVoice::unassignAllClusterReasons(bool beingDestructed) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForLoopStart[l]) {
 			// Happened to me while auto-pilot testing, I think
-			audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E320");
+			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E320");
 			if (!beingDestructed) {
 				clustersForLoopStart[l] = nullptr;
 			}
@@ -93,7 +93,7 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 		                             clusterLoadInstruction);
 	}
 
-	else if (static_cast<int32_t>(((Sample*)audioFile)->clusters.size()) <= 4) {
+	else if (static_cast<int32_t>(((Sample*)audioFile)->stream().num_clusters()) <= 4) {
 		// claim the next few reasons for the sample instead since we can keep it all cached
 		int32_t nextClusterStartByte = (((Sample*)audioFile)->audioDataStartPosBytes + Cluster::size_magnitude) << 1;
 
@@ -104,7 +104,7 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 	else {
 		for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 			if (clustersForLoopStart[l]) {
-				audioFileManager.removeReasonFromCluster(*clustersForLoopStart[l], "E246");
+				deluge::cluster::remove_reason(*clustersForLoopStart[l], "E246");
 				clustersForLoopStart[l] = nullptr;
 			}
 		}

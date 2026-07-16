@@ -65,6 +65,7 @@
 #include "processing/sound/sound_drum.h"
 #include "processing/source.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
@@ -1225,7 +1226,7 @@ removeReasonsFromSamplesAndGetOut:
 	}
 
 	while (true) {
-		audioFileManager.loadAnyEnqueuedClusters();
+		deluge::audio::stream::loader::pump();
 		FilePointer thisFilePointer;
 
 		/* Read a directory item */

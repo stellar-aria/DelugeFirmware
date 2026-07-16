@@ -27,7 +27,6 @@
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 #include <cmath>
@@ -179,7 +178,7 @@ void TimeStretcher::beenUnassigned() {
 void TimeStretcher::unassignAllReasonsForPercLookahead() {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clustersForPercLookahead[l]) {
-			audioFileManager.removeReasonFromCluster(*clustersForPercLookahead[l], "E130");
+			deluge::cluster::remove_reason(*clustersForPercLookahead[l], "E130");
 			clustersForPercLookahead[l] = nullptr;
 		}
 	}
@@ -188,7 +187,7 @@ void TimeStretcher::unassignAllReasonsForPercLookahead() {
 void TimeStretcher::unassignAllReasonsForPercCacheClusters() {
 	for (int32_t l = 0; l < 2; l++) {
 		if (percCacheClustersNearby[l]) {
-			audioFileManager.removeReasonFromCluster(*percCacheClustersNearby[l], "E132");
+			deluge::cluster::remove_reason(*percCacheClustersNearby[l], "E132");
 			percCacheClustersNearby[l] = nullptr;
 		}
 	}
@@ -248,7 +247,7 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 #if ALPHA_OR_BETA_VERSION
 	// Trying to track down Steven's E133 - percCacheClusterNearby pointing to things with no reasons left
 	for (int32_t l = 0; l < 2; l++) {
-		if (percCacheClustersNearby[l] && !percCacheClustersNearby[l]->leaseCount()) {
+		if (percCacheClustersNearby[l] && !deluge::cluster::lease_count(percCacheClustersNearby[l]->resource_slot)) {
 			FREEZE_WITH_ERROR("i036");
 		}
 	}
@@ -724,7 +723,7 @@ startSearch:
 				}
 
 				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				Cluster* cluster = sample->clusters[whichCluster].cluster;
+				StreamedChunk* cluster = sample->stream().chunk_at(whichCluster);
 				if (!cluster || !cluster->loaded) {
 					goto skipSearch;
 				}
@@ -742,7 +741,8 @@ startSearch:
 					numSamplesThisRead = (uint32_t)bytesWeMayRead / (uint8_t)bytesPerSample;
 				}
 
-				currentPos[i] = &cluster->data[bytePosWithinCluster] - 4 + byteDepth;
+				currentPos[i] = reinterpret_cast<char const*>(
+				    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
 			}
 
 			// Alright, read those samples for our currently worked out little bit until we reach a cluster boundary or
@@ -1106,17 +1106,17 @@ void TimeStretcher::readFromBuffer(int32_t* __restrict__ oscBufferPos, int32_t n
 // Adds reason if this one wasn't already remembered here.
 // And just to be super clear, this is for remembering links to *PERC CACHE Clusters*! Not just regular audio data
 // Clusters.
-void TimeStretcher::rememberPercCacheCluster(Cluster* cluster) {
+void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 
 	if (percCacheClustersNearby[0] == cluster || percCacheClustersNearby[1] == cluster) {
 		return;
 	}
 
-	cluster->addReason();
+	deluge::cluster::add_lease(cluster);
 
 	if (percCacheClustersNearby[0]) {
 		// Steven G got this on V3.1.5, Feb 2021!
-		audioFileManager.removeReasonFromCluster(*percCacheClustersNearby[0], "E133");
+		deluge::cluster::remove_reason(*percCacheClustersNearby[0], "E133");
 	}
 	percCacheClustersNearby[0] = percCacheClustersNearby[1];
 
@@ -1129,7 +1129,7 @@ void TimeStretcher::rememberPercCacheCluster(Cluster* cluster) {
 void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection) {
 	int32_t clusterIndex = sourceBytePos >> Cluster::size_magnitude;
 
-	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->clusterIndex != clusterIndex) {
+	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->cluster_index != clusterIndex) {
 		unassignAllReasonsForPercLookahead();
 
 		int32_t nextClusterIndex = clusterIndex;
@@ -1138,8 +1138,7 @@ void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sour
 			    || nextClusterIndex >= sample->getFirstClusterIndexWithNoAudioData()) {
 				break; // If no more Clusters
 			}
-			clustersForPercLookahead[l] =
-			    sample->clusters[nextClusterIndex].getCluster(sample, nextClusterIndex, CLUSTER_ENQUEUE);
+			clustersForPercLookahead[l] = sample->stream().get_cluster(nextClusterIndex, CLUSTER_ENQUEUE);
 			if (!clustersForPercLookahead[l]) {
 				break;
 			}
@@ -1165,11 +1164,11 @@ void TimeStretcher::setupCrossfadeFromCache(SampleCache* cache, int32_t cacheByt
 	int32_t cachedClusterIndex = cacheBytePos >> Cluster::size_magnitude;
 	int32_t bytePosWithinCluster = cacheBytePos & (Cluster::size - 1);
 
-	Cluster* cacheCluster = cache->getCluster(cachedClusterIndex);
+	ComputedChunk* cacheCluster = cache->getCluster(cachedClusterIndex);
 	if (ALPHA_OR_BETA_VERSION && !cacheCluster) { // If it got stolen - but we should have already detected this above
 		FREEZE_WITH_ERROR("E178");
 	}
-	int32_t* __restrict__ readPos = (int32_t*)&cacheCluster->data[bytePosWithinCluster - 4 + kCacheByteDepth];
+	int32_t* __restrict__ readPos = (int32_t*)cacheCluster->frame_read_origin(bytePosWithinCluster, kCacheByteDepth);
 
 	int32_t bytesTilCacheClusterEnd =
 	    Cluster::size - bytePosWithinCluster

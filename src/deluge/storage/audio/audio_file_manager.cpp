@@ -37,6 +37,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/cluster_byte_source.h"
 #include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -62,7 +63,7 @@ extern int currentlySearchingForCluster;
 // calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
 // calls *down* into the block device.
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
+	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 
 	DelugeStatus status =
 	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
@@ -75,7 +76,7 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-	audioFileManager.loadAnyEnqueuedClusters(); // always ensure SD streaming is fulfilled first
+	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 	DelugeStatus status =
 	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 	return status == DELUGE_OK ? RES_OK : RES_ERROR;
@@ -142,11 +143,9 @@ void AudioFileManager::firstCardRead() {
 
 void AudioFileManager::init() {
 
-	clusterBeingLoaded = nullptr;
-
 	Error error = StorageManager::initSD();
 	if (error == Error::NONE) {
-		Cluster::setSize(fileSystem.csize * 512);
+		Cluster::set_size(fileSystem.csize * 512);
 
 		D_PRINTLN("Cluster::size  %d clusterSizeMagnitude  %d", Cluster::size, Cluster::size_magnitude);
 		cardEjected = false;
@@ -154,7 +153,7 @@ void AudioFileManager::init() {
 	}
 
 	else {
-		Cluster::setSize(Cluster::kSizeFAT16Max);
+		Cluster::set_size(Cluster::kSizeFAT16Max);
 		cardEjected = true;
 	}
 
@@ -207,7 +206,7 @@ clusterSizeChangedButItsOk:
 		}
 
 		// That was all a pain, but now we can update the cluster size
-		Cluster::setSize(fileSystem.csize * 512);
+		Cluster::set_size(fileSystem.csize * 512);
 	}
 
 	// Or if cluster size stayed the same...
@@ -244,7 +243,7 @@ clusterSizeChangedButItsOk:
 
 					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
 					// enough the file hasn't changed
-					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
+					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->stream().sd_address_at(0)) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -322,7 +321,7 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 			staticDIR = *maybeDIR;
 
 			while (true) {
-				loadAnyEnqueuedClusters();
+				deluge::audio::stream::loader::pump();
 				/* Read a directory item */
 				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
 					return Error::SD_CARD; // error if invalid
@@ -791,8 +790,8 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->filePath = filePath;
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
-		// Open the stream_io.h boundary once for this Sample's lifetime; readClusterData (called
-		// per-cluster during playback) reads through it. sdAddress stays populated too -- it feeds
+		// Open the stream_io.h boundary once for this Sample's lifetime; SampleStream::read_cluster_data
+		// (called per-cluster during playback) reads through it. sdAddress stays populated too -- it feeds
 		// AudioFileManager's cold-path "did the card's file change" re-validation check, a separate,
 		// FatFS-specific concern outside the real-time read path.
 		//
@@ -804,21 +803,10 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
-		auto openedStream = deluge::io::Stream::open(pathToOpen, DELUGE_STREAM_READ);
-		if (!openedStream) {
+		if (!sampleFile->stream().open_read_stream(pathToOpen, DELUGE_STREAM_READ, numClusters)) {
 			*error = Error::FILE_NOT_FOUND;
 			destroyAudioFileObject(*audioFile);
 			return nullptr;
-		}
-		sampleFile->readStream_ = std::move(openedStream.value());
-		for (uint32_t i = 0; i < numClusters; i++) {
-			uint32_t sector = 0;
-			auto sectorResult = sampleFile->readStream_->sector_of(i); // best-effort; only meaningful
-			                                                           // on FatFS-family backends
-			if (sectorResult) {
-				sector = *sectorResult;
-			}
-			sampleFile->clusters[i].sdAddress = sector;
 		}
 
 		// The byte source streams the clusters; its destructor releases the held cluster's reason.
@@ -870,375 +858,6 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 	return audioFile;
 }
 
-#define REPORT_LOAD_TIME 0
-
-bool AudioFileManager::loadCluster(Cluster& cluster, int32_t minNumReasonsAfter) {
-
-	if (currentlyAccessingCard) {
-		return false; // Could happen if we're trying to render a waveform but we're actually already inside the SD
-		              // routine
-	}
-
-	// I don't think these should happen...
-	if (clusterBeingLoaded != nullptr) {
-		return false;
-	}
-
-	if (AudioEngine::audioRoutineLocked) {
-		return false;
-	}
-
-	clusterBeingLoaded = &cluster;
-	minNumReasonsForClusterBeingLoaded = minNumReasonsAfter + 1;
-
-	Sample* sample = cluster.sample;
-
-	if (cluster.type != Cluster::Type::SAMPLE) {
-		FREEZE_WITH_ERROR("E205"); // Chris F got this, so gonna leave checking in release build
-	}
-
-#if ALPHA_OR_BETA_VERSION
-	if (cluster.leaseCount() == 0) {
-		// Ok, I think we know there's at least 1 reason at the point this function's called, because
-		FREEZE_WITH_ERROR("E204");
-	}
-	// it'd only be in the loading queue if it had a "reason".
-	if (!sample) {
-		FREEZE_WITH_ERROR("E206");
-	}
-#endif
-
-	// So that it can't accidentally hit 0 reasons while we're loading it,
-	// cos then it might get deallocated.
-	cluster.addReason();
-
-	bool ok = readClusterData(cluster, minNumReasonsAfter);
-
-	clusterBeingLoaded = nullptr;
-	removeReasonFromCluster(cluster, ok ? "E034" : "E033");
-
-#if ALPHA_OR_BETA_VERSION
-	if (ok) {
-		if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter) {
-			FREEZE_WITH_ERROR("i037");
-		}
-		if (cluster.sample->clusters[cluster.clusterIndex].cluster != &cluster) {
-			FREEZE_WITH_ERROR("E438");
-		}
-	}
-#endif
-
-	return ok;
-}
-
-// The cluster data reader extracted from loadCluster (for the resource-manager
-// integration): the pure data work — sector count, read from the card, conversion, and the
-// inter-cluster boundary fixups. No orchestration (the card-state guards, clusterBeingLoaded,
-// the loading "reason", and the loadingQueue stay in loadCluster). This is the seam the resource
-// manager will use as a materialize Source. `minNumReasonsAfter` only feeds the ALPHA sanity checks.
-bool AudioFileManager::readClusterData(Cluster& cluster, [[maybe_unused]] int32_t minNumReasonsAfter) {
-	Sample* sample = cluster.sample;
-	int32_t clusterIndex = cluster.clusterIndex;
-
-	// Failure exits jump here (kept above the local inits so the backward gotos don't cross them).
-	if (false) {
-getOutEarly:
-		return false;
-	}
-
-	int32_t numSectors = Cluster::size >> 9;
-
-	// If this is the last Cluster, and we do know what the audio data length is...
-	if (sample->audioDataLengthBytes && sample->audioDataLengthBytes != 0x8FFFFFFFFFFFFFFF) {
-		uint32_t audioDataEndPosBytes = sample->audioDataLengthBytes + sample->audioDataStartPosBytes;
-		uint32_t startByteThisCluster = clusterIndex << Cluster::size_magnitude;
-		int32_t bytesToRead = audioDataEndPosBytes - startByteThisCluster;
-		if (bytesToRead <= 0) {
-			D_PRINTLN("fail thing"); // Shouldn't really still happen
-			goto getOutEarly;
-		}
-		if (bytesToRead < Cluster::size) {
-			numSectors = ((bytesToRead - 1) >> 9) + 1;
-		}
-		// Otherwise, just leave it at the normal number of sectors
-	}
-
-#if ALPHA_OR_BETA_VERSION
-	if ((uintptr_t)cluster.data & 0b11) {
-		D_PRINTLN("SD read address misaligned by  %d", (int32_t)((uintptr_t)cluster.data & 0b11));
-	}
-#endif
-
-	AudioEngine::logAction("loadCluster");
-
-#if REPORT_LOAD_TIME
-	uint16_t startTime = MTU2.TCNT_0;
-#endif
-
-#if ALPHA_OR_BETA_VERSION
-	if (cluster.type != Cluster::Type::SAMPLE) {
-		FREEZE_WITH_ERROR("i023"); // Happened to me while thrash testing with reduced RAM
-	}
-
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
-		FREEZE_WITH_ERROR("i039"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
-	uint32_t bytesRead = 0;
-	DelugeStatus status;
-	if (sample->readStream_.has_value()) {
-		auto readResult = sample->readStream_->read_at(
-		    static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude,
-		    std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
-		if (readResult) {
-			bytesRead = static_cast<uint32_t>(readResult->size());
-			status = DELUGE_OK;
-		}
-		else {
-			status = deluge::io::to_deluge_status(readResult.error());
-		}
-	}
-	else {
-		// No open stream_io.h handle: this Sample wasn't opened via buildAudioFileFromCard's SAMPLE
-		// branch (e.g. it's still being written/finalized by SampleRecorder, which reads back its own
-		// just-written first cluster to patch the WAV header -- see
-		// SampleRecorder::finalizeRecordedFile). SampleRecorder populates sdAddress directly as it
-		// writes each cluster, so fall back to the direct block read against that address.
-		status = deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(cluster.data),
-		                           sample->clusters[cluster.clusterIndex].sdAddress, static_cast<uint32_t>(numSectors));
-	}
-
-#if REPORT_LOAD_TIME
-	uint16_t endTime = MTU2.TCNT_0;
-	uint16_t duration = endTime - startTime;
-	int32_t uSec = timerCountToUS(duration);
-	if (uSec > 7000) {
-		D_PRINTLN(uSec);
-	}
-#endif
-
-#if ALPHA_OR_BETA_VERSION
-	if (cluster.type != Cluster::Type::SAMPLE) {
-		FREEZE_WITH_ERROR("E207");
-	}
-	if (cluster.sample == nullptr) {
-		FREEZE_WITH_ERROR("E208");
-	}
-
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
-		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	// If that failed, get out
-	if (status != DELUGE_OK) {
-		goto getOutEarly;
-	}
-
-	cluster.convertDataIfNecessary();
-
-#if ALPHA_OR_BETA_VERSION
-	if (static_cast<int32_t>(cluster.leaseCount()) < minNumReasonsAfter + 1) {
-		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	int32_t misalignment = sample->audioDataStartPosBytes & 0b11;
-
-	// Give extra bytes to previous Cluster
-	if (clusterIndex > 0) {
-		Cluster* prevCluster = sample->clusters[cluster.clusterIndex - 1].cluster;
-
-		if (prevCluster && prevCluster->loaded) {
-
-			// We first copy our first 7 bytes from here to the end of the prev Cluster...
-			memcpy(&prevCluster->data[Cluster::size], cluster.data, 7);
-
-			// If 24-bit wrong-endian data...
-			if (sample->rawDataFormat == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-				// If we hadn't previously written the "extra" bytes to the end of the prev Cluster and converted
-				// them, do so now...
-				if (!prevCluster->extraBytesAtEndConverted) {
-
-					uint32_t bytesBeforeStartOfCluster = clusterIndex * Cluster::size - sample->audioDataStartPosBytes;
-					int32_t bytesUnconvertedBeforeCluster = bytesBeforeStartOfCluster % 3;
-					if (bytesUnconvertedBeforeCluster) {
-
-						// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-						// just copied over the next one and a bit, which already was converted)
-						int32_t startPos = Cluster::size - bytesUnconvertedBeforeCluster;
-						uint8_t* thisNumber = (uint8_t*)&prevCluster->data[startPos];
-
-						uint8_t temp = thisNumber[0];
-						thisNumber[0] = thisNumber[2];
-						thisNumber[2] = temp;
-
-						// And now, copy 2 bytes back to this Cluster (that's the maximum that the float could have
-						// been overhanging the boundary)
-						memcpy(cluster.data, &prevCluster->data[Cluster::size], 2);
-					}
-
-					prevCluster->extraBytesAtEndConverted = true;
-				}
-			}
-
-			// Or, all other types of raw data conversion
-			else if (sample->rawDataFormat != RawDataFormat::NATIVE) {
-
-				// If we haven't previously written the "extra" bytes to the end of the prev Cluster and converted
-				// them, do so now...
-				if (!prevCluster->extraBytesAtEndConverted) {
-
-					// If misaligned from the 4-byte boundary
-					if (misalignment) {
-
-						// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-						// also just moved over the next one too, which already was converted)
-						int32_t startPos = Cluster::size - 4 + misalignment;
-						auto& thisNumber = reinterpret_cast<int32_t&>(prevCluster->data[startPos]);
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now, copy 3 bytes back to this Cluster (that's the maximum that the float could have
-						// been overhanging the boundary)
-						memcpy(cluster.data, &prevCluster->data[Cluster::size], 3);
-					}
-
-					prevCluster->extraBytesAtEndConverted = true;
-				}
-			}
-
-			cluster.extraBytesAtStartConverted = true;
-		}
-	}
-
-	// Grab extra bytes from next Cluster
-	if (clusterIndex < static_cast<int32_t>(sample->clusters.size()) - 1) {
-		Cluster* nextCluster = sample->clusters[cluster.clusterIndex + 1].cluster;
-
-		if (nextCluster && nextCluster->loaded) {
-
-			// If 24-bit wrong-endian data...
-			if (sample->rawDataFormat == RawDataFormat::ENDIANNESS_WRONG_24) {
-
-				uint32_t bytesBeforeStartOfNextCluster =
-				    (clusterIndex + 1) * Cluster::size - sample->audioDataStartPosBytes;
-				int32_t bytesUnconvertedBeforeNextCluster = bytesBeforeStartOfNextCluster % 3;
-
-				// If one word missed conversion...
-				if (bytesUnconvertedBeforeNextCluster) {
-
-					// If we had't previously converted the first couple of bytes of the next Cluster...
-					if (!nextCluster->extraBytesAtStartConverted) {
-
-						// We first copy the next Cluster first 7 bytes to the end of this Cluster
-						memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-
-						// Grab the unconverted bytes back from where we backed them up to
-						memcpy(&cluster.data[Cluster::size], nextCluster->firstThreeBytesPreDataConversion, 2);
-					}
-
-					// There'll be one word in there which hasn't yet been converted. Do it now. (We've probably
-					// just copied over the next one and a bit, which already was converted)
-					uint8_t* thisNumber = (uint8_t*)&cluster.data[Cluster::size - bytesUnconvertedBeforeNextCluster];
-
-					uint8_t temp = thisNumber[0];
-					thisNumber[0] = thisNumber[2];
-					thisNumber[2] = temp;
-
-					// If we had't previously converted the first couple of bytes of the next Cluster, do so now...
-					if (!nextCluster->extraBytesAtStartConverted) {
-						nextCluster->extraBytesAtStartConverted = true;
-
-						// And now, copy 2 bytes back to the next Cluster (that's the maximum that the 24-bit
-						// int32_t could have been overhanging the boundary)
-						memcpy(nextCluster->data, &cluster.data[Cluster::size], 2);
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-						goto copy7ToMe;
-					}
-				}
-
-				// Or if no words missed conversion
-				else {
-					goto copy7ToMe;
-				}
-			}
-
-			// Or, all other types of raw data conversion
-			else if (sample->rawDataFormat != RawDataFormat::NATIVE) {
-
-				// If one word missed conversion...
-				if (misalignment) {
-					int32_t startPos = Cluster::size - 4 + misalignment;
-					auto& thisNumber = reinterpret_cast<int32_t&>(cluster.data[startPos]);
-
-					// If we had't previously converted the first couple of bytes of the next Cluster, do so now...
-					if (!nextCluster->extraBytesAtStartConverted) {
-
-						// We first copy the next Cluster first 7 bytes to the end of this Cluster
-						memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-
-						// There'll be one word in there which hasn't yet been converted from float. Do it now
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now, copy 3 bytes back to the next Cluster (that's the maximum that the float could
-						// have been overhanging the boundary)
-						memcpy(nextCluster->data, &cluster.data[Cluster::size], 3);
-
-						nextCluster->extraBytesAtStartConverted = true;
-					}
-
-					// Or, if we *had* previously converted the first bytes of the next Cluster...
-					else {
-
-						// Grab the unconverted bytes back from where we backed them up to
-						memcpy(&cluster.data[Cluster::size], nextCluster->firstThreeBytesPreDataConversion, 3);
-
-						// There'll be one word in there which hasn't yet been converted from float. Do it now
-						thisNumber = sample->convertToNative(thisNumber);
-
-						// And now just copy the converted-from-float first bytes from the next Cluster to the end
-						// of this one
-						goto copy7ToMe;
-					}
-				}
-				else {
-					goto copy7ToMe;
-				}
-			}
-
-			else {
-copy7ToMe:
-				// We copy the next Cluster's first 7 bytes to the end of this Cluster
-				memcpy(&cluster.data[Cluster::size], nextCluster->data, 7);
-			}
-
-			cluster.extraBytesAtEndConverted = true;
-		}
-	}
-
-	cluster.loaded = true;
-	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in
-	// the Loading state; now its data is read, signal the manager so the async/RT `try_acquire` path
-	// sees it ready. `cluster.loaded` stays the C++ sync-path field; this keeps the manager in sync.
-	{
-		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-		if (mgr != nullptr) {
-			deluge_resource_mark_ready(mgr, &cluster);
-		}
-	}
-	return true;
-}
-
 // Only needs calling a couple times per second. Must be called outside of the audio / SD-reading routine
 // Call this repeatedly so SD card is re-initialized on re-insert before we actually urgently need audio from it
 void AudioFileManager::slowRoutine() {
@@ -1266,156 +885,8 @@ void AudioFileManager::slowRoutine() {
 	// for a copy if ever needed
 }
 
-#define REPORT_AWAY_TIME 0
-
-#if REPORT_AWAY_TIME
-uint16_t timeLastFinish;
-#endif
-
-void AudioFileManager::loadAnyEnqueuedClusters(int32_t maxNum, bool mayProcessUserActionsBetween) {
-
-	if (currentlyAccessingCard) {
-		return;
-	}
-	if (clusterBeingLoaded) {
-		return; // One might be having stuff done to it, like having its data converted, but not actually reading
-		        // the card right now
-	}
-	if (AudioEngine::audioRoutineLocked) {
-		return; // Not sure if this should be neccesary?
-	}
-
-	// Cannot call any functions in here which will read the SD card, other than loadCluster(), otherwise that'll
-	// re-call this function!
-
-	if (cardEjected || cardDisabled) {
-
-performActionsAndGetOut:
-		if (mayProcessUserActionsBetween) {
-			playbackHandler.slowRoutine();
-		}
-		return;
-	}
-
-	if (!StorageManager::checkSDInitialized()) {
-		goto performActionsAndGetOut; // In case the card somehow died
-	}
-
-	int32_t count = 0;
-
-#if REPORT_AWAY_TIME
-	uint16_t startTime = MTU2.TCNT_0;
-	uint16_t awayTime = startTime - timeLastFinish;
-	int32_t uSecAway = timerCountToUS(awayTime);
-	if (uSecAway > 1000) {
-		D_PRINTLN("away  %d", uSecAway);
-	}
-#endif
-
-	while (true) {
-
-		// We now have an opportunity, since we're not reading the card, to process any pending user actions like
-		// undo / redo.
-		if (mayProcessUserActionsBetween) {
-			playbackHandler.slowRoutine();
-		}
-
-		// Pop the most-urgent queued + still-leased cluster's backing (the manager skips/de-queues
-		// abandoned-unleased ones). This prevents loading clusters quickly culled after enqueue.
-		void* p = deluge_resource_loader_next(GeneralMemoryAllocator::get().resourceManager());
-
-		// no more clusters to load, so exit
-		if (p == nullptr) {
-			return;
-		}
-		Cluster* cluster = reinterpret_cast<Cluster*>(p);
-
-		// The unloadable domain-filter stays here (the manager doesn't know it). markAsUnloadable
-		// already de-queues, so this is the safety net — loader_next has cleared its queued flag, so
-		// skipping won't loop.
-		if (cluster->unloadable) {
-			continue;
-		}
-
-		// cluster has at least 1 "reason". If it didn't, it would have been removed from the load-queue
-
-		// Do the actual loading
-		if (cluster->type != Cluster::Type::SAMPLE) {
-			FREEZE_WITH_ERROR("E235"); // Cos Chris F got an E205
-		}
-
-		allowSomeUserActionsEvenWhenInCardRoutine = true; // Sorry!!
-		bool success;
-		if (cluster->type == Cluster::Type::SAMPLE && cluster->sample != nullptr
-		    && cluster->sample->resourceAssetId != DELUGE_RESOURCE_NO_ASSET) {
-			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
-			// read directly. NOT loadCluster — its addReason/removeReason would desync the manager
-			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render
-			// (the headless-render streaming starvation we're fixing). The lease persists; the read
-			// just flips loaded=true (or fails, handled below as for legacy).
-			success = readClusterData(*cluster, 0);
-		}
-		else {
-			success = loadCluster(*cluster);
-		}
-		allowSomeUserActionsEvenWhenInCardRoutine = false;
-
-		// If that didn't work, presumably because the SD card got ejected...
-		if (!success) {
-			D_PRINTLN("load Cluster fail");
-
-			// If the Cluster is now down to 0 reasons (i.e. it lost a reason while being loaded), then it's already
-			// been made "available" and we don't have a problem
-			if (!cluster->leaseCount()) {}
-
-			// Otherwise, there are still "reasons" waiting for this Cluster to become loaded, so we need to put it
-			// back in the loading queue. Presumably it won't actually get loaded for a while - only when the user
-			// re-inserts the card
-			else {
-
-				if (cluster->type != Cluster::Type::SAMPLE) {
-					FREEZE_WITH_ERROR("E237"); // Cos Chris F got an E205
-				}
-
-				// TODO: If that fails, it'll just get awkwardly forgotten about
-				deluge_resource_loader_enqueue(GeneralMemoryAllocator::get().resourceManager(), cluster->resourceSlot,
-				                               0xFFFFFFFF); // lowest priority
-
-				// Also, return now. Normally we stay here til there's nothing left in the load-queue, but now that
-				// would leave us in an infinite loop!
-				break;
-			}
-		}
-
-		count++;
-		if (count >= maxNum) {
-			break; // Keep things sane?
-		}
-	}
-
-#if REPORT_AWAY_TIME
-	timeLastFinish = MTU2.TCNT_0;
-#endif
-}
-
-void AudioFileManager::removeReasonFromCluster(Cluster& cluster, [[maybe_unused]] char const* errorCode,
-                                               bool deletingSong) {
-	(void)deletingSong;
-	// Every cluster is a manager-owned chunk — SAMPLE / PERC leased via the owner's Asset, SAMPLE_CACHE
-	// resident via the cache's Asset (and leased by the low-level reader while it streams it). A removed
-	// reason is just a manager lease drop: the cluster stays resident (cached, evictable under pressure),
-	// never enqueued/destroyed here. The lease count lives in the manager's chunk slot (leaseCount()).
-	if (ALPHA_OR_BETA_VERSION && cluster.leaseCount() == 0) {
-		FREEZE_WITH_ERROR(errorCode); // removing a reason that was never there
-	}
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	if (mgr != nullptr) {
-		deluge_resource_release(mgr, &cluster); // unlease (backing ptr == the Cluster slot)
-	}
-}
-
-bool AudioFileManager::loadingQueueHasAnyLowestPriorityElements() {
-	return deluge_resource_loader_has_lowest(GeneralMemoryAllocator::get().resourceManager());
+bool AudioFileManager::cardUnavailableForStreaming() const {
+	return cardEjected || cardDisabled || !StorageManager::checkSDInitialized();
 }
 
 // Caller must also set alternateAudioFileLoadPath.

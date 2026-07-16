@@ -41,6 +41,7 @@
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/loader.h"
 #include "util/etl_string.h"
 #include "util/string.h"
 #include <iterator>
@@ -213,11 +214,11 @@ void StemExport::renderWait(RunCondition until) {
 		while (!until()) {
 			AudioEngine::routine();
 			// Pump the cluster loader HERE, between audio routines, where audioRoutineLocked is
-			// false — loadAnyEnqueuedClusters() bails immediately while it's set, and the offline
+			// false — loader::pump() bails immediately while it's set, and the offline
 			// AudioEngine::routine() holds it for its whole body, so the in-routine pump (and any
 			// async prefetch) would otherwise never load anything (the headless-render streaming
 			// starvation). On-device the scheduler runs this between audio routines for the same reason.
-			audioFileManager.loadAnyEnqueuedClusters(128, false);
+			deluge::audio::stream::loader::pump(128, false);
 			AudioEngine::slowRoutine();
 			audioRecorder.slowRoutine();
 		}

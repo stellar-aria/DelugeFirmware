@@ -25,7 +25,6 @@
 #include "model/voice/voice_sample.h"
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <optional>
@@ -238,7 +237,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 	int32_t endClusters;
 	if (recorder) {
 		numValidSamples = recorder->numSamplesCaptured;
-		endClusters = static_cast<int32_t>(sample->clusters.size());
+		endClusters = static_cast<int32_t>(sample->stream().num_clusters());
 	}
 	else {
 		numValidSamples = sample->lengthInSamples;
@@ -379,7 +378,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 			}
 		}
 
-		SampleCluster* sampleCluster = &sample->clusters[clusterIndexToDo];
+		SampleCluster* sampleCluster = &sample->stream().entry(clusterIndexToDo);
 
 		// If we're wanting to investigate the whole length of one Cluster, and that's already actually been done
 		// previously, we can just reuse those findings!
@@ -404,7 +403,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 				                    // Malte P.
 			}
 
-			Cluster* cluster = sampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+			StreamedChunk* cluster = sample->stream().get_cluster(clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
 			if (!cluster) {
 cantReadData:
 				D_PRINTLN("cant read");
@@ -413,7 +412,7 @@ cantReadData:
 				continue;
 			}
 
-			if (cluster->leaseCount() == 0) {
+			if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 				// Branko V got this. Trying to catch E340 below, which Ron R got while recording
 				FREEZE_WITH_ERROR(errorCode);
 			}
@@ -426,18 +425,21 @@ cantReadData:
 
 			// However, if that's reduced us to 0 bytes to read, we know we're gonna have to load in the next Cluster to
 			// get its sample that's on the boundary
-			Cluster* nextCluster = nullptr;
+			StreamedChunk* nextCluster = nullptr;
 			if (endByteWithinCluster <= startByteWithinCluster && clusterIndexToDo < endClusters - 1) {
 				endByteWithinCluster += overshoot;
-				SampleCluster* nextSampleCluster = &sample->clusters[clusterIndexToDo + 1];
-				nextCluster = nextSampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+				// NOTE: this deliberately indexes clusterIndexToDo + 1 (the *next* cluster), not
+				// clusterIndexToDo. The old two-argument getCluster(sample, index, ...) call let the
+				// looked-up entry and the index argument drift out of sync; get_cluster() takes a single
+				// index for both, so fetching the next cluster means indexing by clusterIndexToDo + 1.
+				nextCluster = sample->stream().get_cluster(clusterIndexToDo + 1, CLUSTER_LOAD_IMMEDIATELY);
 
-				if (cluster->leaseCount() == 0) {
+				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 					FREEZE_WITH_ERROR("E342"); // Trying to catch E340 below, which Ron R got while recording
 				}
 
 				if (nextCluster == nullptr) {
-					audioFileManager.removeReasonFromCluster(*cluster, "po8w");
+					deluge::cluster::remove_reason(*cluster, "po8w");
 					goto cantReadData;
 				}
 			}
@@ -475,8 +477,8 @@ cantReadData:
 			// Go through the actual waveform of this cluster
 			while (bytePos < endByteWithinCluster) {
 
-				int32_t individualSampleValue =
-				    *(int32_t*)&cluster->data[bytePos]; // & sample->bitMask; // bitMask hardly matters here
+				int32_t individualSampleValue = *(
+				    int32_t*)(cluster->payload().data() + bytePos); // & sample->bitMask; // bitMask hardly matters here
 
 				if (individualSampleValue > maxThisCol) {
 					maxThisCol = individualSampleValue;
@@ -544,9 +546,9 @@ cantReadData:
 			data->maxPerCol[col] = maxThisCol;
 			data->minPerCol[col] = minThisCol;
 
-			audioFileManager.removeReasonFromCluster(*cluster, "E340"); // Ron R got this, when error was "iiuh"
+			deluge::cluster::remove_reason(*cluster, "E340"); // Ron R got this, when error was "iiuh"
 			if (nextCluster != nullptr) {
-				audioFileManager.removeReasonFromCluster(*nextCluster, "9700");
+				deluge::cluster::remove_reason(*nextCluster, "9700");
 			}
 			AudioEngine::routineWithClusterLoading();
 		}

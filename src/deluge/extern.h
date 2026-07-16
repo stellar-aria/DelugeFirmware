@@ -22,7 +22,6 @@
 // Defined in RZA1/diskio.c, so it has C linkage - several files declare it inline in their own extern "C" blocks.
 extern "C" uint8_t currentlyAccessingCard;
 extern int16_t zeroMPEValues[];
-extern bool allowSomeUserActionsEvenWhenInCardRoutine;
 extern bool readButtonsAndPads();
 extern uint32_t picFirmwareVersion;
 extern bool isShortPress(uint32_t pressTime);

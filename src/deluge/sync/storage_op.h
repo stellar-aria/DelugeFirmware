@@ -20,10 +20,6 @@
 /// explicit primitives over the libdeluge BSP seam. See
 /// docs/superpowers/specs/2026-07-16-cooperative-glue-retirement-design.md.
 
-// Owned by this module (defined in storage_op.cpp); also declared in extern.h for
-// the legacy readers that have not yet been migrated.
-extern bool allowSomeUserActionsEvenWhenInCardRoutine;
-
 namespace deluge::sync {
 
 /// @brief RAII scope for a long storage (SD/card) operation.
@@ -38,10 +34,8 @@ namespace deluge::sync {
 /// is unchanged. See the design spec.
 class StorageOp {
 public:
-	StorageOp() : prev_permit_{allowSomeUserActionsEvenWhenInCardRoutine} {
-		allowSomeUserActionsEvenWhenInCardRoutine = true;
-	}
-	~StorageOp() { allowSomeUserActionsEvenWhenInCardRoutine = prev_permit_; }
+	StorageOp();
+	~StorageOp();
 
 	StorageOp(const StorageOp&) = delete;
 	StorageOp& operator=(const StorageOp&) = delete;

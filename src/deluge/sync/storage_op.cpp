@@ -16,13 +16,23 @@
  */
 #include "sync/storage_op.h"
 
-// Relocated from deluge.cpp: the single definition of the permit flag now lives with
-// its owning module. Global namespace, C++ linkage — matches the declaration in
-// extern.h (extern.h:25) and sync/storage_op.h.
-bool allowSomeUserActionsEvenWhenInCardRoutine = false;
+namespace {
+// The permit state, owned entirely by this module. Was the file-scope global
+// allowSomeUserActionsEvenWhenInCardRoutine (now deleted).
+bool g_user_actions_permitted = false;
+} // namespace
 
 namespace deluge::sync {
-bool user_actions_permitted() {
-	return allowSomeUserActionsEvenWhenInCardRoutine;
+
+StorageOp::StorageOp() : prev_permit_{g_user_actions_permitted} {
+	g_user_actions_permitted = true;
 }
+StorageOp::~StorageOp() {
+	g_user_actions_permitted = prev_permit_;
+}
+
+bool user_actions_permitted() {
+	return g_user_actions_permitted;
+}
+
 } // namespace deluge::sync

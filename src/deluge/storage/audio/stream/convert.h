@@ -98,8 +98,7 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 }
 
 // Vectorized transform over the 16-byte-aligned prefix of [begin, end), for the formats that have a
-// SIMD path (UNSIGNED_8, ENDIANNESS_WRONG_32, ENDIANNESS_WRONG_16; FLOAT joins in a later pass — see
-// docs/superpowers/plans/2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 4).
+// SIMD path (UNSIGNED_8, ENDIANNESS_WRONG_32, ENDIANNESS_WRONG_16).
 // UNSIGNED_8: bytewise XOR 0x80 is exactly equivalent to the scalar path's word-wise `word ^
 // 0x80808080` (convert_word) for every byte position regardless of host endianness, since every byte
 // of the XOR key is the same — so this is bit-exact to the scalar reference, not just an approximation
@@ -107,6 +106,15 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 // ENDIANNESS_WRONG_32/16: Reverse32bit/Reverse16bit (vrev32q_u8/vrev16q_u8) reverse the bytes within
 // each 4-byte/2-byte lane group of the 16-byte vector -- the same word-relative-to-`begin` grid the
 // scalar convert_word (swapEndianness32/swapEndianness2x16) walks, so this is bit-exact too.
+// FLOAT deliberately does NOT get a SIMD path: `Argon<float>::Load(...).ConvertTo<int32_t, 31>()`
+// (vcvtq_n_s32_f32) was implemented and tested against the Task-1 FLOAT spec cases on the same -m32
+// SIMDe backend the golden sim compiles convert.cpp with, and it diverged from the scalar
+// `q31_from_float` reference: 1.0f (the exact saturation boundary) produced 0x80000000 instead of the
+// saturated 0x7FFFFFFF, and NaN produced 0x00000000 instead of saturating to 0x7FFFFFFF. Since the
+// goldens render through this exact host path, a host-divergent FLOAT SIMD must not ship -- see
+// docs/superpowers/plans/2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 4 and TODO.md. FLOAT
+// falls through to the scalar `convert_word_range` loop (`convert_word` -> `q31_from_float`), same as
+// before this pass.
 // Yields roughly every 1024 bytes (64 lanes), matching convert_word_range's cadence. Returns the
 // (16-byte-aligned) point where the caller's scalar tail should pick up; formats with no SIMD path
 // yet are returned unchanged so the caller's scalar loop covers the whole range as before.

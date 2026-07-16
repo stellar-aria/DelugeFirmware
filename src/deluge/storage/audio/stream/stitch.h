@@ -6,19 +6,19 @@
 
 namespace deluge::audio::stream {
 
-// Edge of the PREVIOUS cluster: a mutable view of prevCluster->data over [cluster_size-4, cluster_size+7)
-// (11 bytes) — so tail[4+k] == prevCluster->data[cluster_size+k], tail[0..4) == prevCluster->data[size-4..size).
-// `end_boundary_converted` points at prevCluster->extra_bytes_at_end_converted.
+// Edge of the PREVIOUS cluster: a mutable view of prevCluster->payload() over [cluster_size-4, cluster_size+7)
+// (11 bytes) — so tail[4+k] == prevCluster->payload()[cluster_size+k], tail[0..4) ==
+// prevCluster->payload()[size-4..size). `end_boundary_converted` points at prevCluster->extra_bytes_at_end_converted.
 struct StitchPrevEdge {
-	std::span<std::byte> tail; // 11 bytes: prevCluster->data[cluster_size-4 .. cluster_size+7)
+	std::span<std::byte> tail; // 11 bytes: prevCluster->payload()[cluster_size-4 .. cluster_size+7)
 	bool* end_boundary_converted;
 };
 
-// Edge of the NEXT cluster: a mutable view of nextCluster->data[0..7), plus a read-only view of
+// Edge of the NEXT cluster: a mutable view of nextCluster->payload()[0..7), plus a read-only view of
 // nextCluster->first_three_bytes_pre_data_conversion[0..3). `start_boundary_converted` points at
 // nextCluster->extra_bytes_at_start_converted.
 struct StitchNextEdge {
-	std::span<std::byte> head;                      // 7 bytes: nextCluster->data[0..7)
+	std::span<std::byte> head;                      // 7 bytes: nextCluster->payload()[0..7)
 	std::span<const std::byte, 3> unconverted_head; // nextCluster->first_three_bytes_pre_data_conversion
 	bool* start_boundary_converted;
 };

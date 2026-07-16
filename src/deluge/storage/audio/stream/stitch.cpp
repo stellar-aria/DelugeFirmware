@@ -17,7 +17,7 @@ void byteswap3(std::byte* group) {
 // straddles the boundary.
 void stitch_prev(std::span<std::byte> self_data, StitchPrevEdge& prev, RawDataFormat format, int32_t misalignment,
                  int32_t cluster_index, uint32_t audio_data_start_pos_bytes, size_t cluster_size) {
-	// prev.tail[4..11) mirrors prevCluster->data[cluster_size..cluster_size+7) -- kept in sync with our
+	// prev.tail[4..11) mirrors prevCluster->payload()[cluster_size..cluster_size+7) -- kept in sync with our
 	// own head regardless of format or whether this boundary was already converted.
 	auto prev_overhang = prev.tail.subspan<4, 7>();
 	std::ranges::copy(self_data.first<7>(), prev_overhang.begin());

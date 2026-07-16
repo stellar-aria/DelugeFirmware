@@ -40,3 +40,7 @@ __pycache__
 
 # Local Claude Code config / skills (not shared)
 .claude/
+
+# Superpowers process artifacts (specs, plans, ledger) — local, not shared
+.superpowers/
+docs/superpowers/

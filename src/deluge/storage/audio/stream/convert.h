@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <utility> // std::unreachable
 
 namespace deluge::audio::stream {
 // Pure per-word format conversion — the body of Sample::convertToNative(int32_t), depending only on the
@@ -39,11 +40,44 @@ struct ConvertGeometry {
 	int32_t first_cluster_index_with_no_audio_data; // = sample->getFirstClusterIndexWithNoAudioData()
 };
 
+// Vectorized transform over the 48-byte-aligned (16 lanes x 3-byte groups) prefix of [begin, end), for
+// ENDIANNESS_WRONG_24: de-interleaves 16 consecutive 3-byte groups into 3 channel vectors via vld3
+// (LoadInterleaved<3>), then stores them back with channel 0 and channel 2 swapped via vst3
+// (store_interleaved) -- the vectorized form of the scalar byte0<->byte2 swap below. The caller's `begin`
+// is already 3-byte-group-aligned (see convert_cluster_data), so the 48-byte SIMD grid lines up with the
+// scalar grid with no prologue needed. Yields roughly every 1024 bytes, matching convert_24bit_range's
+// cadence. Returns the (48-byte-aligned) point where the caller's scalar tail should pick up.
+template <class Yield>
+char* convert_24bit_range_simd(char* begin, char const* end, Yield yield) {
+	constexpr size_t lanes = Argon<uint8_t>::lanes; // 16
+	constexpr size_t group_bytes = lanes * 3;       // 48
+
+	size_t const num_groups = (static_cast<size_t>(end - begin) / 3) / lanes;
+	char* const vec_end = begin + num_groups * group_bytes;
+
+	size_t bytes_since_yield = 0;
+	for (; begin < vec_end; begin += group_bytes) {
+		auto* p = reinterpret_cast<uint8_t*>(begin);
+		auto [c0, c1, c2] = Argon<uint8_t>::LoadInterleaved<3>(p);
+		argon::store_interleaved(p, c2, c1, c0);
+
+		bytes_since_yield += group_bytes;
+		if (bytes_since_yield >= 1024) {
+			yield();
+			bytes_since_yield = 0;
+		}
+	}
+	return begin;
+}
+
 // The ENDIANNESS_WRONG_24 byteswap loop: swaps byte 0 and byte 2 of every 3-byte group in [begin, end),
 // yielding roughly every 1024 bytes. `yield` is skipped after the final chunk (see convert_cluster_data's
-// doc comment for what it's for).
+// doc comment for what it's for). Runs vectorized over the 48-byte-aligned prefix first
+// (convert_24bit_range_simd); this loop then only covers the (< 48-byte) scalar tail.
 template <class Yield>
 void convert_24bit_range(char* begin, char const* end, Yield yield) {
+	begin = convert_24bit_range_simd(begin, end, yield);
+
 	while (true) {
 		char const* end_pos_now = begin + 1024; // Every this many bytes, we'll pause and do an audio routine
 		end_pos_now = std::min(end_pos_now, end);
@@ -64,17 +98,22 @@ void convert_24bit_range(char* begin, char const* end, Yield yield) {
 }
 
 // Vectorized transform over the 16-byte-aligned prefix of [begin, end), for the formats that have a
-// SIMD path (currently just UNSIGNED_8; the remaining formats join in a later pass — see
-// docs/superpowers/plans/2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 3/4).
-// Bytewise XOR 0x80 is exactly equivalent to the scalar path's word-wise `word ^ 0x80808080`
-// (convert_word) for every byte position regardless of host endianness, since every byte of the XOR
-// key is the same — so this is bit-exact to the scalar reference, not just an approximation of it.
+// SIMD path (UNSIGNED_8, ENDIANNESS_WRONG_32, ENDIANNESS_WRONG_16; FLOAT joins in a later pass — see
+// docs/superpowers/plans/2026-07-15-audio-stream-phase2d-simd-rewrite.md Task 4).
+// UNSIGNED_8: bytewise XOR 0x80 is exactly equivalent to the scalar path's word-wise `word ^
+// 0x80808080` (convert_word) for every byte position regardless of host endianness, since every byte
+// of the XOR key is the same — so this is bit-exact to the scalar reference, not just an approximation
+// of it.
+// ENDIANNESS_WRONG_32/16: Reverse32bit/Reverse16bit (vrev32q_u8/vrev16q_u8) reverse the bytes within
+// each 4-byte/2-byte lane group of the 16-byte vector -- the same word-relative-to-`begin` grid the
+// scalar convert_word (swapEndianness32/swapEndianness2x16) walks, so this is bit-exact too.
 // Yields roughly every 1024 bytes (64 lanes), matching convert_word_range's cadence. Returns the
 // (16-byte-aligned) point where the caller's scalar tail should pick up; formats with no SIMD path
 // yet are returned unchanged so the caller's scalar loop covers the whole range as before.
 template <class Yield>
 std::byte* convert_range_simd(std::byte* begin, std::byte* end, RawDataFormat format, Yield yield) {
-	if (format != RawDataFormat::UNSIGNED_8) {
+	if (format != RawDataFormat::UNSIGNED_8 && format != RawDataFormat::ENDIANNESS_WRONG_32
+	    && format != RawDataFormat::ENDIANNESS_WRONG_16) {
 		return begin;
 	}
 
@@ -84,7 +123,19 @@ std::byte* convert_range_simd(std::byte* begin, std::byte* end, RawDataFormat fo
 
 	size_t bytes_since_yield = 0;
 	for (; p < vec_end; p += Argon<uint8_t>::lanes) {
-		(Argon<uint8_t>::Load(p) ^ xor_key).StoreTo(p);
+		switch (format) {
+		case RawDataFormat::UNSIGNED_8:
+			(Argon<uint8_t>::Load(p) ^ xor_key).StoreTo(p);
+			break;
+		case RawDataFormat::ENDIANNESS_WRONG_32:
+			Argon<uint8_t>::Load(p).Reverse32bit().StoreTo(p);
+			break;
+		case RawDataFormat::ENDIANNESS_WRONG_16:
+			Argon<uint8_t>::Load(p).Reverse16bit().StoreTo(p);
+			break;
+		default:
+			std::unreachable();
+		}
 
 		bytes_since_yield += Argon<uint8_t>::lanes;
 		if (bytes_since_yield >= 1024) {

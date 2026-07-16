@@ -173,8 +173,8 @@ getOutEarly:
 	}
 
 #if ALPHA_OR_BETA_VERSION
-	if ((uintptr_t)cluster.data & 0b11) {
-		D_PRINTLN("SD read address misaligned by  %d", (int32_t)((uintptr_t)cluster.data & 0b11));
+	if ((uintptr_t)cluster.payload().data() & 0b11) {
+		D_PRINTLN("SD read address misaligned by  %d", (int32_t)((uintptr_t)cluster.payload().data() & 0b11));
 	}
 #endif
 
@@ -198,9 +198,8 @@ getOutEarly:
 		// sample, Block for a still-being-written recording). See storage/audio/stream/
 		// sample_stream.h and design §6/§7.
 		auto source = make_read_source();
-		auto readResult =
-		    source->read(static_cast<uint32_t>(clusterIndex),
-		                 std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
+		auto readResult = source->read(static_cast<uint32_t>(clusterIndex),
+		                               std::span<std::byte>(cluster.payload().data(), bytesRequested));
 		if (readResult) {
 			bytesRead = readResult.value();
 			status = DELUGE_OK;
@@ -249,7 +248,7 @@ getOutEarly:
 		StreamedChunk* prevCluster = chunk_at(cluster.cluster_index - 1);
 		if (prevCluster && prevCluster->loaded) {
 			prev_edge = deluge::audio::stream::StitchPrevEdge{
-			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
+			    .tail = std::span<std::byte>(prevCluster->payload().data() + (Cluster::size - 4), 11),
 			    .end_boundary_converted = &prevCluster->extra_bytes_at_end_converted,
 			};
 		}
@@ -261,7 +260,7 @@ getOutEarly:
 		StreamedChunk* nextCluster = chunk_at(cluster.cluster_index + 1);
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{
-			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),
+			    .head = std::span<std::byte>(nextCluster->payload().data(), 7),
 			    .unconverted_head = std::span<const std::byte, 3>(
 			        reinterpret_cast<const std::byte*>(nextCluster->first_three_bytes_pre_data_conversion), 3),
 			    .start_boundary_converted = &nextCluster->extra_bytes_at_start_converted,
@@ -270,7 +269,7 @@ getOutEarly:
 	}
 	deluge::audio::stream::StitchNextEdge* next_ptr = next_edge ? &*next_edge : nullptr;
 
-	std::span<std::byte> self_span(reinterpret_cast<std::byte*>(cluster.data), Cluster::size + 7);
+	std::span<std::byte> self_span = cluster.payload_with_trailing_slack();
 	deluge::audio::stream::stitch_boundaries(
 	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
 	    cluster.extra_bytes_at_start_converted, cluster.extra_bytes_at_end_converted, prev_ptr, next_ptr);

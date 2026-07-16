@@ -712,7 +712,8 @@ readCachedWindow:
 		    && !cacheCluster) { // If it got stolen - but we should have already detected this above
 			FREEZE_WITH_ERROR("E157");
 		}
-		int32_t* __restrict__ readPos = (int32_t*)&cacheCluster->data[bytePosWithinCluster - 4 + kCacheByteDepth];
+		int32_t* __restrict__ readPos =
+		    (int32_t*)cacheCluster->frame_read_origin(bytePosWithinCluster, kCacheByteDepth);
 
 		int32_t sampleRead[2]; // Somehow works out a tiny bit faster having it as an array
 
@@ -861,7 +862,7 @@ readCachedWindow:
 			if (clusters[0]) {
 				oscPos = uncachedSamplePosBig & 16777215;
 				int32_t uncachedBytePosWithinCluster = uncachedBytePos - uncachedClusterIndex * Cluster::size;
-				currentPlayPos = &clusters[0]->data[uncachedBytePosWithinCluster];
+				currentPlayPos = reinterpret_cast<char*>(clusters[0]->payload().data()) + uncachedBytePosWithinCluster;
 				currentPlayPos = currentPlayPos - 4 + sample->byteDepth;
 			}
 			else {
@@ -933,7 +934,7 @@ uncachedPlayback:
 				// Check that the Cluster hasn't been stolen - but this should have been detected right at the start
 				FREEZE_WITH_ERROR("E166");
 			}
-			cacheWritePos = &cacheCluster->data[bytePosWithinCluster];
+			cacheWritePos = reinterpret_cast<char*>(cacheCluster->payload().data()) + bytePosWithinCluster;
 
 			int32_t cachingBytesTilClusterEnd = Cluster::size - bytePosWithinCluster;
 			int32_t cachingBytesTilUncachedReadEnd = std::min(cachingBytesTilClusterEnd, cachingBytesTilLoopEnd);

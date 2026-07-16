@@ -616,8 +616,8 @@ doLoading:
 
 			timeStretcher->rememberPercCacheCluster(percCacheClusters[reversed][percClusterIndex]);
 
-			percCacheNow =
-			    (uint8_t*)percCacheClusters[reversed][percClusterIndex]->data - (percClusterIndex * Cluster::size);
+			percCacheNow = reinterpret_cast<uint8_t*>(percCacheClusters[reversed][percClusterIndex]->payload().data())
+			               - (percClusterIndex * Cluster::size);
 
 			int32_t posWithinPercClusterBig = startPosSamples & ((Cluster::size << kPercBufferReductionMagnitude) - 1);
 
@@ -655,7 +655,8 @@ doLoading:
 		sourceBytePos += numSamplesThisClusterReadWrite * posIncrement;
 
 		// Alright, load those samples
-		char* currentPos = (char*)&cluster->data[bytePosWithinCluster] - 4 + byteDepth;
+		char* currentPos =
+		    reinterpret_cast<char*>(cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
 
 		do {
 			int32_t numSamplesThisPercPixelSegment = numSamplesThisClusterReadWrite;
@@ -872,7 +873,8 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 			}
 
 			// Alright, read those samples
-			char* currentPos = (char*)&cluster->data[bytePosWithinCluster] - 4 + byteDepthNow;
+			char* currentPos = reinterpret_cast<char*>(
+			    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepthNow)));
 			char* endPos = currentPos + numSamplesThisRead * bytesPerSample * playDirection;
 
 			do {
@@ -950,7 +952,8 @@ uint8_t* Sample::prepareToReadPercCache(int32_t pixellatedPos, int32_t playDirec
 		}
 
 		// Fudge an address to send back
-		return (uint8_t*)percCacheClusters[reversed][ourCluster]->data - (ourCluster * Cluster::size);
+		return reinterpret_cast<uint8_t*>(percCacheClusters[reversed][ourCluster]->payload().data())
+		       - (ourCluster * Cluster::size);
 	}
 }
 
@@ -1435,8 +1438,9 @@ continueWhileLoop:
 			}
 			count++;
 
-			int32_t individualSampleValue =
-			    *(int32_t*)&cluster->data[(currentOffset & (Cluster::size - 1)) - 4 + byteDepth] & bitMask;
+			int32_t individualSampleValue = *(int32_t*)cluster->frame_read_origin(currentOffset & (Cluster::size - 1),
+			                                                                      static_cast<uint8_t>(byteDepth))
+			                                & bitMask;
 			thisValue += (individualSampleValue >> lengthDoublingsNow);
 
 			currentOffset += byteDepth;

@@ -425,7 +425,7 @@ tryGettingFFTConfig:
 					}
 
 					clusterIndexCurrentlyLoaded = clusterIndex;
-					sourceBuffer = cluster->data;
+					sourceBuffer = reinterpret_cast<char const*>(cluster->payload().data());
 				}
 			}
 

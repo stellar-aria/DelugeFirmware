@@ -232,8 +232,8 @@ gotError:
 	recordMax = -2147483648;
 	recordMin = 2147483647;
 
-	writePos = currentRecordCluster->data;
-	clusterEndPos = &currentRecordCluster->data[Cluster::size];
+	writePos = reinterpret_cast<char*>(currentRecordCluster->payload().data());
+	clusterEndPos = reinterpret_cast<char*>(currentRecordCluster->payload().data() + Cluster::size);
 
 	numSamplesBeenRunning = 0;
 	numSamplesCaptured = 0;
@@ -682,7 +682,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 	// created, cos or RAM or file size limit.)
 	if (currentRecordCluster) {
 
-		int32_t bytesToWrite = writePos - currentRecordCluster->data;
+		int32_t bytesToWrite = writePos - reinterpret_cast<char*>(currentRecordCluster->payload().data());
 		if (bytesToWrite > 0) { // Will always be true
 			Error error = writeCluster(currentRecordClusterIndex, bytesToWrite);
 			if (error != Error::NONE) {
@@ -820,7 +820,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 				updateDataLengthInFirstCluster(cluster);
 
 				// Write just that one first sector back to the card
-				disk_write(0, (BYTE*)cluster->data, firstSampleCluster.sdAddress, 1);
+				disk_write(0, (BYTE*)cluster->payload().data(), firstSampleCluster.sdAddress, 1);
 
 				// If that failed, well, that's a shame, but we don't need to do anything
 
@@ -853,14 +853,16 @@ void SampleRecorder::updateDataLengthInFirstCluster(StreamedChunk* cluster) {
 	uint32_t data32;
 
 	// Write top-level RIFF chunk size
-	*(uint32_t*)&cluster->data[4] = audioDataLengthBytesAsWrittenToFile + sample->audioDataStartPosBytes - 8;
+	*(uint32_t*)(cluster->payload().data() + 4) =
+	    audioDataLengthBytesAsWrittenToFile + sample->audioDataStartPosBytes - 8;
 
 	// Write data chunk size
-	*(uint32_t*)&cluster->data[sample->audioDataStartPosBytes - 4] = audioDataLengthBytesAsWrittenToFile;
+	*(uint32_t*)(cluster->payload().data() + (sample->audioDataStartPosBytes - 4)) =
+	    audioDataLengthBytesAsWrittenToFile;
 
 	if (recordingExtraMargins) {
 		// Write loop end point
-		*(uint32_t*)&cluster->data[92] = loopEndSampleAsWrittenToFile;
+		*(uint32_t*)(cluster->payload().data() + 92) = loopEndSampleAsWrittenToFile;
 	}
 }
 
@@ -873,9 +875,8 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	SampleCluster* sampleCluster = &sample->stream().entry(clusterIndex);
 
 	uint32_t byteOffset = static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude;
-	auto writeResult = file->write_at(
-	    byteOffset,
-	    std::span<const std::byte>(reinterpret_cast<const std::byte*>(sampleCluster->cluster->data), numBytes));
+	auto writeResult =
+	    file->write_at(byteOffset, std::span<const std::byte>(sampleCluster->cluster->payload().data(), numBytes));
 	if (!writeResult || *writeResult != numBytes) {
 		return Error::SD_CARD;
 	}
@@ -954,7 +955,7 @@ Error SampleRecorder::createNextCluster() {
 	currentRecordCluster->num_reasons_held_by_sample_recorder++;
 
 	// Copy those extra bytes from the end of the old record cluster to the start of the new cluster
-	memcpy(currentRecordCluster->data, &oldRecordCluster->data[Cluster::size],
+	memcpy(currentRecordCluster->payload().data(), oldRecordCluster->payload().data() + Cluster::size,
 	       5); // 5 is the max number of bytes we could have overshot
 
 	int32_t bytesOvershot = writePos - clusterEndPos;
@@ -962,8 +963,8 @@ Error SampleRecorder::createNextCluster() {
 	currentRecordCluster->loaded =
 	    true; // I think this is ok - mark it as loaded even though we're yet to record into it
 
-	writePos = (char*)&currentRecordCluster->data[bytesOvershot];
-	clusterEndPos = (char*)&currentRecordCluster->data[Cluster::size];
+	writePos = (char*)(currentRecordCluster->payload().data() + bytesOvershot);
+	clusterEndPos = (char*)(currentRecordCluster->payload().data() + Cluster::size);
 
 	return Error::NONE;
 }
@@ -1245,7 +1246,7 @@ void SampleRecorder::setExtraBytesOnPreviousCluster(StreamedChunk* currentCluste
 
 	// It might have since been deallocated, which is just fine. But if not...
 	if (prevCluster) {
-		memcpy(&prevCluster->data[Cluster::size], currentCluster->data, 5);
+		memcpy(prevCluster->payload().data() + Cluster::size, currentCluster->payload().data(), 5);
 	}
 }
 
@@ -1307,19 +1308,19 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 	if (action != MonitoringAction::NONE) {
 		// Write num channels
 		data16 = 1;
-		memcpy(&currentWriteCluster->data[22], &data16, 2);
+		memcpy(currentWriteCluster->payload().data() + 22, &data16, 2);
 
 		// Data rate
 		data32 = kSampleRate * 1 * 3;
-		memcpy(&currentWriteCluster->data[28], &data32, 4);
+		memcpy(currentWriteCluster->payload().data() + 28, &data32, 4);
 
 		// Data block size
 		data16 = 1 * 3;
-		memcpy(&currentWriteCluster->data[32], &data16, 2);
+		memcpy(currentWriteCluster->payload().data() + 32, &data16, 2);
 	}
 
-	char* readPos = &currentReadCluster->data[sample->audioDataStartPosBytes];
-	char* writePos = &currentWriteCluster->data[sample->audioDataStartPosBytes];
+	char* readPos = reinterpret_cast<char*>(currentReadCluster->payload().data() + sample->audioDataStartPosBytes);
+	char* writePos = reinterpret_cast<char*>(currentWriteCluster->payload().data() + sample->audioDataStartPosBytes);
 
 	uint32_t bytesFinalCluster = idealFileSizeBeforeAction & (Cluster::size - 1);
 	if (bytesFinalCluster == 0) {
@@ -1365,7 +1366,8 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 
 		// If need to advance write-head past the end of a cluster, then we'll write that current cluster to disk
 		// and carry on
-		int32_t writeOvershot = writePos - &currentWriteCluster->data[Cluster::size];
+		int32_t writeOvershot =
+		    writePos - reinterpret_cast<char*>(currentWriteCluster->payload().data() + Cluster::size);
 		if (writeOvershot >= 0) {
 
 			// If reached very end of file, break
@@ -1388,12 +1390,12 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 			}
 
 			// Write the Cluster we just finished processing to card
-			DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->data, sdAddress, Cluster::size >> 9);
+			DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, Cluster::size >> 9);
 
 			// Grab any overshot / extra bytes from the end of the Cluster we just finished...
 			uint8_t extraBytes[5]; // 5 is the max number of bytes we could have overshot
 			if (writeOvershot) {
-				memcpy(extraBytes, &currentWriteCluster->data[Cluster::size], writeOvershot);
+				memcpy(extraBytes, currentWriteCluster->payload().data() + Cluster::size, writeOvershot);
 			}
 
 			// And from the Cluster we just finished, give the Cluster *before that* the extra bytes from its start
@@ -1454,27 +1456,27 @@ writeFailed:
 			// Ok, and those extra bytes that we grabbed from the end of the previous Cluster - paste them into the
 			// beginning of the new current Cluster
 			if (writeOvershot) {
-				memcpy(currentWriteCluster->data, extraBytes, writeOvershot);
+				memcpy(currentWriteCluster->payload().data(), extraBytes, writeOvershot);
 			}
 
 			// And get ready to write to the new current Cluster - from the next sample, which might not be
 			// perfectly aligned to the Cluster start
-			writePos = &currentWriteCluster->data[writeOvershot];
+			writePos = reinterpret_cast<char*>(currentWriteCluster->payload().data() + writeOvershot);
 		}
 
 		// If we're in the final read-Cluster and reached the end, then all that's left to do is flush out what we
 		// have left to write (max 1 cluster), and get out.
 		if (currentReadClusterIndex == numClustersBeforeAction - 1
-		    && readPos >= &currentReadCluster->data[bytesFinalCluster]) {
+		    && readPos >= reinterpret_cast<char*>(currentReadCluster->payload().data() + bytesFinalCluster)) {
 			break;
 		}
 
 		// Advance read-head. We read one Cluster ahead, so we can access its "extra bytes"
-		if (readPos >= &currentReadCluster->data[Cluster::size]) {
+		if (readPos >= reinterpret_cast<char*>(currentReadCluster->payload().data() + Cluster::size)) {
 
 			D_PRINTLN("read advance");
 
-			int32_t overshot = readPos - &currentReadCluster->data[Cluster::size];
+			int32_t overshot = readPos - reinterpret_cast<char*>(currentReadCluster->payload().data() + Cluster::size);
 
 			// Some bug-hunting
 			if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
@@ -1520,7 +1522,7 @@ writeFailed:
 				nextReadCluster = nullptr;
 			}
 
-			readPos = &currentReadCluster->data[overshot];
+			readPos = reinterpret_cast<char*>(currentReadCluster->payload().data() + overshot);
 		}
 	}
 
@@ -1537,7 +1539,7 @@ writeFailed:
 
 	currentWriteCluster->loaded = true;
 
-	uint32_t bytesToWriteFinalCluster = writePos - currentWriteCluster->data;
+	uint32_t bytesToWriteFinalCluster = writePos - reinterpret_cast<char*>(currentWriteCluster->payload().data());
 
 	if (bytesToWriteFinalCluster) { // If there is in fact anything to flush out to the file / card...
 
@@ -1559,7 +1561,7 @@ writeFailed:
 			FREEZE_WITH_ERROR("E276");
 		}
 
-		DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->data, sdAddress, numSectorsToWrite);
+		DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, numSectorsToWrite);
 
 		// Some bug-hunting
 		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {

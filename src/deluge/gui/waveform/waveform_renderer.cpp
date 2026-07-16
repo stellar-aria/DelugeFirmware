@@ -479,8 +479,8 @@ cantReadData:
 			// Go through the actual waveform of this cluster
 			while (bytePos < endByteWithinCluster) {
 
-				int32_t individualSampleValue =
-				    *(int32_t*)&cluster->data[bytePos]; // & sample->bitMask; // bitMask hardly matters here
+				int32_t individualSampleValue = *(
+				    int32_t*)(cluster->payload().data() + bytePos); // & sample->bitMask; // bitMask hardly matters here
 
 				if (individualSampleValue > maxThisCol) {
 					maxThisCol = individualSampleValue;

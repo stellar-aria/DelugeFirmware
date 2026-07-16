@@ -76,7 +76,7 @@ void ComputedChunk::operator delete(void* ptr) {
  */
 void StreamedChunk::convert_data_if_necessary() {
 	deluge::audio::stream::convert_cluster_data(
-	    std::span<std::byte>(reinterpret_cast<std::byte*>(data), Cluster::size), cluster_index, sample->rawDataFormat,
+	    payload(), cluster_index, sample->rawDataFormat,
 	    {.audio_data_start_pos_bytes = sample->audioDataStartPosBytes,
 	     .audio_data_length_bytes = sample->audioDataLengthBytes,
 	     .first_cluster_index_with_no_audio_data = sample->getFirstClusterIndexWithNoAudioData()},

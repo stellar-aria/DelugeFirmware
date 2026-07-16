@@ -41,8 +41,8 @@ void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAg
 int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlaybackGuide* guide,
                                                   bool compensateForInterpolationBuffer) {
 	if (clusters[0] != nullptr) {
-		uint32_t withinCluster =
-		    (currentPlayPos - clusters[0]->data) + 4 - sample->byteDepth; // Remove deliberate misalignment
+		uint32_t withinCluster = (currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data())) + 4
+		                         - sample->byteDepth; // Remove deliberate misalignment
 
 		if (compensateForInterpolationBuffer && interpolationBufferSizeLastTime) {
 			int32_t extraSamples = -(interpolationBufferSizeLastTime >> 1);
@@ -66,7 +66,7 @@ void SampleLowLevelReader::setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuid
 #endif
 
 	// Ok, now we've just moved the play-pos into a new Cluster, so do some setting up for that
-	currentPlayPos = clusters[0]->data + bytePosWithinNewCluster;
+	currentPlayPos = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinNewCluster;
 
 	setupReassessmentLocation(guide, sample);
 }
@@ -109,10 +109,10 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 			return false;
 		}
 
-		int32_t bytePosWithinCluster = currentPlayPos - clusters[0]->data;
+		int32_t bytePosWithinCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
 		bytePosWithinCluster += (clusterIndex - finalClusterIndex) * Cluster::size;
 
-		currentPlayPos = finalCluster->data + bytePosWithinCluster;
+		currentPlayPos = reinterpret_cast<char*>(finalCluster->payload().data()) + bytePosWithinCluster;
 		clusterIndex = finalClusterIndex;
 	}
 
@@ -161,7 +161,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 		}
 
-		reassessmentLocation = &clusters[0]->data[bytePosWithinClusterToStopAt];
+		reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinClusterToStopAt;
 		reassessmentAction = REASSESSMENT_ACTION_STOP_OR_LOOP;
 	}
 
@@ -186,7 +186,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 				FREEZE_WITH_ERROR("E163");
 			}
 #endif
-			reassessmentLocation = clusters[0]->data + endPosWithinCurrentCluster;
+			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
 		}
 
 		// Playing backwards
@@ -201,7 +201,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 
 			int32_t endPosWithinCurrentCluster = -excess;
-			reassessmentLocation = clusters[0]->data + endPosWithinCurrentCluster;
+			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
 		}
 	}
 
@@ -210,10 +210,11 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	if (guide->playDirection == 1) {
 		int32_t firstClusterWithData = sample->getFirstClusterIndexWithAudioData();
 		if (currentClusterIndex == firstClusterWithData) {
-			clusterStartLocation = &clusters[0]->data[sample->audioDataStartPosBytes & (Cluster::size - 1)];
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data())
+			                       + (sample->audioDataStartPosBytes & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = clusters[0]->data;
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data());
 		}
 	}
 
@@ -226,10 +227,11 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 		int32_t highestClusterIndex = audioDataStopPos >> Cluster::size_magnitude;
 
 		if (currentClusterIndex == highestClusterIndex) {
-			clusterStartLocation = &clusters[0]->data[(audioDataStopPos - 1) & (Cluster::size - 1)];
+			clusterStartLocation =
+			    reinterpret_cast<char*>(clusters[0]->payload().data()) + ((audioDataStopPos - 1) & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = &clusters[0]->data[Cluster::size - 1];
+			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + (Cluster::size - 1);
 		}
 	}
 
@@ -334,7 +336,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 
 	int32_t oldClusterIndex = clusters[0]->cluster_index;
 
-	int32_t bytePosWithinOldCluster = currentPlayPos - clusters[0]->data;
+	int32_t bytePosWithinOldCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
 	deluge::cluster::remove_reason(*clusters[0], "E035");
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead - 1; l++) {

@@ -63,7 +63,7 @@ Error ClusterByteSource::read(std::span<std::byte> dest) {
 		if (const Error error = advanceClustersIfNecessary(); error != Error::NONE) {
 			return error;
 		}
-		out = static_cast<std::byte>(currentCluster_->data[byteIndexWithinCluster_]);
+		out = currentCluster_->payload()[byteIndexWithinCluster_];
 		byteIndexWithinCluster_++;
 	}
 	return Error::NONE;

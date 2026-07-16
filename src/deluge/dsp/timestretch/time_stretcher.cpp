@@ -741,7 +741,8 @@ startSearch:
 					numSamplesThisRead = (uint32_t)bytesWeMayRead / (uint8_t)bytesPerSample;
 				}
 
-				currentPos[i] = &cluster->data[bytePosWithinCluster] - 4 + byteDepth;
+				currentPos[i] = reinterpret_cast<char const*>(
+				    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
 			}
 
 			// Alright, read those samples for our currently worked out little bit until we reach a cluster boundary or
@@ -1167,7 +1168,7 @@ void TimeStretcher::setupCrossfadeFromCache(SampleCache* cache, int32_t cacheByt
 	if (ALPHA_OR_BETA_VERSION && !cacheCluster) { // If it got stolen - but we should have already detected this above
 		FREEZE_WITH_ERROR("E178");
 	}
-	int32_t* __restrict__ readPos = (int32_t*)&cacheCluster->data[bytePosWithinCluster - 4 + kCacheByteDepth];
+	int32_t* __restrict__ readPos = (int32_t*)cacheCluster->frame_read_origin(bytePosWithinCluster, kCacheByteDepth);
 
 	int32_t bytesTilCacheClusterEnd =
 	    Cluster::size - bytePosWithinCluster

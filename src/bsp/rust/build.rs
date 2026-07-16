@@ -94,7 +94,9 @@ fn main() {
     // objects whose symbols rust's lld can't read). Debug objects are plain ELF
     // (and carry debug_info). Switch to Release later via bfd ld if LTO is wanted.
     let cfg = env::var("DELUGE_BUILD_CONFIG").unwrap_or_else(|_| "Debug".into());
-    let ar = repo_root.join("toolchain/v22/linux-x86_64/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
+    // `toolchain/current` symlinks to the active toolchain version's host dir,
+    // so this survives version bumps (was a hardcoded, now-stale toolchain/v22).
+    let ar = repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
 
     let app_objs_dir = build_dir.join(format!("src/deluge/CMakeFiles/deluge_app.dir/{cfg}"));
     if !app_objs_dir.is_dir() {

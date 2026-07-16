@@ -21,13 +21,16 @@
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_cluster.h"
-#include "storage/audio/audio_file_manager.h"
+#include "processing/engines/audio_engine.h"
 #include "storage/cluster/cluster.h"
 #include <memory>
 #include <new>
+#include <optional>
+#include <span>
 #include <utility>
 
-#include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "deluge_resource.h"             // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "storage/audio/stream/stitch.h" // StitchPrevEdge/StitchNextEdge/stitch_boundaries
 
 namespace deluge::audio::stream {
 
@@ -42,7 +45,7 @@ bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t inde
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
 
-	bool ok = audioFileManager.readClusterData(*cluster, 0);
+	bool ok = sample->stream().read_cluster_data(*cluster, 0);
 	if (ok) {
 		sample->stream().table_[index].cluster = cluster;
 	}
@@ -137,6 +140,154 @@ std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 	return std::make_unique<BlockReadSource>(sample_);
 }
 
+#define REPORT_LOAD_TIME 0
+
+// The cluster data reader (contract documented in sample_stream.h): the pure data work — sector count,
+// read from the read source, conversion, and the inter-cluster boundary fixups. No orchestration (the
+// card-state guards, the loading "reason", and the loading queue stay with the caller).
+bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after) {
+	Sample* sample = cluster.sample;
+	int32_t clusterIndex = cluster.cluster_index;
+
+	// Failure exits jump here (kept above the local inits so the backward gotos don't cross them).
+	if (false) {
+getOutEarly:
+		return false;
+	}
+
+	int32_t numSectors = Cluster::size >> 9;
+
+	// If this is the last Cluster, and we do know what the audio data length is...
+	if (sample->audioDataLengthBytes && sample->audioDataLengthBytes != 0x8FFFFFFFFFFFFFFF) {
+		uint32_t audioDataEndPosBytes = sample->audioDataLengthBytes + sample->audioDataStartPosBytes;
+		uint32_t startByteThisCluster = clusterIndex << Cluster::size_magnitude;
+		int32_t bytesToRead = audioDataEndPosBytes - startByteThisCluster;
+		if (bytesToRead <= 0) {
+			D_PRINTLN("fail thing"); // Shouldn't really still happen
+			goto getOutEarly;
+		}
+		if (bytesToRead < Cluster::size) {
+			numSectors = ((bytesToRead - 1) >> 9) + 1;
+		}
+		// Otherwise, just leave it at the normal number of sectors
+	}
+
+#if ALPHA_OR_BETA_VERSION
+	if ((uintptr_t)cluster.data & 0b11) {
+		D_PRINTLN("SD read address misaligned by  %d", (int32_t)((uintptr_t)cluster.data & 0b11));
+	}
+#endif
+
+	AudioEngine::logAction("loadCluster");
+
+#if REPORT_LOAD_TIME
+	uint16_t startTime = MTU2.TCNT_0;
+#endif
+
+#if ALPHA_OR_BETA_VERSION
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
+		FREEZE_WITH_ERROR("i039"); // It's +1 because we haven't removed this function's "reason" yet.
+	}
+#endif
+
+	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
+	uint32_t bytesRead = 0;
+	DelugeStatus status;
+	{
+		// Read seam: SampleStream::make_read_source owns source selection (Stream for a loaded
+		// sample, Block for a still-being-written recording). See storage/audio/stream/
+		// sample_stream.h and design §6/§7.
+		auto source = make_read_source();
+		auto readResult =
+		    source->read(static_cast<uint32_t>(clusterIndex),
+		                 std::span<std::byte>(reinterpret_cast<std::byte*>(cluster.data), bytesRequested));
+		if (readResult) {
+			bytesRead = readResult.value();
+			status = DELUGE_OK;
+		}
+		else {
+			status = readResult.error();
+		}
+	}
+
+#if REPORT_LOAD_TIME
+	uint16_t endTime = MTU2.TCNT_0;
+	uint16_t duration = endTime - startTime;
+	int32_t uSec = timerCountToUS(duration);
+	if (uSec > 7000) {
+		D_PRINTLN(uSec);
+	}
+#endif
+
+#if ALPHA_OR_BETA_VERSION
+	if (cluster.sample == nullptr) {
+		FREEZE_WITH_ERROR("E208");
+	}
+
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
+		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
+	}
+#endif
+
+	// If that failed, get out
+	if (status != DELUGE_OK) {
+		goto getOutEarly;
+	}
+
+	cluster.convert_data_if_necessary();
+
+#if ALPHA_OR_BETA_VERSION
+	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
+		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
+	}
+#endif
+
+	// Gather the neighbor edge spans and hand off to the pure stitch core (Phase 2b). A neighbor is
+	// only passed when present AND loaded, matching the original inline gates exactly.
+	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
+	if (clusterIndex > 0) {
+		StreamedChunk* prevCluster = chunk_at(cluster.cluster_index - 1);
+		if (prevCluster && prevCluster->loaded) {
+			prev_edge = deluge::audio::stream::StitchPrevEdge{
+			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
+			    .end_boundary_converted = &prevCluster->extra_bytes_at_end_converted,
+			};
+		}
+	}
+	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
+
+	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
+	if (clusterIndex < static_cast<int32_t>(num_clusters()) - 1) {
+		StreamedChunk* nextCluster = chunk_at(cluster.cluster_index + 1);
+		if (nextCluster && nextCluster->loaded) {
+			next_edge = deluge::audio::stream::StitchNextEdge{
+			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),
+			    .unconverted_head = std::span<const std::byte, 3>(
+			        reinterpret_cast<const std::byte*>(nextCluster->first_three_bytes_pre_data_conversion), 3),
+			    .start_boundary_converted = &nextCluster->extra_bytes_at_start_converted,
+			};
+		}
+	}
+	deluge::audio::stream::StitchNextEdge* next_ptr = next_edge ? &*next_edge : nullptr;
+
+	std::span<std::byte> self_span(reinterpret_cast<std::byte*>(cluster.data), Cluster::size + 7);
+	deluge::audio::stream::stitch_boundaries(
+	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
+	    cluster.extra_bytes_at_start_converted, cluster.extra_bytes_at_end_converted, prev_ptr, next_ptr);
+
+	cluster.loaded = true;
+	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in
+	// the Loading state; now its data is read, signal the manager so the async/RT `try_acquire` path
+	// sees it ready. `cluster.loaded` stays the C++ sync-path field; this keeps the manager in sync.
+	{
+		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
+		if (mgr != nullptr) {
+			deluge_resource_mark_ready(mgr, &cluster);
+		}
+	}
+	return true;
+}
+
 // Cluster residency dispatch + table accessors (contract documented in sample_stream.h).
 StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instruction, uint32_t priority_rating,
                                          Error* error) {
@@ -206,7 +357,7 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 	table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
 	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
 	if (!table_[index].cluster->loaded) {
-		bool ok = audioFileManager.readClusterData(*table_[index].cluster, 0);
+		bool ok = read_cluster_data(*table_[index].cluster, 0);
 		deluge_resource_loader_remove(mgr, table_[index].cluster->resource_slot); // it no longer needs the loader
 		if (!ok) {
 			if (load_instruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {

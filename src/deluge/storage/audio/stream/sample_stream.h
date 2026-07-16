@@ -125,6 +125,22 @@ public:
 	/// @name Cluster residency
 	/// @{
 
+	/// @brief Reconstruct @p cluster's data: read its sectors from the read source, convert if the
+	///        sample's raw format isn't native, and stitch in the neighbouring clusters' boundary bytes.
+	///
+	/// The pure per-cluster reconstruction primitive underneath get_cluster() and the resource-manager
+	/// materialize callback (cluster_materialize()) — no orchestration (leasing, the loading queue) here.
+	/// @warning Must be called on the cluster's OWN sample's stream, i.e. on `cluster.sample->stream()`
+	///          (`this == &cluster.sample->stream()`) — make_read_source(), chunk_at() and num_clusters()
+	///          are called on `*this` below to reach `cluster.sample`'s read source and residency table
+	///          (for the neighbour-edge stitch), not some other sample's. All callers uphold this.
+	/// @param cluster           The chunk to reconstruct (already leased/resident, not yet loaded).
+	/// @param min_reasons_after ALPHA/BETA-only: the expected post-call lease-count floor, checked by the
+	///                          freeze sanity-checks below (unused in a release build).
+	/// @return `true` if the cluster was successfully read and stitched; `false` on a read failure (the
+	///         cluster is left unloaded).
+	bool read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after);
+
 	/// @brief Ensure cluster @p index is resident (or scheduled to load) and return it, taking a lease.
 	///
 	/// The dispatch always takes a manager lease on a non-null return; the caller is responsible for

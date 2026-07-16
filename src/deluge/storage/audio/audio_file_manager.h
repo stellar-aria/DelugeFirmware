@@ -89,10 +89,6 @@ public:
 	AudioFile* getAudioFileFromFilename(std::string& fileName, bool mayReadCard, Error* error, FilePointer* filePointer,
 	                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts = false);
 	bool loadCluster(StreamedChunk& cluster, int32_t minNumReasonsAfter = 0);
-	// The pure data read extracted from loadCluster (the future resource-manager materialize Source):
-	// sector count + disk_read + conversion + inter-cluster boundary fixups, with no orchestration
-	// (card-state guards, clusterBeingLoaded, the loading reason, and the loadingQueue stay in loadCluster).
-	bool readClusterData(StreamedChunk& cluster, [[maybe_unused]] int32_t minNumReasonsAfter);
 	void loadAnyEnqueuedClusters(int32_t maxNum = 128, bool mayProcessUserActionsBetween = false);
 	// Shared/generic reason-drop entry point — both chunk roles route through it (it only touches the
 	// role-agnostic lease surface: the chunk's address + resource_slot). One overload per chunk type

@@ -74,6 +74,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
+#include "sync/sd_access.h"
 #include "util/cfunctions.h"
 #include "util/etl_string.h"
 #include "util/functions.h"
@@ -91,7 +92,6 @@ extern void songLoaded(Song* song);
 
 GlobalMIDICommand pendingGlobalMIDICommand = GlobalMIDICommand::NONE; // -1 means none
 int32_t pendingGlobalMIDICommandNumClustersWritten;
-extern uint8_t currentlyAccessingCard;
 
 // FineTempoKnob variable
 int32_t tempoKnobMode = 1;
@@ -157,7 +157,7 @@ void PlaybackHandler::routine() {
 
 void PlaybackHandler::slowRoutine() {
 	// See if any MIDI commands are pending which couldn't be actioned before (see comments in tryGlobalMIDICommands())
-	if (pendingGlobalMIDICommand != GlobalMIDICommand::NONE && !currentlyAccessingCard) {
+	if (pendingGlobalMIDICommand != GlobalMIDICommand::NONE && !deluge::sync::sd_busy()) {
 
 		D_PRINTLN("actioning pending command -----------------------------------------");
 

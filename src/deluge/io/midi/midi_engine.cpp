@@ -35,6 +35,7 @@
 #include "playback/mode/playback_mode.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/smsysex.h"
+#include "sync/sd_access.h"
 #include "version.h"
 
 extern "C" {
@@ -482,11 +483,6 @@ void MidiEngine::midiSysexReceived(MIDICable& cable, uint8_t* data, int32_t len)
 	}
 }
 
-extern "C" {
-
-extern uint8_t currentlyAccessingCard;
-}
-
 void MidiEngine::check_incoming_usb() {
 	bool usbLockNow = usbLock;
 
@@ -503,9 +499,9 @@ void MidiEngine::check_incoming_usb() {
 void MidiEngine::checkIncomingUsbMidi() {
 
 	if (!usbCurrentlyInitialized
-	    || currentlyAccessingCard != 0) { // hack to avoid SysEx handlers clashing with other sd-card activity.
-		if (currentlyAccessingCard != 0) {
-			// D_PRINTLN("checkIncomingUsbMidi seeing currentlyAccessingCard non-zero");
+	    || deluge::sync::sd_busy()) { // hack to avoid SysEx handlers clashing with other sd-card activity.
+		if (deluge::sync::sd_busy()) {
+			// D_PRINTLN("checkIncomingUsbMidi seeing sd_busy()");
 		}
 		return;
 	}

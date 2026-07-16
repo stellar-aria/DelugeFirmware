@@ -106,6 +106,24 @@ volume grant. **Phase 2b's core reentrancy risk -- whether FatFS's own grant
 actually serializes concurrent volume access correctly -- is retired without
 hardware**, subject to the scope notes below.
 
+### What CLEAN mechanically certifies
+
+In `ff.c`, `lock_fs()`/`validate()` bracket essentially the *entire body* of
+every top-level API call the workload uses (`f_open` via `find_volume`,
+`f_read`/`f_write`/`f_close`/`f_stat`/etc. via `validate()`, each paired with
+`LEAVE_FF`->`unlock_fs`). So FatFS's internals never actually execute
+concurrently with each other under the grant -- the "concurrency" under test
+is thread-level *API-call contention*, not internal execution overlap. A CLEAN
+verdict therefore certifies precisely: **the vendored `ff.c`'s lock-macro
+placement has no gaps that leak shared-state access outside the grant, for the
+codepaths this workload exercises.** That is exactly Phase 2b's dependency (the
+`FF_FS_REENTRANT` grant macros have no coverage gaps). It does *not* certify --
+and structurally cannot exercise -- FatFS supporting genuine internal
+parallelism. This matters for the async-SD/Phase-7 follow-on: there, diskio
+calls happen *inside* that locked region, and yielding mid-transfer changes
+this calculus entirely (it lets another caller enter while the grant is held by
+a suspended one) -- so the CLEAN verdict here must not be read as covering that.
+
 ## Scope notes (what this does NOT cover)
 
 - Not a proof of absence of races in general -- it is one (large, seeded,

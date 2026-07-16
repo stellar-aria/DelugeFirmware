@@ -26,11 +26,9 @@ SampleCluster::~SampleCluster() {
 	if (cluster) {
 
 #if ALPHA_OR_BETA_VERSION
+		// No in-flight extra lease exists for manager-owned clusters, so the leftover-reason assertion
+		// holds without any discount.
 		uint32_t reasons = deluge::cluster::lease_count(cluster->resource_slot);
-		if (cluster == audioFileManager.clusterBeingLoaded && reasons > 0) {
-			reasons--;
-		}
-
 		if (reasons) {
 			D_PRINTLN("uh oh, some reasons left...  %d", reasons);
 

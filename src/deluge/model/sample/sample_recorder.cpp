@@ -155,8 +155,8 @@ gotError:
 	sample->byteDepth = 3;
 	sample->numChannels = newNumChannels;
 	sample->lengthInSamples = 0x8FFFFFFFFFFFFFFF;
-	sample->audioDataLengthBytes =
-	    0x8FFFFFFFFFFFFFFF; // If you ever change this value, update the check for it in SampleManager::loadCluster()
+	sample->audioDataLengthBytes = 0x8FFFFFFFFFFFFFFF; // If you ever change this value, update the check for it in
+	                                                   // SampleStream::read_cluster_data()
 	sample->sampleRate = kSampleRate;
 	sample->workOutBitMask();
 

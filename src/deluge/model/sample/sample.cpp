@@ -1842,10 +1842,6 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 			}
 
 			numClusterReasons += static_cast<int32_t>(deluge::cluster::lease_count(cluster->resource_slot));
-
-			if (cluster == audioFileManager.clusterBeingLoaded) {
-				numClusterReasons--;
-			}
 		}
 	}
 
@@ -1857,10 +1853,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 			if (cluster) {
 				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
 
-				if (cluster == audioFileManager.clusterBeingLoaded) {
-					D_PRINTLN(" (loading)");
-				}
-				else if (!cluster->loaded) {
+				if (!cluster->loaded) {
 					D_PRINTLN(" (unloaded)");
 				}
 				else {

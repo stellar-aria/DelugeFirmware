@@ -146,8 +146,6 @@ void AudioFileManager::firstCardRead() {
 
 void AudioFileManager::init() {
 
-	clusterBeingLoaded = nullptr;
-
 	Error error = StorageManager::initSD();
 	if (error == Error::NONE) {
 		Cluster::set_size(fileSystem.csize * 512);
@@ -861,61 +859,6 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 	audioFile->finalizeAfterLoad(effectiveFilePointer.objsize);
 	audioFile->removeReason("E399"); // Setup done; drop the protect-during-setup reason (the caller re-leases).
 	return audioFile;
-}
-
-bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasonsAfter) {
-
-	if (currentlyAccessingCard) {
-		return false; // Could happen if we're trying to render a waveform but we're actually already inside the SD
-		              // routine
-	}
-
-	// I don't think these should happen...
-	if (clusterBeingLoaded != nullptr) {
-		return false;
-	}
-
-	if (AudioEngine::audioRoutineLocked) {
-		return false;
-	}
-
-	clusterBeingLoaded = &cluster;
-	minNumReasonsForClusterBeingLoaded = minNumReasonsAfter + 1;
-
-	Sample* sample = cluster.sample;
-
-#if ALPHA_OR_BETA_VERSION
-	if (deluge::cluster::lease_count(cluster.resource_slot) == 0) {
-		// Ok, I think we know there's at least 1 reason at the point this function's called, because
-		FREEZE_WITH_ERROR("E204");
-	}
-	// it'd only be in the loading queue if it had a "reason".
-	if (!sample) {
-		FREEZE_WITH_ERROR("E206");
-	}
-#endif
-
-	// So that it can't accidentally hit 0 reasons while we're loading it,
-	// cos then it might get deallocated.
-	deluge::cluster::add_lease(&cluster);
-
-	bool ok = cluster.sample->stream().read_cluster_data(cluster, minNumReasonsAfter);
-
-	clusterBeingLoaded = nullptr;
-	deluge::cluster::remove_reason(cluster, ok ? "E034" : "E033");
-
-#if ALPHA_OR_BETA_VERSION
-	if (ok) {
-		if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter) {
-			FREEZE_WITH_ERROR("i037");
-		}
-		if (cluster.sample->stream().chunk_at(cluster.cluster_index) != &cluster) {
-			FREEZE_WITH_ERROR("E438");
-		}
-	}
-#endif
-
-	return ok;
 }
 
 // Only needs calling a couple times per second. Must be called outside of the audio / SD-reading routine

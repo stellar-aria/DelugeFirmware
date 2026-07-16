@@ -43,16 +43,12 @@ void pump(int32_t max_num, bool may_process_user_actions) {
 	if (currentlyAccessingCard) {
 		return;
 	}
-	if (audioFileManager.clusterConversionInProgress()) {
-		return; // One might be having stuff done to it, like having its data converted, but not actually reading
-		        // the card right now
-	}
 	if (AudioEngine::audioRoutineLocked) {
 		return; // Not sure if this should be neccesary?
 	}
 
-	// Cannot call any functions in here which will read the SD card, other than loadCluster(), otherwise that'll
-	// re-call this function!
+	// Cannot call any functions in here which will read the SD card, other than read_cluster_data(), otherwise
+	// that'll re-call this function!
 
 	if (audioFileManager.cardUnavailableForStreaming()) {
 		if (may_process_user_actions) {
@@ -101,20 +97,11 @@ void pump(int32_t max_num, bool may_process_user_actions) {
 
 		// Do the actual loading
 		allowSomeUserActionsEvenWhenInCardRoutine = true; // Sorry!!
-		bool success;
-		if (cluster->sample != nullptr && cluster->sample->stream().resource_asset_id() != DELUGE_RESOURCE_NO_ASSET) {
-			// Manager-owned cluster: it's already constructed + leased (via request), so just do the
-			// read directly. NOT loadCluster — its add_lease/removeReason would desync the manager
-			// lease, and its `audioRoutineLocked` guard would refuse to load during the offline render
-			// (the headless-render streaming starvation we're fixing). The lease persists; the read
-			// just flips loaded=true (or fails, handled below as for legacy).
-			success = cluster->sample->stream().read_cluster_data(*cluster, 0);
-		}
-		else {
-			// Legacy (non-manager-owned) cluster. Task 4 removes this branch + `loadCluster` once
-			// verified dead.
-			success = audioFileManager.loadCluster(*cluster);
-		}
+		// Every queued cluster is manager-owned: it was enqueued via SampleStream::get_cluster, which
+		// calls ensure_resource_asset() (asset != NO_ASSET) before enqueueing, and construct/materialize
+		// set cluster->sample = the owner. So it's already constructed + leased (via request); just do the
+		// read directly. The lease persists; the read just flips loaded=true (or fails, handled below).
+		bool success = cluster->sample->stream().read_cluster_data(*cluster, 0);
 		allowSomeUserActionsEvenWhenInCardRoutine = false;
 
 		// If that didn't work, presumably because the SD card got ejected...

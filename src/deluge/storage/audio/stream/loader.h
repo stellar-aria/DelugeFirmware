@@ -23,16 +23,15 @@
 ///
 /// A stateless set of free functions over the single `deluge_resource` manager instance — there is
 /// nothing to own besides the queue itself (which lives in the resource manager). Card-lifecycle
-/// state (ejected/disabled/uninitialised) and the legacy `loadCluster`/`clusterBeingLoaded` reentrancy
-/// sentinel stay owned by `AudioFileManager` for now (Task 4 retires the sentinel); `pump()` reaches
-/// them through two minimal accessors so the guard behaviour is reproduced exactly.
+/// state (ejected/disabled/uninitialised) stays owned by `AudioFileManager`; `pump()` reaches it
+/// through a minimal accessor.
 namespace deluge::audio::stream::loader {
 
 /// @brief Pump the resource-manager loader queue: pop enqueued clusters (highest priority first) and
 ///        reconstruct each one, up to `max_num` per call.
 ///
-/// Bails out immediately (without touching the card) if a card access is already underway, a legacy
-/// cluster is mid-conversion, the audio routine is locked, or the card is unavailable — in the
+/// Bails out immediately (without touching the card) if a card access is already underway, the audio
+/// routine is locked, or the card is unavailable — in the
 /// card-unavailable case it optionally runs `PlaybackHandler::slowRoutine()` first so pending user
 /// actions (undo/redo etc.) still get serviced while the card is down. Never called from the render
 /// thread's hot path; this is the cooperative, re-entrant pump that both the FatFs `disk_read`/

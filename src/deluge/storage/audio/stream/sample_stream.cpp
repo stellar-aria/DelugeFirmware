@@ -178,7 +178,7 @@ getOutEarly:
 	}
 #endif
 
-	AudioEngine::logAction("loadCluster");
+	AudioEngine::logAction("read_cluster_data");
 
 #if REPORT_LOAD_TIME
 	uint16_t startTime = MTU2.TCNT_0;

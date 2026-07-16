@@ -88,7 +88,6 @@ public:
 	void init();
 	AudioFile* getAudioFileFromFilename(std::string& fileName, bool mayReadCard, Error* error, FilePointer* filePointer,
 	                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts = false);
-	bool loadCluster(StreamedChunk& cluster, int32_t minNumReasonsAfter = 0);
 
 	bool ensureEnoughMemoryForOneMoreAudioFile();
 
@@ -97,10 +96,6 @@ public:
 	Error setupAlternateAudioFilePath(std::string& newPath, int32_t dirPathLength, std::string& oldPath);
 	Error setupAlternateAudioFileDir(std::string& newPath, char const* rootDir,
 	                                 const char* songFilenameWithoutExtension);
-	/// @brief Whether a legacy (non-manager-owned) cluster is mid-reconstruction (data conversion etc.) via
-	///        `loadCluster`, and so the loader pump must not re-enter the SD card right now.
-	/// @return `true` while `clusterBeingLoaded` is set. [Task 4 removes this with the sentinel.]
-	[[nodiscard]] bool clusterConversionInProgress() const { return clusterBeingLoaded != nullptr; }
 	/// @brief Whether the SD card is currently unusable for streaming (ejected, disabled, or not
 	///        initialized) — the loader pump's card-down gate.
 	/// @return `true` if the card cannot be read right now.
@@ -126,10 +121,6 @@ public:
 
 	void setCardRead() { cardReadOnce = true; }
 	void setCardEjected() { cardEjected = true; }
-
-	StreamedChunk* clusterBeingLoaded{};
-	int32_t minNumReasonsForClusterBeingLoaded{}; // Only valid when clusterBeingLoaded is set. And this exists for bug
-	                                              // hunting only.
 
 	std::string alternateAudioFileLoadPath{};
 	AlternateLoadDirStatus alternateLoadDirStatus = AlternateLoadDirStatus::NONE_SET;

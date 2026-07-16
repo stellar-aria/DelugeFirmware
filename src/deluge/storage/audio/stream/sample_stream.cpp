@@ -133,7 +133,7 @@ bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode
 	return true;
 }
 
-std::unique_ptr<ReadSource> SampleStream::make_read_source() const {
+std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 	if (read_stream_.has_value()) {
 		return std::make_unique<StreamReadSource>(read_stream_.value(), static_cast<uint8_t>(Cluster::size_magnitude));
 	}
@@ -244,9 +244,6 @@ const SampleCluster& SampleStream::entry(uint32_t index) const {
 
 uint32_t SampleStream::sd_address_at(uint32_t index) const {
 	return table_[index].sdAddress;
-}
-void SampleStream::set_sd_address_at(uint32_t index, uint32_t sector) {
-	table_[index].sdAddress = sector;
 }
 
 size_t SampleStream::num_clusters() const {

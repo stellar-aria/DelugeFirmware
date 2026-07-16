@@ -1847,7 +1847,6 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 				numClusterReasons--;
 			}
 		}
-		// clusters[c].ensureNoReason(this);
 	}
 
 	if (numClusterReasons) {

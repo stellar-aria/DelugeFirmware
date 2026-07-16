@@ -79,13 +79,12 @@ public:
 	/// disengaged, if the underlying open fails; the caller maps that to Error::FILE_NOT_FOUND,
 	/// matching prior behavior.
 	bool open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters);
-	[[nodiscard]] bool has_read_stream() const { return read_stream_.has_value(); }
 
 	/// Selects the read source from this Sample's backing state: an open read stream (normal,
 	/// loaded-from-card sample) -> StreamReadSource; otherwise (a recording still being written) ->
 	/// BlockReadSource. This is the single place the block-vs-stream decision is made -- no caller
 	/// branches on it.
-	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source() const;
+	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source();
 
 	// === Cluster residency dispatch + table accessors (Phase 4, Task 2; internalized Task 5) =====
 	// `table_` (declared below, private) is this Sample's residency table -- every accessor here
@@ -113,7 +112,6 @@ public:
 	[[nodiscard]] const SampleCluster& entry(uint32_t index) const;
 
 	[[nodiscard]] uint32_t sd_address_at(uint32_t index) const;
-	void set_sd_address_at(uint32_t index, uint32_t sector);
 
 	[[nodiscard]] size_t num_clusters() const;
 	void resize(size_t n);
@@ -148,9 +146,8 @@ private:
 	// Opened once by AudioFileManager::buildAudioFileFromCard, used by readClusterData for every
 	// cluster read thereafter; closed (via the optional's destructor) when this SampleStream is
 	// destructed. Disengaged for a Sample that isn't backed by a stream_io.h read (e.g. one still
-	// being recorded). `mutable`: make_read_source() is logically const (it doesn't change which
-	// source a caller would observe), but StreamReadSource needs a mutable Stream& to read through.
-	mutable std::optional<deluge::io::Stream> read_stream_;
+	// being recorded).
+	std::optional<deluge::io::Stream> read_stream_;
 
 	// The cluster residency table (Phase 4, Task 5: internalized from `Sample::clusters`). Each
 	// entry is a passive `SampleCluster` (sdAddress, StreamedChunk* cluster, waveform min/max); this

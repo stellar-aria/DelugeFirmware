@@ -4,7 +4,9 @@
 #include "cppspec.hpp"
 
 // The permit state is module-internal (storage_op.cpp); exercised exclusively through
-// the public accessor and StorageOp's RAII behaviour.
+// the public accessor and StorageOp's RAII behaviour. Test isolation invariant: each
+// example must leave no live StorageOp (all are scoped locals), so the flag returns to
+// false between examples — there is no before_each reset backstop.
 
 // clang-format off
 describe storage_op("deluge::sync::StorageOp", $ {

@@ -29,8 +29,8 @@ namespace deluge::sync {
 /// `ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE`). The prior permit state is restored
 /// on destruction, so nested scopes compose correctly.
 ///
-/// @note Phase 0 implements only this permit role. Later phases extend `StorageOp` to
-/// also acquire the FatFS serialization owner and expose yield points; the permit role
+/// @note Currently `StorageOp` implements only this permit role. Later phases extend it
+/// to also acquire the FatFS serialization owner and expose yield points; the permit role
 /// is unchanged. See the design spec.
 class StorageOp {
 public:

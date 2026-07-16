@@ -25,7 +25,6 @@
 #include "model/sample/sample.h"
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample_playback_guide.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 
 void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {

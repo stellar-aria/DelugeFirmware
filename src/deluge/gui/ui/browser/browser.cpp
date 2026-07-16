@@ -34,7 +34,6 @@
 #include "model/instrument/instrument.h"
 #include "model/song/song.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/storage_manager.h"

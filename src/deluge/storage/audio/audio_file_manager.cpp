@@ -38,8 +38,6 @@
 #include "storage/audio/cluster_byte_source.h"
 #include "storage/audio/deserializer_byte_source.h"
 #include "storage/audio/stream/loader.h"
-#include "storage/audio/stream/read_source.h"
-#include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -48,7 +46,6 @@
 #include <cstddef>
 
 #include <new>
-#include <optional>
 #include <string.h>
 
 extern "C" {

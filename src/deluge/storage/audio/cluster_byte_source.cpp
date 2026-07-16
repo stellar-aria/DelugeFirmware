@@ -17,7 +17,6 @@
 
 #include "storage/audio/cluster_byte_source.h"
 #include "model/sample/sample.h"
-#include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 
 ClusterByteSource::ClusterByteSource(Sample& sample, uint32_t fileSize)

@@ -288,6 +288,7 @@ dependencies = [
  "critical-section",
  "deluge-alloc",
  "deluge-bsp",
+ "deluge_resource",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync",
@@ -297,6 +298,17 @@ dependencies = [
  "log",
  "rtt-target",
  "rza1l-hal",
+]
+
+[[package]]
+name = "deluge_alloc"
+version = "0.1.0"
+
+[[package]]
+name = "deluge_resource"
+version = "0.1.0"
+dependencies = [
+ "deluge_alloc",
 ]
 
 [[package]]

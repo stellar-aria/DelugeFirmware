@@ -44,8 +44,7 @@ enum class RecorderStatus {
 };
 
 class Sample;
-class Cluster;
-using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class AudioClip;
 class Output;
 struct RecorderConfig {

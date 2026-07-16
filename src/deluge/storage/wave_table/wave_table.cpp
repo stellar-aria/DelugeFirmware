@@ -381,7 +381,7 @@ tryGettingFFTConfig:
 
 	uint32_t bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 
-	Cluster* cluster = nullptr;
+	StreamedChunk* cluster = nullptr;
 	int32_t clusterIndexCurrentlyLoaded = -1; // Initially, none is loaded yet.
 
 	uint32_t startedBandsYet = 0;

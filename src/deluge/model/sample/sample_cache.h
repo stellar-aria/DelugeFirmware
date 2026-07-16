@@ -20,9 +20,7 @@
 #include "definitions_cxx.hpp"
 
 class Sample;
-class Cluster;
-using ComputedChunk =
-    Cluster; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
+struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
 
 class SampleCache {
 public:

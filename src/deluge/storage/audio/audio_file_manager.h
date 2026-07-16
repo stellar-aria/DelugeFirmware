@@ -94,7 +94,11 @@ public:
 	// (card-state guards, clusterBeingLoaded, the loading reason, and the loadingQueue stay in loadCluster).
 	bool readClusterData(StreamedChunk& cluster, [[maybe_unused]] int32_t minNumReasonsAfter);
 	void loadAnyEnqueuedClusters(int32_t maxNum = 128, bool mayProcessUserActionsBetween = false);
-	void removeReasonFromCluster(Cluster& cluster, char const* errorCode, bool deletingSong = false);
+	// Shared/generic reason-drop entry point — both chunk roles route through it (it only touches the
+	// role-agnostic lease surface: the chunk's address + resource_slot). One overload per chunk type
+	// since StreamedChunk / ComputedChunk no longer share a payload base.
+	void removeReasonFromCluster(StreamedChunk& cluster, char const* errorCode, bool deletingSong = false);
+	void removeReasonFromCluster(ComputedChunk& cluster, char const* errorCode, bool deletingSong = false);
 
 	bool ensureEnoughMemoryForOneMoreAudioFile();
 

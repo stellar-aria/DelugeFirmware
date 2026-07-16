@@ -29,8 +29,7 @@ extern "C" {
 }
 
 class Sample;
-class Cluster;
-using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 
 class SampleHolder : public AudioFileHolder {
 public:

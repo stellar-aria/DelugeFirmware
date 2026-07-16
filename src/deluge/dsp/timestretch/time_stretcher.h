@@ -30,10 +30,8 @@ class VoiceSample;
 class Voice;
 class VoiceSamplePlaybackGuide;
 class VoiceUnisonPartSource;
-class Cluster;
-using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
-using ComputedChunk =
-    Cluster; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
 class Sample;
 class SampleCache;
 

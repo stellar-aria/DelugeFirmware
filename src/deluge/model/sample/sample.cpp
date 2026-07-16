@@ -118,7 +118,6 @@ Error Sample::initialize(int32_t newNumClusters) {
 static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
 	auto* sample = static_cast<Sample*>(owner);
 	auto* cluster = new (dest) StreamedChunk();
-	cluster->type = Cluster::Type::SAMPLE;
 	cluster->sample = sample;
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
@@ -140,7 +139,6 @@ static bool clusterMaterialize(void* /*ctx*/, void* owner, uint32_t index, void*
 static void clusterConstruct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
 	auto* sample = static_cast<Sample*>(owner);
 	auto* cluster = new (dest) StreamedChunk();
-	cluster->type = Cluster::Type::SAMPLE;
 	cluster->sample = sample;
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);

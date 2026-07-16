@@ -43,7 +43,7 @@ SampleCluster::~SampleCluster() {
 			FREEZE_WITH_ERROR("E036");
 		}
 #endif
-		cluster->destroy();
+		deluge::cluster::free_chunk(cluster);
 	}
 }
 

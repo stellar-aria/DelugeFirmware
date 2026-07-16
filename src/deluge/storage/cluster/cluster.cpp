@@ -29,6 +29,12 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <type_traits>
+
+// Both chunk payloads must stay standard-layout + non-polymorphic: they're placement-new'd into raw
+// slab slots and their `data[]` tail is over-allocated by Cluster::size extra bytes.
+static_assert(std::is_standard_layout_v<StreamedChunk> && !std::is_polymorphic_v<StreamedChunk>);
+static_assert(std::is_standard_layout_v<ComputedChunk> && !std::is_polymorphic_v<ComputedChunk>);
 
 // The universal size of all clusters
 size_t Cluster::size = 32768;
@@ -41,16 +47,13 @@ void Cluster::set_size(size_t size) {
 	Cluster::size_magnitude = 32 - __builtin_clz(size) - 1;
 }
 
-void Cluster::destroy() {
-	this->~Cluster();
-	// Release back to the slab so its table entry is cleared (a bare deluge_free /
-	// delugeDealloc would leave a dangling slot pointing at freed memory).
-	GeneralMemoryAllocator::get().freeSdram(this);
+// Safety nets (see the header): release through the slab so the table entry is cleared.
+// freeSdram() falls back to a plain heap free for any non-slab pointer.
+void StreamedChunk::operator delete(void* ptr) {
+	GeneralMemoryAllocator::get().freeSdram(ptr);
 }
 
-// Safety net (see the header): release through the slab so the table entry is cleared.
-// freeSdram() falls back to a plain heap free for any non-slab pointer.
-void Cluster::operator delete(void* ptr) {
+void ComputedChunk::operator delete(void* ptr) {
 	GeneralMemoryAllocator::get().freeSdram(ptr);
 }
 
@@ -58,7 +61,7 @@ void Cluster::operator delete(void* ptr) {
  * @brief This function goes through the contents of the cluster,
  *        and converts them to the Deluge's native PCM 24-bit format if needed
  */
-void Cluster::convert_data_if_necessary() {
+void StreamedChunk::convert_data_if_necessary() {
 	deluge::audio::stream::convert_cluster_data(
 	    std::span<std::byte>(reinterpret_cast<std::byte*>(data), Cluster::size), cluster_index, sample->rawDataFormat,
 	    {.audio_data_start_pos_bytes = sample->audioDataStartPosBytes,
@@ -75,17 +78,20 @@ void Cluster::convert_data_if_necessary() {
 	    });
 }
 
-// The resource-manager Asset that owns this cluster's residency for the *leased* (reason-tracked)
-// kinds — SAMPLE (the sample's asset) and PERC_CACHE_* (the sample's per-direction perc asset).
-// SAMPLE_CACHE clusters are unleased (never reasoned), so they return NO_ASSET here and are managed
-// via their cache's own Asset instead.
-uint32_t Cluster::resource_lease_asset_id() const {
+// The resource-manager Asset that owns this chunk's residency (the sample's asset), or NO_ASSET if
+// it has no sample. Used to route a reason to a manager lease.
+uint32_t StreamedChunk::resource_lease_asset_id() const {
+	return (sample != nullptr) ? sample->resourceAssetId : DELUGE_RESOURCE_NO_ASSET;
+}
+
+// The resource-manager Asset that owns this chunk's residency for the *leased* (reason-tracked) perc
+// kinds (the sample's per-direction perc asset). SAMPLE_CACHE chunks are unleased (never reasoned),
+// so they return NO_ASSET here and are managed via their cache's own Asset instead.
+uint32_t ComputedChunk::resource_lease_asset_id() const {
 	switch (type) {
-	case Type::SAMPLE:
-		return (sample != nullptr) ? sample->resourceAssetId : DELUGE_RESOURCE_NO_ASSET;
-	case Type::PERC_CACHE_FORWARDS:
+	case Cluster::Type::PERC_CACHE_FORWARDS:
 		return (sample != nullptr) ? sample->percCacheAssetId[0] : DELUGE_RESOURCE_NO_ASSET;
-	case Type::PERC_CACHE_REVERSED:
+	case Cluster::Type::PERC_CACHE_REVERSED:
 		return (sample != nullptr) ? sample->percCacheAssetId[1] : DELUGE_RESOURCE_NO_ASSET;
 	default:
 		return DELUGE_RESOURCE_NO_ASSET; // SAMPLE_CACHE is unleased
@@ -93,6 +99,13 @@ uint32_t Cluster::resource_lease_asset_id() const {
 }
 
 namespace deluge::cluster {
+
+void free_chunk(void* chunk) {
+	// Release back to the slab so its table entry is cleared (a bare deluge_free / delugeDealloc
+	// would leave a dangling slot pointing at freed memory). Both chunk structs are trivially
+	// destructible (POD / char-array members), so no explicit destructor call is needed.
+	GeneralMemoryAllocator::get().freeSdram(chunk);
+}
 
 void add_lease(void* chunk) {
 	// Manager-owned leased clusters (SAMPLE / PERC) are pinned by a resource-manager lease (they're

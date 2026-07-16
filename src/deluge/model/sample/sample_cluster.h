@@ -20,10 +20,8 @@
 #include "definitions_cxx.hpp"
 #include <utility>
 
-class Cluster;
-using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
-using ComputedChunk =
-    Cluster; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
+struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct ComputedChunk; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
 class Sample;
 
 // This is a quick list item within Sample storing minimal info about one Cluster (which often won't be loaded yet) of

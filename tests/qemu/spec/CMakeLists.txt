@@ -4,6 +4,15 @@ FetchContent_Declare(CppSpec
 )
 FetchContent_MakeAvailable(CppSpec)
 
+# Pinned identically to lib/CMakeLists.txt. On this ARM target the toolchain provides a real
+# <arm_neon.h> (-mfpu=neon, __ARM_NEON defined), so argon's arm_simd.hpp dispatch picks the native
+# NEON backend directly -- no SIMDe, no compat shim.
+FetchContent_Declare(argon
+  GIT_REPOSITORY https://github.com/stellar-aria/argon
+  GIT_TAG b04f7e82ff33523875aca36167fa5bf7ffaf507b
+)
+FetchContent_MakeAvailable(argon)
+
 add_library(deluge_spec INTERFACE)
 
 target_include_directories(deluge_spec INTERFACE
@@ -11,6 +20,7 @@ target_include_directories(deluge_spec INTERFACE
   ../../../src
   ../../32bit_unit_test/mocks/
 )
+target_link_libraries(deluge_spec INTERFACE argon)
 
 set_target_properties(deluge_spec PROPERTIES
   CXX_STANDARD 26

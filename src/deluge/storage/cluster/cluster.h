@@ -102,3 +102,8 @@ public:
 // A file-backed streamed sample-audio chunk (Cluster::Type::SAMPLE). Alias today (Cluster is still
 // one overloaded type); becomes a distinct struct once the cache/perc role (ComputedChunk) splits off.
 using StreamedChunk = Cluster;
+
+// A computed/cached chunk (Cluster::Type::SAMPLE_CACHE / PERC_CACHE_FORWARDS / PERC_CACHE_REVERSED)
+// — repitch SampleCache + perc-cache scratch. Alias today (Cluster is still one overloaded type);
+// becomes a distinct struct once the split from StreamedChunk lands.
+using ComputedChunk = Cluster;

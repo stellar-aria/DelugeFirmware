@@ -32,6 +32,8 @@ class VoiceSamplePlaybackGuide;
 class VoiceUnisonPartSource;
 class Cluster;
 using StreamedChunk = Cluster; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+using ComputedChunk =
+    Cluster; // computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h)
 class Sample;
 class SampleCache;
 
@@ -51,7 +53,7 @@ public:
 	            int32_t timeStretchRatio, int32_t phaseIncrement, uint64_t combinedIncrement, int32_t playDirection,
 	            LoopType loopingType, int32_t priorityRating);
 
-	void rememberPercCacheCluster(Cluster* cluster);
+	void rememberPercCacheCluster(ComputedChunk* cluster);
 	void updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection);
 
 	int32_t getSamplePos(int32_t playDirection);
@@ -98,8 +100,8 @@ public:
 	// SAMPLE chunks fed via Sample::clusters[].getCluster() (see updateClustersForPercLookahead).
 	StreamedChunk* clustersForPercLookahead[kNumClustersLoadedAhead]{};
 
-	Cluster* percCacheClustersNearby[2]{}; // Remembers and acts as a "reason" for the two most recently needed /
-	                                       // accessed Clusters, basically
+	ComputedChunk* percCacheClustersNearby[2]{}; // Remembers and acts as a "reason" for the two most recently needed /
+	                                             // accessed Clusters, basically
 
 private:
 	bool setupNewPlayHead(Sample* sample, VoiceSample* voiceSample, SamplePlaybackGuide* guide, int32_t newHeadBytePos,

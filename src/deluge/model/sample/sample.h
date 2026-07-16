@@ -77,7 +77,7 @@ public:
 	int32_t getFirstClusterIndexWithNoAudioData();
 	Error fillPercCache(TimeStretcher* timeStretcher, int32_t startPosSamples, int32_t endPosSamples,
 	                    int32_t playDirection, int32_t maxNumSamplesToProcess);
-	void percCacheClusterStolen(Cluster* cluster);
+	void percCacheClusterStolen(ComputedChunk* cluster);
 	void deletePercCache(bool beingDestructed = false);
 	uint8_t* prepareToReadPercCache(int32_t pixellatedPos, int32_t playDirection, int32_t* earliestPixellatedPos,
 	                                int32_t* latestPixellatedPos);
@@ -143,7 +143,7 @@ public:
 	// which would re-enter these arrays mid-modification.
 	deluge::vector<SamplePercCacheZone> percCacheZones[2]{};
 
-	Cluster** percCacheClusters[2]{nullptr, nullptr}; // One for each play-direction: 0=forwards; 1=reversed
+	ComputedChunk** percCacheClusters[2]{nullptr, nullptr}; // One for each play-direction: 0=forwards; 1=reversed
 	int32_t numPercCacheClusters{};
 	// Resource-manager Asset id per play-direction for the perc-cache clusters (construct-only,
 	// leased-while-nearby by the TimeStretcher). DELUGE_RESOURCE_NO_ASSET (0xFFFFFFFF) = legacy.

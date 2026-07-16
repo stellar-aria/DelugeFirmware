@@ -167,7 +167,7 @@ static void clusterEvict(void* /*ctx*/, void* owner, uint32_t index) {
 static void percCacheConstruct(void* ctx, void* owner, uint32_t index, void* dest) {
 	auto* sample = static_cast<Sample*>(owner);
 	int32_t reversed = static_cast<int32_t>(reinterpret_cast<intptr_t>(ctx));
-	auto* cluster = new (dest) Cluster();
+	auto* cluster = new (dest) ComputedChunk();
 	cluster->type = reversed ? Cluster::Type::PERC_CACHE_REVERSED : Cluster::Type::PERC_CACHE_FORWARDS;
 	cluster->sample = sample;
 	cluster->cluster_index = index;
@@ -178,10 +178,10 @@ static void percCacheConstruct(void* ctx, void* owner, uint32_t index, void* des
 static void percCacheEvict(void* ctx, void* owner, uint32_t index) {
 	auto* sample = static_cast<Sample*>(owner);
 	int32_t reversed = static_cast<int32_t>(reinterpret_cast<intptr_t>(ctx));
-	Cluster* cluster = sample->percCacheClusters[reversed][index];
+	ComputedChunk* cluster = sample->percCacheClusters[reversed][index];
 	if (cluster != nullptr) {
 		sample->percCacheClusterStolen(cluster); // nulls percCacheClusters[reversed][index] + trims zones
-		cluster->~Cluster();                     // manager frees the slab slot
+		cluster->~ComputedChunk();               // manager frees the slab slot
 	}
 }
 
@@ -341,7 +341,7 @@ SampleCache* Sample::getOrCreateCache(SampleHolder* sampleHolder, int32_t phaseI
 
 	int32_t numClusters = ((lengthInBytesCached - 1) >> Cluster::size_magnitude) + 1;
 
-	void* memory = deluge::memory::alloc_sdram(sizeof(SampleCache) + (numClusters - 1) * sizeof(Cluster*));
+	void* memory = deluge::memory::alloc_sdram(sizeof(SampleCache) + (numClusters - 1) * sizeof(ComputedChunk*));
 	if (memory == nullptr) {
 		return nullptr;
 	}
@@ -420,8 +420,8 @@ Error Sample::fillPercCache(TimeStretcher* timeStretcher, int32_t startPosSample
 		if (!percCacheClusters[reversed]) {
 			numPercCacheClusters = ((lengthInSamplesAfterReduction - 1) >> Cluster::size_magnitude)
 			                       + 1; // Stores this number for the future too
-			int32_t memorySize = numPercCacheClusters * sizeof(Cluster*);
-			percCacheClusters[reversed] = (Cluster**)deluge::memory::alloc_fast(memorySize);
+			int32_t memorySize = numPercCacheClusters * sizeof(ComputedChunk*);
+			percCacheClusters[reversed] = (ComputedChunk**)deluge::memory::alloc_fast(memorySize);
 			if (!percCacheClusters[reversed]) {
 				LOCK_EXIT
 				return Error::INSUFFICIENT_RAM;
@@ -527,7 +527,7 @@ doReturnNoError:
 				if (ALPHA_OR_BETA_VERSION && percClusterIndexStart >= numPercCacheClusters) {
 					FREEZE_WITH_ERROR("E138");
 				}
-				Cluster* clusterHere = percCacheClusters[reversed][percClusterIndexStart];
+				ComputedChunk* clusterHere = percCacheClusters[reversed][percClusterIndexStart];
 #if ALPHA_OR_BETA_VERSION
 				if (!clusterHere) {
 
@@ -685,7 +685,7 @@ doLoading:
 				// resident-but-unleased (the TimeStretcher re-leases the nearby ones via add_reason).
 				DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 				void* p = deluge_resource_request(mgr, percCacheAssetId[reversed], percClusterIndex,
-				                                  sizeof(Cluster) + Cluster::size);
+				                                  sizeof(ComputedChunk) + Cluster::size);
 				if (p == nullptr) {
 					error = Error::INSUFFICIENT_RAM;
 					goto getOut;
@@ -1033,7 +1033,7 @@ uint8_t* Sample::prepareToReadPercCache(int32_t pixellatedPos, int32_t playDirec
 	}
 }
 
-void Sample::percCacheClusterStolen(Cluster* cluster) {
+void Sample::percCacheClusterStolen(ComputedChunk* cluster) {
 	LOCK_ENTRY
 
 	D_PRINTLN("percCacheClusterStolen -----------------------------------------------------------!!");

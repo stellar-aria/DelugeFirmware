@@ -706,7 +706,7 @@ readCachedWindow:
 		int32_t cachedClusterIndex = cacheBytePos >> Cluster::size_magnitude;
 		int32_t bytePosWithinCluster = cacheBytePos & (Cluster::size - 1);
 
-		Cluster* cacheCluster = cache->getCluster(cachedClusterIndex);
+		ComputedChunk* cacheCluster = cache->getCluster(cachedClusterIndex);
 		if (ALPHA_OR_BETA_VERSION
 		    && !cacheCluster) { // If it got stolen - but we should have already detected this above
 			FREEZE_WITH_ERROR("E157");
@@ -926,7 +926,7 @@ uncachedPlayback:
 				}
 			}
 
-			Cluster* cacheCluster = cache->getCluster(cacheClusterIndex);
+			ComputedChunk* cacheCluster = cache->getCluster(cacheClusterIndex);
 			if (ALPHA_OR_BETA_VERSION && !cacheCluster) {
 				// Check that the Cluster hasn't been stolen - but this should have been detected right at the start
 				FREEZE_WITH_ERROR("E166");

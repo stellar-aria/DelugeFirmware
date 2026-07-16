@@ -1106,7 +1106,7 @@ void TimeStretcher::readFromBuffer(int32_t* __restrict__ oscBufferPos, int32_t n
 // Adds reason if this one wasn't already remembered here.
 // And just to be super clear, this is for remembering links to *PERC CACHE Clusters*! Not just regular audio data
 // Clusters.
-void TimeStretcher::rememberPercCacheCluster(Cluster* cluster) {
+void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 
 	if (percCacheClustersNearby[0] == cluster || percCacheClustersNearby[1] == cluster) {
 		return;
@@ -1165,7 +1165,7 @@ void TimeStretcher::setupCrossfadeFromCache(SampleCache* cache, int32_t cacheByt
 	int32_t cachedClusterIndex = cacheBytePos >> Cluster::size_magnitude;
 	int32_t bytePosWithinCluster = cacheBytePos & (Cluster::size - 1);
 
-	Cluster* cacheCluster = cache->getCluster(cachedClusterIndex);
+	ComputedChunk* cacheCluster = cache->getCluster(cachedClusterIndex);
 	if (ALPHA_OR_BETA_VERSION && !cacheCluster) { // If it got stolen - but we should have already detected this above
 		FREEZE_WITH_ERROR("E178");
 	}

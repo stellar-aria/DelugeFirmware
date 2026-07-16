@@ -420,8 +420,7 @@ tryGettingFFTConfig:
 						audioFileManager.removeReasonFromCluster(*cluster, "E385");
 					}
 
-					cluster = sample->clusters[clusterIndex].getCluster(sample, clusterIndex, CLUSTER_LOAD_IMMEDIATELY,
-					                                                    0, &error);
+					cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0, &error);
 					if (!cluster) {
 						return error; // allocGuard frees both temp buffers + the bands.
 					}

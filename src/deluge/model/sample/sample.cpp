@@ -99,7 +99,7 @@ Error Sample::initialize(int32_t newNumClusters) {
 	fileExplicitlySpecifiesSelfAsWaveTable = false;
 
 	try {
-		clusters.resize(clusters.size() + newNumClusters);
+		stream().resize(stream().num_clusters() + newNumClusters);
 	} catch (deluge::exception&) {
 		return Error::INSUFFICIENT_RAM;
 	}
@@ -203,8 +203,8 @@ void Sample::markAsUnloadable() {
 
 	// If any Clusters in the load-queue, remove them from there
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
-		StreamedChunk* cluster = clusters[c].cluster;
+	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
+		StreamedChunk* cluster = stream().chunk_at(c);
 		if (cluster != nullptr) {
 			cluster->unloadable = true;
 			deluge_resource_loader_remove(mgr, cluster->resource_slot);
@@ -634,7 +634,7 @@ doLoading:
 		}
 
 		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff.
-		StreamedChunk* cluster = clusters[sourceClusterIndex].cluster;
+		StreamedChunk* cluster = stream().chunk_at(sourceClusterIndex);
 		if (!cluster || !cluster->loaded) {
 			goto getOut;
 		}
@@ -856,7 +856,7 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				FREEZE_WITH_ERROR("EEEE");
 			}
 
-			StreamedChunk* cluster = clusters[whichCluster].cluster;
+			StreamedChunk* cluster = stream().chunk_at(whichCluster);
 			if (!cluster || !cluster->loaded) {
 				return false;
 			}
@@ -1070,8 +1070,8 @@ int32_t Sample::getFirstClusterIndexWithAudioData() {
 int32_t Sample::getFirstClusterIndexWithNoAudioData() {
 	uint32_t clusterIndex =
 	    ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1; // Rounds up
-	if (clusterIndex > static_cast<int32_t>(clusters.size())) {
-		clusterIndex = static_cast<int32_t>(clusters.size());
+	if (clusterIndex > static_cast<int32_t>(stream().num_clusters())) {
+		clusterIndex = static_cast<int32_t>(stream().num_clusters());
 	}
 	return clusterIndex;
 }
@@ -1392,8 +1392,7 @@ startAgain:
 	uint32_t currentClusterIndex = currentOffset >> Cluster::size_magnitude;
 	int32_t writeIndex = 0;
 
-	StreamedChunk* cluster =
-	    clusters[currentClusterIndex].getCluster(this, currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
+	StreamedChunk* cluster = stream().get_cluster(currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
 	if (!cluster) {
 		D_PRINTLN("failed to load first");
 getOut:
@@ -1418,8 +1417,7 @@ getOut:
 continueWhileLoop:
 		// If there's no "next" Cluster, load it now
 		if (!nextCluster && currentClusterIndex + 1 < getFirstClusterIndexWithNoAudioData()) {
-			nextCluster =
-			    clusters[currentClusterIndex + 1].getCluster(this, currentClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY);
+			nextCluster = stream().get_cluster(currentClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY);
 			if (!nextCluster) {
 				audioFileManager.removeReasonFromCluster(*cluster, "imcwn4o");
 				D_PRINTLN("failed to load next");
@@ -1740,7 +1738,7 @@ doneReading:
 void Sample::convertDataOnAnyClustersIfNecessary() {
 	if (rawDataFormat != RawDataFormat::NATIVE) {
 		for (int32_t c = getFirstClusterIndexWithAudioData(); c < getFirstClusterIndexWithNoAudioData(); c++) {
-			StreamedChunk* cluster = clusters[c].cluster;
+			StreamedChunk* cluster = stream().chunk_at(c);
 			if (cluster != nullptr) {
 
 				// Add reason in case it would get stolen
@@ -1833,9 +1831,9 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 #if ALPHA_OR_BETA_VERSION
 	// Count up the individual reasons, as a bug check
 	int32_t numClusterReasons = 0;
-	for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
+	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
 
-		StreamedChunk* cluster = clusters[c].cluster;
+		StreamedChunk* cluster = stream().chunk_at(c);
 		if (cluster) {
 
 			if (cluster->cluster_index != c) {
@@ -1854,9 +1852,9 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 
 	if (numClusterReasons) {
 		D_PRINTLN("reason dump---");
-		for (int32_t c = 0; c < static_cast<int32_t>(clusters.size()); c++) {
+		for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
 
-			StreamedChunk* cluster = clusters[c].cluster;
+			StreamedChunk* cluster = stream().chunk_at(c);
 			if (cluster) {
 				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
 

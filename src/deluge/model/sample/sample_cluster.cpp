@@ -18,13 +18,11 @@
 #include "model/sample/sample_cluster.h"
 #include "definitions_cxx.hpp"
 #include "io/debug/log.h"
-#include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/audio/stream/sample_stream.h" // the forwarder's target: SampleStream::get_cluster
 #include "storage/cluster/cluster.h"
 #include <cstddef>
-
-#include "deluge_resource.h" // resource manager: route raw SAMPLE-cluster residency through it
 
 SampleCluster::~SampleCluster() {
 	if (cluster) {
@@ -60,87 +58,15 @@ void SampleCluster::ensureNoReason(Sample* sample) {
 
 // Calling this will add a reason to the loaded Cluster!
 // priorityRating is only relevant if enqueuing.
+//
+// COEXISTENCE thin forwarder (Phase 4, Task 2): the dispatch itself moved onto
+// deluge::audio::stream::SampleStream::get_cluster (sample_stream.{h,cpp}); this is kept only so the
+// not-yet-migrated recorder / SampleHolder / RT-reader callers (Tasks 3-4), which still call
+// `clusters[i].getCluster(sample, i, ...)`, keep compiling unchanged. Deleted in Task 5. This
+// deliberately ignores `this` (the SampleCluster entry) and uses only `clusterIndex`, which is safe
+// because every remaining caller passes an index equal to its own entry's subscript (verified at
+// migration time).
 StreamedChunk* SampleCluster::getCluster(Sample* sample, uint32_t clusterIndex, int32_t loadInstruction,
                                          uint32_t priorityRating, Error* error) {
-
-	if (error != nullptr) {
-		*error = Error::NONE;
-	}
-
-	// Manager-owned residency. The manager is the sole SDRAM evictor: every Sample (playback or
-	// recording) is manager-owned (SampleStream::ensure_resource_asset FREEZEs if the asset table is
-	// exhausted — no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
-	// construct/materialize callback records the slot handle); add_lease/request take the lease.
-	// non-null `cluster` <=> manager-resident (on_evict nulls it).
-	uint32_t asset = sample->stream().ensure_resource_asset();
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	bool wasResident = (cluster != nullptr);
-
-	if (loadInstruction == CLUSTER_DONT_LOAD) {
-		// "Allocate but don't read from the card" — recording / convert write target. Resident ⇒ just
-		// pin (lease); not-resident ⇒ construct an empty cluster (no I/O). Held *dirty* so the manager
-		// never evicts the unflushed data; writeCluster clears dirty once it is on the card, after
-		// which it is reconstructable like any sample cluster.
-		if (wasResident) {
-			deluge_resource_add_lease(mgr, cluster);
-		}
-		else {
-			void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
-			if (p == nullptr) {
-				if (error != nullptr) {
-					*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
-				}
-				return nullptr;
-			}
-			cluster = reinterpret_cast<StreamedChunk*>(p);
-		}
-		deluge_resource_mark_dirty(mgr, cluster, true);
-		return cluster;
-	}
-
-	if (loadInstruction == CLUSTER_ENQUEUE) {
-		// Async prefetch: construct + lease now (NO I/O), then schedule the read on the loader
-		// (the existing loadingQueue, pumped off the audio thread) so the audio thread never
-		// blocks on SD. Returns the cluster (loaded==false until the loader reads it).
-		void* p = deluge_resource_request(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
-		if (p == nullptr) {
-			if (error != nullptr) {
-				*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
-			}
-			return nullptr;
-		}
-		cluster = reinterpret_cast<StreamedChunk*>(p);
-		if (!cluster->loaded) {
-			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priorityRating);
-		}
-		return cluster;
-	}
-
-	// CLUSTER_LOAD_IMMEDIATELY / _OR_ENQUEUE: must have it loaded now → acquire (full
-	// materialize on a miss; this may block on I/O, which is the must-load-now contract).
-	void* p = deluge_resource_acquire(mgr, asset, clusterIndex, sizeof(StreamedChunk) + Cluster::size);
-	if (p == nullptr) {
-		if (error != nullptr) {
-			*error = sample->unloadable ? Error::FILE_NOT_FOUND : Error::UNSPECIFIED;
-		}
-		return nullptr;
-	}
-	cluster = reinterpret_cast<StreamedChunk*>(p);
-	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
-	if (!cluster->loaded) {
-		bool ok = audioFileManager.readClusterData(*cluster, 0);
-		deluge_resource_loader_remove(mgr, cluster->resource_slot); // it no longer needs the loader
-		if (!ok) {
-			if (loadInstruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
-				deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priorityRating); // fall back to async
-			}
-			else {
-				if (error != nullptr) {
-					*error = Error::UNSPECIFIED;
-				}
-				return nullptr; // must-load-now failed; cluster stays resident+leased, caller may retry
-			}
-		}
-	}
-	return cluster;
+	return sample->stream().get_cluster(clusterIndex, loadInstruction, priorityRating, error);
 }

@@ -49,8 +49,7 @@ Error ClusterByteSource::advanceClustersIfNecessary() {
 	if (currentCluster_ != nullptr) {
 		audioFileManager.removeReasonFromCluster(*currentCluster_, "E031");
 	}
-	currentCluster_ =
-	    sample_.clusters[currentClusterIndex_].getCluster(&sample_, currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
+	currentCluster_ = sample_.stream().get_cluster(currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
 	if (currentCluster_ == nullptr) {
 		return Error::SD_CARD; // Failed to load cluster from card.
 	}

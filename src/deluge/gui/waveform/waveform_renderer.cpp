@@ -238,7 +238,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 	int32_t endClusters;
 	if (recorder) {
 		numValidSamples = recorder->numSamplesCaptured;
-		endClusters = static_cast<int32_t>(sample->clusters.size());
+		endClusters = static_cast<int32_t>(sample->stream().num_clusters());
 	}
 	else {
 		numValidSamples = sample->lengthInSamples;
@@ -379,7 +379,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 			}
 		}
 
-		SampleCluster* sampleCluster = &sample->clusters[clusterIndexToDo];
+		SampleCluster* sampleCluster = &sample->stream().entry(clusterIndexToDo);
 
 		// If we're wanting to investigate the whole length of one Cluster, and that's already actually been done
 		// previously, we can just reuse those findings!
@@ -404,7 +404,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 				                    // Malte P.
 			}
 
-			StreamedChunk* cluster = sampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+			StreamedChunk* cluster = sample->stream().get_cluster(clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
 			if (!cluster) {
 cantReadData:
 				D_PRINTLN("cant read");
@@ -429,8 +429,13 @@ cantReadData:
 			StreamedChunk* nextCluster = nullptr;
 			if (endByteWithinCluster <= startByteWithinCluster && clusterIndexToDo < endClusters - 1) {
 				endByteWithinCluster += overshoot;
-				SampleCluster* nextSampleCluster = &sample->clusters[clusterIndexToDo + 1];
-				nextCluster = nextSampleCluster->getCluster(sample, clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+				// NOTE (Phase 4 Task 2, deliberate behavior change -- waveform-only, not golden-covered):
+				// the pre-migration code read `&sample->clusters[clusterIndexToDo + 1]` (the entry) but
+				// passed the getCluster() index arg as plain `clusterIndexToDo` (missing the `+1`) -- a
+				// latent entry/index mismatch. The unified get_cluster(index) API couples entry and index
+				// by construction, so exact reproduction of that mismatch is impossible; this resolves to
+				// the entry-consistent index (the evident intent).
+				nextCluster = sample->stream().get_cluster(clusterIndexToDo + 1, CLUSTER_LOAD_IMMEDIATELY);
 
 				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 					FREEZE_WITH_ERROR("E342"); // Trying to catch E340 below, which Ron R got while recording

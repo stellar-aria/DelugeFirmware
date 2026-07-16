@@ -724,7 +724,7 @@ startSearch:
 				}
 
 				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				StreamedChunk* cluster = sample->clusters[whichCluster].cluster;
+				StreamedChunk* cluster = sample->stream().chunk_at(whichCluster);
 				if (!cluster || !cluster->loaded) {
 					goto skipSearch;
 				}
@@ -1138,8 +1138,7 @@ void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sour
 			    || nextClusterIndex >= sample->getFirstClusterIndexWithNoAudioData()) {
 				break; // If no more Clusters
 			}
-			clustersForPercLookahead[l] =
-			    sample->clusters[nextClusterIndex].getCluster(sample, nextClusterIndex, CLUSTER_ENQUEUE);
+			clustersForPercLookahead[l] = sample->stream().get_cluster(nextClusterIndex, CLUSTER_ENQUEUE);
 			if (!clustersForPercLookahead[l]) {
 				break;
 			}

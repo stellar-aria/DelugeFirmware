@@ -247,7 +247,7 @@ clusterSizeChangedButItsOk:
 
 					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
 					// enough the file hasn't changed
-					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->clusters[0].sdAddress) {
+					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->stream().sd_address_at(0)) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -910,7 +910,7 @@ bool AudioFileManager::loadCluster(StreamedChunk& cluster, int32_t minNumReasons
 		if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < minNumReasonsAfter) {
 			FREEZE_WITH_ERROR("i037");
 		}
-		if (cluster.sample->clusters[cluster.cluster_index].cluster != &cluster) {
+		if (cluster.sample->stream().chunk_at(cluster.cluster_index) != &cluster) {
 			FREEZE_WITH_ERROR("E438");
 		}
 	}
@@ -1025,7 +1025,7 @@ getOutEarly:
 	// only passed when present AND loaded, matching the original inline gates exactly.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
-		StreamedChunk* prevCluster = sample->clusters[cluster.cluster_index - 1].cluster;
+		StreamedChunk* prevCluster = sample->stream().chunk_at(cluster.cluster_index - 1);
 		if (prevCluster && prevCluster->loaded) {
 			prev_edge = deluge::audio::stream::StitchPrevEdge{
 			    .tail = std::span<std::byte>(reinterpret_cast<std::byte*>(&prevCluster->data[Cluster::size - 4]), 11),
@@ -1036,8 +1036,8 @@ getOutEarly:
 	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
 
 	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
-	if (clusterIndex < static_cast<int32_t>(sample->clusters.size()) - 1) {
-		StreamedChunk* nextCluster = sample->clusters[cluster.cluster_index + 1].cluster;
+	if (clusterIndex < static_cast<int32_t>(sample->stream().num_clusters()) - 1) {
+		StreamedChunk* nextCluster = sample->stream().chunk_at(cluster.cluster_index + 1);
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{
 			    .head = std::span<std::byte>(reinterpret_cast<std::byte*>(nextCluster->data), 7),

@@ -92,6 +92,9 @@ public:
 	/// resource-manager Asset for this Sample's clusters, and the ReadSource selection. See
 	/// storage/audio/stream/sample_stream.h.
 	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
+	/// const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
+	/// accessors (sd_address_at et al.) without dropping const.
+	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
 
 	// Floating point
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }

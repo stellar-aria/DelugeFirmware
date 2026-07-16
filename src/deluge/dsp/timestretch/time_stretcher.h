@@ -95,7 +95,7 @@ public:
 #endif
 
 	// Misnamed (not perc cache) — despite living in the perc-lookahead machinery, this holds source-audio
-	// SAMPLE chunks fed via Sample::clusters[].getCluster() (see updateClustersForPercLookahead).
+	// SAMPLE chunks fed via Sample::stream().get_cluster() (see updateClustersForPercLookahead).
 	StreamedChunk* clustersForPercLookahead[kNumClustersLoadedAhead]{};
 
 	ComputedChunk* percCacheClustersNearby[2]{}; // Remembers and acts as a "reason" for the two most recently needed /

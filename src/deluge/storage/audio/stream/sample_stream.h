@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "io/stream.hpp"
 #include "libdeluge/stream_io.h" // DelugeStreamMode
 #include "storage/audio/stream/read_source.h"
@@ -27,6 +28,8 @@
 #include <string_view>
 
 class Sample;
+class SampleCluster;
+struct StreamedChunk;
 
 // The audio-stream module's per-Sample orchestrator (design spec §4/§8 step 3). This is a
 // COEXISTENCE migration (Phase 4, Task 1 of the plan): SampleStream owns the read-stream handle,
@@ -82,6 +85,45 @@ public:
 	/// BlockReadSource. This is the single place the block-vs-stream decision is made -- no caller
 	/// branches on it.
 	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source() const;
+
+	// === Cluster residency dispatch + table accessors (Phase 4, Task 2; design plan DD3) ========
+	// Additive over the still-Sample-owned residency table (`Sample::clusters`) during the
+	// COEXISTENCE migration -- SampleCluster::getCluster forwards here so not-yet-migrated callers
+	// (the recorder, Task 3; SampleHolder + the RT reader, Task 4) keep compiling unchanged. Bodies
+	// live in the .cpp: they need `Sample` complete (only forward-declared above, since `sample.h`
+	// includes this header).
+
+	/// The getCluster dispatch (moved verbatim from the former SampleCluster::getCluster,
+	/// sample_cluster.cpp:63-146, rebased onto `sample_.clusters[index]`): CLUSTER_DONT_LOAD
+	/// pins/constructs without I/O (recorder write target, held dirty); CLUSTER_ENQUEUE constructs +
+	/// leases and schedules an async read on the loader (the audio thread never blocks); CLUSTER_
+	/// LOAD_IMMEDIATELY[_OR_ENQUEUE] acquires (materializing on a miss, which may block on I/O) and
+	/// reads synchronously on an unloaded hit. Adds a manager lease on every non-null return. `error`,
+	/// if non-null, is set to Error::NONE up front and only overwritten on a failure path (matches the
+	/// original's out-param contract; `std::expected` is out of scope here -- see plan DD4).
+	StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction = CLUSTER_ENQUEUE,
+	                           uint32_t priority_rating = 0xFFFFFFFF, Error* error = nullptr);
+
+	/// Resident chunk pointer for `index`, no lease taken (stitch neighbor edges, fillPercCache,
+	/// crossfade sampling, ALPHA bug-checks). nullptr if not currently resident.
+	[[nodiscard]] StreamedChunk* chunk_at(uint32_t index) const;
+
+	/// The raw table entry (waveform min/max cache, recorder re-fetch-after-write).
+	[[nodiscard]] SampleCluster& entry(uint32_t index);
+	[[nodiscard]] const SampleCluster& entry(uint32_t index) const;
+
+	[[nodiscard]] uint32_t sd_address_at(uint32_t index) const;
+	void set_sd_address_at(uint32_t index, uint32_t sector);
+
+	[[nodiscard]] size_t num_clusters() const;
+	void resize(size_t n);
+	/// Erases every entry from `index` to the end (recorder table shrink on record-stop/truncate).
+	void erase_from(size_t index);
+
+	/// ALPHA debug bug-check: FREEZEs if the entry at `index` still holds a manager lease. Every call
+	/// site is currently commented out (see sample.cpp/sample_recorder.cpp); kept for parity with the
+	/// former SampleCluster::ensureNoReason, deletion deferred to Task 5 (plan DD4).
+	void ensure_no_reason(uint32_t index);
 
 private:
 	// === Resource-manager Source for SAMPLE clusters =========================================

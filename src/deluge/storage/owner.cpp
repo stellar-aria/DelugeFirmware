@@ -17,6 +17,8 @@
 
 #include "storage/owner.h"
 
+#include "libdeluge/worker.h"
+
 namespace deluge::storage {
 
 void Owner::run(void (*fn)(void*), void* ctx) {

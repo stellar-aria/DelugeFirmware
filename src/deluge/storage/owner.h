@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include "libdeluge/worker.h"
-
 namespace deluge::storage {
 
 /// @brief The single storage owner: routes FatFS-touching operations through

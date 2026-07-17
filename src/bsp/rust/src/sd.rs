@@ -32,6 +32,10 @@
 //! FatFS `disk_*` entry points are otherwise unused there; they're still given
 //! working host bodies (rather than gated out) since a future host FatFS
 //! exercise will call them.
+//!
+//! This file also hosts `deluge_storage_on_owner`, a query the Embassy diskio
+//! shims use to assert single-owner access; it just forwards to
+//! `crate::fiber::on_fiber()`.
 #![allow(non_upper_case_globals)]
 
 use core::sync::atomic::{AtomicBool, Ordering};

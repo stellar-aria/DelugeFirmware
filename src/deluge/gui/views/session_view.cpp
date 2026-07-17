@@ -3700,7 +3700,7 @@ void SessionView::gridClonePad(uint32_t sourceX, uint32_t sourceY, uint32_t targ
 // Worker-fiber jobs for the new-track grid gesture. gridCreateClip() opens the
 // clip-type picker and yields until the user chooses; on the decomposed BSP that
 // yield runs cooperatively only on the worker fiber, so these run there (dispatched
-// from the pad handlers via deluge_worker_run). Each mirrors its call site's
+// from the pad handlers via deluge::storage::Owner::run). Each mirrors its call site's
 // post-create logic; press x/y are unpacked from the packed arg (y<<16 | x).
 
 void SessionView::gridNewTrackClipAndEnter(uint32_t packedXY) {

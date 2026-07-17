@@ -4,20 +4,25 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Host (platform-std) build: none of the below applies. bindgen's libdeluge
-    // POD types, the rza1l linker script, and the archived C++ deluge_app closure
-    // are all device-only concerns (M1 only makes the *dependency graph*
-    // host-capable; M3 revisits bindgen for a host-ABI target, and the host image
-    // never links the C++ app at all). `mod sys`/the app-call boundary on host is
-    // handled in a later milestone task, not here.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("none") {
-        return;
-    }
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // DelugeFirmware repo root (crate is at <root>/src/bsp/rust).
     let repo_root = manifest_dir.join("../../..").canonicalize().unwrap();
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Host (platform-std) build: most of the below is device-only (the rza1l
+    // linker script, the arm-eabi archived C++ deluge_app closure). Under
+    // `--features host_app` we instead bindgen the host ABI and link the
+    // host-built `deluge_app` object closure (see m4a-spike-report.md /
+    // m4b task-2-brief.md); this lets the host binary reach the C++ app
+    // boundary without a device build. Without that feature the host path
+    // stays a pure no-op, exactly as before M4b (M1-M3's `sys_host.rs`
+    // stand-ins are used instead).
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("none") {
+        if env::var("CARGO_FEATURE_HOST_APP").is_ok() {
+            run_host_app(&repo_root, &manifest_dir, &out_dir);
+        }
+        return;
+    }
 
     // ---------------------------------------------------------------------
     // bindgen: generate the libdeluge POD types from the canonical headers
@@ -25,38 +30,7 @@ fn main() {
     // ourselves in src/ffi.rs (#[no_mangle]); the C contract drives the types
     // so a layout/type change is a compile error.
     // ---------------------------------------------------------------------
-    let include_dir = repo_root.join("include");
-    let wrapper = manifest_dir.join("wrapper.h");
-    let bindings = bindgen::Builder::default()
-        .header(wrapper.to_str().unwrap())
-        .clang_arg(format!("-I{}", include_dir.display()))
-        // Types only (incl. the fn-pointer aliases). The service functions are
-        // DEFINED in src/ffi.rs; emitting bindgen's `extern "C"` decls too would
-        // trip edition-2024's "extern blocks must be unsafe" (bindgen 0.70).
-        .allowlist_type("Deluge.*")
-        .allowlist_type("RunCondition")
-        .use_core()
-        // CRITICAL: the C++ app is built arm-none-eabi, whose EABI default makes
-        // enums the smallest type that fits (`-fshort-enums`) — e.g.
-        // DelugeInputEventKind (0..3) is 1 byte, so DelugeInputEvent is
-        // {kind@0, x@1, y@2, value@4}. bindgen runs under the *host* clang, which
-        // sizes enums as 4-byte `int` by default; without this flag every
-        // enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card events, …)
-        // is laid out differently on the two sides and fields read as garbage
-        // across the ABI. Point libclang at the actual armv7a EABI target so it
-        // computes the same layout as the app; -fshort-enums alone is ignored
-        // when libclang targets the host (x86_64 mandates 4-byte int enums).
-        .clang_arg("--target=armv7a-none-eabihf")
-        .clang_arg("-fshort-enums")
-        // Layouts now match the armv7a app; the asserts would run host-side anyway.
-        .layout_tests(false)
-        .generate()
-        .expect("bindgen failed on libdeluge headers");
-    bindings
-        .write_to_file(out_dir.join("libdeluge_sys.rs"))
-        .expect("write libdeluge_sys.rs");
-    println!("cargo:rerun-if-changed={}", wrapper.display());
-    println!("cargo:rerun-if-changed={}", include_dir.display());
+    run_bindgen(&repo_root, &manifest_dir, &out_dir, "armv7a-none-eabihf");
 
     // ---------------------------------------------------------------------
     // Linker script + memory layout (rza1l-hal's build.rs puts rza1l.x on the
@@ -194,6 +168,161 @@ fn main() {
             );
         }
     }
+}
+
+/// Run bindgen over the canonical libdeluge headers (`include/libdeluge/*.h`)
+/// for `clang_target`, writing `libdeluge_sys.rs` into `out_dir`. Shared by the
+/// device path (`--target=armv7a-none-eabihf`) and the `host_app` path
+/// (`--target=x86_64-unknown-linux-gnu`) — same allowlist/flags otherwise, so
+/// the two `mod sys`es stay structurally identical modulo target.
+fn run_bindgen(
+    repo_root: &std::path::Path,
+    manifest_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+    clang_target: &str,
+) {
+    let include_dir = repo_root.join("include");
+    let wrapper = manifest_dir.join("wrapper.h");
+    let bindings = bindgen::Builder::default()
+        .header(wrapper.to_str().unwrap())
+        .clang_arg(format!("-I{}", include_dir.display()))
+        // Types only (incl. the fn-pointer aliases). The service functions are
+        // DEFINED in src/ffi.rs; emitting bindgen's `extern "C"` decls too would
+        // trip edition-2024's "extern blocks must be unsafe" (bindgen 0.70).
+        .allowlist_type("Deluge.*")
+        .allowlist_type("RunCondition")
+        .use_core()
+        // CRITICAL: the C++ app is built with `-fshort-enums` (arm-eabi always;
+        // the host_app build-embassy-hostapp tree opts in too, see
+        // m4a-spike-report.md), which makes enums the smallest type that fits —
+        // e.g. DelugeInputEventKind (0..3) is 1 byte, so DelugeInputEvent is
+        // {kind@0, x@1, y@2, value@4}. bindgen runs under the *host* clang, which
+        // sizes enums as 4-byte `int` by default; without this flag every
+        // enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card events, …)
+        // is laid out differently on the two sides and fields read as garbage
+        // across the ABI. Point libclang at the actual target so it computes the
+        // same layout as the app being linked; -fshort-enums alone is ignored
+        // when libclang targets x86_64 without an explicit --target (host
+        // x86_64 mandates 4-byte int enums by default, same as arm w/o the
+        // flag) — with an explicit target the flag applies on both.
+        .clang_arg(format!("--target={clang_target}"))
+        .clang_arg("-fshort-enums")
+        // Layouts now match the app being linked; the asserts would run
+        // host-side anyway.
+        .layout_tests(false)
+        .generate()
+        .expect("bindgen failed on libdeluge headers");
+    bindings
+        .write_to_file(out_dir.join("libdeluge_sys.rs"))
+        .expect("write libdeluge_sys.rs");
+    println!("cargo:rerun-if-changed={}", wrapper.display());
+    println!("cargo:rerun-if-changed={}", include_dir.display());
+}
+
+/// `host_app` feature: bindgen the host ABI (x86-64 + `-fshort-enums`, matching
+/// build-embassy-hostapp's CMake config) into the real `mod sys`, then archive
+/// the host-built C++ `deluge_app` object closure and emit link directives so
+/// the crate reaches the linker against real provider-symbol references. See
+/// m4a-spike-report.md (proved the ABI round-trip + link mechanics) and
+/// task-2-brief.md.
+fn run_host_app(
+    repo_root: &std::path::Path,
+    manifest_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+) {
+    run_bindgen(repo_root, manifest_dir, out_dir, "x86_64-unknown-linux-gnu");
+
+    // This link is EXPECTED to fail on undefined provider symbols until Tasks
+    // 3-5 land (that failure list is this task's deliverable) — lift lld's
+    // default error cap so a single `cargo build` run surfaces the complete
+    // set instead of truncating after the first batch.
+    println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
+    // No host Rust code calls `deluge_app_init` yet (Tasks 3-5 earn that real
+    // call). Force it as a link root (`-u`) so lld extracts deluge.cpp.o from
+    // the archive and keeps its whole transitively-reachable graph under the
+    // default --gc-sections, exactly as if Task 3's real boot call already
+    // existed — without that, gc-sections would strip everything down to just
+    // the C++ global-constructor subset, under-reporting the checklist.
+    println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
+
+    // CMake-built host tree (Task 1: `cmake -S sim -B build-embassy-hostapp
+    // -DDELUGE_HOST_EMBASSY=... ; ninja -C build-embassy-hostapp deluge_app`).
+    // Overridable so CI/devs can point at a differently-named build dir.
+    let build_dir = env::var("DELUGE_HOSTAPP_BUILD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root.join("build-embassy-hostapp"));
+    // Single-config Ninja generator (unlike the device path's multi-config
+    // `.../{cfg}` layout) — objects land directly under deluge_app.dir, no
+    // Debug/Release subdir (see m4a-spike-report.md's "minor note for M4b").
+    let app_objs_dir = build_dir.join("app/CMakeFiles/deluge_app.dir");
+    if !app_objs_dir.is_dir() {
+        panic!(
+            "host C++ app objects not found at {}. Build them first:\n  \
+             ninja -C {} deluge_app fatfs NE10 eyalroz_printf deluge_dsp \
+             deluge_scheduler deluge_foundation deluge_midi",
+            app_objs_dir.display(),
+            build_dir.display()
+        );
+    }
+
+    let mut objs = Vec::new();
+    collect_objs(&app_objs_dir, &mut objs);
+    objs.sort();
+    // Re-archive on object content change, not just add/remove (see the device
+    // path's identical rationale above).
+    for o in &objs {
+        println!("cargo:rerun-if-changed={}", o.display());
+    }
+    let app_objs_archive = out_dir.join("libdeluge_app_objs.a");
+    let _ = fs::remove_file(&app_objs_archive);
+    // Host `ar` (not arm-none-eabi-ar): these are x86-64 ELF objects.
+    let status = Command::new("ar")
+        .arg("crs")
+        .arg(&app_objs_archive)
+        .args(&objs)
+        .status()
+        .expect("run host ar");
+    assert!(status.success(), "archiving host deluge_app objects failed");
+
+    // The portable static-lib closure, built alongside deluge_app in the same
+    // host tree (see the panic message above). Paths mirror build-embassy-hostapp's
+    // actual layout (NE10 at the build root, dsp under app/, not src/deluge/ —
+    // both differ from the device tree's layout; see collect step above).
+    let deps: [(&str, &str); 7] = [
+        ("fatfs", "libfatfs.a"),
+        (".", "libNE10.a"),
+        ("printf", "libeyalroz_printf.a"),
+        ("app/dsp", "libdeluge_dsp.a"),
+        ("scheduler", "libdeluge_scheduler.a"),
+        ("foundation", "libdeluge_foundation.a"),
+        ("midi", "libdeluge_midi.a"),
+    ];
+
+    // One link group so the mutual C++/Rust refs resolve (the `-u` above is
+    // what actually pulls deluge_app_init — and everything it transitively
+    // reaches — out of this archive; see the comment there).
+    println!("cargo:rustc-link-arg=-Wl,--start-group");
+    println!("cargo:rustc-link-arg={}", app_objs_archive.display());
+    for (dir, lib) in deps {
+        let p = build_dir.join(dir).join(lib);
+        assert!(p.is_file(), "missing host dep archive {}", p.display());
+        println!("cargo:rustc-link-arg={}", p.display());
+    }
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
+
+    // Host runtime: rustc passes -nodefaultlibs, so re-add what the app needs
+    // (libstdc++ for std::/vtables, libgcc for compiler helpers, libc/libm).
+    // Unlike the device (arm-eabi/newlib) group, host glibc pulls libsupc++ in
+    // via libstdc++ and needs no unhosted syscall stubs, so NO -lsupc++/-lnosys
+    // here (see m4a-spike-report.md risk #5). Grouped for the libstdc++<->libc
+    // <->libgcc circular refs.
+    println!("cargo:rustc-link-arg=-Wl,--start-group");
+    for l in ["-lstdc++", "-lm", "-lc", "-lgcc"] {
+        println!("cargo:rustc-link-arg={l}");
+    }
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
+
+    println!("cargo:rerun-if-changed={}", app_objs_dir.display());
 }
 
 fn collect_objs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {

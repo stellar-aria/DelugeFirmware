@@ -46,10 +46,26 @@ extern crate deluge_resource;
 mod sys {
     include!(concat!(env!("OUT_DIR"), "/libdeluge_sys.rs"));
 }
-/// Host stand-in for the above (no C++ app / bindgen output off-target).
-#[cfg(not(target_os = "none"))]
+/// Host stand-in for the above (no C++ app / bindgen output off-target). Used
+/// unless `host_app` is enabled, in which case the real bindgen output below
+/// takes over.
+#[cfg(all(not(target_os = "none"), not(feature = "host_app")))]
 #[path = "sys_host.rs"]
 mod sys;
+/// `host_app` feature: the real host-ABI bindgen output (see build.rs), for
+/// when the host-built C++ `deluge_app` object closure is linked in too.
+/// Replaces the `sys_host.rs` stand-ins above with the genuine generated
+/// types (M4b).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod sys {
+    #![allow(
+        non_upper_case_globals,
+        non_camel_case_types,
+        non_snake_case,
+        dead_code
+    )]
+    include!(concat!(env!("OUT_DIR"), "/libdeluge_sys.rs"));
+}
 
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
 #[cfg(target_os = "none")]

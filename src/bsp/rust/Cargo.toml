@@ -111,6 +111,12 @@ rtt = ["dep:rtt-target", "rza1l-hal/rtt"]
 ## same-thread corosensei stack switch has no other thread to misattribute
 ## happens-before to, unlike ASan's per-stack redzone tracking which does.
 sanitize = ["corosensei/sanitizer"]
+## Off by default. Bindgens the libdeluge C-ABI headers for the HOST ABI
+## (x86-64 + `-fshort-enums`) into the real `mod sys` (replacing the M3
+## `sys_host.rs` stand-ins) and links the host-built C++ `deluge_app` object
+## closure (see build.rs). Lets the host binary reach the C++ app boundary for
+## bring-up/link-checking without a device build. See m4a-spike-report.md.
+host_app = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

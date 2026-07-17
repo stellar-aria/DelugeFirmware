@@ -52,7 +52,6 @@
 #include "io/debug/log.h"
 #include "io/midi/device_specific/specific_midi_device.h"
 #include "io/midi/midi_follow.h"
-#include "libdeluge/worker.h" // deluge_worker_run — run the yielding new-track clip create on the worker fiber
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "model/clip/audio_clip.h"
@@ -76,6 +75,7 @@
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/file_item.h"
+#include "storage/owner.h" // deluge::storage::Owner::run — run the yielding new-track clip create on the worker fiber
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
 #include "util/cfunctions.h"
@@ -3925,7 +3925,7 @@ ActionResult SessionView::gridHandlePadsEdit(int32_t x, int32_t y, int32_t on, C
 						// yield can't run on this BSP, so run the create + this site's
 						// post-logic on the worker fiber (gridNewTrackClipAndEnter) and
 						// return a provisional result; the work finishes after the choice.
-						deluge_worker_run(
+						deluge::storage::Owner::run(
 						    [](void* p) {
 							    sessionView.gridNewTrackClipAndEnter(
 							        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)));
@@ -4138,7 +4138,7 @@ ActionResult SessionView::gridHandlePadsLaunch(int32_t x, int32_t y, int32_t on,
 					// New track: gridCreateClip() yields for the clip-type picker — run the
 					// create + this site's post-logic on the worker fiber (see gridHandlePads),
 					// returning a provisional result; it finishes after the choice.
-					deluge_worker_run(
+					deluge::storage::Owner::run(
 					    [](void* p) {
 						    sessionView.gridNewTrackClipAndSelect(
 						        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)));

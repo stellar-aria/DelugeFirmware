@@ -72,12 +72,26 @@ embassy-time = { version = "0.5.1", features = ["std"] }
 critical-section = { version = "1", features = ["std"] }
 # Host `main`'s logger (device uses `log` over RTT instead; see the `rtt` feature).
 env_logger = "0.11"
+# Host implementation of the fiber.rs low-level switch (`corosensei::Coroutine`/
+# `Yielder`), standing in for the device's ARM `fiber_switch` global_asm. Chosen
+# over `ucontext`/`swapcontext` because it has built-in sanitizer support (the
+# `sanitize` feature below) instead of needing hand-written
+# `__tsan_switch_to_fiber` annotations around every switch — decisive for M1's
+# ThreadSanitizer goal (Task 5).
+corosensei = "0.3"
 
 [features]
 default = ["rtt"]
 ## RTT (SEGGER Real-Time Transfer) logging over a debug probe. Selects the
 ## rza1l_rtt.x linker script (via build.rs) + registers the log logger.
 rtt = ["dep:rtt-target", "rza1l-hal/rtt"]
+## Enable corosensei's sanitizer instrumentation (host fiber switch only — it
+## informs the sanitizer runtime of stack switches so ThreadSanitizer doesn't
+## false-positive across a coroutine switch). OFF by default: enabling it
+## without actually building under a sanitizer causes linker errors (the
+## instrumentation calls into the sanitizer runtime, which isn't linked in a
+## plain build). Turned on by the M1 Task 5 TSan invocation.
+sanitize = ["corosensei/sanitizer"]
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

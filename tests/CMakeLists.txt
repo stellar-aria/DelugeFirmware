@@ -87,6 +87,7 @@ if (UNIX AND NOT APPLE)
 endif ()
 add_subdirectory(spec)
 add_subdirectory(spec_io)
+add_subdirectory(spec_storage)
 add_subdirectory(spec_audio_stream)
 add_subdirectory(unit)
 

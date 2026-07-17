@@ -272,7 +272,11 @@ pub fn start(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
         };
         f(ctx);
     });
-    unsafe { core::ptr::addr_of_mut!(WORKER).write(Some(coro)) };
+    // Drop-respecting assignment (not `.write()`, which would leak an old `Some`
+    // coroutine's stack without running its `Drop`): the caller's contract is that
+    // the fiber is idle here, so WORKER is `None` and there's nothing to drop
+    // today, but this stays parity-correct with `resume()`'s `Return` arm below.
+    unsafe { *core::ptr::addr_of_mut!(WORKER) = Some(coro) };
     resume()
 }
 
@@ -293,9 +297,17 @@ pub fn resume() -> bool {
     match result {
         CoroutineResult::Yield(()) => false,
         CoroutineResult::Return(()) => {
-            // Drop the finished coroutine (frees its stack) so a stale WORKER
-            // can't be mistakenly resumed again; the next op rebuilds it.
-            unsafe { core::ptr::addr_of_mut!(WORKER).write(None) };
+            // Drop-respecting assignment (not `.write(None)`, which overwrites
+            // the old `Some(finished_coroutine)` without running its `Drop` —
+            // silently leaking the coroutine's stack, ~4 KiB, on every completed
+            // op) so a stale WORKER can't be mistakenly resumed again; the next
+            // op rebuilds it.
+            unsafe { *core::ptr::addr_of_mut!(WORKER) = None };
+            // The stashed Yielder pointer is dangling now that the coroutine
+            // (and its stack) is gone — null it out so a wayward yield_now()
+            // call between here and the next start() fails the null-check
+            // instead of dereferencing freed memory.
+            unsafe { core::ptr::addr_of_mut!(CURRENT_YIELDER).write(core::ptr::null()) };
             true
         }
     }

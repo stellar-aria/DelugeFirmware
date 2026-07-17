@@ -8,8 +8,8 @@
 //! those with `deluge_bsp::sd`'s async `Result<_, SdError>` API
 //! (`init`/`read_sectors`/`write_sectors`/`is_ready`/`is_inserted`/
 //! `is_write_protected`/`total_sectors`) via `block_on` — no `#[cfg]` needed at
-//! the `deluge_bsp::sd` call sites themselves, since deluge-sdk's
-//! `feat/deluge-bsp-host` gave `sd` matching signatures on both targets:
+//! the `deluge_bsp::sd` call sites themselves, since deluge-sdk provides `sd`
+//! with matching signatures on both targets:
 //! - Device: the real SDHI1+DMA driver. SD ops complete on the SDHI/DMA-
 //!   completion IRQ, so `block_on` drives them to completion without needing
 //!   another task to run.
@@ -26,13 +26,12 @@
 //! Per target, the FatFS diskio C-ABI entry points below still need two
 //! `#[unsafe(no_mangle)]` definitions (one `#[cfg(target_os = "none")]`, one
 //! not) purely because only one symbol of a given name may be linked into a
-//! given binary — but each now calls the *same* `deluge_bsp::sd` functions, so
-//! there is no bespoke per-target storage backend left in this file (the old
-//! host-only `mod host_disk` file-backed shim is gone; that's now
-//! `deluge_bsp::sd`'s job). No C++ app is linked on host in M1, so the FatFS
-//! `disk_*` entry points are otherwise unused there; they're still given
-//! working host bodies (rather than gated out) since a future milestone's host
-//! FatFS exercise will call them.
+//! given binary — but each calls the *same* `deluge_bsp::sd` functions, so
+//! there is no bespoke per-target storage backend left in this file (that's
+//! `deluge_bsp::sd`'s job). No C++ app is currently linked on host, so the
+//! FatFS `disk_*` entry points are otherwise unused there; they're still given
+//! working host bodies (rather than gated out) since a future host FatFS
+//! exercise will call them.
 #![allow(non_upper_case_globals)]
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -433,12 +432,11 @@ pub extern "C" fn deluge_block_poll_card_event(unit: u8) -> DelugeCardEvent {
     }
 }
 
-/// Host: the SAME insert/eject edge-tracking algorithm as the device path
-/// (above), now calling `sd::is_inserted()` uniformly too. `deluge_bsp::sd`'s
-/// host stand-in always reports the backing file as present (`is_inserted()`
+/// Host: the same insert/eject edge-tracking algorithm as the device path
+/// (above), calling `sd::is_inserted()` uniformly. `deluge_bsp::sd`'s host
+/// stand-in always reports the backing file as present (`is_inserted()`
 /// always returns `true`), so `now == was` holds on every poll after the
-/// first — there is never an edge to report, matching the previous
-/// hardcoded-`CARD_NONE` behaviour exactly, just derived rather than assumed.
+/// first — there is never an edge to report on host.
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_poll_card_event(unit: u8) -> DelugeCardEvent {

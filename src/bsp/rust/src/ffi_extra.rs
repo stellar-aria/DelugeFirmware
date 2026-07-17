@@ -1,7 +1,7 @@
 //! Stubs for app/BSP symbols that live OUTSIDE the libdeluge C-ABI headers:
 //! BSP globals/functions the app references directly (USB-host, card, trigger
 //! clock), the FatFS `disk_*` diskio glue, NE10 DSP entry points (see note), and
-//! a couple of C-runtime/linker shims. Replaced with real impls as they land.
+//! a couple of C-runtime/linker shims.
 //!
 //! Compiled on host too under the `host_app` feature (see main.rs). Most of
 //! this module is already host-portable as-is (the BSP globals, the USB
@@ -138,7 +138,7 @@ mod boundary_markers {
     // base 16-byte aligned and dereferences a `BlockHeader` through it
     // unconditionally — a plain `[u8; N]` static (alignment 1) faults on the
     // first allocation. See the identical fix + full explanation on
-    // `services.rs`'s `HeapRegion` (found running the host_app boot smoke).
+    // `services.rs`'s `HeapRegion`.
     #[repr(C, align(16))]
     struct HeapRegion<const N: usize>([u8; N]);
     static mut HOST_FRUNK: HeapRegion<HOST_FRUNK_BYTES> = HeapRegion([0; HOST_FRUNK_BYTES]);

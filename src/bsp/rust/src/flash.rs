@@ -34,10 +34,11 @@ const UNCACHED_FLASH_MIRROR: u32 = 0x4000_0000; // 0x1800_0000 (cached) → 0x58
 const SETTINGS_XIP_BASE: u32 =
     spibsc::SPI_FLASH_BASE + flash::DELUGE_SETTINGS_OFFSET + UNCACHED_FLASH_MIRROR;
 
-// Host in-memory settings store: a single 64 KiB sector, NOR-erased (0xFF) at
-// start. Mirrors the device SETTINGS window byte-for-byte at the C-ABI boundary
-// so the app's settings load/save round-trips exactly as on hardware — with no
-// SPIBSC/XIP hardware. Offsets are relative to the settings region, as on device.
+/// Host in-memory settings store: a single 64 KiB sector, NOR-erased (0xFF) at
+/// start. Mirrors the device SETTINGS window byte-for-byte at the C-ABI boundary
+/// so the app's settings load/save round-trips exactly as on hardware, with no
+/// SPIBSC/XIP hardware involved. Offsets are relative to the settings region, as
+/// on device.
 #[cfg(not(target_os = "none"))]
 const HOST_SETTINGS_LEN: usize = 64 * 1024;
 #[cfg(not(target_os = "none"))]
@@ -58,6 +59,9 @@ pub extern "C" fn deluge_flash_read(offset: u32, dst: *mut c_void, len: u32) {
     }
 }
 
+/// Host-sim implementation of `deluge_flash_read`: copies `len` bytes from the
+/// in-memory settings store at `offset`. Both are clamped to the store's bounds,
+/// so an out-of-range read copies nothing rather than panicking.
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_flash_read(offset: u32, dst: *mut c_void, len: u32) {
@@ -83,12 +87,13 @@ pub extern "C" fn deluge_flash_erase(offset: u32) {
     unsafe { flash::MAP.erase_sector(flash::DELUGE_SETTINGS_OFFSET + offset) };
 }
 
+/// Host-sim implementation of `deluge_flash_erase`: resets the whole in-memory
+/// settings store to 0xFF (NOR-erased state). The store is a single 64 KiB
+/// sector, so any `offset` within it erases the entire region — matching device
+/// sector-erase semantics, where the settings region *is* the sector.
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_flash_erase(offset: u32) {
-    // Erase the 64 KiB sector containing `offset` → all 0xFF. The store is one
-    // sector, so any in-region offset erases the whole thing (device semantics:
-    // a sector erase; our region *is* the sector).
     let mut store = HOST_SETTINGS.lock().unwrap();
     store.fill(0xFF);
     log::info!("flash(host): erase settings off={offset:#x} (whole sector → 0xFF)");
@@ -115,6 +120,9 @@ pub extern "C" fn deluge_flash_program(offset: u32, src: *const c_void, len: u32
     log::info!("flash: readback cached={rb_cached:02x?} uncached={rb_uncached:02x?}");
 }
 
+/// Host-sim implementation of `deluge_flash_program`: programs `len` bytes from
+/// `src` into the in-memory settings store at `offset`, clamped to the store's
+/// bounds.
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_flash_program(offset: u32, src: *const c_void, len: u32) {
@@ -133,6 +141,9 @@ pub extern "C" fn deluge_flash_program(offset: u32, src: *const c_void, len: u32
     );
 }
 
+/// Round-trip and edge-case coverage for the host in-memory flash model's
+/// contract: NOR-erased (0xFF) initial/post-erase state, AND-semantics program,
+/// and bounds clamping on out-of-range access.
 #[cfg(all(test, not(target_os = "none")))]
 mod host_tests {
     use super::*;

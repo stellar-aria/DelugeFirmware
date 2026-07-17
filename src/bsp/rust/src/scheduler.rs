@@ -34,7 +34,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
 // `RunCondition` is a bindgen type (`crate::sys`, device-only — no C++ ABI is
-// linked on host in M1). On host, reuse the identical host stand-in `fiber.rs`
+// linked on host). On host, reuse the identical host stand-in `fiber.rs`
 // already defines for the same C typedef (`storage_wait.h`), keeping the
 // scheduler's logic (this file) untouched — only the type's source differs.
 #[cfg(not(target_os = "none"))]

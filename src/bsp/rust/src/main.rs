@@ -25,7 +25,7 @@ use embassy_executor::{Executor, InterruptExecutor, Spawner};
 // own GeneralMemoryAllocator over the region we hand it; the Rust app allocator
 // (TLSF/slab, docs/dev/allocator_redesign.md) is a later, separately-gated step.
 // Device-only: `deluge-alloc` is a `target_os = "none"`-only dependency (see
-// Cargo.toml) — no Rust-side heap on host in M1 (Task 4 grows a Vec-backed one).
+// Cargo.toml) — there is no Rust-side heap on host yet.
 #[cfg(target_os = "none")]
 use deluge_alloc as allocator;
 
@@ -46,8 +46,9 @@ extern crate deluge_resource;
 extern crate deluge_resource;
 
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
-/// service functions are defined in [`ffi`]). No C++ app is linked on host in
-/// M1 (see build.rs), so there is no bindgen output to include.
+/// service functions are defined in [`ffi`]). No C++ app is linked on host
+/// unless `host_app` is enabled (see build.rs), so there is no bindgen output
+/// to include.
 #[cfg(target_os = "none")]
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod sys {
@@ -62,7 +63,7 @@ mod sys;
 /// `host_app` feature: the real host-ABI bindgen output (see build.rs), for
 /// when the host-built C++ `deluge_app` object closure is linked in too.
 /// Replaces the `sys_host.rs` stand-ins above with the genuine generated
-/// types (M4b).
+/// types.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod sys {
     #![allow(
@@ -77,9 +78,9 @@ mod sys {
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
 #[cfg(target_os = "none")]
 mod audio;
-/// audio_io.h — host null-sink render pump (M4c Task 1): the priority-0 task
-/// actually calls `deluge_app_render` and discards the output, instead of
-/// M4b's no-op stub (see `host_link_stubs.rs`).
+/// audio_io.h — host null-sink render pump: the priority-0 task actually
+/// calls `deluge_app_render` and discards the output, instead of the no-op
+/// stub in `host_link_stubs.rs`.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod audio_host;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
@@ -144,7 +145,7 @@ unsafe extern "C" {
     fn deluge_app_init(board: *const sys::DelugeBoard);
 }
 // `host_app` feature: host-side sibling of the device import above. The
-// host-built `deluge_app` object closure (build.rs's `run_host_app`, Task 1)
+// host-built `deluge_app` object closure (build.rs's `run_host_app`)
 // exports the exact same symbol; this lets the host `host_app` boot path
 // (below) call the real `deluge_app_init` → `registerTasks()` on host too.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
@@ -435,21 +436,22 @@ async fn host_app_task() {
 }
 
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
-/// "none"`). Exercises the M1-core modules (`fiber`, `scheduler`, `sd`,
-/// `services`) on std without any device BSP/HAL — no MMU/GIC/SDRAM bring-up,
-/// no C++ app linked (see build.rs). Proves the host binary actually links and
-/// runs: the fiber context switch works on a std thread stack (Task 3), and the
-/// `sd.rs` file-backed block-device shim round-trips real bytes through the same
-/// `deluge_block_read`/`deluge_block_write` C ABI the app would call (Task 4).
-/// Later M1 tasks grow this into a real host scheduler run.
+/// "none"`). Exercises the core host modules (`fiber`, `scheduler`, `sd`,
+/// `services`) on std without any device BSP/HAL — no MMU/GIC/SDRAM bring-up.
+/// Proves the host binary actually links and runs: the fiber context switch
+/// works on a std thread stack, and the `sd.rs` file-backed block-device shim
+/// round-trips real bytes through the same `deluge_block_read`/
+/// `deluge_block_write` C ABI the app would call. With `host_app` off, no C++
+/// app is linked (see build.rs); with it on, this also boots the real C++ app
+/// (see the `host_app`-gated blocks below).
 #[cfg(not(target_os = "none"))]
 fn main() {
     env_logger::init();
     log::info!("deluge-bsp-rust: HOST harness");
-    // Run the fiber selftest (Task 3).
+    // Run the fiber selftest.
     assert!(fiber::selftest(), "fiber selftest failed on host");
 
-    // sd.rs host shim round-trip (Task 4): write a known sector via the C-ABI
+    // sd.rs host shim round-trip: write a known sector via the C-ABI
     // deluge_block_write, read it back via deluge_block_read, and verify the
     // bytes survive — proves the file-backed shim actually persists data, not
     // just that it links. Sector 1 (not 0): leaves a notional boot sector alone.
@@ -475,7 +477,7 @@ fn main() {
     );
     log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
 
-    // --- M3: whole-BSP host boot smoke (no C++ app; `host_app` OFF) --------
+    // --- Whole-BSP host boot smoke (no C++ app; `host_app` OFF) ------------
     // Bring up a host Embassy executor (platform-std) and spawn the four
     // control/display tasks — the same ones main.rs spawns on device (minus the
     // app/audio/cv/usb tasks, which need the C++ app or real peripherals). With
@@ -523,8 +525,8 @@ fn main() {
         log::info!("deluge-bsp-rust: whole-BSP host boot OK (control/display tasks quiescent)");
     }
 
-    // --- M4b Task 6: host app boot-and-idle smoke (`host_app` ON) ----------
-    // Same host executor-on-a-thread shape as the M3 smoke above, but this time
+    // --- Host app boot-and-idle smoke (`host_app` ON) ----------------------
+    // Same host executor-on-a-thread shape as the whole-BSP smoke above, but this time
     // also spawn a host `app_task` that runs the REAL C++ app's one-time
     // bring-up (`deluge_app_init` → `deluge_boot` + `registerTasks()` +
     // `encoders::init()`, mirroring the device `app_task` in `main`, above).
@@ -533,14 +535,14 @@ fn main() {
     // `scheduler::set_spawner`'s stashed spawner — so "at least one scheduler
     // slot claimed" is the strongest cheap, real-app-driven signal that boot
     // reached the scheduler (not just BSP init); `oled_render`'s captured first
-    // frame (same signal the M3 smoke above uses) is the fallback.
+    // frame (same signal the whole-BSP smoke above uses) is the fallback.
     #[cfg(feature = "host_app")]
     {
         use embassy_executor::{Executor, Spawner};
         use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
 
-        // --- M4c Task 2: second host executor thread for the audio task -----
+        // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
         // concurrently with — and can preempt — the main thread executor. Host
@@ -548,8 +550,8 @@ fn main() {
         // `std::thread` running its own platform-std `Executor` is the host
         // analogue: real OS-thread preemption instead of an SGI, but the same
         // "audio is not cooperatively scheduled alongside everything else"
-        // property (races enumerated under TSan in Task 3 — this task only
-        // needs a functional two-thread boot).
+        // property (races enumerated under TSan — this task only needs a
+        // functional two-thread boot).
         //
         // Ordering barrier: exactly like the device (`set_audio_spawner` is
         // called *before* the main executor's closure spawns `app_task`, which
@@ -638,8 +640,8 @@ fn main() {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // M4c Task 2 proof: boot alone (a scheduler slot claimed / first OLED
-        // frame) only shows registerTasks() ran — it doesn't show the
+        // Boot alone (a scheduler slot claimed / first OLED frame) only
+        // shows registerTasks() ran — it doesn't show the
         // priority-0 (audio) task actually executes on the second executor
         // thread. Wait (bounded) for at least one `deluge_audio_drive` call
         // observed on the "deluge-audio" thread — the scheduled render, not
@@ -664,13 +666,12 @@ fn main() {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // --- WT2: widen the concurrent window before exit -------------------
+        // --- Widen the concurrent window before exit ------------------------
         // The boot-OK / audio-routing-OK checks above only prove the two
         // executors are both alive and correctly wired — they fire within
-        // ~1-2 render cycles of boot (WT1 found this leaves the host-app and
-        // audio threads almost no time to actually overlap: 0 TSan races in
-        // 5 runs, see `.superpowers/sdd/wt1-report.md`). The spike's races
-        // (`AudioEngine::audioRoutineLocked`, `audioSampleTimer`) came from
+        // ~1-2 render cycles of boot, which leaves the host-app and audio
+        // threads almost no time to actually overlap. The real races
+        // (`AudioEngine::audioRoutineLocked`, `audioSampleTimer`) come from
         // the *whole* task graph `registerTasks()` spawns (17 slots, incl.
         // `UITimerManager::routine`) ticking on the host-app executor
         // CONCURRENTLY with the audio thread's ongoing renders — so, instead
@@ -678,7 +679,7 @@ fn main() {
         // executors running for a bounded soak so the repeating main-thread
         // tasks and the audio render overlap heavily before exit. This is
         // what lets a TSan run actually see the cross-thread C++ race
-        // surface (see `docs/superpowers/specs/2026-07-17-m4c-race-findings.md`).
+        // surface.
         //
         // Bounded two ways — wall-clock (`SOAK_DURATION`) and render-cycle
         // count (`SOAK_MAX_RENDER_BLOCKS`, via `audio_host::drive_count()`),

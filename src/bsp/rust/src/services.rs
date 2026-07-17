@@ -95,8 +95,9 @@ pub extern "C" fn deluge_in_interrupt() -> bool {
     mode == 0x12 /* IRQ */ || mode == 0x11 /* FIQ */
 }
 
-/// Host stand-in: no ARM CPSR / IRQ context exists, and no C++ app is linked
-/// on host in M1 to call this. [task] [isr]
+/// Host stand-in: no ARM CPSR / IRQ context exists on host, so this always
+/// reports false — the host executor is single-threaded and cooperative, with
+/// no true interrupt preemption to detect. [task] [isr]
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_in_interrupt() -> bool {
@@ -178,13 +179,12 @@ pub extern "C" fn deluge_clock_monotonic_hz() -> u64 {
 
 // ── memory.h ────────────────────────────────────────────────────────────────
 //
-// Device-only: describes the C++ app's SRAM/SDRAM regions (linker-symbol
-// bounds via `crate::boot_mem` and `crate::sys::DelugeMemoryRegion`), and no
-// C++ app is linked on host in M1 (see build.rs) to call any of these — so
-// nothing host-side references them. Rather than fabricate a `sys`-shaped
-// return value nothing reads, they're gated out entirely; a later milestone
-// that links a host-ABI app can give them real host stubs alongside a host
-// `sys` module.
+// Device-only: describes the C++ app's SRAM/SDRAM regions via linker-symbol
+// bounds (`crate::boot_mem` and `crate::sys::DelugeMemoryRegion`), which only
+// exist on the device build. The host_app build gets its own real
+// implementations of these same symbols, backed by process memory instead of
+// linker symbols — see the "memory.h + cache maintenance (host_app)" section
+// below.
 
 /// One past the application-usable external (SDRAM) region. Capped below the
 /// Rust allocator's reserved slice so the app's heap and the Rust SDRAM heap

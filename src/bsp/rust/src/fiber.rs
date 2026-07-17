@@ -15,7 +15,7 @@
 //! (`target_os = "none"`) it's the ARM `global_asm!` register-save switch below;
 //! on host it's [`corosensei`](https://docs.rs/corosensei)'s stackful
 //! `Coroutine`/`Yielder`, chosen over `ucontext`/`swapcontext` because it has
-//! built-in sanitizer support (needed for ThreadSanitizer, M1 Task 5) instead of
+//! built-in sanitizer support (needed for ThreadSanitizer) instead of
 //! requiring hand-written `__tsan_switch_to_fiber` annotations around every
 //! switch. Both sides present the same `start`/`resume`/`yield_now`/`on_fiber`
 //! contract to the portable layer below.
@@ -339,7 +339,7 @@ pub fn yield_now() {
 use crate::sys::RunCondition;
 /// Host stand-in for the bindgen `RunCondition` typedef (`storage_wait.h`:
 /// `typedef bool (*RunCondition)();`). `mod sys` (the bindgen output) is
-/// device-only — no C++ ABI is linked on host in M1 — so mirror the C type's
+/// device-only — no C++ ABI is linked on host — so mirror the C type's
 /// shape directly here rather than depending on it. Same shape bindgen would
 /// produce for this typedef; if a shared host-ABI `sys` module lands later this
 /// can be replaced with `crate::sys::RunCondition` again.

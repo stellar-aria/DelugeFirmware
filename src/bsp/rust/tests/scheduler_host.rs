@@ -1,5 +1,5 @@
-//! M1 Task 5 — drive the REAL `scheduler.rs` + `fiber.rs` task/fiber concurrency
-//! on a host `platform-std` Embassy executor.
+//! Drive the REAL `scheduler.rs` + `fiber.rs` task/fiber concurrency on a host
+//! `platform-std` Embassy executor.
 //!
 //! The normal (unsanitized) `cargo test` entry point. The exercise body is
 //! shared with the ThreadSanitizer entry point (`examples/scheduler_host_tsan.rs`)

@@ -1,4 +1,4 @@
-//! `audio_io.h` — host null-sink render pump (`host_app` feature, M4c Task 1).
+//! `audio_io.h` — host null-sink render pump for the `host_app` feature.
 //!
 //! On device (`audio.rs`) `deluge_audio_drive` trickles the app's render into
 //! the SSI TX DMA ring, paced by the free-running play head. There is no DMA
@@ -7,10 +7,10 @@
 //! `registerTasks()` during `deluge_app_init` — see `scheduler.rs`'s
 //! `addRepeatingTask`) actually call `deluge_app_render` each time it drives,
 //! discarding the output block (a null sink), so the render graph exercises
-//! for real instead of M4b's no-op stub in `host_link_stubs.rs`.
+//! for real instead of the no-op stub in `host_link_stubs.rs`.
 //!
-//! M4c Task 2 adds a second, preemptive host executor thread (`"deluge-audio"`,
-//! spawned in `main.rs`'s `host_app` boot path) that `scheduler::set_audio_spawner`
+//! A second, preemptive host executor thread (`"deluge-audio"`, spawned in
+//! `main.rs`'s `host_app` boot path) is what `scheduler::set_audio_spawner`
 //! routes the priority-0 task onto — the host analogue of device `audio.rs`'s
 //! `AUDIO_EXEC` SGI executor. `AudioEngine::runRoutine()` (audio_engine.cpp) also
 //! calls `routine()` — and so `deluge_audio_drive` — directly and synchronously
@@ -22,9 +22,9 @@
 //! returns, every subsequent call is driven by the scheduled task and runs on
 //! `"deluge-audio"`. No ISR and no other task touches this module's state
 //! concurrently with a render *from the same thread*, but the render itself can
-//! now run concurrently with everything else (races enumerated under TSan in
-//! Task 3) — the `static mut` buffer access is no longer single-threaded in the
-//! way `audio.rs` documents for its own statics; that's this task's whole point.
+//! now run concurrently with everything else — the `static mut` buffer access is
+//! no longer single-threaded in the way `audio.rs` documents for its own
+//! statics; that's this module's whole point.
 #![allow(non_upper_case_globals)]
 
 use core::ptr::{addr_of, addr_of_mut};
@@ -84,11 +84,11 @@ static DRIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 /// flooding the log at ~44100/128 Hz.
 const LOG_EVERY: u64 = 500;
 
-/// M4c Task 2 proof: set once a render is observed running on the
-/// `"deluge-audio"` executor thread, i.e. the priority-0 task genuinely routed
-/// through `scheduler::set_audio_spawner` rather than staying on whichever
-/// thread happened to call `deluge_app_render` (see this module's doc comment
-/// re: the pre-registration synchronous call from `deluge_boot`). Polled by the
+/// Set once a render is observed running on the `"deluge-audio"` executor
+/// thread, i.e. the priority-0 task genuinely routed through
+/// `scheduler::set_audio_spawner` rather than staying on whichever thread
+/// happened to call `deluge_app_render` (see this module's doc comment re:
+/// the pre-registration synchronous call from `deluge_boot`). Polled by the
 /// `host_app` boot smoke in `main.rs` before it lets the process exit.
 static AUDIO_THREAD_RENDER_SEEN: AtomicBool = AtomicBool::new(false);
 
@@ -100,8 +100,8 @@ pub fn audio_thread_render_seen() -> bool {
 }
 
 /// Total `deluge_audio_drive` calls observed so far (monotonic). Polled by
-/// `main.rs`'s `host_app` boot path to bound the post-boot concurrency soak
-/// (WT2) by render-cycle count as well as wall-clock time.
+/// `main.rs`'s `host_app` boot path to bound the post-boot concurrency soak by
+/// render-cycle count as well as wall-clock time.
 pub fn drive_count() -> u64 {
     DRIVE_COUNT.load(Ordering::Relaxed)
 }
@@ -158,7 +158,7 @@ pub extern "C" fn deluge_audio_drive() -> u32 {
         log::info!("audio: first (pre-registration) render on thread {thread_name:?}");
     }
     if thread_name == "deluge-audio" && !AUDIO_THREAD_RENDER_SEEN.swap(true, Ordering::Relaxed) {
-        // M4c Task 2 proof: the priority-0 task's *scheduled* render (not the
+        // Evidence that the priority-0 task's *scheduled* render (not the
         // pre-registration one above) genuinely routed to the second executor
         // thread via `scheduler::set_audio_spawner`, and is running there
         // concurrently with the main/host-app executor thread.
@@ -179,9 +179,9 @@ pub extern "C" fn deluge_audio_frames_until_block_offset(
     // Host stand-in for device `audio.rs`'s TX-ring play-head math: "now" is
     // the monotonic render cursor (no real DMA play head to poll), and there
     // is no ring to mask against, so this is plain (non-panicking) wrapping
-    // arithmetic rather than a masked ring offset. Simplified/monotonic per
-    // this task's brief — the null-sink harness doesn't need sample-accurate
-    // MIDI-gate timing, only a sane, non-panicking answer.
+    // arithmetic rather than a masked ring offset. The null-sink harness
+    // doesn't need sample-accurate MIDI-gate timing, only a sane,
+    // non-panicking answer.
     let play_now = CURSOR.load(Ordering::Relaxed);
     let block_start = BLOCK_START.load(Ordering::Relaxed);
 

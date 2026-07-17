@@ -1,4 +1,4 @@
-//! M1 Task 5 — ThreadSanitizer entry point for the scheduler/fiber exercise.
+//! ThreadSanitizer entry point for the scheduler/fiber exercise.
 //!
 //! A plain `fn main()` binary, NOT a `#[test]`: `cargo test`'s `--test` harness
 //! needs `libtest`, and building `libtest` for a custom `-Zbuild-std`

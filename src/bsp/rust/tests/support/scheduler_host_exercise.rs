@@ -1,6 +1,6 @@
-//! M1 Task 5 — the shared scheduler/fiber exercise body, driving the REAL
-//! `scheduler.rs` + `fiber.rs` (via `crate::scheduler`/`crate::fiber`,
-//! declared by whichever crate root includes this file with `#[path]`).
+//! The shared scheduler/fiber exercise body, driving the REAL `scheduler.rs`
+//! + `fiber.rs` (via `crate::scheduler`/`crate::fiber`, declared by whichever
+//! crate root includes this file with `#[path]`).
 //!
 //! Two crate roots include this file:
 //! - `tests/scheduler_host.rs` — the normal `cargo test` entry point (plain,
@@ -16,11 +16,11 @@
 //! This crate is bin-only (no `[lib]` target — see `Cargo.toml`), so neither
 //! root can `use deluge_bsp_rust::...`; both instead declare the same `mod
 //! fiber; mod scheduler;` tree `main.rs` does, via `#[path]` pointing at the
-//! real sources — recompiling those two files unmodified rather than a copy.
-//! No `scheduler.rs`/`fiber.rs` logic is duplicated or altered, and every
-//! symbol used below (the `scheduler_api.h` C-ABI fns, `fiber::deluge_worker_run`,
-//! `fiber::worker_poll`, `fiber::WORKER_WAKE`) was already `pub` before this
-//! task; no visibility change was needed.
+//! real sources, recompiling those two files unmodified rather than copying
+//! them. `scheduler.rs`/`fiber.rs` logic is never duplicated or altered, and
+//! every symbol used below (the `scheduler_api.h` C-ABI fns,
+//! `fiber::deluge_worker_run`, `fiber::worker_poll`, `fiber::WORKER_WAKE`) is
+//! `pub` in those modules.
 
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};

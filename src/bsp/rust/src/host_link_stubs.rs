@@ -6,7 +6,7 @@
 //! modules provide on-target. Boot-and-idle never drives real peripheral I/O on
 //! host (no SSI/DMA rings, no PIC-shared RSPI0, no USB stack), so inert defaults
 //! are correct here; real host-side behaviour (virtual MIDI, WAV capture, …) is
-//! M4c/M5 work.
+//! not yet implemented.
 //!
 //! Return values are chosen to match `src/bsp/host/host_bsp.c` / `host_audio.c`
 //! (the existing C host-stub BSP) wherever the boot path might actually read
@@ -32,10 +32,10 @@ macro_rules! stub_log {
 
 // ── audio_io.h ─────────────────────────────────────────────────────────────
 // `deluge_audio_drive`/`max_block_frames`/`sample_rate`/`frames_until_block_offset`
-// are now real (see `audio_host.rs`, M4c Task 1) — the priority-0 task actually
-// renders via `deluge_app_render` instead of a no-op. The remaining audio_io.h
-// symbols below (start/input_resync/stamp_to_render_offset) have no host
-// equivalent (no DMA ring to (re-)anchor or resync) and stay inert stubs.
+// are real (see `audio_host.rs`) — the priority-0 task actually renders via
+// `deluge_app_render` instead of a no-op. The remaining audio_io.h symbols
+// below (start/input_resync/stamp_to_render_offset) have no host equivalent
+// (no DMA ring to (re-)anchor or resync) and stay inert stubs.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_audio_start() -> DelugeStatus {
@@ -177,9 +177,8 @@ pub extern "C" fn deluge_midi_gate_timer_pending() -> bool {
 pub extern "C" fn deluge_midi_gate_timer_arm(samples_from_now: u32) {
     stub_log!("deluge_midi_gate_timer_arm");
     // No MTU2 (or any) one-shot timer on host; matches host_bsp.c's inert stub.
-    // Newly required now that `deluge_audio_drive` (audio_host.rs) actually
-    // calls `deluge_app_render` — that render path can reach
-    // AudioEngine::scheduleMidiGateOutISR, which arms the gate timer.
+    // Reachable via `deluge_audio_drive`'s (audio_host.rs) render path, which
+    // can hit AudioEngine::scheduleMidiGateOutISR and arm the gate timer.
 }
 
 // ── signals.h ──────────────────────────────────────────────────────────────

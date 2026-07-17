@@ -3,10 +3,11 @@
 //! (src/bsp/rza1/board.c): GPIO direction/mux for LEDs/codec/detects, the CV DAC
 //! SPI, the audio SSI, etc. All pin/port numbers stay BSP-internal here.
 //!
-//! M2b TODO: the OLED path (probe + the shared-SPI / DMA / PIC bring-up and the
-//! display driver) is not wired yet — `deluge_board_probe_oled` returns false so
-//! the app takes the 7-segment path and the superloop runs without needing the
-//! OLED+PIC stack. Flip to real OLED detection + bring-up with display.h/control.
+//! `deluge_board_probe_oled` currently hard-codes `true` (this hardware always
+//! has the OLED fitted); OLED bring-up itself (SSD1309 init, shared-RSPI0
+//! framebuffer streaming, PIC-forwarded chip-select) happens in display.rs /
+//! `deluge_bsp::oled` + `pic`, not here — `deluge_board_init_early` only touches
+//! the SPI_SSL pin mux for the 7-segment (non-OLED) variant.
 //!
 //! Compiled on host too under the `host_app` feature (see main.rs): the
 //! descriptor and `deluge_board`/`deluge_board_probe_oled` are pure data/logic
@@ -96,8 +97,8 @@ pub extern "C" fn deluge_board_init_early(have_oled: bool) {
         // CV DAC over RSPI0 (the BSP driver sets up the SPI peripheral + pins).
         deluge_bsp::cv_gate::init();
 
-        // OLED shares RSPI0 (manual SSL); without it, mux SSL as the 7-seg path.
-        // M2b: when have_oled, bring up the shared-SPI SSL/interrupts/DMA here.
+        // OLED shares RSPI0 (manual SSL, handled in display.rs / deluge_bsp::oled);
+        // only the 7-segment path needs the pin muxed to hardware SSL here.
         if !have_oled {
             gpio::set_pin_mux(6, 1, 3); // SPI_SSL
         }

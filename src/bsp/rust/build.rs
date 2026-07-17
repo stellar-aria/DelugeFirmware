@@ -12,11 +12,9 @@ fn main() {
     // Host (platform-std) build: most of the below is device-only (the rza1l
     // linker script, the arm-eabi archived C++ deluge_app closure). Under
     // `--features host_app` we instead bindgen the host ABI and link the
-    // host-built `deluge_app` object closure (see m4a-spike-report.md /
-    // m4b task-2-brief.md); this lets the host binary reach the C++ app
-    // boundary without a device build. Without that feature the host path
-    // stays a pure no-op, exactly as before M4b (M1-M3's `sys_host.rs`
-    // stand-ins are used instead).
+    // host-built `deluge_app` object closure, letting the host binary reach
+    // the C++ app boundary without a device build. Without that feature the
+    // host path stays a no-op.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("none") {
         if env::var("CARGO_FEATURE_HOST_APP").is_ok() {
             run_host_app(&repo_root, &manifest_dir, &out_dir);
@@ -79,7 +77,7 @@ fn main() {
     // (and carry debug_info). Switch to Release later via bfd ld if LTO is wanted.
     let cfg = env::var("DELUGE_BUILD_CONFIG").unwrap_or_else(|_| "Debug".into());
     // `toolchain/current` symlinks to the active toolchain version's host dir,
-    // so this survives version bumps (was a hardcoded, now-stale toolchain/v22).
+    // so this survives version bumps.
     let ar = repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
 
     let app_objs_dir = build_dir.join(format!("src/deluge/CMakeFiles/deluge_app.dir/{cfg}"));
@@ -193,8 +191,8 @@ fn run_bindgen(
         .allowlist_type("RunCondition")
         .use_core()
         // CRITICAL: the C++ app is built with `-fshort-enums` (arm-eabi always;
-        // the host_app build-embassy-hostapp tree opts in too, see
-        // m4a-spike-report.md), which makes enums the smallest type that fits —
+        // the host_app build-embassy-hostapp tree opts in too), which makes
+        // enums the smallest type that fits —
         // e.g. DelugeInputEventKind (0..3) is 1 byte, so DelugeInputEvent is
         // {kind@0, x@1, y@2, value@4}. bindgen runs under the *host* clang, which
         // sizes enums as 4-byte `int` by default; without this flag every
@@ -222,9 +220,7 @@ fn run_bindgen(
 /// `host_app` feature: bindgen the host ABI (x86-64 + `-fshort-enums`, matching
 /// build-embassy-hostapp's CMake config) into the real `mod sys`, then archive
 /// the host-built C++ `deluge_app` object closure and emit link directives so
-/// the crate reaches the linker against real provider-symbol references. See
-/// m4a-spike-report.md (proved the ABI round-trip + link mechanics) and
-/// task-2-brief.md.
+/// the crate reaches the linker against real provider-symbol references.
 fn run_host_app(
     repo_root: &std::path::Path,
     manifest_dir: &std::path::Path,
@@ -240,20 +236,19 @@ fn run_host_app(
 
     run_bindgen(repo_root, manifest_dir, out_dir, "x86_64-unknown-linux-gnu");
 
-    // This link is EXPECTED to fail on undefined provider symbols until Tasks
-    // 3-5 land (that failure list is this task's deliverable) — lift lld's
-    // default error cap so a single `cargo build` run surfaces the complete
-    // set instead of truncating after the first batch.
+    // This link is expected to fail on undefined provider symbols while the
+    // host-side callers are still being wired up — lift lld's default error
+    // cap so a single `cargo build` run surfaces the complete set instead of
+    // truncating after the first batch.
     println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
-    // No host Rust code calls `deluge_app_init` yet (Tasks 3-5 earn that real
-    // call). Force it as a link root (`-u`) so lld extracts deluge.cpp.o from
-    // the archive and keeps its whole transitively-reachable graph under the
-    // default --gc-sections, exactly as if Task 3's real boot call already
-    // existed — without that, gc-sections would strip everything down to just
-    // the C++ global-constructor subset, under-reporting the checklist.
+    // No host Rust code calls `deluge_app_init` yet. Force it as a link root
+    // (`-u`) so lld extracts deluge.cpp.o from the archive and keeps its whole
+    // transitively-reachable graph under the default --gc-sections — without
+    // that, gc-sections would strip everything down to just the C++
+    // global-constructor subset.
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
 
-    // CMake-built host tree (Task 1: `cmake -S sim -B build-embassy-hostapp
+    // CMake-built host tree (`cmake -S sim -B build-embassy-hostapp
     // -DDELUGE_HOST_EMBASSY=... ; ninja -C build-embassy-hostapp deluge_app`).
     // Overridable so CI/devs can point at a differently-named build dir.
     let build_dir = env::var("DELUGE_HOSTAPP_BUILD_DIR")
@@ -261,7 +256,7 @@ fn run_host_app(
         .unwrap_or_else(|_| repo_root.join("build-embassy-hostapp"));
     // Single-config Ninja generator (unlike the device path's multi-config
     // `.../{cfg}` layout) — objects land directly under deluge_app.dir, no
-    // Debug/Release subdir (see m4a-spike-report.md's "minor note for M4b").
+    // Debug/Release subdir.
     let app_objs_dir = build_dir.join("app/CMakeFiles/deluge_app.dir");
     if !app_objs_dir.is_dir() {
         panic!(
@@ -292,11 +287,11 @@ fn run_host_app(
         .expect("run host ar");
     assert!(status.success(), "archiving host deluge_app objects failed");
 
-    // Belt-and-suspenders against the staleness trap the M4c spike hit: a
-    // reconfigured/rebuilt CMake tree (e.g. flipping on -fsanitize=thread)
-    // whose objects Cargo's mtime-based `rerun-if-changed` failed to notice,
-    // so the OUT_DIR archive above got rebuilt this run from fresh objects,
-    // but downstream the rustc-link-arg lines below are byte-identical to the
+    // This hash-based staleness check is load-bearing, not a defensive extra:
+    // a reconfigured/rebuilt CMake tree (e.g. flipping on -fsanitize=thread)
+    // whose objects Cargo's mtime-based `rerun-if-changed` failed to notice
+    // gets the OUT_DIR archive above rebuilt this run from fresh objects, but
+    // downstream the rustc-link-arg lines below are byte-identical to the
     // previous run (same archive path) — from Cargo's fingerprint's point of
     // view, "nothing about this build script's output changed", so it can
     // decide the final `deluge-rust` binary doesn't need relinking even
@@ -306,9 +301,9 @@ fn run_host_app(
     // metadata (rustc-env/rustc-cfg/rustc-link-*) run over run, so a changed
     // hash value forces this crate — and therefore the final link — to be
     // considered stale and rebuilt, independent of whether any individual
-    // `.o`'s mtime was itself trusted. This directly targets the spike's
-    // reproduced failure mode (an instrumented `.o` on disk, an uninstrumented
-    // archive still linked in) without requiring a `target/` wipe.
+    // `.o`'s mtime was itself trusted. This directly targets the failure mode
+    // where an instrumented `.o` sits on disk but an uninstrumented archive is
+    // still linked in, without requiring a `target/` wipe.
     let content_hash = hash_objs_content(&objs);
     let hash_str = format!("{content_hash:016x}");
     let hash_stamp = out_dir.join("host_app_objs_hash.txt");
@@ -354,8 +349,7 @@ fn run_host_app(
     // (libstdc++ for std::/vtables, libgcc for compiler helpers, libc/libm).
     // Unlike the device (arm-eabi/newlib) group, host glibc pulls libsupc++ in
     // via libstdc++ and needs no unhosted syscall stubs, so NO -lsupc++/-lnosys
-    // here (see m4a-spike-report.md risk #5). Grouped for the libstdc++<->libc
-    // <->libgcc circular refs.
+    // here. Grouped for the libstdc++<->libc<->libgcc circular refs.
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     for l in ["-lstdc++", "-lm", "-lc", "-lgcc"] {
         println!("cargo:rustc-link-arg={l}");

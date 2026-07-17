@@ -45,6 +45,7 @@
 #include "processing/sound/sound.h"
 #include "processing/source.h"
 #include "storage/multi_range/multisample_range.h"
+#include "sync/sd_access.h"
 #include "util/cfunctions.h"
 #include "util/misc.h"
 
@@ -897,7 +898,7 @@ bool SampleMarkerEditor::renderSidebar(uint32_t whichRows, RGB image[][kDisplayW
 void SampleMarkerEditor::graphicsRoutine() {
 
 #ifdef TEST_SAMPLE_LOOP_POINTS
-	if (!currentlyAccessingCard && !(getNoise() >> 27)) {
+	if (!deluge::sync::sd_busy() && !(getNoise() >> 27)) {
 		Uart::println("random change to marker -----------------------------");
 
 		int32_t minDistance = 1;

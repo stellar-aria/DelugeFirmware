@@ -537,7 +537,57 @@ fn main() {
     #[cfg(feature = "host_app")]
     {
         use embassy_executor::{Executor, Spawner};
+        use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
+
+        // --- M4c Task 2: second host executor thread for the audio task -----
+        // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
+        // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
+        // concurrently with — and can preempt — the main thread executor. Host
+        // has no interrupt context to stand in for that, so a dedicated
+        // `std::thread` running its own platform-std `Executor` is the host
+        // analogue: real OS-thread preemption instead of an SGI, but the same
+        // "audio is not cooperatively scheduled alongside everything else"
+        // property (races enumerated under TSan in Task 3 — this task only
+        // needs a functional two-thread boot).
+        //
+        // Ordering barrier: exactly like the device (`set_audio_spawner` is
+        // called *before* the main executor's closure spawns `app_task`, which
+        // reaches `registerTasks()`), the main thread here must not let
+        // `host_app_task` call `deluge_app_init` until `scheduler::AUDIO_SPAWNER`
+        // is `Some` — otherwise `scheduler::claim`'s `use_audio` check races
+        // `registerTasks()`'s `addRepeatingTask(priority 0)` and the audio task
+        // silently falls back to the cooperative main-thread spawner instead of
+        // routing to this thread. A two-party `Barrier` makes the rendezvous
+        // synchronous: the audio thread reaches its side immediately after
+        // `set_audio_spawner`, the main thread reaches its side immediately
+        // before spawning the host-app executor thread below.
+        let audio_spawner_ready = Arc::new(Barrier::new(2));
+        let audio_thread_barrier = Arc::clone(&audio_spawner_ready);
+        std::thread::Builder::new()
+            .name("deluge-audio".into())
+            .spawn(move || {
+                let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
+                executor.run(|spawner: Spawner| {
+                    crate::scheduler::set_audio_spawner(spawner.make_send());
+                    log::info!(
+                        "deluge-bsp-rust: host audio executor up on thread {:?} — set_audio_spawner done",
+                        std::thread::current().name()
+                    );
+                    // Release the main thread, which was waiting on this before
+                    // proceeding to deluge_app_init. `Executor::run`'s closure
+                    // then returns and the executor blocks polling forever —
+                    // once `registerTasks()` spawns the priority-0 task onto the
+                    // stashed `SendSpawner` it runs right here, on this thread.
+                    audio_thread_barrier.wait();
+                });
+            })
+            .expect("spawning the host audio executor thread");
+
+        // Do not proceed to spawn the host-app executor (whose `host_app_task`
+        // calls `deluge_app_init`) until the audio thread has stashed its
+        // spawner.
+        audio_spawner_ready.wait();
 
         std::thread::Builder::new()
             .name("deluge-bsp-host-app".into())
@@ -559,17 +609,14 @@ fn main() {
         // sequence (deluge_boot + registerTasks + encoders::init) touches a lot
         // of BSP surface for the first time on host, so give it room.
         let deadline = Instant::now() + Duration::from_secs(20);
+        let mut boot_ok = false;
         loop {
             let tasks = crate::scheduler::registered_task_count();
             if tasks > 0 {
                 log::info!(
                     "deluge-bsp-rust: HOST APP boot OK — registerTasks() claimed {tasks} scheduler slot(s)"
                 );
-                log::info!("deluge-bsp-rust: HOST harness OK");
-                // See `hard_exit`'s doc comment: a normal return here (or a plain
-                // `std::process::exit`) races the still-live host-app executor
-                // thread against libc's atexit-run C++ static destructors.
-                hard_exit(0);
+                boot_ok = true;
             }
             // Fallback signal: the app rendered its first real OLED frame (only
             // reachable once deluge_boot/registerTasks got far enough to drive
@@ -577,8 +624,10 @@ fn main() {
             // a transient zero.
             if deluge_bsp::oled::boot_frame_captured() {
                 log::info!("deluge-bsp-rust: HOST APP boot OK — first OLED frame captured");
-                log::info!("deluge-bsp-rust: HOST harness OK");
-                hard_exit(0);
+                boot_ok = true;
+            }
+            if boot_ok {
+                break;
             }
             if Instant::now() >= deadline {
                 panic!(
@@ -588,6 +637,38 @@ fn main() {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+
+        // M4c Task 2 proof: boot alone (a scheduler slot claimed / first OLED
+        // frame) only shows registerTasks() ran — it doesn't show the
+        // priority-0 (audio) task actually executes on the second executor
+        // thread. Wait (bounded) for at least one `deluge_audio_drive` call
+        // observed on the "deluge-audio" thread — the scheduled render, not
+        // `AudioEngine::runRoutine()`'s pre-registration direct call from
+        // `deluge_boot` (see `audio_host.rs`'s doc comment), which necessarily
+        // runs on this (host-app executor) thread and doesn't count.
+        let audio_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if audio_host::audio_thread_render_seen() {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP audio-thread routing OK — priority-0 task rendered on \"deluge-audio\""
+                );
+                break;
+            }
+            if Instant::now() >= audio_deadline {
+                panic!(
+                    "host app boot: no deluge_audio_drive call was observed on the \"deluge-audio\" \
+                     thread within 5s after boot — the priority-0 task did not route to the audio \
+                     executor (scheduler::set_audio_spawner wiring regressed?)"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        log::info!("deluge-bsp-rust: HOST harness OK");
+        // See `hard_exit`'s doc comment: a normal return here (or a plain
+        // `std::process::exit`) races the still-live host-app/audio executor
+        // threads against libc's atexit-run C++ static destructors.
+        hard_exit(0);
     }
 
     #[cfg(not(feature = "host_app"))]

@@ -9,17 +9,26 @@
 //! discarding the output block (a null sink), so the render graph exercises
 //! for real instead of M4b's no-op stub in `host_link_stubs.rs`.
 //!
-//! Still single-threaded here: on host the audio task has no preemptive
-//! interrupt-executor to route onto (`scheduler.rs::claim`'s `audio_spawner()`
-//! is never set under `host_app`), so priority 0 runs cooperatively on the
-//! same single main executor as every other task (Task 2 adds a second
-//! thread). No ISR and no other task touches this module's state, so the
-//! `static mut` buffer access is single-threaded exactly as `audio.rs`
-//! documents for its own statics.
+//! M4c Task 2 adds a second, preemptive host executor thread (`"deluge-audio"`,
+//! spawned in `main.rs`'s `host_app` boot path) that `scheduler::set_audio_spawner`
+//! routes the priority-0 task onto — the host analogue of device `audio.rs`'s
+//! `AUDIO_EXEC` SGI executor. `AudioEngine::runRoutine()` (audio_engine.cpp) also
+//! calls `routine()` — and so `deluge_audio_drive` — directly and synchronously
+//! from `deluge_boot()`, before `registerTasks()` assigns `routine_task_id`
+//! ("necessary otherwise Deluge freezes on boot"); that one pre-registration call
+//! runs on whichever thread called `deluge_boot` (the host-app executor thread),
+//! not `"deluge-audio"` — expected, and `deluge_audio_drive` below accounts for
+//! it rather than treating it as a routing failure. Once `registerTasks()`
+//! returns, every subsequent call is driven by the scheduled task and runs on
+//! `"deluge-audio"`. No ISR and no other task touches this module's state
+//! concurrently with a render *from the same thread*, but the render itself can
+//! now run concurrently with everything else (races enumerated under TSan in
+//! Task 3) — the `static mut` buffer access is no longer single-threaded in the
+//! way `audio.rs` documents for its own statics; that's this task's whole point.
 #![allow(non_upper_case_globals)]
 
 use core::ptr::{addr_of, addr_of_mut};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sys::DelugeStereoSample;
 
@@ -75,6 +84,21 @@ static DRIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 /// flooding the log at ~44100/128 Hz.
 const LOG_EVERY: u64 = 500;
 
+/// M4c Task 2 proof: set once a render is observed running on the
+/// `"deluge-audio"` executor thread, i.e. the priority-0 task genuinely routed
+/// through `scheduler::set_audio_spawner` rather than staying on whichever
+/// thread happened to call `deluge_app_render` (see this module's doc comment
+/// re: the pre-registration synchronous call from `deluge_boot`). Polled by the
+/// `host_app` boot smoke in `main.rs` before it lets the process exit.
+static AUDIO_THREAD_RENDER_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// `true` once a `deluge_audio_drive` call has been observed on the
+/// `"deluge-audio"` thread — the host-side evidence that the priority-0 task
+/// routed to the second (audio) executor.
+pub fn audio_thread_render_seen() -> bool {
+    AUDIO_THREAD_RENDER_SEEN.load(Ordering::Relaxed)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_audio_max_block_frames() -> u32 {
     APP_BLOCK_FRAMES as u32
@@ -115,8 +139,26 @@ pub extern "C" fn deluge_audio_drive() -> u32 {
     CURSOR.store(block_start + APP_BLOCK_FRAMES as u64, Ordering::Relaxed);
 
     let n = DRIVE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let thread_name = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+    if n == 1 {
+        // Expected to read the host-app executor thread, NOT "deluge-audio" —
+        // this is `AudioEngine::runRoutine()`'s pre-registration direct call
+        // (routine_task_id is still -1), made before `registerTasks()` has had
+        // a chance to route anything anywhere. See this module's doc comment.
+        log::info!("audio: first (pre-registration) render on thread {thread_name:?}");
+    }
+    if thread_name == "deluge-audio" && !AUDIO_THREAD_RENDER_SEEN.swap(true, Ordering::Relaxed) {
+        // M4c Task 2 proof: the priority-0 task's *scheduled* render (not the
+        // pre-registration one above) genuinely routed to the second executor
+        // thread via `scheduler::set_audio_spawner`, and is running there
+        // concurrently with the main/host-app executor thread.
+        log::info!("audio: render #{n} routed onto the \"deluge-audio\" executor thread");
+    }
     if n == 1 || n.is_multiple_of(LOG_EVERY) {
-        log::info!("audio: rendered {n} blocks");
+        log::info!("audio: rendered {n} blocks (last on thread {thread_name:?})");
     }
 
     1

@@ -29,7 +29,6 @@
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
 #include "libdeluge/file_io.h"
-#include "libdeluge/worker.h" // deluge_worker_run — run the export on the worker fiber
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/non_audio_instrument.h"
@@ -42,6 +41,7 @@
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/audio/stream/loader.h"
+#include "storage/owner.h" // deluge::storage::Owner::run — run the export on the worker fiber
 #include "util/etl_string.h"
 #include "util/string.h"
 #include <iterator>
@@ -89,7 +89,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	// yield can't hand the CPU back, so run the whole export on the worker fiber;
 	// the launching menu/button handler returns immediately. The export type is
 	// carried in the ctx word (no capture needed).
-	deluge_worker_run(
+	deluge::storage::Owner::run(
 	    [](void* p) { stemExport.runStemExportProcess(static_cast<StemExportType>(reinterpret_cast<uintptr_t>(p))); },
 	    reinterpret_cast<void*>(static_cast<uintptr_t>(stemExportType)));
 }

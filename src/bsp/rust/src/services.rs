@@ -12,6 +12,16 @@ use crate::sys::{
     DelugeStatus_DELUGE_ERR_PARAM as DELUGE_ERR_PARAM, DelugeStatus_DELUGE_OK as DELUGE_OK,
 };
 
+// `host_app` feature: the C++ app is actually linked on host (see build.rs),
+// so it needs real memory/cache providers too — same `sys` identifiers as the
+// device block above (the two cfgs are mutually exclusive, so no clash).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+use crate::sys::{
+    DelugeMemoryKind_DELUGE_MEM_FAST_INTERNAL as KIND_INTERNAL,
+    DelugeMemoryKind_DELUGE_MEM_LARGE_EXTERNAL as KIND_EXTERNAL, DelugeMemoryRegion, DelugeStatus,
+    DelugeStatus_DELUGE_ERR_PARAM as DELUGE_ERR_PARAM, DelugeStatus_DELUGE_OK as DELUGE_OK,
+};
+
 // Linker boundary symbols (rza1l.x): the internal SRAM heap and the end of the
 // SDRAM .bss. Used to describe the allocatable regions to the app. Device-only
 // (no rza1l.x linker script on host).
@@ -113,6 +123,15 @@ pub extern "C" fn deluge_log(text: *const core::ffi::c_char) {
         rtt_target::rprint!("{}", s);
         let _ = s;
     }
+}
+
+/// Reset the device. Does not return. On host there is no hardware reset
+/// vector, so this tears down the process the same way a watchdog reset would
+/// end the firmware's execution. [task]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_system_reset() -> ! {
+    std::process::abort()
 }
 
 // ── clock.h ─────────────────────────────────────────────────────────────────
@@ -226,3 +245,106 @@ pub extern "C" fn deluge_memory_scratch() -> *mut core::ffi::c_void {
     static mut SCRATCH: [u8; 256] = [0; 256];
     core::ptr::addr_of_mut!(SCRATCH) as *mut core::ffi::c_void
 }
+
+// ── memory.h + cache maintenance (host_app) ────────────────────────────────
+//
+// `host_app` feature: the C++ app is actually linked and run on host (see
+// build.rs), so its `GeneralMemoryAllocator` needs *real* backing memory
+// (process `static` byte arrays), not the no-op stand-ins above (which are
+// `target_os = "none"`-only and reference device linker-boundary symbols that
+// don't exist on host). Mirrors `src/bsp/host/host_bsp.c` exactly: same two
+// regions, same `HOST_SDRAM_BYTES`/`HOST_INTERNAL_BYTES` sizes, no DMA on host
+// so cache maintenance is a no-op.
+
+/// 64 MiB — holds stealable + external + external_small (host_bsp.c's
+/// `HOST_SDRAM_BYTES`).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+const HOST_SDRAM_BYTES: usize = 67_108_864;
+/// 2 MiB on-chip-SRAM-equivalent internal heap region (host_bsp.c's
+/// `HOST_INTERNAL_BYTES`).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+const HOST_INTERNAL_BYTES: usize = 2_097_152;
+
+/// Region 0: large external (SDRAM-equivalent) backing store.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+static mut HOST_SDRAM: [u8; HOST_SDRAM_BYTES] = [0; HOST_SDRAM_BYTES];
+/// Region 1: fast internal (SRAM-equivalent) backing store.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+static mut HOST_INTERNAL: [u8; HOST_INTERNAL_BYTES] = [0; HOST_INTERNAL_BYTES];
+
+/// Number of allocatable memory regions the board provides. [task]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_memory_region_count() -> u8 {
+    2
+}
+
+/// Describe region `index`: 0 = large external (host-process SDRAM stand-in),
+/// 1 = fast internal (host-process SRAM stand-in). [task]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_memory_region(index: u8, out: *mut DelugeMemoryRegion) -> DelugeStatus {
+    // `addr_of_mut!` on a `static mut` just forms a raw pointer to the place
+    // (no reference created, no read/write) — safe to call outside `unsafe`.
+    let (base, size, kind): (*mut u8, usize, _) = match index {
+        0 => (
+            core::ptr::addr_of_mut!(HOST_SDRAM) as *mut u8,
+            HOST_SDRAM_BYTES,
+            KIND_EXTERNAL,
+        ),
+        1 => (
+            core::ptr::addr_of_mut!(HOST_INTERNAL) as *mut u8,
+            HOST_INTERNAL_BYTES,
+            KIND_INTERNAL,
+        ),
+        _ => return DELUGE_ERR_PARAM,
+    };
+    // SAFETY: the app passes a valid DelugeMemoryRegion out-pointer.
+    unsafe {
+        (*out).base = base as *mut core::ffi::c_void;
+        (*out).size = size as u32;
+        (*out).kind = kind;
+    }
+    DELUGE_OK
+}
+
+/// One past the application-usable external (SDRAM-equivalent) region. [task] [audio] [isr]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_memory_external_end() -> usize {
+    core::ptr::addr_of!(HOST_SDRAM) as usize + HOST_SDRAM_BYTES
+}
+
+/// Base of the fast internal (SRAM-equivalent) region. [task] [audio] [isr]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_memory_internal_begin() -> usize {
+    core::ptr::addr_of!(HOST_INTERNAL) as usize
+}
+
+/// A writable scratch address whose contents are never read. [task] [audio] [isr]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_memory_scratch() -> *mut core::ffi::c_void {
+    static mut HOST_SCRATCH: [u8; 256] = [0; 256];
+    core::ptr::addr_of_mut!(HOST_SCRATCH) as *mut core::ffi::c_void
+}
+
+/// Cache line size in bytes (alignment unit for DMA-coherent buffers). No real
+/// DMA on host; matches the device's actual RZ/A1 line size for allocator
+/// alignment behavior parity. [task]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_cache_line_size() -> u32 {
+    64
+}
+
+/// No DMA on host → cache maintenance is a no-op (host_bsp.c parity). [task] [isr]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_cache_clean(_addr: *const core::ffi::c_void, _size: u32) {}
+
+/// No DMA on host → cache maintenance is a no-op (host_bsp.c parity). [task] [isr]
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_cache_invalidate(_addr: *const core::ffi::c_void, _size: u32) {}

@@ -265,12 +265,26 @@ const HOST_SDRAM_BYTES: usize = 67_108_864;
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 const HOST_INTERNAL_BYTES: usize = 2_097_152;
 
+/// Plain `[u8; N]` statics default to alignment 1 — `deluge_heap_create`
+/// (`deluge_alloc::tlsf::Tlsf::add_pool`) requires its `mem` pointer 16-byte
+/// aligned (`tlsf::ALIGN`) and dereferences a `BlockHeader` through it
+/// unconditionally, so an unaligned region faults immediately on the first
+/// allocation (found running the host_app boot smoke: "misaligned pointer
+/// dereference ... must be a multiple of 0x10" inside `add_pool`). C's
+/// `host_bsp.c` gets away with an unaligned `uint8_t[]` because nothing there
+/// enforces the alignment at the type level; Rust's raw-pointer-dereference
+/// check does. Force it explicitly rather than relying on the allocator's
+/// internal 16-byte carve-out to happen to land aligned.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[repr(C, align(16))]
+struct HeapRegion<const N: usize>([u8; N]);
+
 /// Region 0: large external (SDRAM-equivalent) backing store.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
-static mut HOST_SDRAM: [u8; HOST_SDRAM_BYTES] = [0; HOST_SDRAM_BYTES];
+static mut HOST_SDRAM: HeapRegion<HOST_SDRAM_BYTES> = HeapRegion([0; HOST_SDRAM_BYTES]);
 /// Region 1: fast internal (SRAM-equivalent) backing store.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
-static mut HOST_INTERNAL: [u8; HOST_INTERNAL_BYTES] = [0; HOST_INTERNAL_BYTES];
+static mut HOST_INTERNAL: HeapRegion<HOST_INTERNAL_BYTES> = HeapRegion([0; HOST_INTERNAL_BYTES]);
 
 /// Number of allocatable memory regions the board provides. [task]
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]

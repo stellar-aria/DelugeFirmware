@@ -133,7 +133,15 @@ mod boundary_markers {
     /// builds an actual `DelugeHeap` over `[__frunk_bss_end, __frunk_slack_end)`
     /// and the app allocates/writes into it.
     const HOST_FRUNK_BYTES: usize = 262_144;
-    static mut HOST_FRUNK: [u8; HOST_FRUNK_BYTES] = [0; HOST_FRUNK_BYTES];
+    // `#[repr(align(16))]`: `deluge::memory::init_heaps()` builds a real
+    // `DelugeHeap` (`deluge_alloc::tlsf`) over this region, which requires its
+    // base 16-byte aligned and dereferences a `BlockHeader` through it
+    // unconditionally — a plain `[u8; N]` static (alignment 1) faults on the
+    // first allocation. See the identical fix + full explanation on
+    // `services.rs`'s `HeapRegion` (found running the host_app boot smoke).
+    #[repr(C, align(16))]
+    struct HeapRegion<const N: usize>([u8; N]);
+    static mut HOST_FRUNK: HeapRegion<HOST_FRUNK_BYTES> = HeapRegion([0; HOST_FRUNK_BYTES]);
 
     /// Backing address for `program_stack_start`/`program_stack_end`, aliased
     /// to the SAME address below (mirroring host_bsp.c) — never dereferenced,

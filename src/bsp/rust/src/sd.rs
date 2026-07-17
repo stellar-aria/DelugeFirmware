@@ -133,6 +133,27 @@ pub async fn boot_init() {
     );
 }
 
+/// `host_app` sibling of the device [`boot_init`] above: called from the host
+/// `app_task` (`main.rs`) before `deluge_app_init`, purely to mirror the device
+/// boot sequencing exactly. Not strictly required on host — unlike the device
+/// (whose integrated timer queue makes `sd::init()`'s `Timer` delays unusable
+/// under `disk_initialize`'s synchronous `block_on`, see the host
+/// `disk_initialize` doc comment below), `deluge_bsp::sd`'s host `init()` never
+/// suspends, so `disk_initialize` already drives it lazily via `block_on` on
+/// first FatFS access with no separate async bring-up step needed. Calling it
+/// here too is harmless (idempotent) and keeps the host and device `app_task`
+/// bodies textually identical.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+pub async fn boot_init() {
+    let r = sd::init().await;
+    log::info!(
+        "sd: boot_init (host) — init={:?} inserted={} wp={}",
+        r.is_ok(),
+        sd::is_inserted(),
+        sd::is_write_protected(),
+    );
+}
+
 /// FatFS DSTATUS bits for the current card state. Device-only (see [`sd`]).
 #[cfg(target_os = "none")]
 fn status_bits() -> u8 {

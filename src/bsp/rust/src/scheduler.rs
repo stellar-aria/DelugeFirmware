@@ -333,6 +333,20 @@ fn current_slot() -> Option<&'static TaskSlot> {
     slot_of(CURRENT.load(Ordering::Relaxed))
 }
 
+/// Count of currently-claimed slots — i.e. how many `add*Task` calls have
+/// landed and not yet been removed. `host_app`-only: the boot-and-idle smoke
+/// (`main.rs`) polls this from a second thread as the cheapest strong signal
+/// that the real C++ app's `registerTasks()` actually ran (it calls
+/// `addRepeatingTask`/`addConditionalTask` a couple dozen times during
+/// `deluge_app_init`), rather than just that BSP init reached that point.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+pub fn registered_task_count() -> usize {
+    SLOTS
+        .iter()
+        .filter(|s| s.used.load(Ordering::Acquire))
+        .count()
+}
+
 /// One Embassy task per Deluge task. Pool sized to [`MAX_TASKS`] so every slot can
 /// be live at once. Waits per the slot's schedule (or condition), runs the C++
 /// handle to completion, and loops until removed or (for once tasks) it has run.

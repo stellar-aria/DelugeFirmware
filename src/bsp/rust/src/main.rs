@@ -138,6 +138,14 @@ unsafe extern "C" {
     /// the spawned runners drive the app — there is no `deluge_app_tick` loop.
     fn deluge_app_init(board: *const sys::DelugeBoard);
 }
+// `host_app` feature: host-side sibling of the device import above. The
+// host-built `deluge_app` object closure (build.rs's `run_host_app`, Task 1)
+// exports the exact same symbol; this lets the host `host_app` boot path
+// (below) call the real `deluge_app_init` → `registerTasks()` on host too.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+unsafe extern "C" {
+    fn deluge_app_init(board: *const sys::DelugeBoard);
+}
 
 /// Rust-side SRAM heap pool. The C++ app's GeneralMemoryAllocator owns the rest
 /// of SRAM (`[__heap_start, program_stack_start)`), so the Rust heap is a small,
@@ -393,6 +401,34 @@ async fn app_task() {
     }
 }
 
+/// `host_app` feature: host sibling of [`app_task`] above — the real C++ app's
+/// one-time bring-up, run on the host executor spawned by `fn main`'s
+/// `host_app` boot path. Mirrors the device sequencing exactly (wait for the
+/// PIC handshake, bring SD up, then `deluge_app_init`), minus the device-only
+/// SYNC LED blink (no GPIO on host) and the worker-fiber pump loop (nothing on
+/// the boot-and-idle path dispatches a yielding op onto the worker fiber — see
+/// `fiber.rs`'s module doc — so there is nothing for this task to pump; it
+/// parks instead, exactly as this fn's doc promises).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[embassy_executor::task]
+async fn host_app_task() {
+    // Mirrors the device `app_task`: wait for the PIC's (host: synthetic)
+    // ready handshake, then bring SD up, before the app's first storage access.
+    deluge_bsp::pic::wait_ready().await;
+    crate::sd::boot_init().await;
+
+    log::info!("deluge-bsp-rust: host deluge_app_init() (registers + spawns task runners)");
+    // deluge_app_init → registerTasks() spawns the per-task runners onto this
+    // executor via scheduler::set_spawner's stashed spawner. They begin running
+    // as soon as we park below.
+    unsafe { deluge_app_init(board::deluge_board()) };
+    log::info!("deluge-bsp-rust: host scheduler running; app_task parking");
+
+    // The scheduler's task runners now own all app work; this task has nothing
+    // left to do (see doc comment above re: the worker-fiber pump).
+    core::future::pending::<()>().await;
+}
+
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
 /// "none"`). Exercises the M1-core modules (`fiber`, `scheduler`, `sd`,
 /// `services`) on std without any device BSP/HAL — no MMU/GIC/SDRAM bring-up,
@@ -434,7 +470,7 @@ fn main() {
     );
     log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
 
-    // --- M3: whole-BSP host boot smoke -------------------------------------
+    // --- M3: whole-BSP host boot smoke (no C++ app; `host_app` OFF) --------
     // Bring up a host Embassy executor (platform-std) and spawn the four
     // control/display tasks — the same ones main.rs spawns on device (minus the
     // app/audio/cv/usb tasks, which need the C++ app or real peripherals). With
@@ -446,38 +482,152 @@ fn main() {
     //                    (captured by the oled host sim), then parks on wait_redraw
     // Boot is proven by the captured blank frame; the watchdog bounds it so a
     // regression (init that blocks/crashes) fails instead of hanging forever.
-    use embassy_executor::{Executor, Spawner};
-    use std::time::{Duration, Instant};
+    #[cfg(not(feature = "host_app"))]
+    {
+        use embassy_executor::{Executor, Spawner};
+        use std::time::{Duration, Instant};
 
-    std::thread::Builder::new()
-        .name("deluge-bsp-boot".into())
-        .spawn(|| {
-            let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
-            executor.run(|spawner: Spawner| {
-                crate::scheduler::set_spawner(spawner);
-                spawner.spawn(control::pic_pump().unwrap());
-                spawner.spawn(control::pad_render().unwrap());
-                spawner.spawn(control::encoder_wake_pump().unwrap());
-                spawner.spawn(display::oled_render().unwrap());
-            });
-        })
-        .expect("spawning the host BSP executor thread");
+        std::thread::Builder::new()
+            .name("deluge-bsp-boot".into())
+            .spawn(|| {
+                let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
+                executor.run(|spawner: Spawner| {
+                    crate::scheduler::set_spawner(spawner);
+                    spawner.spawn(control::pic_pump().unwrap());
+                    spawner.spawn(control::pad_render().unwrap());
+                    spawner.spawn(control::encoder_wake_pump().unwrap());
+                    spawner.spawn(display::oled_render().unwrap());
+                });
+            })
+            .expect("spawning the host BSP executor thread");
 
-    // Wait (bounded) for oled_render to capture its first (blank) frame.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        // A blank frame is all-zero; captured_frame() returns the last frame the
-        // oled sim received. Before the first send it is the sim's initial state;
-        // we detect "boot reached first send" via a distinct signal below.
-        if deluge_bsp::oled::boot_frame_captured() {
-            break;
+        // Wait (bounded) for oled_render to capture its first (blank) frame.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // A blank frame is all-zero; captured_frame() returns the last frame the
+            // oled sim received. Before the first send it is the sim's initial state;
+            // we detect "boot reached first send" via a distinct signal below.
+            if deluge_bsp::oled::boot_frame_captured() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("host BSP boot: oled_render did not capture its blank frame in time");
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        if Instant::now() >= deadline {
-            panic!("host BSP boot: oled_render did not capture its blank frame in time");
-        }
-        std::thread::sleep(Duration::from_millis(5));
+        log::info!("deluge-bsp-rust: whole-BSP host boot OK (control/display tasks quiescent)");
     }
-    log::info!("deluge-bsp-rust: whole-BSP host boot OK (control/display tasks quiescent)");
 
+    // --- M4b Task 6: host app boot-and-idle smoke (`host_app` ON) ----------
+    // Same host executor-on-a-thread shape as the M3 smoke above, but this time
+    // also spawn a host `app_task` that runs the REAL C++ app's one-time
+    // bring-up (`deluge_app_init` → `deluge_boot` + `registerTasks()` +
+    // `encoders::init()`, mirroring the device `app_task` in `main`, above).
+    // `registerTasks()` calls `addRepeatingTask`/`addConditionalTask` a couple
+    // dozen times, spawning one Embassy task runner per Deluge task via
+    // `scheduler::set_spawner`'s stashed spawner — so "at least one scheduler
+    // slot claimed" is the strongest cheap, real-app-driven signal that boot
+    // reached the scheduler (not just BSP init); `oled_render`'s captured first
+    // frame (same signal the M3 smoke above uses) is the fallback.
+    #[cfg(feature = "host_app")]
+    {
+        use embassy_executor::{Executor, Spawner};
+        use std::time::{Duration, Instant};
+
+        std::thread::Builder::new()
+            .name("deluge-bsp-host-app".into())
+            .spawn(|| {
+                let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
+                executor.run(|spawner: Spawner| {
+                    crate::scheduler::set_spawner(spawner);
+                    spawner.spawn(control::pic_pump().unwrap());
+                    spawner.spawn(control::pad_render().unwrap());
+                    spawner.spawn(control::encoder_wake_pump().unwrap());
+                    spawner.spawn(display::oled_render().unwrap());
+                    spawner.spawn(host_app_task().unwrap());
+                });
+            })
+            .expect("spawning the host app executor thread");
+
+        // Bounded watchdog: boot must never hang forever. ~20s is generous for
+        // a host process (no real hardware waits), but the real app's boot
+        // sequence (deluge_boot + registerTasks + encoders::init) touches a lot
+        // of BSP surface for the first time on host, so give it room.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let tasks = crate::scheduler::registered_task_count();
+            if tasks > 0 {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP boot OK — registerTasks() claimed {tasks} scheduler slot(s)"
+                );
+                log::info!("deluge-bsp-rust: HOST harness OK");
+                // See `hard_exit`'s doc comment: a normal return here (or a plain
+                // `std::process::exit`) races the still-live host-app executor
+                // thread against libc's atexit-run C++ static destructors.
+                hard_exit(0);
+            }
+            // Fallback signal: the app rendered its first real OLED frame (only
+            // reachable once deluge_boot/registerTasks got far enough to drive
+            // display output), in case task-count observation somehow races past
+            // a transient zero.
+            if deluge_bsp::oled::boot_frame_captured() {
+                log::info!("deluge-bsp-rust: HOST APP boot OK — first OLED frame captured");
+                log::info!("deluge-bsp-rust: HOST harness OK");
+                hard_exit(0);
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "host app boot: registerTasks() had not claimed any scheduler slot within 20s \
+                     (deluge_app_init likely wedged or crashed before reaching registerTasks())"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(not(feature = "host_app"))]
     log::info!("deluge-bsp-rust: HOST harness OK");
+}
+
+/// Immediate, unconditional process termination for the `host_app` boot smoke
+/// — skips libc's atexit-run destructors entirely (a raw Linux `exit_group(2)`
+/// syscall, not `std::process::exit`/a normal return from `fn main`).
+///
+/// Needed because the real C++ app links genuine C++ objects with static
+/// storage duration (`AudioEngine`, `midiEngine`, `playbackHandler`,
+/// `cvEngine`, …) that register destructors via `__cxa_atexit` when
+/// constructed at process start (`.init_array`). A normal return from `fn
+/// main` (or `std::process::exit`, which still calls libc `exit()`) runs
+/// those destructors on the main thread while the host-app executor thread —
+/// still alive, still ticking the real scheduler task runners spawned by
+/// `registerTasks()` — keeps calling virtual methods on those same objects
+/// concurrently. Found running the host_app boot smoke under ThreadSanitizer:
+/// the unsanitized build is fast enough to usually win this exit race (the
+/// process was gone before a background tick landed mid-destructor), but
+/// TSan's instrumentation overhead reliably loses it — a background task's
+/// `deluge_display_consume_transfer_ack`/`deluge_audio_input_resync` tick fired
+/// after a static's destructor had already reset its vtable, so the next
+/// virtual call landed on the pure-virtual stub: `pure virtual method called`
+/// / `terminate called without an active exception` (SIGABRT), not a TSan
+/// `WARNING: data race` — unsurprising, since the racing code (the prebuilt
+/// C++ app + libc's exit path) is outside TSan's instrumentation (see
+/// HOST_HARNESS.md's scoping note); TSan only widened the timing window that
+/// exposed a real lifecycle bug it can't itself see. This is exactly the
+/// "process never returns" shape of the real device's `main -> !` anyway —
+/// there is no orderly app shutdown on hardware either — so a hard kill after
+/// the boot-OK observation is the *correct* model for this smoke, not a
+/// workaround.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+fn hard_exit(code: i32) -> ! {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") 231usize, // exit_group
+            in("rdi") code,
+            options(noreturn, nostack)
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    std::process::exit(code);
 }

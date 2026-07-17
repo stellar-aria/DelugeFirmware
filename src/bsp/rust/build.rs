@@ -4,6 +4,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Host (platform-std) build: none of the below applies. bindgen's libdeluge
+    // POD types, the rza1l linker script, and the archived C++ deluge_app closure
+    // are all device-only concerns (M1 only makes the *dependency graph*
+    // host-capable; M3 revisits bindgen for a host-ABI target, and the host image
+    // never links the C++ app at all). `mod sys`/the app-call boundary on host is
+    // handled in a later milestone task, not here.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("none") {
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // DelugeFirmware repo root (crate is at <root>/src/bsp/rust).

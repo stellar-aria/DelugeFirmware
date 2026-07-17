@@ -20,12 +20,24 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+# Truly cross-target deps: same source, same versions, on both device and host.
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+log = "0.4"
+rtt-target = { version = "0.6", features = ["log"], optional = true }
+
+# ── Device (the Deluge, armv7a-none-eabihf) ──────────────────────────────────
 # Sibling deluge-sdk HAL + BSP + allocators (DelugeFirmware and deluge-sdk cloned
 # side by side). The HAL is memory-map facts only; the general-purpose Rust heaps
 # now live in deluge-alloc.
 # `flash` feature: deluge-bsp gates its `flash` module behind an opt-in feature
 # (only flash-writing firmwares need it). We do — src/flash.rs reads device
 # settings from the reserved SPI-flash sector via deluge_bsp::flash.
+#
+# `platform-cortex-ar` and `platform-std` (host, below) are mutually exclusive
+# by embassy-executor's `check_at_most_one!`, so they must live in disjoint
+# `[target...]` sections rather than both landing in `[dependencies]`.
+[target.'cfg(target_os = "none")'.dependencies]
 deluge-bsp = { path = "../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
 rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
@@ -44,15 +56,20 @@ deluge_resource = { path = "../../../crates/deluge_resource" }
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
-embassy-sync = "0.8.0"
-embassy-futures = "0.1.2"
 embassy-usb = "0.6.0"
 embassy-usb-driver = "0.2.2"
 
 cortex-ar = "0.3"
 critical-section = "1"
-log = "0.4"
-rtt-target = { version = "0.6", features = ["log"], optional = true }
+
+# ── Host (x86/std) ────────────────────────────────────────────────────────────
+# Same source, but the executor is std-thread-backed with no cortex-ar/BSP deps,
+# so the Embassy scheduler/fiber concurrency can be exercised off-hardware
+# (e.g. under ThreadSanitizer). No C++ app is linked on host (see build.rs).
+[target.'cfg(not(target_os = "none"))'.dependencies]
+embassy-executor = { version = "0.10.0", features = ["nightly", "platform-std", "executor-thread"] }
+embassy-time = { version = "0.5.1", features = ["std"] }
+critical-section = { version = "1", features = ["std"] }
 
 [features]
 default = ["rtt"]

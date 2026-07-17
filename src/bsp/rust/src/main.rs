@@ -10,17 +10,23 @@
 //! The C++ application is compiled by CMake into `libdeluge_app.a` and linked in
 //! by `build.rs`; this crate implements the `<libdeluge/...>` C-ABI services it
 //! calls. See docs/dev/libdeluge_bsp_design.md.
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 #![feature(impl_trait_in_assoc_type)]
 
+#[cfg(target_os = "none")]
 use core::mem::MaybeUninit;
+#[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 
+#[cfg(target_os = "none")]
 use embassy_executor::{Executor, InterruptExecutor, Spawner};
 // General-purpose Rust heaps (for BSP/Embassy/our boot). The C++ app keeps its
 // own GeneralMemoryAllocator over the region we hand it; the Rust app allocator
 // (TLSF/slab, docs/dev/allocator_redesign.md) is a later, separately-gated step.
+// Device-only: `deluge-alloc` is a `target_os = "none"`-only dependency (see
+// Cargo.toml) — no Rust-side heap on host in M1 (Task 4 grows a Vec-backed one).
+#[cfg(target_os = "none")]
 use deluge_alloc as allocator;
 
 // Link-only: the C++ app (archived into this image by build.rs) calls the
@@ -29,37 +35,50 @@ use deluge_alloc as allocator;
 // symbols resolve; nothing here references them from Rust. deluge_alloc arrives
 // transitively via deluge_resource (a distinct crate from the `deluge_alloc`
 // aliased above — that one is the sibling deluge-sdk allocator).
+#[cfg(target_os = "none")]
 extern crate deluge_resource;
 
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
-/// service functions are defined in [`ffi`]).
+/// service functions are defined in [`ffi`]). No C++ app is linked on host in
+/// M1 (see build.rs), so there is no bindgen output to include.
+#[cfg(target_os = "none")]
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod sys {
     include!(concat!(env!("OUT_DIR"), "/libdeluge_sys.rs"));
 }
 
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
+#[cfg(target_os = "none")]
 mod audio;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up.
+#[cfg(target_os = "none")]
 mod board;
 /// C++ memory-model bring-up (SDRAM bss/data, global ctors).
+#[cfg(target_os = "none")]
 mod boot_mem;
 /// control_surface.h — pads/buttons/encoders + LEDs (M2b WIP).
+#[cfg(target_os = "none")]
 mod control;
 /// cv_gate.h — CV/gate outputs + external trigger clock.
+#[cfg(target_os = "none")]
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
+#[cfg(target_os = "none")]
 mod display;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
+#[cfg(target_os = "none")]
 mod ffi;
 /// Non-header app/BSP symbols (USB-host globals, FatFS glue, NE10, runtime shims).
+#[cfg(target_os = "none")]
 mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
+#[cfg(target_os = "none")]
 mod flash;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
+#[cfg(target_os = "none")]
 mod midi;
 /// scheduler.h / OSLikeStuff scheduler_api.h — the cooperative task scheduler,
 /// implemented on the Embassy executor (one task per registered Deluge task).
@@ -69,10 +88,13 @@ mod sd;
 /// Real impls of the simplest services (system.h, clock.h, memory.h).
 mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
+#[cfg(target_os = "none")]
 mod signals;
 /// USB device bring-up — USB-MIDI 1.0 peripheral (Deluge → computer).
+#[cfg(target_os = "none")]
 mod usb;
 
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     /// One-time C++ application bring-up (deluge.cpp / app.h). On this BSP it also
     /// runs `registerTasks()`, which spawns one Embassy task per registered Deluge
@@ -85,18 +107,21 @@ unsafe extern "C" {
 /// of SRAM (`[__heap_start, program_stack_start)`), so the Rust heap is a small,
 /// dedicated static pool that can't overlap it. Nothing on the Rust side
 /// allocates from SRAM yet; sized small.
+#[cfg(target_os = "none")]
 static mut RUST_SRAM_POOL: [u8; 64 * 1024] = [0; 64 * 1024];
 
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     // `extern "C"` boundary: never unwind (panic = "abort" is also set).
-    #[cfg(feature = "rtt")]
+    #[cfg(all(feature = "rtt", target_os = "none"))]
     log::error!("PANIC: {}", _info);
     loop {
         core::hint::spin_loop();
     }
 }
 
+#[cfg(target_os = "none")]
 static mut EXECUTOR: MaybeUninit<Executor> = MaybeUninit::uninit();
 
 /// Preemptive Embassy executor for audio. Runs the audio
@@ -104,19 +129,23 @@ static mut EXECUTOR: MaybeUninit<Executor> = MaybeUninit::uninit();
 /// µs hard-RT ISRs, so it preempts the cooperative thread executor (a storage
 /// `yield()` spin can no longer starve audio) yet is itself preempted by
 /// OSTM/MTU2-gate/MIDI. The scheduler routes the priority-0 task here.
+#[cfg(target_os = "none")]
 static AUDIO_EXEC: InterruptExecutor = InterruptExecutor::new();
 
 /// GIC Software-Generated Interrupt id driving [`AUDIO_EXEC`] (0..=15; SMP-free
 /// board, so SGIs are otherwise unused).
+#[cfg(target_os = "none")]
 const AUDIO_SGI: u8 = 8;
 /// Audio SGI GIC priority. Numerically ABOVE the hard-RT IRQs (OSTM=14, UART/MIDI
 /// =10, DMAC=13) so they preempt the render, and below PMR (31) so it is
 /// forwarded. (Lower number = more urgent.)
+#[cfg(target_os = "none")]
 const AUDIO_SGI_PRIORITY: u8 = 20;
 
 /// GIC handler for [`AUDIO_SGI`]: drive the audio interrupt executor. Registered
 /// in the HAL dispatch (`gic::register`), which already acks (GICC_IAR) before and
 /// EOIs (GICC_EOIR) after, with IRQs re-enabled for nesting.
+#[cfg(target_os = "none")]
 fn audio_sgi_handler() {
     // SAFETY: only called from the SGI handler, after AUDIO_EXEC.start().
     unsafe { AUDIO_EXEC.on_interrupt() };
@@ -124,11 +153,12 @@ fn audio_sgi_handler() {
 
 /// Firmware entry. The HAL reset handler (`_reset_handler` in rza1l-hal) ends in
 /// `bl main`; control lands here with caches/MMU off and stacks set up.
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
     // RTT logger first, so every boot step is visible over the probe. The ring
     // buffer + control block live in uncached SRAM (.rtt_buffer / rza1l_rtt.x).
-    #[cfg(feature = "rtt")]
+    #[cfg(all(feature = "rtt", target_os = "none"))]
     {
         let channels = rtt_target::rtt_init! {
             up: { 0: { size: 16384, name: "Terminal", section: ".rtt_buffer" } }
@@ -264,6 +294,7 @@ pub extern "C" fn main() -> ! {
 /// I/O tasks) then drive everything cooperatively, so this task has nothing left
 /// to do and parks forever. The decomposed scheduler replaces the old yielding
 /// `deluge_app_tick` superloop.
+#[cfg(target_os = "none")]
 #[embassy_executor::task]
 async fn app_task() {
     use embassy_time::Timer;
@@ -324,4 +355,19 @@ async fn app_task() {
             fiber::WORKER_WAKE.wait().await;
         }
     }
+}
+
+/// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
+/// "none"`). Exercises the M1-core modules (`fiber`, `scheduler`, `sd`,
+/// `services`) on std without any device BSP/HAL — no MMU/GIC/SDRAM bring-up,
+/// no C++ app linked (see build.rs). Later M1 tasks grow this into a real
+/// host scheduler run; for now it proves the fiber context switch works on a
+/// std thread stack.
+#[cfg(not(target_os = "none"))]
+fn main() {
+    env_logger::init();
+    log::info!("deluge-bsp-rust: HOST harness");
+    // Host heap for deluge_alloc (SRAM/SDRAM ranges) → Vec-backed (Task 4).
+    // Run the fiber selftest (Task 3), then a plain Executor (Task 5 test drives scheduler).
+    assert!(fiber::selftest(), "fiber selftest failed on host");
 }

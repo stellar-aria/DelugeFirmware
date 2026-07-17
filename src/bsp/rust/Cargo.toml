@@ -26,21 +26,31 @@ embassy-futures = "0.1.2"
 log = "0.4"
 rtt-target = { version = "0.6", features = ["log"], optional = true }
 
-# ── Device (the Deluge, armv7a-none-eabihf) ──────────────────────────────────
-# Sibling deluge-sdk HAL + BSP + allocators (DelugeFirmware and deluge-sdk cloned
-# side by side). The HAL is memory-map facts only; the general-purpose Rust heaps
-# now live in deluge-alloc.
+# Sibling deluge-sdk BSP + HAL (DelugeFirmware and deluge-sdk cloned side by
+# side). Both are dual-target as of deluge-sdk's feat/deluge-bsp-host: `sd`
+# (block_device.h's backing store) has the SAME async `Result<_, SdError>` API
+# on host (a file-backed disk image) and device (the real SDHI1 driver), so
+# `deluge-bsp-rust`'s `sd.rs` can call `deluge_bsp::sd::*` uniformly with no
+# `#[cfg]` at the call site (see sd.rs). `rza1l-hal` is dual-target too
+# (`target_os = "none"` gates its hardware-touching internals; its host build
+# is effectively inert but the crate itself compiles either way). Both are
+# therefore shared deps now rather than device-only.
 # `flash` feature: deluge-bsp gates its `flash` module behind an opt-in feature
 # (only flash-writing firmwares need it). We do — src/flash.rs reads device
 # settings from the reserved SPI-flash sector via deluge_bsp::flash.
+deluge-bsp = { path = "../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
+rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
+
+# ── Device (the Deluge, armv7a-none-eabihf) ──────────────────────────────────
+# `deluge-alloc` (the general-purpose Rust heap) has no host meaning — the host
+# harness links no C++ app and does no SDRAM bring-up (see build.rs) — so it
+# stays device-only.
 #
 # `platform-cortex-ar` and `platform-std` (host, below) are mutually exclusive
 # by embassy-executor's `check_at_most_one!`, so they must live in disjoint
 # `[target...]` sections rather than both landing in `[dependencies]`.
 [target.'cfg(target_os = "none")'.dependencies]
-deluge-bsp = { path = "../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
-rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 
 # DelugeFirmware's own Rust crate providing the residency/eviction engine + the
 # GeneralMemoryAllocator backing (TLSF + slab), both as C ABIs the C++ app calls.

@@ -37,6 +37,13 @@ use deluge_alloc as allocator;
 // aliased above — that one is the sibling deluge-sdk allocator).
 #[cfg(target_os = "none")]
 extern crate deluge_resource;
+/// `host_app` feature: host-side sibling of the above. The host-built C++
+/// `deluge_app` object closure (build.rs's `run_host_app`) calls the same
+/// deluge_resource_*/deluge_{alloc,slab_*,heap_*} C ABI; `deluge_resource` is an
+/// optional dep enabled by `host_app` (see Cargo.toml) so this `extern crate`
+/// forces its rlib onto the host link line too.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_resource;
 
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
 /// service functions are defined in [`ffi`]). No C++ app is linked on host in
@@ -101,6 +108,11 @@ mod ffi_extra;
 mod fiber;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
 mod flash;
+/// Host-only no-op stubs for the peripheral (MIDI/audio/CV-gate/signals) C ABI
+/// under `host_app`. Boot-and-idle never exercises real peripheral I/O on host;
+/// the real `audio`/`cv_gate`/`midi`/`signals` modules below stay device-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;

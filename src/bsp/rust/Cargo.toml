@@ -90,6 +90,15 @@ env_logger = "0.11"
 # (it tracks happens-before per real thread, not per stack), so the M1 Task 5
 # TSan run does not enable this feature. Kept for a future ASan pass.
 corosensei = "0.3"
+# The host-built C++ `deluge_app` object closure (see build.rs, `host_app`
+# feature) calls the deluge_resource_* residency C ABI and the
+# deluge_{alloc,slab_*,heap_*} allocator C ABI — the same symbols the device
+# build resolves via the `deluge_resource` dep above. `deluge_resource` and its
+# `deluge_alloc` dependency are `#![cfg_attr(target_os = "none", no_std)]`, so on
+# host they're plain std rlibs (no panic_handler, no dup-panic-handler risk) and
+# link cleanly against std. Optional + gated by `host_app` so a plain host build
+# (M1-M3 harness, no C++ app linked) never pulls it in.
+deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 
 [features]
 default = ["rtt"]
@@ -116,7 +125,10 @@ sanitize = ["corosensei/sanitizer"]
 ## `sys_host.rs` stand-ins) and links the host-built C++ `deluge_app` object
 ## closure (see build.rs). Lets the host binary reach the C++ app boundary for
 ## bring-up/link-checking without a device build. See m4a-spike-report.md.
-host_app = []
+## Pulls in the host-side `deluge_resource` dep above (dep:) so the linked
+## object closure's deluge_resource_*/deluge_{alloc,slab_*,heap_*} symbols
+## resolve — see host_link_stubs.rs for the remaining (peripheral) stubs.
+host_app = ["dep:deluge_resource"]
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

@@ -664,6 +664,44 @@ fn main() {
             std::thread::sleep(Duration::from_millis(5));
         }
 
+        // --- WT2: widen the concurrent window before exit -------------------
+        // The boot-OK / audio-routing-OK checks above only prove the two
+        // executors are both alive and correctly wired — they fire within
+        // ~1-2 render cycles of boot (WT1 found this leaves the host-app and
+        // audio threads almost no time to actually overlap: 0 TSan races in
+        // 5 runs, see `.superpowers/sdd/wt1-report.md`). The spike's races
+        // (`AudioEngine::audioRoutineLocked`, `audioSampleTimer`) came from
+        // the *whole* task graph `registerTasks()` spawns (17 slots, incl.
+        // `UITimerManager::routine`) ticking on the host-app executor
+        // CONCURRENTLY with the audio thread's ongoing renders — so, instead
+        // of exiting the instant boot-proof is established, keep both
+        // executors running for a bounded soak so the repeating main-thread
+        // tasks and the audio render overlap heavily before exit. This is
+        // what lets a TSan run actually see the cross-thread C++ race
+        // surface (see `docs/superpowers/specs/2026-07-17-m4c-race-findings.md`).
+        //
+        // Bounded two ways — wall-clock (`SOAK_DURATION`) and render-cycle
+        // count (`SOAK_MAX_RENDER_BLOCKS`, via `audio_host::drive_count()`),
+        // whichever is hit first — so this can never hang: it's a fixed
+        // sleep-and-poll loop, nothing here waits on anything unbounded.
+        const SOAK_DURATION: Duration = Duration::from_secs(4);
+        const SOAK_MAX_RENDER_BLOCKS: u64 = 4_000;
+        let soak_start = Instant::now();
+        let soak_start_blocks = audio_host::drive_count();
+        let soak_deadline = soak_start + SOAK_DURATION;
+        loop {
+            let rendered = audio_host::drive_count().saturating_sub(soak_start_blocks);
+            if Instant::now() >= soak_deadline || rendered >= SOAK_MAX_RENDER_BLOCKS {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP soak done after {:?} — {rendered} render \
+                     block(s) rendered concurrently with the main-thread task graph",
+                    soak_start.elapsed()
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         log::info!("deluge-bsp-rust: HOST harness OK");
         // See `hard_exit`'s doc comment: a normal return here (or a plain
         // `std::process::exit`) races the still-live host-app/audio executor

@@ -99,6 +99,13 @@ pub fn audio_thread_render_seen() -> bool {
     AUDIO_THREAD_RENDER_SEEN.load(Ordering::Relaxed)
 }
 
+/// Total `deluge_audio_drive` calls observed so far (monotonic). Polled by
+/// `main.rs`'s `host_app` boot path to bound the post-boot concurrency soak
+/// (WT2) by render-cycle count as well as wall-clock time.
+pub fn drive_count() -> u64 {
+    DRIVE_COUNT.load(Ordering::Relaxed)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_audio_max_block_frames() -> u32 {
     APP_BLOCK_FRAMES as u32

@@ -399,5 +399,50 @@ fn main() {
     );
     log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
 
+    // --- M3: whole-BSP host boot smoke -------------------------------------
+    // Bring up a host Embassy executor (platform-std) and spawn the four
+    // control/display tasks — the same ones main.rs spawns on device (minus the
+    // app/audio/cv/usb tasks, which need the C++ app or real peripherals). With
+    // no app and no input, each runs its init sequence then parks:
+    //   pic_pump       → pic::init(); loops on pic::read_byte() (host: parks)
+    //   pad_render     → pic::wait_ready(); OUT.receive() (parks, nothing queued)
+    //   encoder_wake_pump → parks on ENCODER_WAKER (host: never fires)
+    //   oled_render    → pic::wait_ready(); oled::init(); sends ONE blank frame
+    //                    (captured by the oled host sim), then parks on wait_redraw
+    // Boot is proven by the captured blank frame; the watchdog bounds it so a
+    // regression (init that blocks/crashes) fails instead of hanging forever.
+    use embassy_executor::{Executor, Spawner};
+    use std::time::{Duration, Instant};
+
+    std::thread::Builder::new()
+        .name("deluge-bsp-boot".into())
+        .spawn(|| {
+            let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
+            executor.run(|spawner: Spawner| {
+                crate::scheduler::set_spawner(spawner);
+                spawner.spawn(control::pic_pump().unwrap());
+                spawner.spawn(control::pad_render().unwrap());
+                spawner.spawn(control::encoder_wake_pump().unwrap());
+                spawner.spawn(display::oled_render().unwrap());
+            });
+        })
+        .expect("spawning the host BSP executor thread");
+
+    // Wait (bounded) for oled_render to capture its first (blank) frame.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        // A blank frame is all-zero; captured_frame() returns the last frame the
+        // oled sim received. Before the first send it is the sim's initial state;
+        // we detect "boot reached first send" via a distinct signal below.
+        if deluge_bsp::oled::boot_frame_captured() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("host BSP boot: oled_render did not capture its blank frame in time");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    log::info!("deluge-bsp-rust: whole-BSP host boot OK (control/display tasks quiescent)");
+
     log::info!("deluge-bsp-rust: HOST harness OK");
 }

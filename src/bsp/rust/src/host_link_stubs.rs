@@ -31,19 +31,16 @@ macro_rules! stub_log {
 }
 
 // ── audio_io.h ─────────────────────────────────────────────────────────────
+// `deluge_audio_drive`/`max_block_frames`/`sample_rate`/`frames_until_block_offset`
+// are now real (see `audio_host.rs`, M4c Task 1) — the priority-0 task actually
+// renders via `deluge_app_render` instead of a no-op. The remaining audio_io.h
+// symbols below (start/input_resync/stamp_to_render_offset) have no host
+// equivalent (no DMA ring to (re-)anchor or resync) and stay inert stubs.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_audio_start() -> DelugeStatus {
     stub_log!("deluge_audio_start");
     DELUGE_OK
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_audio_drive() -> u32 {
-    stub_log!("deluge_audio_drive");
-    // 0 = "no new audio was needed" (a real, documented idle return, not an
-    // error) — matches host_audio.c's non-blocking idle behaviour.
-    0
 }
 
 #[unsafe(no_mangle)]
@@ -174,6 +171,15 @@ pub extern "C" fn deluge_midi_poll_usb_host_event() -> DelugeUsbHostEvent {
 pub extern "C" fn deluge_midi_gate_timer_pending() -> bool {
     stub_log!("deluge_midi_gate_timer_pending");
     false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_midi_gate_timer_arm(samples_from_now: u32) {
+    stub_log!("deluge_midi_gate_timer_arm");
+    // No MTU2 (or any) one-shot timer on host; matches host_bsp.c's inert stub.
+    // Newly required now that `deluge_audio_drive` (audio_host.rs) actually
+    // calls `deluge_app_render` — that render path can reach
+    // AudioEngine::scheduleMidiGateOutISR, which arms the gate timer.
 }
 
 // ── signals.h ──────────────────────────────────────────────────────────────

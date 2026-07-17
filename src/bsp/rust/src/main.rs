@@ -77,6 +77,11 @@ mod sys {
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
 #[cfg(target_os = "none")]
 mod audio;
+/// audio_io.h — host null-sink render pump (M4c Task 1): the priority-0 task
+/// actually calls `deluge_app_render` and discards the output, instead of
+/// M4b's no-op stub (see `host_link_stubs.rs`).
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod audio_host;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
 /// too under `host_app` (the descriptor/probe are pure data/logic; the GPIO/CV
 /// bring-up bodies get host no-op siblings — see board.rs).

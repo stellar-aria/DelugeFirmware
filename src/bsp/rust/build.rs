@@ -230,6 +230,14 @@ fn run_host_app(
     manifest_dir: &std::path::Path,
     out_dir: &std::path::Path,
 ) {
+    // Switching which CMake tree we archive from (e.g. the plain
+    // build-embassy-hostapp vs. a clang+TSan build-embassy-hostapp-tsan, see
+    // HOST_HARNESS.md) must itself trigger a rerun: without this, Cargo has no
+    // rerun-if-changed/rerun-if-env-changed directive from a PRIOR run that
+    // mentions the new dir at all, so pointing DELUGE_HOSTAPP_BUILD_DIR
+    // somewhere new can silently keep linking whatever was last archived.
+    println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
+
     run_bindgen(repo_root, manifest_dir, out_dir, "x86_64-unknown-linux-gnu");
 
     // This link is EXPECTED to fail on undefined provider symbols until Tasks
@@ -284,6 +292,38 @@ fn run_host_app(
         .expect("run host ar");
     assert!(status.success(), "archiving host deluge_app objects failed");
 
+    // Belt-and-suspenders against the staleness trap the M4c spike hit: a
+    // reconfigured/rebuilt CMake tree (e.g. flipping on -fsanitize=thread)
+    // whose objects Cargo's mtime-based `rerun-if-changed` failed to notice,
+    // so the OUT_DIR archive above got rebuilt this run from fresh objects,
+    // but downstream the rustc-link-arg lines below are byte-identical to the
+    // previous run (same archive path) — from Cargo's fingerprint's point of
+    // view, "nothing about this build script's output changed", so it can
+    // decide the final `deluge-rust` binary doesn't need relinking even
+    // though `libdeluge_app_objs.a`'s CONTENT just changed underneath that
+    // unchanged path. Hash the actual object closure and thread the hash
+    // through `cargo:rustc-env`: Cargo diffs a build script's full emitted
+    // metadata (rustc-env/rustc-cfg/rustc-link-*) run over run, so a changed
+    // hash value forces this crate — and therefore the final link — to be
+    // considered stale and rebuilt, independent of whether any individual
+    // `.o`'s mtime was itself trusted. This directly targets the spike's
+    // reproduced failure mode (an instrumented `.o` on disk, an uninstrumented
+    // archive still linked in) without requiring a `target/` wipe.
+    let content_hash = hash_objs_content(&objs);
+    let hash_str = format!("{content_hash:016x}");
+    let hash_stamp = out_dir.join("host_app_objs_hash.txt");
+    let prev_hash = fs::read_to_string(&hash_stamp).ok();
+    if prev_hash.as_deref() != Some(hash_str.as_str()) {
+        println!(
+            "cargo:warning=host_app: deluge_app object closure at {} changed ({} -> {}); forcing a relink",
+            app_objs_dir.display(),
+            prev_hash.as_deref().unwrap_or("<none>"),
+            hash_str
+        );
+    }
+    fs::write(&hash_stamp, &hash_str).expect("write host_app_objs_hash.txt");
+    println!("cargo:rustc-env=DELUGE_APP_OBJS_HASH={hash_str}");
+
     // The portable static-lib closure, built alongside deluge_app in the same
     // host tree (see the panic message above). Paths mirror build-embassy-hostapp's
     // actual layout (NE10 at the build root, dsp under app/, not src/deluge/ —
@@ -323,6 +363,25 @@ fn run_host_app(
     println!("cargo:rustc-link-arg=-Wl,--end-group");
 
     println!("cargo:rerun-if-changed={}", app_objs_dir.display());
+}
+
+/// Content hash over a sorted object closure (path + bytes of each `.o`), used
+/// by the `host_app` path to force a relink whenever the archived objects'
+/// CONTENT changes even if Cargo's own `rerun-if-changed` mtime tracking of
+/// the individual files does not (see the staleness comment at the call
+/// site). Not cryptographic — `DefaultHasher` (SipHash) is fine for a
+/// same-machine, same-run change/no-change signal; the whole closure is
+/// tens of MB and hashes in well under a second.
+fn hash_objs_content(objs: &[PathBuf]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for o in objs {
+        hasher.write(o.to_string_lossy().as_bytes());
+        let bytes = fs::read(o)
+            .unwrap_or_else(|e| panic!("failed to read {} for staleness hash: {e}", o.display()));
+        hasher.write(&bytes);
+    }
+    hasher.finish()
 }
 
 fn collect_objs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {

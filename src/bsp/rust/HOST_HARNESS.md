@@ -266,3 +266,151 @@ confidence as `tests/fatfs_stress`'s TSan verdict (see `RESULTS.md` there).
 - Spikes flagged by the scoping doc: the "compiles ≠ runs" HAL audit (M2/M3),
   the host-vs-device ABI round-trip (M3), and the `loom`-vs-`platform-std` fit
   (M5).
+
+## M4c: whole-app TSan enumeration (real C++ `deluge_app` under TSan)
+
+Everything above (M1 Task 5) exercises `scheduler.rs`/`fiber.rs` alone, with
+synthetic task bodies standing in for the C++ app. **This section instead
+links the real, TSan-instrumented C++ `deluge_app`** into the same
+`--features host_app` TSan binary, giving ThreadSanitizer visibility into
+actual C++ data races (e.g. `AudioEngine`'s cross-thread globals), not just
+the Rust scheduler plumbing. Spike verdict: **viable, and it organically finds
+real C++ races** with no synthetic race injection needed — see
+`.superpowers/sdd/m4c-instrument-spike-report.md` for the full writeup this
+section summarizes.
+
+### 1. Build the C++ app with clang + TSan (separate build dir)
+
+A **separate CMake tree**, so it never touches or shares cache with the
+default `build-embassy-hostapp/` (the plain, uninstrumented tree the rest of
+this doc uses):
+
+```sh
+# From the repo root:
+cmake -B build-embassy-hostapp-tsan -S sim -G Ninja \
+  -DDELUGE_SIM_X64=ON \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_C_FLAGS="-fshort-enums -fsanitize=thread" \
+  -DCMAKE_CXX_FLAGS="-fshort-enums -fsanitize=thread"
+ninja -C build-embassy-hostapp-tsan deluge_app fatfs NE10 eyalroz_printf \
+  deluge_dsp deluge_scheduler deluge_foundation deluge_midi
+```
+
+`-fshort-enums` is required regardless of TSan (see `run_bindgen`'s comment in
+`build.rs` — it's what makes the host ABI's enum layout match the arm-eabi
+device build bindgen already assumes). `deluge_app` is a CMake OBJECT
+library — clang only ever *compiles* these TUs here, it never links them, so
+clang's own `libclang_rt.tsan*` never enters the picture; the one real link
+happens later, in step 2, via rustc/lld pulling in
+`librustc-nightly_rt.tsan.a` (LLVM compiler-rt TSan). This is why one program
+ends up with exactly one TSan runtime instead of two colliding ones.
+
+**Compiler requirement — must be `clang`/`clang++`, and its LLVM major must
+match rustc nightly's:** rustc's own sanitizer runtime is LLVM
+compiler-rt (`librustc-nightly_rt.tsan.a`); g++'s `libtsan` is a *different*
+build of TSan's runtime with no guaranteed ABI compatibility with LLVM's, and
+mixing them (two independent TSan runtimes, two independent shadow-memory
+allocators, in one process) is a documented recipe for corruption/hangs, not
+just a "might not find some races" risk. Check both versions line up before
+relying on this:
+
+```sh
+clang++ --version                                # e.g. "clang version 22.1.8"
+rustc +nightly --version --verbose | grep LLVM    # e.g. "LLVM version: 22.1.8"
+```
+
+The spike ran on a machine where these matched exactly (both 22.1.8), which
+is almost certainly why the link "just worked" with no runtime-conflict
+symptoms. A machine where system `clang` and rustc nightly's bundled LLVM
+have skewed major versions is the likelier place to hit that risk — verify
+the version match first if races look bogus (spurious reports, hangs, or
+crashes inside the TSan runtime itself rather than in application code).
+
+### 2. Point the Rust TSan build at it
+
+Same invocation as the "exact invocation" above, plus `DELUGE_HOSTAPP_BUILD_DIR`
+overridden to the TSan tree (from `src/bsp/rust`):
+
+```sh
+DELUGE_HOSTAPP_BUILD_DIR=/abs/path/to/build-embassy-hostapp-tsan \
+RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0" \
+cargo +nightly run --features host_app \
+  -Zbuild-std=core,alloc,std,panic_abort \
+  -Zjson-target-spec \
+  --target sanitizer/x86_64-unknown-linux-gnu-tsan.json
+```
+
+(The one-time sysroot symlink from "One-time environment setup" above is a
+prerequisite here too — it's shared across every use of the custom
+`x86_64-unknown-linux-gnu-tsan` target, not TSan-C++-specific.)
+
+`halt_on_error=0` (vs. the scheduler exercise's `halt_on_error=1` above) is
+deliberate here: this run wants to see the *whole* set of races TSan can find
+in one pass, not stop at the first one.
+
+To go back to the plain, uninstrumented `deluge_app`, just drop
+`DELUGE_HOSTAPP_BUILD_DIR` (or point it back at `build-embassy-hostapp`) and
+rebuild — see "Staleness: switching build dirs always relinks" below for why
+this is safe to do repeatedly with no manual cleanup.
+
+### Staleness: switching build dirs always relinks (no manual `target/` wipe)
+
+The spike's only real blocker wasn't a compiler/linker/ABI problem — it was a
+`build.rs` staleness trap: `deluge_app` is an OBJECT library, so `build.rs`
+archives its `.o`s itself (`libdeluge_app_objs.a` in `OUT_DIR`) before handing
+that archive to rustc/lld. The spike found a run where CMake had been
+reconfigured with `-fsanitize=thread` and `deluge_app` rebuilt, but the
+*archived* `.o`s Cargo linked into the final binary were still the old,
+uninstrumented ones — Cargo never re-ran the archive step, so ~10 straight
+TSan runs reported zero races even though the race (`AudioEngine::audioRoutineLocked`)
+was real and present. The only fix at the time was `rm -rf` of the whole
+`target/x86_64-unknown-linux-gnu-tsan/` directory.
+
+`build.rs`'s `host_app` path (`run_host_app`) now closes this gap two ways, so
+that wipe is never needed:
+
+- **`cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR`** — switching which
+  CMake tree to archive from (plain vs. TSan) is itself now a tracked
+  trigger, not just an unwatched env var read.
+- **A content hash of the archived object closure, threaded through
+  `cargo:rustc-env=DELUGE_APP_OBJS_HASH=...`.** `build.rs` already
+  unconditionally rebuilds `libdeluge_app_objs.a` from whatever `.o`s are on
+  disk every time it runs — the actual gap was downstream: the
+  `cargo:rustc-link-arg=<archive path>` directive handed to rustc is the same
+  *string* whether the archive's bytes are the TSan build or the plain one,
+  so from Cargo's point of view "the build script's output didn't change",
+  which is what Cargo actually diffs to decide whether the final binary needs
+  relinking — the archive path not changing can look like nothing to redo,
+  independent of whatever mtime-tracking bugs did or didn't fire on the way
+  in. Hashing the objects' actual content and emitting the hash as
+  `rustc-env` forces that diff to show a change whenever the archived bytes
+  differ, so the final `deluge-rust` link always gets redone against the
+  fresh archive.
+
+Verified directly (see `.superpowers/sdd/wt1-report.md` for the full
+transcript): building both trees, then round-tripping
+`DELUGE_HOSTAPP_BUILD_DIR` between them across successive `cargo build`s with
+**no `target/` wipe at any point**, correctly flips the linked binary between
+0 and ~450 `__tsan_*` symbols (`nm <binary> | grep -c __tsan`) each time,
+matching the pointed-at tree.
+
+### Compile: clean, no TU special-casing
+
+All 348 `deluge_app` translation units (plus the 7 dependency archives)
+compile clean under `clang++ -fshort-enums -fsanitize=thread -std=gnu++26`.
+The only warnings are the same pre-existing ones the non-TSan build already
+produces (`[[gnu::hot]]` ignored-attribute, a couple of
+`-Wimplicit-const-int-float-conversion` hits in the fixed-point DSP code, one
+`-Wint-to-pointer-cast` in `smsysex.cpp`) — no file needed a TSan-specific
+exception.
+
+### What this finds (scope note — the actual race hunt is a separate task)
+
+This section only covers the *build wiring*; running the harness and
+triaging what TSan reports is out of scope here. For reference, the spike's
+unmodified, stock-window run organically reproduced two real, still-open
+cross-thread hazards on unsynchronized `AudioEngine` globals
+(`audioRoutineLocked`, `audioSampleTimer`) in 4 of 5 runs — see the spike
+report for the full TSan output. Whether a given local run reproduces a race
+depends on scheduling, same as any TSan result: a clean run means "not seen
+this time," not "race-free."

@@ -67,7 +67,7 @@ pub async fn pic_pump() {
     log::info!("deluge-rust: PIC initialised, pumping input events");
     let mut parser = pic::Parser::new();
     loop {
-        let byte = rza1l_hal::uart::read_byte(pic::UART_CH).await;
+        let byte = pic::read_byte().await;
         let Some(event) = parser.push(byte) else {
             continue;
         };

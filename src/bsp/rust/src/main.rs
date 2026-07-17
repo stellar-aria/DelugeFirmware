@@ -46,6 +46,10 @@ extern crate deluge_resource;
 mod sys {
     include!(concat!(env!("OUT_DIR"), "/libdeluge_sys.rs"));
 }
+/// Host stand-in for the above (no C++ app / bindgen output off-target).
+#[cfg(not(target_os = "none"))]
+#[path = "sys_host.rs"]
+mod sys;
 
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
 #[cfg(target_os = "none")]
@@ -57,13 +61,11 @@ mod board;
 #[cfg(target_os = "none")]
 mod boot_mem;
 /// control_surface.h — pads/buttons/encoders + LEDs (M2b WIP).
-#[cfg(target_os = "none")]
 mod control;
 /// cv_gate.h — CV/gate outputs + external trigger clock.
 #[cfg(target_os = "none")]
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
-#[cfg(target_os = "none")]
 mod display;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
 #[cfg(target_os = "none")]

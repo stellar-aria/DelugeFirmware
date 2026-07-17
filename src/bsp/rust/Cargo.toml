@@ -129,6 +129,15 @@ sanitize = ["corosensei/sanitizer"]
 ## object closure's deluge_resource_*/deluge_{alloc,slab_*,heap_*} symbols
 ## resolve — see host_link_stubs.rs for the remaining (peripheral) stubs.
 host_app = ["dep:deluge_resource"]
+## Off by default. Turns `deluge_storage_on_owner`'s single-owner discipline into
+## an opt-in completeness diagnostic: `deluge_block_read`/`deluge_block_write`
+## debug_assert! the caller is on the worker fiber. Until later async-sd rungs
+## migrate the loader / MIDI-SysEx / recorder / UI FatFS access onto the fiber,
+## most card transfers still legitimately happen off it, so this stays OFF for
+## normal builds — enable it to see what's not yet migrated (it becomes the
+## pre-flight gate at the rung-5 yield flip, where everything IS expected to be
+## on the owner). See include/libdeluge/storage_owner.h.
+storage-owner-audit = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

@@ -271,6 +271,12 @@ pub extern "C" fn disk_ioctl(pdrv: u8, cmd: u8, buff: *mut core::ffi::c_void) ->
     }
 }
 
+/// libdeluge/storage_owner.h — Embassy: the storage owner IS the worker fiber.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_storage_on_owner() -> bool {
+    crate::fiber::on_fiber()
+}
+
 // NOTE: SD I/O must use `block_on` (which parks the executor for
 // the transfer), NOT a fiber-yielding drive. FatFS is not re-entrant and the app's
 // SD-reentrancy guard (`currentlyAccessingCard`) is only set by the legacy C diskio
@@ -287,6 +293,12 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber(),
+        "FatFS card transfer off the storage owner (non-fiber context) — \
+         single-owner discipline not yet complete (async-sd staging ladder)"
+    );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
     }
@@ -307,6 +319,12 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber(),
+        "FatFS card transfer off the storage owner (non-fiber context) — \
+         single-owner discipline not yet complete (async-sd staging ladder)"
+    );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
     }
@@ -342,6 +360,12 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber(),
+        "FatFS card transfer off the storage owner (non-fiber context) — \
+         single-owner discipline not yet complete (async-sd staging ladder)"
+    );
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
@@ -370,6 +394,12 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber(),
+        "FatFS card transfer off the storage owner (non-fiber context) — \
+         single-owner discipline not yet complete (async-sd staging ladder)"
+    );
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }

@@ -17,6 +17,7 @@
 
 #include "OSLikeStuff/scheduler_api.h"
 #include "OSLikeStuff/task_scheduler/task_scheduler.h"
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner — cooperative default (Embassy BSP overrides)
 #include "libdeluge/storage_wait.h"
 #include "libdeluge/system.h" // deluge_in_interrupt — the ISR guard, via the boundary
 #include "libdeluge/worker.h" // deluge_worker_run — cooperative default (Embassy BSP overrides)
@@ -89,6 +90,12 @@ bool yieldToIdle(RunCondition until) {
 // definition wins at link time and this object is not pulled from the archive.
 void deluge_worker_run(void (*fn)(void*), void* ctx) {
 	fn(ctx);
+}
+
+// libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the
+// caller, so the caller is always the owner. Embassy overrides (fiber-only).
+bool deluge_storage_on_owner(void) {
+	return true;
 }
 
 // Cooperative yield hooks for slow-storage busy-waits (the <libdeluge/storage_wait.h>

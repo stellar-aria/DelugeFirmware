@@ -360,14 +360,43 @@ async fn app_task() {
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
 /// "none"`). Exercises the M1-core modules (`fiber`, `scheduler`, `sd`,
 /// `services`) on std without any device BSP/HAL — no MMU/GIC/SDRAM bring-up,
-/// no C++ app linked (see build.rs). Later M1 tasks grow this into a real
-/// host scheduler run; for now it proves the fiber context switch works on a
-/// std thread stack.
+/// no C++ app linked (see build.rs). Proves the host binary actually links and
+/// runs: the fiber context switch works on a std thread stack (Task 3), and the
+/// `sd.rs` file-backed block-device shim round-trips real bytes through the same
+/// `deluge_block_read`/`deluge_block_write` C ABI the app would call (Task 4).
+/// Later M1 tasks grow this into a real host scheduler run.
 #[cfg(not(target_os = "none"))]
 fn main() {
     env_logger::init();
     log::info!("deluge-bsp-rust: HOST harness");
-    // Host heap for deluge_alloc (SRAM/SDRAM ranges) → Vec-backed (Task 4).
-    // Run the fiber selftest (Task 3), then a plain Executor (Task 5 test drives scheduler).
+    // Run the fiber selftest (Task 3).
     assert!(fiber::selftest(), "fiber selftest failed on host");
+
+    // sd.rs host shim round-trip (Task 4): write a known sector via the C-ABI
+    // deluge_block_write, read it back via deluge_block_read, and verify the
+    // bytes survive — proves the file-backed shim actually persists data, not
+    // just that it links. Sector 1 (not 0): leaves a notional boot sector alone.
+    const TEST_SECTOR: u32 = 1;
+    let mut pattern = [0u8; 512];
+    for (i, b) in pattern.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+    }
+    let status = sd::deluge_block_write(0, pattern.as_ptr(), TEST_SECTOR, 1);
+    assert_eq!(
+        status, 0,
+        "sd round-trip: deluge_block_write failed (status={status})"
+    );
+    let mut readback = [0u8; 512];
+    let status = sd::deluge_block_read(0, readback.as_mut_ptr(), TEST_SECTOR, 1);
+    assert_eq!(
+        status, 0,
+        "sd round-trip: deluge_block_read failed (status={status})"
+    );
+    assert_eq!(
+        pattern, readback,
+        "sd round-trip: readback did not match what was written"
+    );
+    log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
+
+    log::info!("deluge-bsp-rust: HOST harness OK");
 }

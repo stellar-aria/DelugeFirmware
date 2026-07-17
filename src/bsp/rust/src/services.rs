@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(target_os = "none")]
 use crate::sys::{
     DelugeMemoryKind_DELUGE_MEM_FAST_INTERNAL as KIND_INTERNAL,
     DelugeMemoryKind_DELUGE_MEM_LARGE_EXTERNAL as KIND_EXTERNAL, DelugeMemoryRegion, DelugeStatus,
@@ -12,7 +13,9 @@ use crate::sys::{
 };
 
 // Linker boundary symbols (rza1l.x): the internal SRAM heap and the end of the
-// SDRAM .bss. Used to describe the allocatable regions to the app.
+// SDRAM .bss. Used to describe the allocatable regions to the app. Device-only
+// (no rza1l.x linker script on host).
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     static __sram_heap_start: u8;
     static __sram_heap_end: u8;
@@ -22,13 +25,31 @@ unsafe extern "C" {
 // ── system.h ────────────────────────────────────────────────────────────────
 
 /// Nesting depth for ENTER/EXIT_CRITICAL_SECTION — only the outermost pair
-/// actually toggles interrupts.
+/// actually toggles interrupts (device) / acquires the lock (host).
 static CS_DEPTH: AtomicU32 = AtomicU32::new(0);
+
+/// Host stand-in for the ARM interrupt mask: the outermost ENTER's
+/// `critical-section` restore token, consumed by the matching outermost EXIT.
+/// The `critical-section/std` impl is itself reentrancy-safe per-thread, but we
+/// still gate on [`CS_DEPTH`] (rather than acquiring on every call) to keep the
+/// nesting shape identical to the device path above and avoid needing a stack
+/// of tokens. Single-threaded executor (see scheduler.rs's concurrency note),
+/// so plain `static mut` access here is not racing with itself.
+#[cfg(not(target_os = "none"))]
+static mut CS_TOKEN: Option<critical_section::RestoreState> = None;
 
 /// Mask interrupts (nestable). [task] [isr]
 #[unsafe(no_mangle)]
 pub extern "C" fn ENTER_CRITICAL_SECTION() {
+    #[cfg(target_os = "none")]
     cortex_ar::interrupt::disable();
+    #[cfg(not(target_os = "none"))]
+    if CS_DEPTH.load(Ordering::Relaxed) == 0 {
+        // SAFETY: paired with the release in EXIT_CRITICAL_SECTION once
+        // CS_DEPTH returns to 0; single-threaded, so no concurrent writer.
+        let token = unsafe { critical_section::acquire() };
+        unsafe { *core::ptr::addr_of_mut!(CS_TOKEN) = Some(token) };
+    }
     CS_DEPTH.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -36,12 +57,23 @@ pub extern "C" fn ENTER_CRITICAL_SECTION() {
 #[unsafe(no_mangle)]
 pub extern "C" fn EXIT_CRITICAL_SECTION() {
     if CS_DEPTH.fetch_sub(1, Ordering::Relaxed) <= 1 {
+        #[cfg(target_os = "none")]
         // SAFETY: balanced with ENTER_CRITICAL_SECTION; re-enabling at depth 0.
-        unsafe { cortex_ar::interrupt::enable() };
+        unsafe {
+            cortex_ar::interrupt::enable()
+        };
+        #[cfg(not(target_os = "none"))]
+        // SAFETY: the token was stashed by the matching outermost ENTER above.
+        unsafe {
+            if let Some(token) = (*core::ptr::addr_of_mut!(CS_TOKEN)).take() {
+                critical_section::release(token);
+            }
+        }
     }
 }
 
 /// True if executing in IRQ/FIQ context (CPSR mode bits). [task] [isr]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_in_interrupt() -> bool {
     let cpsr: u32;
@@ -51,6 +83,14 @@ pub extern "C" fn deluge_in_interrupt() -> bool {
     }
     let mode = cpsr & 0x1f;
     mode == 0x12 /* IRQ */ || mode == 0x11 /* FIQ */
+}
+
+/// Host stand-in: no ARM CPSR / IRQ context exists, and no C++ app is linked
+/// on host in M1 to call this. [task] [isr]
+#[cfg(not(target_os = "none"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_in_interrupt() -> bool {
+    false
 }
 
 /// Platform is already brought up by the Rust `main` before the app runs, so
@@ -118,22 +158,33 @@ pub extern "C" fn deluge_clock_monotonic_hz() -> u64 {
 }
 
 // ── memory.h ────────────────────────────────────────────────────────────────
+//
+// Device-only: describes the C++ app's SRAM/SDRAM regions (linker-symbol
+// bounds via `crate::boot_mem` and `crate::sys::DelugeMemoryRegion`), and no
+// C++ app is linked on host in M1 (see build.rs) to call any of these — so
+// nothing host-side references them. Rather than fabricate a `sys`-shaped
+// return value nothing reads, they're gated out entirely; a later milestone
+// that links a host-ABI app can give them real host stubs alongside a host
+// `sys` module.
 
 /// One past the application-usable external (SDRAM) region. Capped below the
 /// Rust allocator's reserved slice so the app's heap and the Rust SDRAM heap
 /// don't overlap. [task] [audio] [isr]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_memory_external_end() -> usize {
     crate::boot_mem::RUST_SDRAM_BASE
 }
 
 /// Base of the fast internal (on-chip SRAM) region. [task] [audio] [isr]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_memory_internal_begin() -> usize {
     0x2000_0000
 }
 
 /// Number of allocatable memory regions the board provides. [task]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_memory_region_count() -> u8 {
     2
@@ -144,6 +195,7 @@ pub extern "C" fn deluge_memory_region_count() -> u8 {
 /// __sram_heap_end)`). The app sources its internal-heap bounds from this instead
 /// of reading raw linker symbols, whose meaning differs in this BSP's layout
 /// (per-mode exception stacks sit between the heap and the program stack). [task]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_memory_region(index: u8, out: *mut DelugeMemoryRegion) -> DelugeStatus {
     let (base, size, kind) = match index {
@@ -168,6 +220,7 @@ pub extern "C" fn deluge_memory_region(index: u8, out: *mut DelugeMemoryRegion) 
 }
 
 /// A writable scratch address whose contents are never read. [task] [audio] [isr]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_memory_scratch() -> *mut core::ffi::c_void {
     static mut SCRATCH: [u8; 256] = [0; 256];

@@ -7,8 +7,15 @@
 //! display driver) is not wired yet — `deluge_board_probe_oled` returns false so
 //! the app takes the 7-segment path and the superloop runs without needing the
 //! OLED+PIC stack. Flip to real OLED detection + bring-up with display.h/control.
+//!
+//! Compiled on host too under the `host_app` feature (see main.rs): the
+//! descriptor and `deluge_board`/`deluge_board_probe_oled` are pure data/logic
+//! and compile unchanged there; the hardware bring-up bodies
+//! (`deluge_board_init_early`/`deluge_board_init_audio`) get host no-op
+//! siblings below (there is no GPIO/CV-DAC/SSI0 hardware on host).
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "none")]
 use rza1l_hal::gpio;
 
 use crate::sys::{DelugeBoard, DelugeDisplayKind_DELUGE_DISPLAY_OLED};
@@ -61,6 +68,7 @@ pub extern "C" fn deluge_board_probe_oled() -> bool {
 
 /// Early bring-up: GPIO direction + initial state for status LEDs, codec/speaker
 /// enables, jack detects, analog sense + trigger-clock input, and the CV DAC SPI.
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_board_init_early(have_oled: bool) {
     unsafe {
@@ -96,11 +104,36 @@ pub extern "C" fn deluge_board_init_early(have_oled: bool) {
     }
 }
 
+/// Host stand-in: no GPIO/CV-DAC hardware to bring up. Logs once so the boot
+/// trace shows the call was reached.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_board_init_early(_have_oled: bool) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!("stub: deluge_board_init_early (host, no GPIO/CV-DAC hardware)");
+    }
+}
+
 /// Bring up the audio serial (SSI0) port.
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_board_init_audio() {
     // SAFETY: called once after init_early; clocks/STB up.
     unsafe { deluge_bsp::audio::init() };
+}
+
+/// Host stand-in: no SSI0 hardware to bring up. Logs once so the boot trace
+/// shows the call was reached.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_board_init_audio() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!("stub: deluge_board_init_audio (host, no SSI0 hardware)");
+    }
 }
 
 /// Storage bring-up (SPIBSC serial flash). TODO.

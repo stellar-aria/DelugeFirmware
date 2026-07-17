@@ -70,8 +70,10 @@ mod sys {
 /// audio_io.h — duplex block audio over the SSI0 DMA rings.
 #[cfg(target_os = "none")]
 mod audio;
-/// board.h — capability descriptor + GPIO/audio/CV bring-up.
-#[cfg(target_os = "none")]
+/// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
+/// too under `host_app` (the descriptor/probe are pure data/logic; the GPIO/CV
+/// bring-up bodies get host no-op siblings — see board.rs).
+#[cfg(any(target_os = "none", feature = "host_app"))]
 mod board;
 /// C++ memory-model bring-up (SDRAM bss/data, global ctors).
 #[cfg(target_os = "none")]
@@ -84,10 +86,15 @@ mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
-#[cfg(target_os = "none")]
+/// Compiled on host too under `host_app` (bodies are already host-safe).
+#[cfg(any(target_os = "none", feature = "host_app"))]
 mod ffi;
 /// Non-header app/BSP symbols (USB-host globals, FatFS glue, NE10, runtime shims).
-#[cfg(target_os = "none")]
+/// Compiled on host too under `host_app`; `_sbrk`/`_fini` stay device-only
+/// (host glibc/crt provide them) and the linker-boundary stand-ins
+/// (`program_stack_*`, `__frunk_*`) are host-only (device gets them from the
+/// linker script).
+#[cfg(any(target_os = "none", feature = "host_app"))]
 mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.

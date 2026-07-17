@@ -75,7 +75,6 @@ mod ffi_extra;
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
-#[cfg(target_os = "none")]
 mod flash;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]

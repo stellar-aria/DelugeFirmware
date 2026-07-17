@@ -2,30 +2,31 @@
 # from the deluge-sdk workspace (.cargo/config is resolved relative to the
 # invocation dir), so the target triple, Cortex-A9/NEON flags, build-std and the
 # embassy USB interface budget are replicated here.
-[build]
-target = "armv7a-none-eabihf"
+#
+# No forced [build] target: this crate now dual-targets (mirrors deluge-sdk's
+# `cargo deluge sim` pattern). Plain `cargo build`/`cargo build --target
+# x86_64-unknown-linux-gnu` builds the HOST (platform-std) image; `cargo device`
+# (below) builds the real ARM firmware, matching the CMake/build.rs C++-link
+# flow that only applies to the device target.
+[alias]
+device = "build --target armv7a-none-eabihf -Zbuild-std=core"
 
 [target.armv7a-none-eabihf]
 # Drive the final link with the bundled arm-none-eabi-g++ so the C++ application
 # archive (libdeluge_app.a) and its runtime (libstdc++/libsupc++/libgcc/libm/
 # newlib) and the correct hard-float NEON multilib resolve automatically.
 # `-nostartfiles`: our entry is rza1l-hal's `_start`, not gcc's crt0.
-# BRING-UP: absolute path to the in-repo toolchain (this machine). Parametrize
-# later via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER from the build driver.
-linker = "/home/kate/GitHub/DelugeFirmware/toolchain/v22/linux-x86_64/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
+# BRING-UP: absolute path to the in-repo toolchain (this machine). Uses the
+# `current` symlink (-> the active toolchain version) so it survives version
+# bumps. Parametrize later via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER from the
+# build driver.
+linker = "/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
 rustflags = [
   "-C", "target-cpu=cortex-a9",
   "-C", "target-feature=+neon",
   "-C", "linker-flavor=gcc",
   "-C", "link-arg=-nostartfiles",
 ]
-
-# This crate is bare-metal only (no host target), so build-std can live in
-# [unstable] directly — a plain `cargo build` works without the deluge-sdk
-# aliases, which keeps the CMake invocation simple.
-[unstable]
-build-std = ["core"]
-build-std-features = ["compiler-builtins-mem"]
 
 [env]
 EMBASSY_USB_MAX_INTERFACE_COUNT = "8"

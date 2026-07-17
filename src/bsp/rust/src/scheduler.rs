@@ -33,6 +33,13 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
+// `RunCondition` is a bindgen type (`crate::sys`, device-only — no C++ ABI is
+// linked on host). On host, reuse the identical host stand-in `fiber.rs`
+// already defines for the same C typedef (`storage_wait.h`), keeping the
+// scheduler's logic (this file) untouched — only the type's source differs.
+#[cfg(not(target_os = "none"))]
+use crate::fiber::RunCondition;
+#[cfg(target_os = "none")]
 use crate::sys::RunCondition;
 
 // ---------------------------------------------------------------------------
@@ -324,6 +331,20 @@ fn slot_of(id: TaskID) -> Option<&'static TaskSlot> {
 
 fn current_slot() -> Option<&'static TaskSlot> {
     slot_of(CURRENT.load(Ordering::Relaxed))
+}
+
+/// Count of currently-claimed slots — i.e. how many `add*Task` calls have
+/// landed and not yet been removed. `host_app`-only: the boot-and-idle smoke
+/// (`main.rs`) polls this from a second thread as the cheapest strong signal
+/// that the real C++ app's `registerTasks()` actually ran (it calls
+/// `addRepeatingTask`/`addConditionalTask` a couple dozen times during
+/// `deluge_app_init`), rather than just that BSP init reached that point.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+pub fn registered_task_count() -> usize {
+    SLOTS
+        .iter()
+        .filter(|s| s.used.load(Ordering::Acquire))
+        .count()
 }
 
 /// One Embassy task per Deluge task. Pool sized to [`MAX_TASKS`] so every slot can

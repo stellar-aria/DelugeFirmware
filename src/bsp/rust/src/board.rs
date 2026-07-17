@@ -3,12 +3,20 @@
 //! (src/bsp/rza1/board.c): GPIO direction/mux for LEDs/codec/detects, the CV DAC
 //! SPI, the audio SSI, etc. All pin/port numbers stay BSP-internal here.
 //!
-//! M2b TODO: the OLED path (probe + the shared-SPI / DMA / PIC bring-up and the
-//! display driver) is not wired yet — `deluge_board_probe_oled` returns false so
-//! the app takes the 7-segment path and the superloop runs without needing the
-//! OLED+PIC stack. Flip to real OLED detection + bring-up with display.h/control.
+//! `deluge_board_probe_oled` currently hard-codes `true` (this hardware always
+//! has the OLED fitted); OLED bring-up itself (SSD1309 init, shared-RSPI0
+//! framebuffer streaming, PIC-forwarded chip-select) happens in display.rs /
+//! `deluge_bsp::oled` + `pic`, not here — `deluge_board_init_early` only touches
+//! the SPI_SSL pin mux for the 7-segment (non-OLED) variant.
+//!
+//! Compiled on host too under the `host_app` feature (see main.rs): the
+//! descriptor and `deluge_board`/`deluge_board_probe_oled` are pure data/logic
+//! and compile unchanged there; the hardware bring-up bodies
+//! (`deluge_board_init_early`/`deluge_board_init_audio`) get host no-op
+//! siblings below (there is no GPIO/CV-DAC/SSI0 hardware on host).
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "none")]
 use rza1l_hal::gpio;
 
 use crate::sys::{DelugeBoard, DelugeDisplayKind_DELUGE_DISPLAY_OLED};
@@ -61,6 +69,7 @@ pub extern "C" fn deluge_board_probe_oled() -> bool {
 
 /// Early bring-up: GPIO direction + initial state for status LEDs, codec/speaker
 /// enables, jack detects, analog sense + trigger-clock input, and the CV DAC SPI.
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_board_init_early(have_oled: bool) {
     unsafe {
@@ -88,19 +97,44 @@ pub extern "C" fn deluge_board_init_early(have_oled: bool) {
         // CV DAC over RSPI0 (the BSP driver sets up the SPI peripheral + pins).
         deluge_bsp::cv_gate::init();
 
-        // OLED shares RSPI0 (manual SSL); without it, mux SSL as the 7-seg path.
-        // M2b: when have_oled, bring up the shared-SPI SSL/interrupts/DMA here.
+        // OLED shares RSPI0 (manual SSL, handled in display.rs / deluge_bsp::oled);
+        // only the 7-segment path needs the pin muxed to hardware SSL here.
         if !have_oled {
             gpio::set_pin_mux(6, 1, 3); // SPI_SSL
         }
     }
 }
 
+/// Host stand-in: no GPIO/CV-DAC hardware to bring up. Logs once so the boot
+/// trace shows the call was reached.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_board_init_early(_have_oled: bool) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!("stub: deluge_board_init_early (host, no GPIO/CV-DAC hardware)");
+    }
+}
+
 /// Bring up the audio serial (SSI0) port.
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_board_init_audio() {
     // SAFETY: called once after init_early; clocks/STB up.
     unsafe { deluge_bsp::audio::init() };
+}
+
+/// Host stand-in: no SSI0 hardware to bring up. Logs once so the boot trace
+/// shows the call was reached.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_board_init_audio() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!("stub: deluge_board_init_audio (host, no SSI0 hardware)");
+    }
 }
 
 /// Storage bring-up (SPIBSC serial flash). TODO.

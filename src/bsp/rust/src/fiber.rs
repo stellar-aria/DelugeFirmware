@@ -11,6 +11,15 @@
 //! context switch plus a `selftest`. The full worker (op queue, predicate wait, the
 //! `yield`/`deluge_worker_*` C ABI) builds on top.
 //!
+//! The low-level switch is the only part that differs per target: on device
+//! (`target_os = "none"`) it's the ARM `global_asm!` register-save switch below;
+//! on host it's [`corosensei`](https://docs.rs/corosensei)'s stackful
+//! `Coroutine`/`Yielder`, chosen over `ucontext`/`swapcontext` because it has
+//! built-in sanitizer support (needed for ThreadSanitizer) instead of
+//! requiring hand-written `__tsan_switch_to_fiber` annotations around every
+//! switch. Both sides present the same `start`/`resume`/`yield_now`/`on_fiber`
+//! contract to the portable layer below.
+//!
 //! Concurrency: single fiber, single-threaded executor. The fiber and the embassy
 //! worker task never run at once (a switch hands control between them); the only
 //! other context is IRQs, which save/restore everything they touch (incl. the VFP
@@ -32,6 +41,7 @@ use embassy_sync::signal::Signal;
 /// the exact order [`fiber_switch`] stores/loads them (sequential, via writeback) —
 /// do not reorder without updating the assembly. `repr(C)` + `align(8)` so the VFP
 /// block is 8-byte aligned for `vstm`/`vldm`.
+#[cfg(target_os = "none")]
 #[repr(C, align(8))]
 struct Ctx {
     core: [u32; 8], // r4-r11
@@ -41,6 +51,7 @@ struct Ctx {
     fpscr: u32,
 }
 
+#[cfg(target_os = "none")]
 impl Ctx {
     const fn zeroed() -> Self {
         Ctx {
@@ -57,6 +68,7 @@ impl Ctx {
 // restore `*restore`, and return into the restored `lr`. ARM-encoded; reached via
 // interworking `bl`/`bx`, so it is safe whether the surrounding Rust is ARM or
 // Thumb (it preserves each context's `lr` thumb bit verbatim).
+#[cfg(target_os = "none")]
 core::arch::global_asm!(
     r#"
     .section .text.fiber_switch, "ax"
@@ -83,24 +95,40 @@ fiber_switch:
 "#
 );
 
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     fn fiber_switch(save: *mut Ctx, restore: *const Ctx);
 }
 
-/// Worker fiber stack. Sized for the deepest operation (song load is deep). In
-/// SDRAM (`.sdram_bss`, zeroed at boot) to spare the tight internal SRAM.
+/// Worker fiber stack size. Sized for the deepest operation (song load is deep).
+/// On device this backs [`WORKER_STACK`] (SDRAM); on host it sizes the
+/// `corosensei` coroutine's stack (kept the same for parity, though it's a
+/// regular allocation there, not a fixed static).
 const WORKER_STACK_SIZE: usize = 64 * 1024;
+
+/// Worker fiber stack. In SDRAM (`.sdram_bss`, zeroed at boot) to spare the tight
+/// internal SRAM. Device-only: on host `corosensei` owns (and allocates) the
+/// coroutine's stack itself.
+#[cfg(target_os = "none")]
 #[unsafe(link_section = ".sdram_bss")]
 static mut WORKER_STACK: [u8; WORKER_STACK_SIZE] = [0; WORKER_STACK_SIZE];
 
 // Saved contexts: MAIN = the embassy worker task; FIBER = the operation.
+#[cfg(target_os = "none")]
 static mut MAIN_CTX: Ctx = Ctx::zeroed();
+#[cfg(target_os = "none")]
 static mut FIBER_CTX: Ctx = Ctx::zeroed();
 
 /// The operation currently assigned to the fiber, consumed by [`trampoline`] on
 /// first entry. `extern "C"` so C++ dispatch can hand over a function + context.
+/// Device-only: the host switch layer captures `f`/`ctx` directly in the
+/// coroutine's closure instead (see the host `start` below).
+#[cfg(target_os = "none")]
 static mut CURRENT_FN: Option<(extern "C" fn(*mut c_void), *mut c_void)> = None;
 /// Set by [`trampoline`] when the operation returns; observed by the worker.
+/// Device-only: the host switch layer reads completion off `CoroutineResult`
+/// instead (see the host `resume` below).
+#[cfg(target_os = "none")]
 static mut FIBER_DONE: bool = false;
 /// True while control is executing on the fiber. `yield()` reads this to decide
 /// whether to suspend the fiber (on it) or fall back to a busy-wait (off it, e.g.
@@ -112,7 +140,12 @@ pub fn on_fiber() -> bool {
     ON_FIBER.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// Low-level switch: device (ARM `fiber_switch`/`Ctx`, above).
+// ---------------------------------------------------------------------------
+
 /// 8-byte-aligned top of the worker stack (stacks grow down).
+#[cfg(target_os = "none")]
 fn worker_stack_top() -> u32 {
     let base = core::ptr::addr_of!(WORKER_STACK) as u32;
     (base + WORKER_STACK_SIZE as u32) & !7
@@ -121,6 +154,7 @@ fn worker_stack_top() -> u32 {
 /// First-entry trampoline: runs the assigned operation, then marks the fiber done
 /// and parks by switching back to main. Never returns (it sits at the base of the
 /// worker stack — returning would pop garbage).
+#[cfg(target_os = "none")]
 extern "C" fn trampoline() -> ! {
     // SAFETY: single fiber; CURRENT_FN was set by `start` before the switch in.
     let job = unsafe { core::ptr::addr_of_mut!(CURRENT_FN).read() };
@@ -137,6 +171,7 @@ extern "C" fn trampoline() -> ! {
 }
 
 /// Switch from the fiber back to main (called on the fiber — `yield`/completion).
+#[cfg(target_os = "none")]
 fn switch_to_main() {
     // SAFETY: only called while executing on the fiber; both contexts are valid.
     unsafe {
@@ -150,6 +185,7 @@ fn switch_to_main() {
 /// Start `f(ctx)` on the fiber (must be idle). Runs it until it yields or
 /// completes, then returns to the caller (the worker). Returns `true` if the
 /// operation completed, `false` if it yielded and is now suspended.
+#[cfg(target_os = "none")]
 pub fn start(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
     // SAFETY: single-threaded; the fiber is idle (caller's contract).
     unsafe {
@@ -167,6 +203,7 @@ pub fn start(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
 
 /// Resume the suspended fiber. Returns `true` if it completed, `false` if it
 /// yielded again.
+#[cfg(target_os = "none")]
 pub fn resume() -> bool {
     ON_FIBER.store(true, Ordering::Relaxed);
     // SAFETY: switches into the fiber; returns here when it yields/completes.
@@ -181,8 +218,112 @@ pub fn resume() -> bool {
 }
 
 /// Yield from the fiber back to the worker. Call only while [`on_fiber`] is true.
+#[cfg(target_os = "none")]
 pub fn yield_now() {
     switch_to_main();
+}
+
+// ---------------------------------------------------------------------------
+// Low-level switch: host (`corosensei` stackful coroutine). Same
+// `start`/`resume`/`yield_now` contract as the device impl above: `start`/
+// `resume` return `true` if the operation ran to completion, `false` if it
+// suspended again; `yield_now` is called from arbitrary depth inside the
+// running operation.
+//
+// `corosensei::Coroutine<Input, Yield, Return>` is asymmetric (a coroutine
+// resumed by its parent, suspending itself via a `Yielder`), unlike the
+// device's symmetric `fiber_switch(save, restore)`, so the worker fiber here
+// is a single `Coroutine<(), (), ()>` held in a static, rebuilt fresh by each
+// `start()` (mirroring the device's re-entry into `trampoline` on a fresh
+// stack). `yield_now()` is called deep inside the C++ op, not at the top of
+// the coroutine body, so — exactly like `ON_FIBER` above — the currently
+// running coroutine's `&Yielder` is stashed in a static for it to reach.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_os = "none"))]
+use corosensei::{Coroutine, CoroutineResult, Yielder, stack::DefaultStack};
+
+/// The worker fiber. `None` when idle (never started, or the last operation ran
+/// to completion). Rebuilt by each `start()`.
+#[cfg(not(target_os = "none"))]
+static mut WORKER: Option<Coroutine<(), (), ()>> = None;
+
+/// The running coroutine's `Yielder`, stashed for [`yield_now`] to reach from
+/// arbitrary call depth (`yield_now` isn't called at the coroutine's top level).
+/// Valid only while [`on_fiber`] is true. Raw pointer (not a reference) since it
+/// must outlive the borrow that created it across the `resume`/`suspend` switch.
+#[cfg(not(target_os = "none"))]
+static mut CURRENT_YIELDER: *const Yielder<(), ()> = core::ptr::null();
+
+/// Start `f(ctx)` on the fiber (must be idle). Runs it until it yields or
+/// completes, then returns to the caller (the worker). Returns `true` if the
+/// operation completed, `false` if it yielded and is now suspended.
+#[cfg(not(target_os = "none"))]
+pub fn start(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
+    // `f` (a fn pointer) and `ctx` (a raw pointer, no lifetime parameter) are
+    // both trivially `'static`, satisfying `Coroutine::with_stack`'s bound.
+    // SAFETY: single-threaded; the fiber is idle (caller's contract), so no
+    // other reference to WORKER/CURRENT_YIELDER is live.
+    let stack =
+        DefaultStack::new(WORKER_STACK_SIZE).expect("fiber: failed to allocate worker stack");
+    let coro = Coroutine::with_stack(stack, move |yielder: &Yielder<(), ()>, ()| {
+        unsafe {
+            core::ptr::addr_of_mut!(CURRENT_YIELDER).write(yielder as *const Yielder<(), ()>)
+        };
+        f(ctx);
+    });
+    // Drop-respecting assignment (not `.write()`, which would leak an old `Some`
+    // coroutine's stack without running its `Drop`): the caller's contract is that
+    // the fiber is idle here, so WORKER is `None` and there's nothing to drop
+    // today, but this stays parity-correct with `resume()`'s `Return` arm below.
+    unsafe { *core::ptr::addr_of_mut!(WORKER) = Some(coro) };
+    resume()
+}
+
+/// Resume the suspended fiber. Returns `true` if it completed, `false` if it
+/// yielded again.
+#[cfg(not(target_os = "none"))]
+pub fn resume() -> bool {
+    ON_FIBER.store(true, Ordering::Relaxed);
+    // SAFETY: single-threaded; WORKER was set by `start` and not yet completed
+    // (caller's contract — resume is only called while an op is suspended).
+    let result = unsafe {
+        let worker = (*core::ptr::addr_of_mut!(WORKER))
+            .as_mut()
+            .expect("fiber: resume() with no active worker");
+        worker.resume(())
+    };
+    ON_FIBER.store(false, Ordering::Relaxed);
+    match result {
+        CoroutineResult::Yield(()) => false,
+        CoroutineResult::Return(()) => {
+            // Drop-respecting assignment (not `.write(None)`, which overwrites
+            // the old `Some(finished_coroutine)` without running its `Drop` —
+            // silently leaking the coroutine's stack, ~4 KiB, on every completed
+            // op) so a stale WORKER can't be mistakenly resumed again; the next
+            // op rebuilds it.
+            unsafe { *core::ptr::addr_of_mut!(WORKER) = None };
+            // The stashed Yielder pointer is dangling now that the coroutine
+            // (and its stack) is gone — null it out so a wayward yield_now()
+            // call between here and the next start() fails the null-check
+            // instead of dereferencing freed memory.
+            unsafe { core::ptr::addr_of_mut!(CURRENT_YIELDER).write(core::ptr::null()) };
+            true
+        }
+    }
+}
+
+/// Yield from the fiber back to the worker. Call only while [`on_fiber`] is true.
+#[cfg(not(target_os = "none"))]
+pub fn yield_now() {
+    // SAFETY: only called while executing on the fiber (on_fiber() == true), so
+    // CURRENT_YIELDER was stashed by the running coroutine's `start` closure and
+    // is still valid (its `resume()` call is still on the stack).
+    unsafe {
+        let yielder = core::ptr::addr_of!(CURRENT_YIELDER).read();
+        debug_assert!(!yielder.is_null(), "yield_now() called while not on_fiber");
+        (*yielder).suspend(());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +335,16 @@ pub fn yield_now() {
 // flips and the op resumes.
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "none")]
 use crate::sys::RunCondition;
+/// Host stand-in for the bindgen `RunCondition` typedef (`storage_wait.h`:
+/// `typedef bool (*RunCondition)();`). `mod sys` (the bindgen output) is
+/// device-only — no C++ ABI is linked on host — so mirror the C type's
+/// shape directly here rather than depending on it. Same shape bindgen would
+/// produce for this typedef; if a shared host-ABI `sys` module lands later this
+/// can be replaced with `crate::sys::RunCondition` again.
+#[cfg(not(target_os = "none"))]
+pub type RunCondition = Option<unsafe extern "C" fn() -> bool>;
 
 /// Pending operations (serialized — these are user actions, at most one active).
 type Job = (extern "C" fn(*mut c_void), *mut c_void);

@@ -67,7 +67,7 @@ pub async fn pic_pump() {
     log::info!("deluge-rust: PIC initialised, pumping input events");
     let mut parser = pic::Parser::new();
     loop {
-        let byte = rza1l_hal::uart::read_byte(pic::UART_CH).await;
+        let byte = pic::read_byte().await;
         let Some(event) = parser.push(byte) else {
             continue;
         };
@@ -271,6 +271,16 @@ fn enqueue(cmd: PicOut) {
     let _ = OUT.try_send(cmd);
     OUTPUT_DIRTY.store(true, Ordering::Relaxed);
 }
+
+/// Set the colour of one main-grid pad. `host_app`-only: the app's real pad
+/// rendering path batches whole columns (see [`deluge_control_set_pad_columns`],
+/// implemented for both device and host above), so this single-pad entry point
+/// is unreached in practice — same as `host_bsp.c`'s host-link forwarder, which
+/// is likewise a best-effort side channel. A no-op keeps host-linked boot-and-idle
+/// working without a GUI socket to forward to.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_control_set_pad(_x: u8, _y: u8, _colour: DelugeColour) {}
 
 /// Set the colours of a main-grid column pair. `colours` holds `count` RGB
 /// entries (one per LED in the pair; the Deluge sends 16). The app pre-packs the

@@ -73,11 +73,12 @@ critical-section = { version = "1", features = ["std"] }
 # Host `main`'s logger (device uses `log` over RTT instead; see the `rtt` feature).
 env_logger = "0.11"
 # Host implementation of the fiber.rs low-level switch (`corosensei::Coroutine`/
-# `Yielder`), standing in for the device's ARM `fiber_switch` global_asm. Chosen
-# over `ucontext`/`swapcontext` because it has built-in sanitizer support (the
-# `sanitize` feature below) instead of needing hand-written
-# `__tsan_switch_to_fiber` annotations around every switch — decisive for M1's
-# ThreadSanitizer goal (Task 5).
+# `Yielder`), standing in for the device's ARM `fiber_switch` global_asm. Its
+# `sanitize` feature below was originally chosen with ThreadSanitizer in mind,
+# but M1 Task 5 found it's actually ASan-only (see that feature's comment) —
+# TSan itself needs no fiber annotations for a same-OS-thread coroutine switch
+# (it tracks happens-before per real thread, not per stack), so the M1 Task 5
+# TSan run does not enable this feature. Kept for a future ASan pass.
 corosensei = "0.3"
 
 [features]
@@ -85,12 +86,20 @@ default = ["rtt"]
 ## RTT (SEGGER Real-Time Transfer) logging over a debug probe. Selects the
 ## rza1l_rtt.x linker script (via build.rs) + registers the log logger.
 rtt = ["dep:rtt-target", "rza1l-hal/rtt"]
-## Enable corosensei's sanitizer instrumentation (host fiber switch only — it
-## informs the sanitizer runtime of stack switches so ThreadSanitizer doesn't
-## false-positive across a coroutine switch). OFF by default: enabling it
-## without actually building under a sanitizer causes linker errors (the
-## instrumentation calls into the sanitizer runtime, which isn't linked in a
-## plain build). Turned on by the M1 Task 5 TSan invocation.
+## Enable corosensei's sanitizer instrumentation (host fiber switch only). OFF
+## by default: enabling it without actually building under a sanitizer causes
+## linker errors (the instrumentation calls into the sanitizer runtime, which
+## isn't linked in a plain build). NOTE (M1 Task 5): this wires
+## `__sanitizer_start/finish_switch_fiber` + `__asan_unpoison_memory_region` —
+## AddressSanitizer's fiber-switch API. ThreadSanitizer's runtime
+## (`librustc-nightly_rt.tsan.a`) does NOT implement that API (it has its own,
+## unrelated `__tsan_create_fiber`/`__tsan_switch_to_fiber` family instead), so
+## `--features sanitize` fails to link under `-Zsanitizer=thread` with
+## undefined-symbol errors. This feature is therefore only usable under
+## `-Zsanitizer=address`; the M1 Task 5 TSan run builds WITHOUT it (see
+## HOST_HARNESS.md) and TSan neither needs nor benefits from it here — a
+## same-thread corosensei stack switch has no other thread to misattribute
+## happens-before to, unlike ASan's per-stack redzone tracking which does.
 sanitize = ["corosensei/sanitizer"]
 
 [build-dependencies]

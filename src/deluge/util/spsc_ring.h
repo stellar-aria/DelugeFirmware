@@ -1,13 +1,11 @@
 #pragma once
 
-// SpscRing<E, N> -- tier-5 "fast lane" of the publish spine: a fixed-size,
+// SpscRing<E, N> -- the tier-5 "fast lane" of the publish spine: a fixed-size,
 // lock-free, allocation-free single-producer/single-consumer ring buffer for
 // [task]->[audio] event delivery (note-on/off, live MPE/expression).
 //
-// See docs/superpowers/specs/2026-07-17-audio-snapshot-boundary-design.md §5.4
-// ("Tier 5 fast lane") and §4 (mechanism 2 of the tier table) for the design
-// rationale, and docs/dev/target_architecture.md §4.2 mechanism 2 for the
-// architectural slot this fills. Sibling primitive: `deluge::util::Published<T>`
+// See docs/dev/target_architecture.md §4.2 (mechanism 2) for the architectural
+// slot this fills. Sibling primitive: `deluge::util::Published<T>`
 // (`published.h`), which this header deliberately does not depend on -- the two
 // solve different tiers (immutable snapshot-swap vs. an event stream) and stay
 // independently usable.

@@ -1,11 +1,9 @@
 #pragma once
 
-// Published<T> -- the "publish spine" primitive for the audio snapshot boundary.
-//
-// See docs/superpowers/specs/2026-07-17-audio-snapshot-boundary-design.md §5 for the
-// design rationale, and docs/dev/target_architecture.md §4.2 mechanism 1 ("immutable
-// snapshot + atomic pointer-swap + app-owned retire list") for the architectural slot
-// this fills.
+// Published<T> -- the "publish spine" primitive for the audio snapshot boundary: an
+// immutable snapshot handed off via atomic pointer-swap, with an app-owned retire list
+// for safe, race-free reclamation once the reader can no longer see the old snapshot.
+// See docs/dev/target_architecture.md §4.2 (mechanism 1) for the architectural slot this fills.
 //
 // Concurrency contract: SPSC-shaped. Exactly one [audio] reader thread calls load();
 // exactly one [task] writer thread calls publish()/reclaim(). No multi-writer, no
@@ -42,11 +40,10 @@ namespace deluge::util {
 /// happens-before edge from "[audio] finished reading whatever it held during block
 /// E-1" to "[task] observed epoch >= E" -- not just a temporal coincidence. This is
 /// what lets `Published<T>::reclaim()` free retired memory without racing the reader,
-/// in the formal C++ memory-model sense (and is why `deluge::util` deliberately does
-/// NOT use `memory_order_relaxed` for the epoch counter, even though the design doc's
-/// prose describes it informally as "a single relaxed store" -- relaxed-only would
-/// leave the free() undefined behavior, since a temporal/wall-clock argument alone is
-/// not a happens-before edge).
+/// in the formal C++ memory-model sense -- and is why the epoch counter deliberately
+/// uses release, not relaxed, store semantics: a relaxed-only store would leave
+/// `reclaim()`'s `free()` undefined behavior, since a temporal/wall-clock argument
+/// alone is not a happens-before edge.
 class SnapshotDomain {
 public:
 	// [audio] must be able to advance/observe this epoch without ever taking a lock;
@@ -106,8 +103,9 @@ public:
 	// std::atomic<const T*> isn't always lock-free.
 	static_assert(std::atomic<const T*>::is_always_lock_free);
 
-	/// Retire-list size at which `retire()` forces an inline `reclaim()` sweep. This
-	/// caps free-list growth *only while [audio] keeps advancing its epoch* -- each
+	/// @brief Retire-list size at which `retire()` forces an inline `reclaim()` sweep.
+	///
+	/// This caps free-list growth *only while [audio] keeps advancing its epoch* -- each
 	/// forced `reclaim()` can then free every entry that has fallen two block-
 	/// boundaries behind. If [audio] is not progressing (never started, stalled, or
 	/// crashed), no entry ever becomes epoch-eligible, so the forced sweep frees
@@ -117,6 +115,9 @@ public:
 	/// threshold can fix.
 	static constexpr std::size_t kDefaultRetireThreshold = 8;
 
+	/// @brief Construct with an epoch source and an optional already-published initial
+	///        pointer.
+	///
 	/// @param domain The shared epoch source for this audio domain (see
 	///        `SnapshotDomain`). Must outlive this `Published<T>`.
 	/// @param initial Initial published pointer (may be `nullptr`); ownership is

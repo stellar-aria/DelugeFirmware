@@ -1,7 +1,7 @@
 // ThreadSanitizer stress harness for deluge::util::Published<T> and
 // deluge::util::SpscRing<E, N> -- the empirical correctness gate for the
-// "publish spine" primitives (Phase A, Task 3). published.h / spsc_ring.h
-// carry the analytical memory-model arguments for why these are race-free;
+// "publish spine" primitives. published.h / spsc_ring.h carry the
+// analytical memory-model arguments for why these are race-free;
 // this binary is a standalone reproduction of the real [task]/[audio] split
 // under ThreadSanitizer, which instruments the actual concurrent accesses
 // to cur_/epoch_/head_/tail_/the slots/the retired Ts and reports any data

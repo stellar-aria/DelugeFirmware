@@ -134,12 +134,10 @@ describe published("Published<T>", $ {
 		pub.publish(c); // retires b, stamped at epoch 2 (2 retired, == threshold: still no auto-sweep)
 		expect(pub.retired_count()).to_equal(std::size_t{2});
 
-		// retiring d pushes the list to 3, past kThreshold == 2: this forces an
-		// inline reclaim() as part of publish() itself, with no explicit
+		// Retiring d pushes the list to 3, past kThreshold == 2, which forces an
+		// inline reclaim() as part of publish() itself -- with no explicit
 		// reclaim() call from the test. Only `a` is old enough to be freed by
-		// the grace-period rule (b and c were just stamped at the current
-		// epoch) -- which is exactly what proves the sweep ran automatically,
-		// as opposed to nothing happening at all.
+		// the grace-period rule; b and c were just stamped at the current epoch.
 		pub.publish(d); // retires c, stamped at epoch 2 -- 3 retired triggers reclaim()
 		expect(freed).to_contain(a);
 		expect(freed).not_().to_contain(b);

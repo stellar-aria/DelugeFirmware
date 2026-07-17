@@ -83,9 +83,7 @@
 #include <iterator>
 #include <new>
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
+extern "C" {}
 
 using namespace deluge;
 using namespace gui;

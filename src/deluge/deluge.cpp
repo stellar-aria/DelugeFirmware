@@ -80,8 +80,6 @@ extern "C" {
 
 namespace encoders = deluge::hid::encoders;
 
-extern uint8_t currentlyAccessingCard;
-
 extern "C" void disk_timerproc(UINT msPassed);
 
 Song* currentSong = nullptr;

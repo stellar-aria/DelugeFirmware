@@ -51,9 +51,7 @@
 #include "storage/flash_storage.h"
 #include "sync/storage_op.h"
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
+extern "C" {}
 
 using namespace deluge::gui;
 

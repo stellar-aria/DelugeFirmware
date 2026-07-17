@@ -43,9 +43,7 @@
 
 namespace params = deluge::modulation::params;
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
+extern "C" {}
 
 AudioClip::AudioClip() : Clip(ClipType::AUDIO) {
 	overdubsShouldCloneOutput = true;

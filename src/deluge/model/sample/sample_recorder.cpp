@@ -46,8 +46,6 @@ extern "C" {
 #include "fatfs/diskio.h"
 }
 
-extern uint8_t currentlyAccessingCard;
-
 #define MAX_FILE_SIZE_MAGNITUDE 32
 
 SampleRecorder::~SampleRecorder() {

@@ -1143,7 +1143,8 @@ doFinishCapturing:
 					auto* endpos = (char*)writePosNow;
 					ptrdiff_t num_bytes = samples_to_copy * 3 * recordingNumChannels;
 					char* audio_start_pos = endpos - num_bytes;
-					char* cluster_start_pos = &currentRecordCluster->data[sample->audioDataStartPosBytes];
+					char* cluster_start_pos = reinterpret_cast<char*>(currentRecordCluster->payload().data()
+					                                                  + sample->audioDataStartPosBytes);
 					if (audio_start_pos > cluster_start_pos) {
 						memcpy(cluster_start_pos, audio_start_pos, num_bytes);
 						writePos = cluster_start_pos + num_bytes;

@@ -93,6 +93,16 @@ bool deluge_worker_run(void (*fn)(void*), void* ctx) {
 	return true; // ran inline — never dropped on the cooperative BSPs
 }
 
+// SD-routine-class dispatch. On the cooperative BSPs the op runs inline (same as
+// deluge_worker_run) and the SD-routine hold is a no-op: run-to-completion means
+// discardRecorder can't interleave a mid-flight cardRoutine, and the writes set
+// sdRoutineActive via the storage-wait hooks as they always have. The hold is an
+// Embassy-only construct (see src/bsp/rust/src/fiber.rs).
+bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx) {
+	fn(ctx);
+	return true;
+}
+
 // libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the
 // caller, so the caller is always the owner. Embassy overrides (fiber-only).
 bool deluge_storage_on_owner(void) {

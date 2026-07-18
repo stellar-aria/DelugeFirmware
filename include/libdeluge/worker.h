@@ -43,6 +43,16 @@ extern "C" {
 ///         will NOT run — a coalescing caller must treat false as "not dispatched".
 bool deluge_worker_run(void (*fn)(void*), void* ctx);
 
+/// Like deluge_worker_run, but the operation is an SD-routine-class op: for its
+/// whole in-flight window (enqueue → completion) the worker holds off
+/// RESOURCE_SD_ROUTINE scheduler tasks, so a task that frees an object the op is
+/// mid-way through (e.g. the recorder, freed by discardRecorder) cannot run
+/// concurrently with it. Cooperative/host: identical to deluge_worker_run (inline).
+/// Embassy: increments an SD-routine hold at enqueue, released at completion.
+/// @return as deluge_worker_run: true if it ran/queued, false if dropped (queue
+///         full) and will NOT run — on false NOTHING was enqueued and no hold was taken.
+bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

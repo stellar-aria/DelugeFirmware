@@ -39,6 +39,14 @@ struct Owner {
 	///         false if the dispatch was dropped (Embassy worker queue full) — the op will
 	///         NOT run, so a coalescing caller must reset its single-flight guard.
 	static bool run(void (*fn)(void*), void* ctx);
+
+	/// Like run(), but the op is SD-routine-class: RESOURCE_SD_ROUTINE tasks are
+	/// held off for its whole in-flight window (enqueue → completion) so a
+	/// consumer whose op frees an object (the recorder) can't be freed
+	/// concurrently by another task. Inline on legacy/host (indistinguishable
+	/// from run() there); Embassy takes an SD-routine hold across the op.
+	/// @return as run(): true if it ran/queued, false if the dispatch was dropped.
+	static bool run_sd_routine(void (*fn)(void*), void* ctx);
 };
 
 /// @brief Single-flight coalesced dispatch onto the storage `Owner`.
@@ -55,12 +63,17 @@ struct Owner {
 /// issued from inside a running `fill` coalesces).
 class Coalescer {
 public:
+	/// @param sd_routine when true, `request()` dispatches via `Owner::run_sd_routine`
+	/// (SD-routine-class exclusion); when false (default), via `Owner::run`.
+	explicit Coalescer(bool sd_routine = false) : sd_routine_(sd_routine) {}
+
 	/// If no dispatch from this `Coalescer` is in flight, run `fill(ctx)` on the owner;
 	/// otherwise coalesce (no-op).
 	void request(void (*fill)(void*), void* ctx);
 
 private:
 	static void run_and_release(void* self);
+	const bool sd_routine_;
 	std::atomic<bool> in_flight_{false};
 	void (*fill_)(void*) = nullptr;
 	void* ctx_ = nullptr;

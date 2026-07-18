@@ -63,6 +63,24 @@ describe coalescer("deluge::storage::Coalescer", $ {
 		c.request(plain_fill, nullptr); // guard was released, so this one runs
 		expect(g_runs).to_equal(1);
 	});
+
+	it("sd-routine flavor runs the fill (inline on host)", _ {
+		Coalescer c{/*sd_routine=*/true};
+		g_runs = 0;
+		c.request(plain_fill, nullptr);
+		expect(g_runs).to_equal(1);
+	});
+
+	it("sd-routine flavor releases the guard when the owner drops the dispatch", _ {
+		Coalescer c{/*sd_routine=*/true};
+		g_runs = 0;
+		g_mock_worker_drop = true;
+		c.request(plain_fill, nullptr); // dispatch dropped → fill never runs
+		expect(g_runs).to_equal(0);
+		g_mock_worker_drop = false;
+		c.request(plain_fill, nullptr); // guard released, so this one runs
+		expect(g_runs).to_equal(1);
+	});
 });
 // clang-format on
 

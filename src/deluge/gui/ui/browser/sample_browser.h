@@ -20,6 +20,8 @@
 #include "definitions_cxx.hpp"
 #include "gui/ui/browser/browser.h"
 #include "hid/button.h"
+#include "storage/latest_wins.h"
+#include <string>
 
 extern "C" {
 
@@ -81,7 +83,31 @@ protected:
 
 private:
 	void displayCurrentFilename();
+
+	/// A snapshot of the file to preview, captured at trigger time so the dispatched op
+	/// loads the file the user pointed at even if the selection moves on before it runs
+	/// (fast cursor-scroll under async dispatch).
+	struct PreviewTarget {
+		std::string path;
+		FilePointer filePointer;
+		int32_t movementDirection;
+	};
+
+	/// Trigger: snapshot the current file and dispatch its preview load+render onto the
+	/// storage owner (coalesced latest-wins). Folder/no-file just clears the preview.
 	void previewIfPossible(int32_t movementDirection = 1);
+	/// The dispatched op: load + render the coalescer's current target, then re-dispatch
+	/// if a newer target arrived while it ran. Runs on the storage owner (inline on
+	/// legacy/host). `self` is the SampleBrowser.
+	static void runPreviewOp(void* self);
+	/// Load the target sample and render its waveform (the body previously inline in
+	/// previewIfPossible); clears the preview display if nothing loaded.
+	void renderPreviewForTarget(const PreviewTarget& target);
+	/// Tear down any on-screen sample preview (shared by the no-file path and a failed load).
+	void clearPreviewDisplay(int32_t movementDirection);
+
+	deluge::storage::LatestWins<PreviewTarget> previewCoalescer_{};
+
 	void audioFileIsNowSet();
 	bool canImportWholeKit();
 	bool loadAllSamplesInFolder(bool detectPitch, int32_t* getNumSamples, Sample*** getSortArea,

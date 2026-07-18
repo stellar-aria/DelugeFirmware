@@ -70,6 +70,7 @@
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h"
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
 #include "util/functions.h"
@@ -523,117 +524,146 @@ void SampleBrowser::previewIfPossible(int32_t movementDirection) {
 	}
 	*/
 
-	bool didDraw = false;
-
 	FileItem* currentFileItem = getCurrentFileItem();
 
-	// Preview the WAV file, if we're allowed
-	if (currentFileItem && !currentFileItem->isFolder) {
+	// Nothing to preview (empty selection or a folder) — just tear down any preview onscreen.
+	if (!currentFileItem || currentFileItem->isFolder) {
+		clearPreviewDisplay(movementDirection);
+		return;
+	}
 
-		std::string filePath = getCurrentFilePath();
+	// Snapshot the target so the dispatched op loads the file pointed at now, even if the
+	// selection moves on before it runs (fast cursor-scroll under async dispatch).
+	PreviewTarget target{
+	    .path = getCurrentFilePath(),
+	    .filePointer = currentFileItem->filePointer,
+	    .movementDirection = movementDirection,
+	};
 
-		// This more formally does the thing that actually was happening accidentally for ages, as found by Michael B.
-		lastFilePathLoaded = filePath;
+	// Coalesce latest-wins onto one owner op: while one preview is loading, a newer request
+	// is queued and dispatched on completion, so rapid scrolls converge on the file landed on.
+	if (previewCoalescer_.request(target)) {
+		if (!deluge::storage::Owner::run(&SampleBrowser::runPreviewOp, this)) {
+			// Owner queue full → the op won't run, so release the guard or the coalescer
+			// would wedge single-flight forever. The next cursor move re-requests.
+			previewCoalescer_.reset();
+		}
+	}
+}
 
-		bool shouldActuallySound = false;
+void SampleBrowser::runPreviewOp(void* self) {
+	auto* browser = static_cast<SampleBrowser*>(self);
+	browser->renderPreviewForTarget(browser->previewCoalescer_.current());
+	// If a newer target arrived while this ran, dispatch it (latest-wins).
+	if (auto next = browser->previewCoalescer_.complete(); next.has_value()) {
+		if (!deluge::storage::Owner::run(&SampleBrowser::runPreviewOp, self)) {
+			browser->previewCoalescer_.reset(); // re-dispatch dropped — release (see previewIfPossible)
+		}
+	}
+}
 
-		// Decide if we're actually going to sound it.
-		if (!instrumentClipView.fileBrowserShouldNotPreview) {
-			switch (FlashStorage::sampleBrowserPreviewMode) {
-			case PREVIEW_ONLY_WHILE_NOT_PLAYING:
-				if (playbackHandler.playbackState) {
-					break;
-				}
-				// No break
+void SampleBrowser::renderPreviewForTarget(const PreviewTarget& target) {
 
-			case PREVIEW_ON:
-				shouldActuallySound = true;
+	bool didDraw = false;
+
+	// This more formally does the thing that actually was happening accidentally for ages, as found by Michael B.
+	lastFilePathLoaded = target.path;
+
+	bool shouldActuallySound = false;
+
+	// Decide if we're actually going to sound it.
+	if (!instrumentClipView.fileBrowserShouldNotPreview) {
+		switch (FlashStorage::sampleBrowserPreviewMode) {
+		case PREVIEW_ONLY_WHILE_NOT_PLAYING:
+			if (playbackHandler.playbackState) {
 				break;
 			}
-		}
+			// No break
 
-		AudioEngine::previewSample(filePath, &currentFileItem->filePointer, shouldActuallySound);
-
-		if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
-			// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
-			// as if you had confirmed with the Select encoder, but keeping the browser open.
-			claimCurrentFile(1, 1, 1, true);
-		}
-
-		/*
-		if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].pos > 0 &&
-		numFilesFoundInRightDirection > 1) { D_PRINTLN("returned 2"); return;
-		}
-		*/
-
-		// If the Sample at least loaded, even if we didn't sound it, then try to render its waveform.
-		if (std::ssize(AudioEngine::sampleForPreview->sources[0].ranges) >= 1) {
-			AudioFile* sample = ((MultisampleRange*)AudioEngine::sampleForPreview->sources[0].ranges.getElement(0))
-			                        ->sampleHolder.audioFile;
-
-			if (sample) {
-				uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
-
-				currentlyShowingSamplePreview = true;
-				PadLEDs::reassessGreyout(true);
-
-				waveformBasicNavigator.sample = (Sample*)sample;
-				waveformBasicNavigator.opened();
-
-				// If want scrolling animation
-				if (movementDirection && !qwertyAlwaysVisible) {
-					waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
-					                                  waveformBasicNavigator.xZoom, PadLEDs::imageStore,
-					                                  &waveformBasicNavigator.renderData);
-					memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
-					PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
-
-					currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
-				}
-
-				// Or if want instant snap render
-				else {
-					if ((qwertyVisible && !qwertyCurrentlyDrawnOnscreen) || qwertyAlwaysVisible) {
-						drawKeys();
-					}
-					else if (!qwertyVisible) {
-						waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
-						                                  waveformBasicNavigator.xZoom, PadLEDs::image,
-						                                  &waveformBasicNavigator.renderData);
-						PadLEDs::sendOutMainPadColours();
-					}
-					qwertyCurrentlyDrawnOnscreen = qwertyVisible;
-				}
-				PadLEDs::sendOutSidebarColours(); // For greyout (wait what?)
-
-				didDraw = true;
-			}
+		case PREVIEW_ON:
+			shouldActuallySound = true;
+			break;
 		}
 	}
 
-	// If did not just preview a sample...
-	if (!didDraw) {
+	// previewSample takes a non-const FilePointer*; copy the snapshot to a mutable local.
+	FilePointer filePointer = target.filePointer;
+	AudioEngine::previewSample(target.path, &filePointer, shouldActuallySound);
 
-		// But if we need to get rid of whatever was onscreen...
-		if ((currentlyShowingSamplePreview || (qwertyCurrentlyDrawnOnscreen && !qwertyVisible))
-		    && !qwertyAlwaysVisible) {
+	if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
+		// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
+		// as if you had confirmed with the Select encoder, but keeping the browser open.
+		claimCurrentFile(1, 1, 1, true);
+	}
 
-			currentlyShowingSamplePreview = false;
-			qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+	// If the Sample at least loaded, even if we didn't sound it, then try to render its waveform.
+	if (std::ssize(AudioEngine::sampleForPreview->sources[0].ranges) >= 1) {
+		AudioFile* sample =
+		    ((MultisampleRange*)AudioEngine::sampleForPreview->sources[0].ranges.getElement(0))->sampleHolder.audioFile;
 
-			if (movementDirection) {
-				getRootUI()->renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
-				//((ViewScreen*)getRootUI())->renderToStore(0, true, false);
-				if (getRootUI() != &keyboardScreen) {
-					PadLEDs::reassessGreyout(true);
-				}
+		if (sample) {
+			uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
+
+			currentlyShowingSamplePreview = true;
+			PadLEDs::reassessGreyout(true);
+
+			waveformBasicNavigator.sample = (Sample*)sample;
+			waveformBasicNavigator.opened();
+
+			// If want scrolling animation
+			if (target.movementDirection && !qwertyAlwaysVisible) {
+				waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
+				                                  waveformBasicNavigator.xZoom, PadLEDs::imageStore,
+				                                  &waveformBasicNavigator.renderData);
 				memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
-				PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
+				PadLEDs::horizontal::setupScroll(target.movementDirection, kDisplayWidth);
+
 				currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
 			}
 
-			possiblySetUpBlinking();
+			// Or if want instant snap render
+			else {
+				if ((qwertyVisible && !qwertyCurrentlyDrawnOnscreen) || qwertyAlwaysVisible) {
+					drawKeys();
+				}
+				else if (!qwertyVisible) {
+					waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
+					                                  waveformBasicNavigator.xZoom, PadLEDs::image,
+					                                  &waveformBasicNavigator.renderData);
+					PadLEDs::sendOutMainPadColours();
+				}
+				qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+			}
+			PadLEDs::sendOutSidebarColours(); // For greyout (wait what?)
+
+			didDraw = true;
 		}
+	}
+
+	if (!didDraw) {
+		clearPreviewDisplay(target.movementDirection);
+	}
+}
+
+void SampleBrowser::clearPreviewDisplay(int32_t movementDirection) {
+	// If we need to get rid of whatever was onscreen...
+	if ((currentlyShowingSamplePreview || (qwertyCurrentlyDrawnOnscreen && !qwertyVisible)) && !qwertyAlwaysVisible) {
+
+		currentlyShowingSamplePreview = false;
+		qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+
+		if (movementDirection) {
+			getRootUI()->renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+			//((ViewScreen*)getRootUI())->renderToStore(0, true, false);
+			if (getRootUI() != &keyboardScreen) {
+				PadLEDs::reassessGreyout(true);
+			}
+			memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
+			PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
+			currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
+		}
+
+		possiblySetUpBlinking();
 	}
 }
 

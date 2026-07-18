@@ -529,10 +529,19 @@ void LoadInstrumentPresetUI::changeOutputType(OutputType newOutputType) {
 		// this is in flight.
 		outputTypeBeforeChange_ = oldOutputType;
 		changingOutputType_ = true;
-		beginListing({.action = ListingAction::Open,
-		              .direction = 0,
-		              .filenameToStartAt = searchFilename,
-		              .defaultDir = getInstrumentFolder(outputTypeToLoad)});
+		bool dispatched = beginListing({.action = ListingAction::Open,
+		                                .direction = 0,
+		                                .filenameToStartAt = searchFilename,
+		                                .defaultDir = getInstrumentFolder(outputTypeToLoad)});
+		if (!dispatched) {
+			// Owner queue was full - the listing never ran, so onBrowserOpened()/onListingFailed()
+			// won't fire to reconcile the state set above. Revert it here so the UI is left
+			// consistent (retryable via the same button - outputTypeToLoad no longer equals
+			// newOutputType - and the next listing that does complete won't get misrouted by a
+			// stuck changingOutputType_).
+			outputTypeToLoad = outputTypeBeforeChange_;
+			changingOutputType_ = false;
+		}
 	}
 }
 

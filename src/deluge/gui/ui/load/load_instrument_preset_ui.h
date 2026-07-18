@@ -99,7 +99,7 @@ private:
 	// Tells changeOutputType()'s Open listing apart from opened()'s in the shared onBrowserOpened()/
 	// onListingFailed() hooks (see changeOutputType()'s comment).
 	bool changingOutputType_{};
-	OutputType outputTypeBeforeChange_;
+	OutputType outputTypeBeforeChange_{};
 
 	InstrumentClip* instrumentClipToLoadFor{}; // Can be NULL - if called from Arranger.
 	Instrument* instrumentToReplace{}; // The Instrument that's actually successfully loaded and assigned to the Clip.

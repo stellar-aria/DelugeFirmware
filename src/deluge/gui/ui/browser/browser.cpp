@@ -90,7 +90,7 @@ Browser::Browser() {
 
 // --- async-listing base machinery ---
 
-void Browser::beginListing(ListingRequest req) {
+bool Browser::beginListing(ListingRequest req) {
 	pendingListing_ = std::move(req);
 	listingInProgress_ = true;
 	display->displayLoadingAnimationText("Working", /*delayed=*/true);
@@ -98,7 +98,9 @@ void Browser::beginListing(ListingRequest req) {
 		// Owner queue full → op won't run; clear so the next HID event retries.
 		listingInProgress_ = false;
 		display->removeLoadingAnimation();
+		return false;
 	}
+	return true;
 }
 
 void Browser::runListingTrampoline(void* self) {

@@ -150,8 +150,11 @@ protected:
 	static bool pendingReloadSearchFromEnd_;
 
 	// Dispatch `req`'s listing onto the storage owner; sets listingInProgress_ + shows the loading
-	// indicator; on a dropped dispatch clears the flag (retried on the next HID event).
-	void beginListing(ListingRequest req);
+	// indicator; on a dropped dispatch clears the flag (retried on the next HID event). Returns
+	// true if the listing was actually dispatched (queued or run inline), false if the dispatch
+	// was dropped (owner queue full) - callers that mutate state before calling this that only a
+	// completed listing would reconcile must check the return and revert on false.
+	bool beginListing(ListingRequest req);
 	static void runListingTrampoline(void* self); // Owner-op entry; self = the active Browser*
 	void runPendingListing();                     // on the fiber: run the action + hooks
 

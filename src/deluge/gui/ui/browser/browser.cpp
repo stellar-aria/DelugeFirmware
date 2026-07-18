@@ -591,14 +591,12 @@ tryReadingItems:
 	return Error::NONE;
 }
 
-// Thin wrapper around readFileItemsFromFolderAndMemory() with the browser's usual args, used by
-// ListingAction::Open. (Only consumed by later tasks' opened() migrations - Browser OPEN stays
-// synchronous until then.)
+// Body of ListingAction::Open, run on the fiber inside runPendingListing(). arrivedInNewFolder()
+// is the full synchronous listing body (readFileItemsFromFolderAndMemory + fileIndexSelected
+// search + folderContentsReady() + render) — the same thing opened() used to call inline, so this
+// makes the async Open path faithful to the old behaviour.
 Error Browser::openListingImpl(char const* filenameToStartAt, char const* defaultDir) {
-	bool doWeHaveASearchString = (filenameToStartAt && *filenameToStartAt);
-	int32_t newCatalogSearchDirection = doWeHaveASearchString ? CATALOG_SEARCH_BOTH : CATALOG_SEARCH_RIGHT;
-	return readFileItemsFromFolderAndMemory(currentSong, outputTypeToLoad, filePrefix, filenameToStartAt, defaultDir,
-	                                        true, Availability::ANY, newCatalogSearchDirection);
+	return arrivedInNewFolder(0, filenameToStartAt, defaultDir);
 }
 
 namespace {

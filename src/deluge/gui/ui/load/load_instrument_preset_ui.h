@@ -83,10 +83,12 @@ protected:
 	void enterKeyPress() override;
 	void folderContentsReady(int32_t entryDirection) override;
 	void currentFileChanged(int32_t movementDirection) override;
+	void onBrowserOpened() override;
 
 private:
 	bool showingAuditionPads();
-	Error setupForOutputType();
+	std::string setupForOutputType();
+	void finishArrivedInFolder(char const* defaultDir);
 	void changeOutputType(OutputType newOutputType);
 	void revertToInitialPreset();
 	void exitAction() override;

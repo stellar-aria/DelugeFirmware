@@ -116,26 +116,32 @@ bool LoadInstrumentPresetUI::opened() {
 
 	Error error = beginSlotSession(); // Requires currentDir to be set. (Not anymore?)
 	if (error != Error::NONE) {
-gotError:
 		display->displayError(error);
 		return false;
 	}
 
 	actionLogger.deleteAllLogs();
 
-	error = setupForOutputType(); // Sets currentDir.
-	if (error != Error::NONE) {
-		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
-		                                 // the pads, in call to setupForOutputType().
-		goto gotError;
-	}
+	std::string searchFilename = setupForOutputType(); // Sets currentDir.
+	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
+	// happens async: dispatch it and return optimistically. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing({.action = ListingAction::Open,
+	              .direction = 0,
+	              .filenameToStartAt = searchFilename,
+	              .defaultDir = getInstrumentFolder(outputTypeToLoad)});
 
 	focusRegained();
 	return true;
 }
 
-// If OLED, then you should make sure renderUIsForOLED() gets called after this.
-Error LoadInstrumentPresetUI::setupForOutputType() {
+// Computes the LED/icon/title state and currentDir for outputTypeToLoad's category, and returns
+// the filename to search for within it (empty if none). Does NOT perform the listing itself
+// (that used to be fused in here) - callers combine this with getInstrumentFolder(outputTypeToLoad)
+// (the category's default dir) to either dispatch an async Open listing (opened()) or call
+// arrivedInNewFolder() directly (changeOutputType(), which isn't part of the browser-open path and
+// stays synchronous).
+std::string LoadInstrumentPresetUI::setupForOutputType() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false);
 	indicator_leds::setLedState(IndicatorLED::MIDI, false);
@@ -253,11 +259,13 @@ useDefaultFolder:
 		searchFilename.append(".XML");
 	}
 
-	Error error = arrivedInNewFolder(0, searchFilename.c_str(), defaultDir);
-	if (error != Error::NONE) {
-		return error;
-	}
+	return searchFilename;
+}
 
+// Shared post-listing tail for both the async Open path (onBrowserOpened(), run once beginListing()'s
+// listing completes) and the synchronous changeOutputType() path (which calls arrivedInNewFolder()
+// directly and isn't part of the browser-open migration).
+void LoadInstrumentPresetUI::finishArrivedInFolder(char const* defaultDir) {
 	currentInstrumentLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	// The redrawing of the sidebar only actually has to happen if we just changed to a different type *or* if we came
@@ -271,8 +279,10 @@ useDefaultFolder:
 		instrumentClipView.recalculateColours();
 		renderingNeededRegardlessOfUI(0, 0xFFFFFFFF);
 	}
+}
 
-	return Error::NONE;
+void LoadInstrumentPresetUI::onBrowserOpened() {
+	finishArrivedInFolder(getInstrumentFolder(outputTypeToLoad));
 }
 
 void LoadInstrumentPresetUI::folderContentsReady(int32_t entryDirection) {
@@ -479,11 +489,14 @@ void LoadInstrumentPresetUI::changeOutputType(OutputType newOutputType) {
 		OutputType oldOutputType = outputTypeToLoad;
 		outputTypeToLoad = newOutputType;
 
-		Error error = setupForOutputType();
+		std::string searchFilename = setupForOutputType();
+		char const* defaultDir = getInstrumentFolder(outputTypeToLoad);
+		Error error = arrivedInNewFolder(0, searchFilename.c_str(), defaultDir);
 		if (error != Error::NONE) {
 			outputTypeToLoad = oldOutputType;
 			return;
 		}
+		finishArrivedInFolder(defaultDir);
 
 		renderUIsForOled();
 		performLoad();

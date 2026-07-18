@@ -1,5 +1,5 @@
 /*
- * Copyright © 2020-2023 Synthstrom Audible Limited
+ * Copyright © 2014-2026 Synthstrom Audible Limited
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -14,14 +14,17 @@
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
  */
-
-// Was I going to expand this file to have more stuff?
 #pragma once
 
-#include <cstdint>
-// Defined in RZA1/diskio.c, so it has C linkage - several files declare it inline in their own extern "C" blocks.
-extern "C" uint8_t currentlyAccessingCard;
-extern int16_t zeroMPEValues[];
-extern bool readButtonsAndPads();
-extern uint32_t picFirmwareVersion;
-extern bool isShortPress(uint32_t pressTime);
+namespace deluge::sync {
+
+/// @brief Whether the SD card / FatFS is currently being accessed (a transfer or
+/// filesystem operation is in flight).
+///
+/// The app-level reentrancy checkers (MIDI / SysEx / playback) query this to defer their
+/// own SD/FatFS work rather than re-enter a non-reentrant FatFS mid-operation. Currently
+/// backed by the `currentlyAccessingCard` flag set in the diskio layer; a later phase may
+/// make the backing BSP-divergent (e.g. the FatFS owner on Embassy) without touching callers.
+bool sd_busy();
+
+} // namespace deluge::sync

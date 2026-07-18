@@ -1,29 +1,38 @@
 /*---------------------------------------------------------------------------/
 /  Harness copy of the firmware ffconf (src/fatfs/ffconf.h).
 /
-/  Intended diffs vs firmware:
-/    - FF_FS_REENTRANT = 1  (the Phase-2b change under test)
-/    - FF_USE_MKFS     = 1  (test setup; orthogonal to reentrancy)
-/    - FF_SYNC_t       = void*  (harness sync-object handle; firmware uses
-/      HANDLE as a Win32-sample placeholder that was never actually wired to
-/      an RTOS primitive, so there is no "real" value to preserve here)
+/  As of Phase 2b, FF_FS_REENTRANT=1 and FF_USE_LFN=2 MATCH firmware -- they
+/  were the changes under test here first (see below), and firmware now
+/  carries them too. This harness therefore stresses the EXACT firmware
+/  reentrancy config, not an approximation of it.
 /
-/  UNPLANNED third diff, discovered by trying to actually compile this
-/  (real-execution finding, not a discretionary choice):
-/    - FF_USE_LFN = 2 (was 1, matching firmware's static-BSS-buffer setting)
-/  src/fatfs/ff.c itself hard-errors this combination:
+/  Remaining REAL diffs vs firmware:
+/    - FF_USE_MKFS = 1  (test setup; orthogonal to reentrancy)
+/    - FF_SYNC_t   = void*, backed by a real std::mutex per volume
+/      (tests/fatfs_stress/ff_sync.cpp). Firmware's FF_SYNC_t is a dummy
+/      `int` and its ff_*_syncobj/grant hooks in ffsystem.c are current
+/      no-ops (no concurrent FatFS entry exists on any BSP yet -- the grant
+/      is installed ahead of the async-SD follow-on). This is the point of
+/      the harness: it exercises a *contended* grant that firmware doesn't
+/      yet have, validating the grant discipline the async follow-on will
+/      rely on.
+/
+/  Historical note -- discovered by trying to actually compile this
+/  (real-execution finding, not a discretionary choice): enabling
+/  FF_FS_REENTRANT=1 forced FF_USE_LFN from 1 to 2. src/fatfs/ff.c itself
+/  hard-errors the FF_FS_REENTRANT=1 + FF_USE_LFN=1 combination:
 /      #if FF_FS_REENTRANT
 /      #if FF_USE_LFN == 1
 /      #error Static LFN work area cannot be used in thread-safe configuration
 /  FF_USE_LFN==1 (mode 1: one static BSS buffer shared by every call) is
-/  ChaN's own documented "Always NOT thread-safe"; FF_FS_REENTRANT=1 is
-/  therefore LITERALLY UNBUILDABLE with firmware's current FF_USE_LFN=1 --
-/  not a harness limitation, a property of the real ff.c firmware would also
-/  hit if it flipped FF_FS_REENTRANT on as-is. Mode 2 (dynamic buffer on the
-/  STACK, ~(FF_MAX_LFN+1)*2 = 512 bytes per call that needs it) is the
-/  minimal change that keeps FF_FS_REENTRANT=1 buildable and is itself
-/  reentrancy-safe (no cross-call shared state) -- see ff.c:526. This is a
-/  significant finding for the real Phase-2b design, not just this harness.
+/  ChaN's own documented "Always NOT thread-safe"; FF_FS_REENTRANT=1 was
+/  therefore LITERALLY UNBUILDABLE with firmware's then-current FF_USE_LFN=1
+/  -- not a harness limitation, a property of the real ff.c firmware would
+/  also have hit if it flipped FF_FS_REENTRANT on as-is. Mode 2 (dynamic
+/  buffer on the STACK, ~(FF_MAX_LFN+1)*2 = 512 bytes per call that needs
+/  it) was the minimal change that kept FF_FS_REENTRANT=1 buildable and is
+/  itself reentrancy-safe (no cross-call shared state) -- see ff.c:526. This
+/  finding drove firmware's own FF_USE_LFN=2 change in Phase 2b.
 /
 /  All OTHER reentrancy-relevant settings (FF_VOLUMES=1, FF_FS_LOCK=0,
 /  FF_FS_TINY=0, FF_FS_NORTC=0, sector sizes) match firmware exactly.

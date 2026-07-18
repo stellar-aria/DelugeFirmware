@@ -32,6 +32,7 @@
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
+#include "sync/sd_access.h"
 #include "util/functions.h"
 #include "util/string.h"
 #include "util/try.h"
@@ -44,8 +45,6 @@ extern "C" {
 
 using namespace deluge;
 using namespace gui;
-
-extern uint8_t currentlyAccessingCard;
 
 SaveSongUI saveSongUI{};
 
@@ -122,7 +121,7 @@ void SaveSongUI::focusRegained() {
 
 bool SaveSongUI::performSave(bool mayOverwrite) {
 
-	if (ALPHA_OR_BETA_VERSION && currentlyAccessingCard) {
+	if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
 		FREEZE_WITH_ERROR("E316");
 	}
 

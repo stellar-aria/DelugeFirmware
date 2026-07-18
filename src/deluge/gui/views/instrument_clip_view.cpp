@@ -89,6 +89,7 @@
 #include "storage/audio/stream/loader.h"
 #include "storage/multi_range/multi_range.h"
 #include "storage/storage_manager.h"
+#include "sync/storage_op.h"
 #include "util/comparison.h"
 #include "util/etl_string.h"
 #include "util/functions.h"
@@ -5015,7 +5016,7 @@ void InstrumentClipView::setSelectedDrum(Drum* drum, bool shouldRedrawStuff, Kit
 
 ActionResult InstrumentClipView::auditionPadAction(int32_t velocity, int32_t yDisplay, bool shiftButtonDown) {
 	exitUIMode(UI_MODE_DRAGGING_KIT_NOTEROW);
-	if (isSDRoutineActive() && !allowSomeUserActionsEvenWhenInCardRoutine) {
+	if (isSDRoutineActive() && !deluge::sync::user_actions_permitted()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allowable sometimes if in card routine.
 	}
 
@@ -6086,7 +6087,7 @@ static const uint32_t verticalScrollUIModes[] = {
 
 ActionResult InstrumentClipView::verticalEncoderAction(int32_t offset, bool inCardRoutine) {
 
-	if (inCardRoutine && !allowSomeUserActionsEvenWhenInCardRoutine) {
+	if (inCardRoutine && !deluge::sync::user_actions_permitted()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow sometimes.
 	}
 

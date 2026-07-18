@@ -88,6 +88,7 @@ endif ()
 add_subdirectory(spec)
 add_subdirectory(spec_io)
 add_subdirectory(spec_audio_stream)
+add_subdirectory(spec_sync)
 add_subdirectory(unit)
 
 # FatFS reentrancy stress harness (host-only, requires a ThreadSanitizer-capable

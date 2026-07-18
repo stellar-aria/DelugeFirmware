@@ -14,15 +14,13 @@
 #include "memory/general_memory_allocator.h"
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
+#include "sync/sd_access.h"
 #include "util/containers.h"
 #include "util/pack.h"
 #include <cstring>
 
 #define MAX_DIR_LINES 25
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
 std::optional<deluge::io::Directory> sxDir;
 uint32_t dirOffsetCounter;
 
@@ -866,7 +864,7 @@ void smSysex::handleNextSysEx() {
 
 	if (SysExQ.empty())
 		return;
-	if (currentlyAccessingCard != 0)
+	if (deluge::sync::sd_busy())
 		return;
 
 	SysExDataEntry& de = SysExQ.front();

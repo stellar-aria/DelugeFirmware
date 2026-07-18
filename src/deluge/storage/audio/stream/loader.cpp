@@ -16,7 +16,7 @@
  */
 
 #include "storage/audio/stream/loader.h"
-#include "extern.h" // currentlyAccessingCard, allowSomeUserActionsEvenWhenInCardRoutine
+#include "extern.h" // currentlyAccessingCard
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
@@ -24,6 +24,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
+#include "sync/storage_op.h"
 
 #include "deluge_resource.h" // deluge_resource_loader_{next,enqueue,has_lowest}
 
@@ -45,16 +46,18 @@ constexpr uint32_t kLowestLoaderPriority = 0xFFFFFFFF;
 
 namespace {
 /// Reconstruct one popped, manager-owned cluster. Opens the user-action gate for the duration of the card
-/// read (see `allowSomeUserActionsEvenWhenInCardRoutine`, extern.h) so the handful of safe UI actions can
-/// run while it blocks. Every queued cluster is manager-owned — get_cluster() ran ensure_resource_asset()
-/// and construct/materialize set `cluster->sample` before it was enqueued — so it is already constructed +
-/// leased; the read just flips `loaded` true (or fails).
+/// read (see `deluge::sync::StorageOp`) so the handful of safe UI actions can run while it blocks. Every
+/// queued cluster is manager-owned — get_cluster() ran ensure_resource_asset() and construct/materialize
+/// set `cluster->sample` before it was enqueued — so it is already constructed + leased; the read just
+/// flips `loaded` true (or fails).
 /// @return `true` to keep draining; `false` only when the read failed while the cluster is still wanted
 ///         (callers still hold reasons), in which case the caller re-queues it and stops.
 bool reconstruct_one(StreamedChunk* cluster) {
-	allowSomeUserActionsEvenWhenInCardRoutine = true;
-	bool ok = cluster->sample->stream().read_cluster_data(*cluster, 0);
-	allowSomeUserActionsEvenWhenInCardRoutine = false;
+	bool ok;
+	{
+		deluge::sync::StorageOp storage_op; // permits safe UI actions for the read's duration
+		ok = cluster->sample->stream().read_cluster_data(*cluster, 0);
+	}
 	if (ok) {
 		return true;
 	}

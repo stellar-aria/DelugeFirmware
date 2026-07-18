@@ -74,6 +74,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/file_item.h"
 #include "storage/storage_manager.h"
+#include "sync/storage_op.h"
 #include "util/c_string.h"
 #include "util/functions.h"
 #include "util/try.h"
@@ -82,9 +83,7 @@
 #include <iterator>
 #include <new>
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
+extern "C" {}
 
 using namespace deluge;
 using namespace gui;
@@ -3076,7 +3075,7 @@ ActionResult ArrangerView::verticalEncoderAction(int32_t offset, bool inCardRout
 		}
 	}
 	else if (isUIModeWithinRange(verticalEncoderUIModes)) {
-		if (inCardRoutine && !allowSomeUserActionsEvenWhenInCardRoutine) {
+		if (inCardRoutine && !deluge::sync::user_actions_permitted()) {
 			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow sometimes.
 		}
 

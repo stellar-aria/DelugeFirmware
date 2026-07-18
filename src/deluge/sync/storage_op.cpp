@@ -1,5 +1,5 @@
 /*
- * Copyright © 2020-2023 Synthstrom Audible Limited
+ * Copyright © 2014-2026 Synthstrom Audible Limited
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -14,14 +14,25 @@
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
  */
+#include "sync/storage_op.h"
 
-// Was I going to expand this file to have more stuff?
-#pragma once
+namespace {
+// The permit state, owned entirely by this module. Was the file-scope global
+// allowSomeUserActionsEvenWhenInCardRoutine (now deleted).
+bool g_user_actions_permitted = false;
+} // namespace
 
-#include <cstdint>
-// Defined in RZA1/diskio.c, so it has C linkage - several files declare it inline in their own extern "C" blocks.
-extern "C" uint8_t currentlyAccessingCard;
-extern int16_t zeroMPEValues[];
-extern bool readButtonsAndPads();
-extern uint32_t picFirmwareVersion;
-extern bool isShortPress(uint32_t pressTime);
+namespace deluge::sync {
+
+StorageOp::StorageOp() : prev_permit_{g_user_actions_permitted} {
+	g_user_actions_permitted = true;
+}
+StorageOp::~StorageOp() {
+	g_user_actions_permitted = prev_permit_;
+}
+
+bool user_actions_permitted() {
+	return g_user_actions_permitted;
+}
+
+} // namespace deluge::sync

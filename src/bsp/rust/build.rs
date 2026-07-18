@@ -77,7 +77,7 @@ fn main() {
     // (and carry debug_info). Switch to Release later via bfd ld if LTO is wanted.
     let cfg = env::var("DELUGE_BUILD_CONFIG").unwrap_or_else(|_| "Debug".into());
     // `toolchain/current` symlinks to the active toolchain version's host dir,
-    // so this survives version bumps.
+    // so this survives version bumps (was a hardcoded, now-stale toolchain/v22).
     let ar = repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
 
     let app_objs_dir = build_dir.join(format!("src/deluge/CMakeFiles/deluge_app.dir/{cfg}"));

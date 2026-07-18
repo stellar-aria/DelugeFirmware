@@ -30,9 +30,7 @@
 #include <optional>
 #include <string.h>
 
-extern "C" {
-extern uint8_t currentlyAccessingCard;
-}
+extern "C" {}
 
 WaveformRenderer waveformRenderer{};
 

@@ -266,7 +266,7 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 	while (true) {
 		AudioEngine::logAction("while loop");
 
-		deluge::audio::stream::loader::pump();
+		deluge::audio::stream::loader::request_pump();
 		FilePointer thisFilePointer;
 
 		std::tie(staticFNO, thisFilePointer) = D_TRY_CATCH(staticDIR.read_and_get_filepointer(), error, {

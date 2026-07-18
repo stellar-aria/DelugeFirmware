@@ -385,7 +385,7 @@ void routineWithClusterLoading(bool mayProcessUserActionsBetween) {
 
 	routineBeenCalled = false;
 
-	deluge::audio::stream::loader::pump(128, mayProcessUserActionsBetween);
+	deluge::audio::stream::loader::request_pump(128, mayProcessUserActionsBetween);
 
 	if (!routineBeenCalled) {
 		// bypassCulling = true; // yolo? Sean: not sure if this is necessary

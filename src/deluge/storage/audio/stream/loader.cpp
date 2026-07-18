@@ -26,6 +26,8 @@
 #include "storage/cluster/cluster.h"
 #include "storage/owner.h"
 
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
+
 #include <atomic>
 
 #include "deluge_resource.h" // deluge_resource_loader_{next,enqueue,has_lowest}
@@ -149,6 +151,14 @@ void loader_fill(void*) {
 } // namespace
 
 void request_pump(int32_t max_num, bool may_process_user_actions) {
+	// Already on the storage owner (the fiber on Embassy; always, on legacy/host where the
+	// caller *is* the owner) — run the fill now rather than dispatching. This makes legacy/host
+	// behaviourally identical to a direct pump() (the coalescer is never touched → golden-inert),
+	// and keeps a fiber-context caller from re-dispatching onto the fiber it is already running on.
+	if (deluge_storage_on_owner()) {
+		pump(max_num, may_process_user_actions);
+		return;
+	}
 	g_fill_max.store(max_num, std::memory_order_relaxed);
 	g_fill_mpua.store(may_process_user_actions, std::memory_order_relaxed);
 	g_loader_coalescer.request(loader_fill, nullptr);

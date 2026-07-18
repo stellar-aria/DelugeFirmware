@@ -2116,7 +2116,7 @@ ActionResult InstrumentClipView::potentiallyRandomizeDrumSample(Kit* kit, Drum* 
 		if (!entry.has_value() || !entry->has_value()) {
 			break;
 		}
-		deluge::audio::stream::loader::pump();
+		deluge::audio::stream::loader::request_pump();
 		if ((*entry)->is_directory || !isAudioFilename((*entry)->name)) {
 			continue;
 		}

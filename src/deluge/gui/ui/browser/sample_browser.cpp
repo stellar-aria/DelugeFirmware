@@ -1226,7 +1226,7 @@ removeReasonsFromSamplesAndGetOut:
 	}
 
 	while (true) {
-		deluge::audio::stream::loader::pump();
+		deluge::audio::stream::loader::request_pump();
 		FilePointer thisFilePointer;
 
 		/* Read a directory item */

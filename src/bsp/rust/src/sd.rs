@@ -11,17 +11,20 @@
 //! the `deluge_bsp::sd` call sites themselves, since deluge-sdk provides `sd`
 //! with matching signatures on both targets:
 //! - Device: the real SDHI1+DMA driver. SD ops complete on the SDHI/DMA-
-//!   completion IRQ, so `block_on` drives them to completion without needing
-//!   another task to run.
+//!   completion IRQ. The two device transfer sites (`deluge_block_read`/
+//!   `deluge_block_write`) drive the transfer with `block_on_fiber` when
+//!   running on the storage-owner fiber (steady state, post-boot) — this
+//!   suspends only the fiber and lets the executor (and the app tick →
+//!   audio) keep running until the completion IRQ resumes it — or with
+//!   `block_on` when not yet on the fiber (only the boot-time FatFS mount,
+//!   which runs before the owner exists and has nothing else to run
+//!   concurrently with anyway). See the guard at each site and the hazard
+//!   note above `deluge_block_read`.
 //! - Host (`target_os` != `"none"`): a small file-backed disk image (no SDHI
 //!   hardware exists), so the FatFS-shaped C ABI can still be exercised (and
 //!   round-tripped) off-target. `deluge_bsp::sd`'s host `init`/`read_sectors`/
 //!   `write_sectors` never suspend (there's nothing to await), so `block_on`
-//!   is safe here too.
-//!
-//! NOTE: `block_on` stalls the executor (and the app tick → audio) for the
-//! duration of a transfer. Fine for bring-up (loads aren't real-time); audio-
-//! during-storage yielding (storage_wait.h / scheduler) is a later refinement.
+//!   is safe here too, and the host sites always use it (no fiber to yield).
 //!
 //! Per target, the FatFS diskio C-ABI entry points below still need two
 //! `#[unsafe(no_mangle)]` definitions (one `#[cfg(target_os = "none")]`, one
@@ -42,6 +45,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use deluge_bsp::sd;
 use embassy_futures::block_on;
+
+#[cfg(target_os = "none")]
+use crate::fiber::block_on_fiber;
 
 #[cfg(target_os = "none")]
 use crate::sys::{
@@ -281,14 +287,28 @@ pub extern "C" fn deluge_storage_on_owner() -> bool {
     crate::fiber::on_fiber()
 }
 
-// NOTE: SD I/O must use `block_on` (which parks the executor for
-// the transfer), NOT a fiber-yielding drive. FatFS is not re-entrant and the app's
-// SD-reentrancy guard (`currentlyAccessingCard`) is only set by the legacy C diskio
-// (src/RZA1/diskio.c), which this BSP does not link — so on this BSP it is always 0.
-// Parking during the transfer is what serializes SD access; yielding mid-transfer
-// (block_on_fiber) let other tasks re-enter FatFS and corrupted it (manifested as
-// "NO MORE PRESETS FOUND" on track create, and would also break song/sample loads).
-// Re-introducing fiber-aware SD requires first serializing all SD access on this BSP.
+// HISTORY: a prior attempt drove SD I/O with a fiber-yielding
+// `block_on_fiber` unconditionally. FatFS is not re-entrant, and the app's
+// SD-reentrancy guard (`currentlyAccessingCard`) is only set by the legacy C
+// diskio (src/RZA1/diskio.c), which this BSP does not link — so on this BSP
+// it is always 0. Yielding mid-transfer let other tasks re-enter FatFS
+// concurrently and corrupted it (manifested as "NO MORE PRESETS FOUND" on
+// track create, and would also break song/sample loads).
+//
+// That precondition — serialize all SD access first — is now MET: the
+// async-sd staging ladder (single-owner routing enforced by
+// `deluge_storage_on_owner`/`storage-owner-audit`, plus the priority-queue
+// and cooperative-yield rungs) guarantees every FatFS transfer after the
+// storage owner is up runs on the single worker fiber, one at a time. The
+// device transfer sites below now flip on that guarantee: `if on_fiber() {
+// block_on_fiber(fut) } else { block_on(fut) }`. The `on_fiber()` branch
+// (steady state, post-boot) yields the fiber mid-transfer so the executor
+// can run other work while the SDHI/DMA completion IRQ is pending — no
+// re-entrancy, because FatFS calls only ever originate from the one owner
+// fiber, which stays suspended (not re-entered) until its own transfer
+// completes. The `else` branch (only the boot-time FatFS mount, which runs
+// before the worker/owner exists) still parks via `block_on`, since nothing
+// else can run concurrently at that point anyway.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_read(
@@ -318,7 +338,12 @@ pub extern "C" fn deluge_block_read(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    match block_on(sd::read_sectors(sector, count, out)) {
+    let fut = sd::read_sectors(sector, count, out);
+    match if crate::fiber::on_fiber() {
+        block_on_fiber(fut)
+    } else {
+        block_on(fut)
+    } {
         Ok(()) => DELUGE_OK,
         Err(_) => DELUGE_ERR_IO,
     }
@@ -356,7 +381,12 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    match block_on(sd::write_sectors(sector, count, data)) {
+    let fut = sd::write_sectors(sector, count, data);
+    match if crate::fiber::on_fiber() {
+        block_on_fiber(fut)
+    } else {
+        block_on(fut)
+    } {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_write err {e:?} (sector={sector} count={count})");

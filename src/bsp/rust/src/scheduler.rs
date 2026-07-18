@@ -220,13 +220,19 @@ static SLOTS: [TaskSlot; MAX_TASKS] = [const { TaskSlot::new() }; MAX_TASKS];
 /// `*ForCurrentTask` C-ABI calls. -1 when no handle is running.
 static CURRENT: AtomicI8 = AtomicI8::new(-1);
 
-/// Resource gates (RESOURCE_SD / RESOURCE_USB). A task holding one of these in its
-/// schedule acquires the corresponding gate for the duration of its (synchronous)
-/// handle, so two same-resource tasks can't run concurrently. Inert in the current
-/// run-to-completion model (handles never overlap) but correct once storage
-/// waits become truly async. Audio (RESOURCE_NONE) never touches these, so the
-/// audio interrupt-executor never blocks on them.
-static SD_GATE: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+/// Resource gate (RESOURCE_USB). A task holding it in its schedule acquires the
+/// gate for the duration of its (synchronous) handle, so two same-resource tasks
+/// can't run concurrently. Audio (RESOURCE_NONE) never touches this, so the
+/// audio interrupt-executor never blocks on it.
+///
+/// There is no equivalent RESOURCE_SD gate: that serialization is now provided
+/// by the single-owner storage discipline (the storage owner IS the worker
+/// fiber; see `deluge_storage_on_owner` in sd.rs and the `storage-owner-audit`
+/// feature) plus the rung-5 `block_on_fiber` flip in sd.rs, which yields the
+/// fiber mid-transfer instead of parking the executor. `SD_GATE` served that
+/// purpose in the run-to-completion staging model and has been retired now
+/// that the real mechanism is live. `RESOURCE_SD_ROUTINE` tasks still get a
+/// hold-off, but via `fiber::sd_routine_held()` below, not a gate.
 static USB_GATE: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
@@ -402,21 +408,19 @@ async fn task_runner(slot: &'static TaskSlot) {
         // Hold off RESOURCE_SD_ROUTINE tasks while an SD-routine op is in flight on
         // the worker (fiber.rs SD_ROUTINE_HELD). Mirrors the cooperative BSP's
         // isSDRoutineActive() gate: a task that would free an object such an op is
-        // mid-way through (discardRecorder freeing the recorder) must not run. Inert
-        // in run-to-completion (the counter only lingers once ops yield, at rung 5).
+        // mid-way through (discardRecorder freeing the recorder) must not run. Live
+        // (not inert) now that the rung-5 flip (sd.rs `block_on_fiber`) makes SD
+        // transfers actually yield: the counter lingers across the whole in-flight
+        // window, not just a synchronous run-to-completion instant, so this is the
+        // real hold-off — independent of (and unaffected by) `SD_GATE`'s retirement.
         if resource & RESOURCE_SD_ROUTINE != 0 && crate::fiber::sd_routine_held() {
             continue;
         }
 
-        // Acquire the resource gates the schedule asks for, held across the
-        // (synchronous) handle so same-resource tasks can't overlap. Consistent
-        // order — SD before USB — avoids deadlock with a task holding both.
+        // Acquire the resource gate(s) the schedule asks for, held across the
+        // (synchronous) handle so same-resource tasks can't overlap. (RESOURCE_SD
+        // has no gate here — see the comment on `USB_GATE` above.)
         let run_us = {
-            let _sd = if resource & (RESOURCE_SD | RESOURCE_SD_ROUTINE) != 0 {
-                Some(SD_GATE.lock().await)
-            } else {
-                None
-            };
             let _usb = if resource & RESOURCE_USB != 0 {
                 Some(USB_GATE.lock().await)
             } else {

@@ -38,14 +38,30 @@ void ff_memfree (
 
 #if FF_FS_REENTRANT	/* Mutal exclusion */
 
-/* NO-OP grants. Correct ONLY because the current block_on execution model has no
- * concurrent entry into FatFS on any BSP (Embassy parks the executor + SD_GATE;
- * legacy is cooperative single-thread + the app checkers; host is single-thread).
- * The async-SD follow-on MUST replace ff_req_grant/ff_rel_grant with a real
- * per-BSP grant (an interrupt-friendly Embassy mutex) BEFORE it makes FatFS calls
- * yield mid-transfer -- see the cooperative-glue-retirement design spec §Phase 2b.
- * The fatfs_stress harness (tests/fatfs_stress/) validates the grant discipline
- * itself. */
+/* NO-OP grants -- by design, not by an interim shortcut. The async-SD design
+ * (docs/superpowers/specs/2026-07-16-async-sd-storage-owner-design.md §4-5)
+ * considered upgrading these to a real per-BSP mutex (a fiber-aware grant, or
+ * an off-fiber defer paired with one) but Kate chose the single-storage-owner
+ * architecture instead: on Embassy, EVERY FatFS-touching operation is routed
+ * through `deluge::storage::Owner` (src/deluge/storage/owner.h) onto the one
+ * worker fiber (see include/libdeluge/storage_owner.h), which can only ever
+ * have one op in flight at a time -- so FatFS is entered from exactly one
+ * serialized context by construction, whether that op parks (`block_on`) or
+ * yields mid-transfer (`block_on_fiber`, live since the rung-5 flip in
+ * src/bsp/rust/src/sd.rs). A real grant would duplicate that guarantee; the
+ * `storage-owner-audit` feature's debug_assert (sd.rs's `deluge_block_read`/
+ * `deluge_block_write`) is the enforcement point instead, catching a stray
+ * off-fiber caller directly rather than relying on a grant it would have to
+ * hold correctly. Legacy/host remain single-thread (cooperative / host
+ * single-thread respectively), so no grant is needed there either. `SD_GATE`
+ * (the scheduler.rs resource mutex this design also made redundant) was
+ * retired in the same change.
+ * The fatfs_stress harness (tests/fatfs_stress/) validates FatFS's own
+ * `lock_fs`/`unlock_fs` macro coverage *given* a correct grant (see
+ * tests/fatfs_stress/RESULTS.md); its scope notes are explicit that this does
+ * NOT cover the yield-mid-transfer/single-owner case -- that property is
+ * proved instead by the host-TSan owner/fiber exercises in
+ * src/bsp/rust/tests/support/owner_host_exercise.rs. */
 
 int ff_cre_syncobj (BYTE vol, FF_SYNC_t* sobj) { (void)vol; *sobj = 1; return 1; }
 int ff_del_syncobj (FF_SYNC_t sobj)            { (void)sobj; return 1; }

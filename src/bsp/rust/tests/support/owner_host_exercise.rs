@@ -52,12 +52,16 @@
 //! any thread by construction — so *that* part of the exercise genuinely does
 //! read it cross-thread from a non-executor OS thread, no channel needed.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use embassy_executor::{Executor, Spawner};
+use embassy_sync::waitqueue::AtomicWaker;
 
 /// A queued submission, handed from a submitter OS thread to [`submit_pump`]
 /// over the channel: the op function plus a `usize`-encoded context (avoids a
@@ -464,6 +468,102 @@ extern "C" fn yield_continuation_op(_ctx: *mut core::ffi::c_void) {
         Ordering::SeqCst,
     );
     YIELD_CONTINUATION_DONE.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// `block_on_fiber` contract (rung 5, the flip): the SD device transfer sites
+// (`sd.rs` `deluge_block_read`/`deluge_block_write`) now drive the real SD
+// transfer future through `fiber::block_on_fiber` when on the owner fiber —
+// suspending the fiber (not parking the whole executor, unlike `block_on`)
+// until the future's own Waker (fired by the transfer-completion IRQ, on
+// device) or the pump's coarse fallback resumes it. This phase drives that
+// SAME `fiber::block_on_fiber` fn against a hand-built Future backed by
+// `embassy_sync::waitqueue::AtomicWaker` — the SAME primitive
+// `rza1l-hal`'s `sdhi.rs`/`dmac.rs` DMA- and command-completion futures
+// actually use (`register(cx.waker())` on `Pending`, `.wake()` from the IRQ
+// handler) — rather than `embassy_time::Timer` (tried first; it panics
+// under a non-Embassy-task Waker like `block_on_fiber`'s, since it needs
+// Embassy's own executor-task waker registration, not just any `Waker` —
+// so it would have been the wrong stand-in). A background OS thread stands
+// in for the completion IRQ, calling `.wake()` after a short delay. Own
+// statics, independent of every other phase.
+//
+// Asserts: (1) it runs on the fiber throughout; (2) another op accepted onto
+// the same ring while it's suspended does NOT start executing until it
+// completes — `worker_poll`'s `FIBER_BUSY` gate means only one op ever
+// occupies the fiber at a time, so this is the single-owner/no-re-entrancy
+// property the whole ladder exists to preserve, now checked against the
+// actual Future-driving mechanism rather than the `yield_until` primitive
+// the other phases above use; (3) it resolves within a bound tight enough
+// to prove the Waker is actually driving it forward, not just an unrelated
+// coarse fallback eventually catching up.
+// ---------------------------------------------------------------------------
+static BOF_STARTED: AtomicBool = AtomicBool::new(false);
+static BOF_DONE: AtomicBool = AtomicBool::new(false);
+static BOF_IN_OP: AtomicBool = AtomicBool::new(false);
+static BOF_ON_OWNER_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+static BOF_SERIALIZATION_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+static BOF_PROBE_RAN_BEFORE_COMPLETE: AtomicBool = AtomicBool::new(false);
+static BOF_PROBE_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Waker storage + ready flag for [`BofFuture`], mirroring the shape of
+/// `rza1l-hal`'s per-channel DMA/SDHI completion state (an `AtomicWaker`
+/// plus a hardware-status bit checked on `poll`).
+static BOF_WAKER: AtomicWaker = AtomicWaker::new();
+static BOF_READY: AtomicBool = AtomicBool::new(false);
+
+/// A minimal stand-in for the real SD transfer future's shape: `Pending`
+/// (registering the waker) until some external event (here, a background
+/// thread simulating the completion IRQ) flips [`BOF_READY`] and wakes it.
+struct BofFuture;
+impl Future for BofFuture {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if BOF_READY.load(Ordering::SeqCst) {
+            Poll::Ready(())
+        } else {
+            BOF_WAKER.register(cx.waker());
+            Poll::Pending
+        }
+    }
+}
+
+extern "C" fn block_on_fiber_op(_ctx: *mut core::ffi::c_void) {
+    if !crate::sd::deluge_storage_on_owner() {
+        BOF_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if BOF_IN_OP.swap(true, Ordering::SeqCst) {
+        BOF_SERIALIZATION_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    BOF_STARTED.store(true, Ordering::SeqCst);
+    BOF_READY.store(false, Ordering::SeqCst);
+    // Stand-in for the completion IRQ: fires the AtomicWaker after a short
+    // delay, exactly as the real DMA/SDHI completion handler would.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(30));
+        BOF_READY.store(true, Ordering::SeqCst);
+        BOF_WAKER.wake();
+    });
+    // The real `fiber::block_on_fiber` fn, driving a real async Future with a
+    // genuine Waker-fired completion — the exact mechanism sd.rs's device
+    // read/write sites now use for the actual SD transfer future.
+    crate::fiber::block_on_fiber(BofFuture);
+    if !crate::sd::deluge_storage_on_owner() {
+        BOF_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    BOF_IN_OP.store(false, Ordering::SeqCst);
+    BOF_DONE.store(true, Ordering::SeqCst);
+}
+
+/// Submitted while `block_on_fiber_op` is suspended inside `block_on_fiber`;
+/// must NOT run until `block_on_fiber_op` has fully completed (single-owner:
+/// only one op occupies the fiber at a time — see `worker_poll`'s
+/// `FIBER_BUSY` gate in `fiber.rs`).
+extern "C" fn block_on_fiber_probe_op(_ctx: *mut core::ffi::c_void) {
+    if !BOF_DONE.load(Ordering::SeqCst) {
+        BOF_PROBE_RAN_BEFORE_COMPLETE.store(true, Ordering::SeqCst);
+    }
+    BOF_PROBE_DONE.store(true, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -930,5 +1030,52 @@ pub fn run() {
         high_order < cont_order,
         "the HIGH op should have run before the re-dispatched NORMAL \
          continuation (high_order={high_order}, cont_order={cont_order})"
+    );
+
+    // --- block_on_fiber (rung 5, the flip): submit block_on_fiber_op (which
+    // drives a real embassy_time::Timer future through the actual
+    // fiber::block_on_fiber fn — the same fn sd.rs's device read/write sites
+    // now use for the real SD transfer future), then while it's suspended
+    // submit a probe op and confirm it doesn't start until block_on_fiber_op
+    // completes, and that completion happens promptly (Waker-driven, not
+    // just an unrelated coarse fallback) ---
+    let bof_deadline = Instant::now() + Duration::from_secs(20);
+    let bof_start = Instant::now();
+    tx.send((block_on_fiber_op, 0, false, false))
+        .expect("send block_on_fiber_op");
+    wait_until(bof_deadline, "block_on_fiber_op to start", || {
+        BOF_STARTED.load(Ordering::SeqCst)
+    });
+    tx.send((block_on_fiber_probe_op, 0, false, false))
+        .expect("send block_on_fiber_probe_op");
+    wait_until(bof_deadline, "block_on_fiber_op to finish", || {
+        BOF_DONE.load(Ordering::SeqCst)
+    });
+    let bof_elapsed = bof_start.elapsed();
+    wait_until(bof_deadline, "block_on_fiber_probe_op to finish", || {
+        BOF_PROBE_DONE.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        BOF_ON_OWNER_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "deluge_storage_on_owner() was false while block_on_fiber_op was \
+         genuinely executing on the fiber"
+    );
+    assert_eq!(
+        BOF_SERIALIZATION_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "block_on_fiber_op overlapped with another op body (serialization \
+         contract broken)"
+    );
+    assert!(
+        !BOF_PROBE_RAN_BEFORE_COMPLETE.load(Ordering::SeqCst),
+        "block_on_fiber_probe_op ran before block_on_fiber_op completed — a \
+         second op started while the first was still suspended inside \
+         block_on_fiber (single-owner/no-re-entrancy contract broken)"
+    );
+    assert!(
+        bof_elapsed < Duration::from_millis(500),
+        "block_on_fiber_op took {bof_elapsed:?} to resolve a 30ms Timer — \
+         suggests it isn't being driven by its Waker/the pump promptly"
     );
 }

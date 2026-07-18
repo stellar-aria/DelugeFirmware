@@ -365,10 +365,11 @@ const QUEUE_CAP: usize = 4;
 static mut QUEUE: [Option<(Job, u32)>; QUEUE_CAP] = [None; QUEUE_CAP];
 static mut Q_COUNT: usize = 0;
 /// Monotonic (wrapping) insertion counter, stamped onto each enqueued slot.
-/// Wraparound is not specially handled: at `QUEUE_CAP == 4` outstanding jobs,
-/// a wrong ordering decision would need ~4 billion intervening enqueues
-/// between two still-queued jobs, which cannot happen (the queue drains far
-/// faster than that).
+/// `dequeue` resets this to 0 whenever the ring drains to empty (see there),
+/// which bounds the span of seqs any two *resident* jobs can carry to at most
+/// `QUEUE_CAP` (4) — so a wrong ordering decision at the wrap would require
+/// ~4 billion enqueues within a single stretch where the ring never once goes
+/// empty, which cannot happen (the queue drains far faster than that).
 static mut Q_NEXT_SEQ: u32 = 0;
 
 /// An operation is on the fiber (running or suspended) — distinct from idle.
@@ -537,6 +538,11 @@ fn dequeue() -> Option<Job> {
             .replace(None)
             .expect("scanned slot was occupied");
         Q_COUNT -= 1;
+        if Q_COUNT == 0 {
+            // Ring just drained: reset the seq counter so the next enqueue
+            // stretch starts a fresh span (see Q_NEXT_SEQ doc comment).
+            Q_NEXT_SEQ = 0;
+        }
         Some(job)
     }
 }

@@ -106,13 +106,12 @@ bool LoadPatternUI::opened() {
 		return false;
 	}
 
-	error = setupForLoadingPattern(); // Sets currentDir.
-	if (error != Error::NONE) {
-		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
-		                                 // the pads, in call to setupForLoadingMidiDeviceDefinition().
-		display->displayError(error);
-		return false;
-	}
+	std::string searchFilename = setupForLoadingPattern(); // Sets currentDir.
+	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
+	// happens async: dispatch it and return optimistically. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = defaultDir});
 
 	focusRegained();
 
@@ -152,8 +151,12 @@ void LoadPatternUI::currentFileChanged(int32_t movementDirection) {
 	}
 }
 
+// Computes the icon state and currentDir, and returns the filename to search for within it (always
+// empty here - preserved as-is, not a migration concern). Does NOT perform the listing itself (that
+// used to be fused in here) - opened() combines this with defaultDir to dispatch an async Open
+// listing; the post-listing tail moved to onBrowserOpened().
 // If OLED, then you should make sure renderUIsForOLED() gets called after this.
-Error LoadPatternUI::setupForLoadingPattern() {
+std::string LoadPatternUI::setupForLoadingPattern() {
 	enteredText.clear();
 
 	fileIcon = deluge::hid::display::OLED::midiIcon;
@@ -168,16 +171,13 @@ Error LoadPatternUI::setupForLoadingPattern() {
 		searchFilename.append(".XML");
 	}
 
-	Error error = arrivedInNewFolder(0, searchFilename.c_str(), defaultDir.c_str());
-	if (error != Error::NONE) {
-		return error;
-	}
+	return searchFilename;
+}
 
+void LoadPatternUI::onBrowserOpened() {
 	currentLabelLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	drawKeys();
-
-	return Error::NONE;
 }
 
 void LoadPatternUI::folderContentsReady(int32_t entryDirection) {

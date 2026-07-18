@@ -81,7 +81,6 @@ doReturnFalse:
 			error = Error::NONE;
 		}
 		if (error != Error::NONE) {
-gotError:
 			display->displayError(error);
 			goto doReturnFalse;
 		}
@@ -90,13 +89,19 @@ gotError:
 
 	currentDir = currentSong->dirPath;
 
-	error = arrivedInNewFolder(0, searchFilename.c_str(), "SONGS");
-	if (error != Error::NONE) {
-		goto gotError;
-	}
-
 	// TODO: create folder if doesn't exist.
 
+	// The listing (and the LED-blink tail that used to run straight after it - see
+	// onBrowserOpened()) now happens async: dispatch it and return optimistically. Failure goes
+	// through the base Browser::onListingFailed() (displayError + close()) once the listing
+	// completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = "SONGS"});
+
+	return true;
+}
+
+void SaveSongUI::onBrowserOpened() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false);
 	indicator_leds::setLedState(IndicatorLED::MIDI, false);
@@ -111,7 +116,6 @@ gotError:
 	// do this after focus regained, otherwise the first scroll starts
 	// from the beginning instead of showing the incremented number
 	enteredTextEditPos = 0; // enteredText.getLength();
-	return true;
 }
 
 void SaveSongUI::focusRegained() {

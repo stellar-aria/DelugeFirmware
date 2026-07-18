@@ -49,9 +49,10 @@ public:
 protected:
 	void folderContentsReady(int32_t entryDirection) override;
 	void enterKeyPress() override;
+	void onBrowserOpened() override;
 
 private:
-	Error setupForLoadingMidiDeviceDefinition();
+	std::string setupForLoadingMidiDeviceDefinition();
 	Error currentLabelLoadError = Error::NONE;
 };
 

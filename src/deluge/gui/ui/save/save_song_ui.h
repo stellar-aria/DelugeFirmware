@@ -33,6 +33,7 @@ public:
 	UIType getUIType() override { return UIType::SAVE_SONG; }
 
 protected:
+	void onBrowserOpened() override;
 	// int32_t arrivedInNewFolder(int32_t direction);
 };
 

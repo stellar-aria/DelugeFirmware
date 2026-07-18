@@ -114,18 +114,22 @@ doReturnFalse:
 	fileIconPt2 = deluge::hid::display::OLED::midiIconPt2;
 	fileIconPt2Width = 1;
 
-	error = arrivedInNewFolder(0, enteredText.c_str(), MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER);
-	if (error != Error::NONE) {
-gotError:
-		display->displayError(error);
-		goto doReturnFalse;
-	}
-
-	focusRegained();
+	// The listing (and the focusRegained tail that used to run straight after it - see
+	// onBrowserOpened()) now happens async: dispatch it and return optimistically. Failure goes
+	// through the base Browser::onListingFailed() (displayError + close()) once the listing
+	// completes.
+	beginListing({.action = ListingAction::Open,
+	              .direction = 0,
+	              .filenameToStartAt = enteredText,
+	              .defaultDir = MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER});
 
 	return true;
 }
 #pragma GCC diagnostic pop
+
+void SaveMidiDeviceDefinitionUI::onBrowserOpened() {
+	focusRegained();
+}
 
 bool SaveMidiDeviceDefinitionUI::performSave(bool mayOverwrite) {
 	MIDIInstrument* midiInstrumentToSave = (MIDIInstrument*)getCurrentInstrument();

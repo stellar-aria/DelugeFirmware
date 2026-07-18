@@ -54,6 +54,7 @@ protected:
 	void folderContentsReady(int32_t entryDirection) override;
 	void currentFileChanged(int32_t movementDirection) override;
 	void enterKeyPress() override;
+	void onBrowserOpened() override;
 
 private:
 	bool selectedDrumOnly{};
@@ -61,7 +62,7 @@ private:
 	bool overwriteExisting{};
 	bool noScaling{};
 	std::string defaultDir{};
-	Error setupForLoadingPattern();
+	std::string setupForLoadingPattern();
 	Error currentLabelLoadError = Error::NONE;
 };
 

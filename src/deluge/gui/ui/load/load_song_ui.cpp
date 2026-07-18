@@ -79,7 +79,6 @@ bool LoadSongUI::opened() {
 
 	Error error = beginSlotSession(false, true);
 	if (error != Error::NONE) {
-gotError:
 		display->displayError(error);
 		// Oh no, we're unable to read a file representing the first song. Get out quick!
 		currentUIMode = UI_MODE_NONE;
@@ -103,11 +102,16 @@ gotError:
 		searchFilename.append(".XML");
 	}
 
-	error = arrivedInNewFolder(0, searchFilename.c_str(), "SONGS");
-	if (error != Error::NONE) {
-		goto gotError;
-	}
+	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
+	// happens async: dispatch it and return optimistically. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = "SONGS"});
 
+	return true;
+}
+
+void LoadSongUI::onBrowserOpened() {
 	focusRegained();
 
 	PadLEDs::vertical::setupScroll(1, false);
@@ -131,8 +135,6 @@ gotError:
 	if (ALPHA_OR_BETA_VERSION && currentUIMode == UI_MODE_WAITING_FOR_NEXT_FILE_TO_LOAD) {
 		FREEZE_WITH_ERROR("E188");
 	}
-
-	return true;
 }
 
 void LoadSongUI::folderContentsReady(int32_t entryDirection) {

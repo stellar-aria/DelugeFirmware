@@ -38,6 +38,9 @@ public:
 
 	// ui
 	UIType getUIType() override { return UIType::SAVE_MIDI_DEVICE_DEFINITION; }
+
+protected:
+	void onBrowserOpened() override;
 };
 
 extern SaveMidiDeviceDefinitionUI saveMidiDeviceDefinitionUI;

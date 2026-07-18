@@ -89,12 +89,9 @@ void DxSyxBrowser::enterKeyPress() {
 		        .c_str(); // Extremely weirdly, if we try to just put this inside the parentheses in the next line,
 		                  // it returns an empty string (&nothing). Surely this is a compiler error??
 
-		Error error = goIntoFolder(filenameChars);
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + exitAction) once the listing completes.
+		goIntoFolder(filenameChars);
 	}
 	else {
 		// TODO: c.f. slotbrowser, we might just be able to pass a file pointer to the FAT loader

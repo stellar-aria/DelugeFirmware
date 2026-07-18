@@ -26,7 +26,9 @@
 #include "io/midi/midi_device_manager.h"
 #include "io/stream.hpp"
 #include "libdeluge/block_device.h"
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/stream_io.h"
+#include "libdeluge/system.h" // deluge_in_interrupt
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 
@@ -39,6 +41,7 @@
 #include "storage/audio/deserializer_byte_source.h"
 #include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
+#include "storage/owner.h" // deluge::storage::Coalescer
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
 #include "util/string.h"
@@ -859,6 +862,26 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 // Only needs calling a couple times per second. Must be called outside of the audio / SD-reading routine
 // Call this repeatedly so SD card is re-initialized on re-insert before we actually urgently need audio from it
+namespace {
+// Plain coalesced dispatch of the card re-init onto the storage owner. No lifetime
+// coupling (unlike the recorder) → plain Owner::run, not the SD-routine flavor.
+// Single-flight so a slow initSD on the fiber can't stack across slowRoutine ticks.
+deluge::storage::Coalescer g_card_init_coalescer{/*sd_routine=*/false};
+
+void card_init_fill(void*) {
+	audioFileManager.reinitEjectedCard();
+}
+} // namespace
+
+void AudioFileManager::reinitEjectedCard() {
+	if (cardEjected) {
+		Error error = StorageManager::initSD();
+		if (error == Error::NONE) {
+			cardEjected = false;
+		}
+	}
+}
+
 void AudioFileManager::slowRoutine() {
 
 	// Drain card-detect events from the BSP (pull-based; the card-detect ISR
@@ -868,11 +891,15 @@ void AudioFileManager::slowRoutine() {
 		setCardEjected();
 	}
 
-	// If we know the card's been ejected...
-	if (cardEjected && !isSDRoutineActive()) {
-		Error error = StorageManager::initSD();
-		if (error == Error::NONE) {
-			cardEjected = false;
+	// If we know the card's been ejected, re-init via the storage owner (inline on
+	// legacy/host → byte-identical; coalesced on the fiber on Embassy). The fill
+	// re-checks cardEjected, so a coalesced-away duplicate is a safe no-op.
+	if (cardEjected && !isSDRoutineActive() && !deluge_in_interrupt()) {
+		if (deluge_storage_on_owner()) {
+			card_init_fill(nullptr);
+		}
+		else {
+			g_card_init_coalescer.request(card_init_fill, nullptr);
 		}
 	}
 

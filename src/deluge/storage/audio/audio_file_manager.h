@@ -122,6 +122,12 @@ public:
 	void setCardRead() { cardReadOnce = true; }
 	void setCardEjected() { cardEjected = true; }
 
+	/// Re-initialise the SD card if it is currently marked ejected (clearing the flag
+	/// on success). Touches FatFS (initSD), so it runs on the storage owner — the fill
+	/// dispatched by slowRoutine(). Re-checks the ejected flag itself, so a coalesced
+	/// duplicate that arrives after re-init is a safe no-op.
+	void reinitEjectedCard();
+
 	std::string alternateAudioFileLoadPath{};
 	AlternateLoadDirStatus alternateLoadDirStatus = AlternateLoadDirStatus::NONE_SET;
 	ThingType thingTypeBeingLoaded = ThingType::NONE;

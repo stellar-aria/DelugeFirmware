@@ -80,6 +80,7 @@ protected:
 	ActionResult backButtonAction() override;
 	void folderContentsReady(int32_t entryDirection) override;
 	void currentFileChanged(int32_t movementDirection) override;
+	void onBrowserOpened() override;
 
 private:
 	void displayCurrentFilename();

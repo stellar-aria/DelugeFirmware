@@ -51,8 +51,7 @@ bool SaveKitRowUI::opened() {
 	// Must set this before calling SaveUI::opened(), which uses this to work out folder name
 
 	bool success = SaveUI::opened();
-	if (!success) { // In this case, an error will have already displayed.
-doReturnFalse:
+	if (!success) {                      // In this case, an error will have already displayed.
 		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
 		                                 // the pads.
 		return false;
@@ -66,7 +65,6 @@ doReturnFalse:
 
 	currentDir = soundDrumToSave->path;
 	if (currentDir.empty()) { // Would this even be able to happen?
-tryDefaultDir:
 		currentDir = defaultDir;
 	}
 
@@ -75,17 +73,19 @@ tryDefaultDir:
 
 	filePrefix = "SYNT";
 
-	Error error = arrivedInNewFolder(0, enteredText.c_str(), defaultDir);
-	if (error != Error::NONE) {
-gotError:
-		display->displayError(error);
-		goto doReturnFalse;
-	}
+	// The listing (and the blinkLed+focusRegained tail that used to run straight after it - see
+	// onBrowserOpened()) now happens async: dispatch it and return optimistically. Failure goes
+	// through the base Browser::onListingFailed() (displayError + close()) once the listing
+	// completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = enteredText, .defaultDir = defaultDir});
 
-	indicator_leds::blinkLed(IndicatorLED::SYNTH);
-
-	focusRegained();
 	return true;
+}
+
+void SaveKitRowUI::onBrowserOpened() {
+	indicator_leds::blinkLed(IndicatorLED::SYNTH);
+	focusRegained();
 }
 
 bool SaveKitRowUI::performSave(bool mayOverwrite) {

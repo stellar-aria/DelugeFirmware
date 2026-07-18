@@ -125,7 +125,6 @@ bool SampleBrowser::opened() {
 
 	Error error = StorageManager::initSD();
 	if (error != Error::NONE) {
-sdError:
 		display->displayError(error);
 		return false;
 	}
@@ -167,11 +166,19 @@ sdError:
 
 dissectionDone:
 
-	error = arrivedInNewFolder(1, searchFilename, "SAMPLES");
-	if (error != Error::NONE) {
-		goto sdError;
-	}
+	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
+	// happens async: dispatch it and return optimistically. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()) once the listing completes — the same
+	// close() the old sdError label used here (not goBackToSoundEditor(), which would left-scroll).
+	beginListing({.action = ListingAction::Open,
+	              .direction = 0,
+	              .filenameToStartAt = searchFilename ? searchFilename : "",
+	              .defaultDir = "SAMPLES"});
 
+	return true;
+}
+
+void SampleBrowser::onBrowserOpened() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, getCurrentOutputType() == OutputType::SYNTH);
 	indicator_leds::setLedState(IndicatorLED::KIT, soundEditor.editingKit());
 
@@ -186,8 +193,6 @@ dissectionDone:
 	}
 
 	possiblySetUpBlinking();
-
-	return true;
 }
 
 void SampleBrowser::possiblySetUpBlinking() {

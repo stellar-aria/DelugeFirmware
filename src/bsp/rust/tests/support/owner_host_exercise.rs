@@ -62,7 +62,9 @@ use embassy_executor::{Executor, Spawner};
 /// A queued submission, handed from a submitter OS thread to [`submit_pump`]
 /// over the channel: the op function plus a `usize`-encoded context (avoids a
 /// raw-pointer field, which would make the tuple `!Send`).
-type Job = (extern "C" fn(*mut core::ffi::c_void), usize);
+// (op, thread-id-as-ctx, is_sd_routine) — the bool selects deluge_worker_run vs
+// deluge_worker_run_sd_routine in submit_pump.
+type Job = (extern "C" fn(*mut core::ffi::c_void), usize, bool);
 
 const NUM_SUBMITTERS: usize = 4;
 const OPS_PER_SUBMITTER: u32 = 6;
@@ -158,6 +160,24 @@ extern "C" fn special_op(_ctx: *mut core::ffi::c_void) {
     COMPLETED.fetch_add(1, Ordering::SeqCst);
 }
 
+/// An SD-routine-class suspending op (submitted via `deluge_worker_run_sd_routine`,
+/// the `is_sd = true` Job). Like `special_op` it yields mid-body and only resumes
+/// once [`SD_OP_GATE`] opens, giving the driving thread a window in which the op is
+/// genuinely in flight (suspended) to observe that `sd_routine_held()` is engaged.
+/// Kept independent of the COMPLETED/IN_OP accounting so it can run as its own
+/// phase after the main exercise.
+static SD_OP_STARTED: AtomicBool = AtomicBool::new(false);
+static SD_OP_DONE: AtomicBool = AtomicBool::new(false);
+static SD_OP_GATE: AtomicBool = AtomicBool::new(false);
+unsafe extern "C" fn sd_op_gate_predicate() -> bool {
+    SD_OP_GATE.load(Ordering::SeqCst)
+}
+extern "C" fn sd_routine_op(_ctx: *mut core::ffi::c_void) {
+    SD_OP_STARTED.store(true, Ordering::SeqCst);
+    crate::fiber::yield_until(Some(sd_op_gate_predicate), None);
+    SD_OP_DONE.store(true, Ordering::SeqCst);
+}
+
 // ---------------------------------------------------------------------------
 // The submission channel + the two executor-thread pump tasks.
 // ---------------------------------------------------------------------------
@@ -176,10 +196,17 @@ async fn submit_pump() {
     loop {
         let job = SUBMIT_RX.lock().unwrap().as_mut().unwrap().try_recv();
         match job {
-            Ok((f, ctx)) => {
-                // deluge_worker_run now returns bool (dispatch accepted?); the exercise's
+            Ok((f, ctx, is_sd)) => {
+                // deluge_worker_run* returns bool (dispatch accepted?); the exercise's
                 // single-flight submitters never overflow the queue, so ignore it here.
-                let _ = crate::fiber::deluge_worker_run(f, ctx as *mut core::ffi::c_void);
+                // The bool routes an op through the SD-routine entry (which takes the
+                // SD_ROUTINE_HELD hold) vs the plain one.
+                let ctx = ctx as *mut core::ffi::c_void;
+                let _ = if is_sd {
+                    crate::fiber::deluge_worker_run_sd_routine(f, ctx)
+                } else {
+                    crate::fiber::deluge_worker_run(f, ctx)
+                };
             }
             Err(TryRecvError::Empty) => embassy_time::Timer::after_millis(1).await,
             Err(TryRecvError::Disconnected) => return,
@@ -256,7 +283,7 @@ pub fn run() {
     // --- submit the suspending op first, so the 4 submitter threads (below)
     // genuinely race to enqueue their fast ops *while* it occupies the fiber
     // ---
-    tx.send((special_op, 0)).expect("send special_op");
+    tx.send((special_op, 0, false)).expect("send special_op");
     wait_until(deadline, "special_op to start", || {
         SPECIAL_STARTED.load(Ordering::SeqCst)
     });
@@ -283,7 +310,7 @@ pub fn run() {
                 .name(format!("owner-submitter-{thread_id}"))
                 .spawn(move || {
                     for i in 0..OPS_PER_SUBMITTER {
-                        tx.send((fast_op, thread_id)).expect("send fast_op");
+                        tx.send((fast_op, thread_id, false)).expect("send fast_op");
                         // Throttle to at most one outstanding op per thread —
                         // see the module doc: this keeps at most
                         // NUM_SUBMITTERS (== QUEUE_CAP) jobs live at once, so
@@ -337,5 +364,35 @@ pub fn run() {
     assert!(
         !crate::sd::deluge_storage_on_owner(),
         "deluge_storage_on_owner() true after every op completed"
+    );
+
+    // --- SD-routine hold: engaged at enqueue, released at completion ---
+    // No SD-routine op has run, so no hold is held.
+    assert!(
+        !crate::fiber::sd_routine_held(),
+        "sd_routine_held() true before any SD-routine op ran"
+    );
+    let sd_deadline = Instant::now() + Duration::from_secs(20);
+    // Submit the suspending SD-routine op through the executor-thread submitter.
+    tx.send((sd_routine_op, 0, true))
+        .expect("send sd_routine_op");
+    wait_until(sd_deadline, "sd_routine_op to start", || {
+        SD_OP_STARTED.load(Ordering::SeqCst)
+    });
+    // While it is in flight (suspended on its gate), the hold must be visible.
+    wait_until(
+        sd_deadline,
+        "sd_routine_held() true while op in flight",
+        || crate::fiber::sd_routine_held(),
+    );
+    // Release it; once it completes the hold must clear.
+    SD_OP_GATE.store(true, Ordering::SeqCst);
+    wait_until(sd_deadline, "sd_routine_op to finish", || {
+        SD_OP_DONE.load(Ordering::SeqCst)
+    });
+    wait_until(
+        sd_deadline,
+        "sd_routine_held() false after completion",
+        || !crate::fiber::sd_routine_held(),
     );
 }

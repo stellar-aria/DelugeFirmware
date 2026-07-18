@@ -397,10 +397,20 @@ async fn task_runner(slot: &'static TaskSlot) {
             continue;
         }
 
+        let resource = slot.resource.load(Ordering::Relaxed) as ResourceID;
+
+        // Hold off RESOURCE_SD_ROUTINE tasks while an SD-routine op is in flight on
+        // the worker (fiber.rs SD_ROUTINE_HELD). Mirrors the cooperative BSP's
+        // isSDRoutineActive() gate: a task that would free an object such an op is
+        // mid-way through (discardRecorder freeing the recorder) must not run. Inert
+        // in run-to-completion (the counter only lingers once ops yield, at rung 5).
+        if resource & RESOURCE_SD_ROUTINE != 0 && crate::fiber::sd_routine_held() {
+            continue;
+        }
+
         // Acquire the resource gates the schedule asks for, held across the
         // (synchronous) handle so same-resource tasks can't overlap. Consistent
         // order — SD before USB — avoids deadlock with a task holding both.
-        let resource = slot.resource.load(Ordering::Relaxed) as ResourceID;
         let run_us = {
             let _sd = if resource & (RESOURCE_SD | RESOURCE_SD_ROUTINE) != 0 {
                 Some(SD_GATE.lock().await)

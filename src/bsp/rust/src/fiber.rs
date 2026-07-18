@@ -140,6 +140,24 @@ pub fn on_fiber() -> bool {
     ON_FIBER.load(Ordering::Relaxed)
 }
 
+/// Latched `true` the first time [`worker_poll`] runs — i.e. the worker/owner is
+/// live. Monotonic (never reset), so a plain `Relaxed` load/store is fine: this
+/// is a one-way latch, not a synchronization point guarding shared data. Exists
+/// so the `storage-owner-audit` diskio asserts (`sd.rs`) can tell apart the
+/// boot-time FatFS mount — which runs synchronously in `deluge_boot()` *before*
+/// the first `worker_poll()`, with no owner yet to run on — from a genuine
+/// off-owner transfer at runtime, after the owner exists. See `sd.rs`'s asserts
+/// for the full rationale.
+static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Has the worker pump run at least once yet? `false` only during the narrow
+/// pre-owner boot window (the synchronous `deluge_boot()` FatFS mount); `true`
+/// for the remainder of the process's life once `app_task`/`host_app_task`
+/// starts polling `worker_poll()`.
+pub fn worker_started() -> bool {
+    WORKER_STARTED.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level switch: device (ARM `fiber_switch`/`Ctx`, above).
 // ---------------------------------------------------------------------------
@@ -587,6 +605,10 @@ fn queue_nonempty() -> bool {
 /// op once its predicate holds / times out. Returns true while work remains.
 /// Called from the embassy `app_task` on a ~1 ms ticker.
 pub fn worker_poll() -> bool {
+    // Latch on first entry: the owner is live from here on (see WORKER_STARTED's
+    // doc comment). Relaxed store is fine — this is a monotonic latch, not a
+    // handoff of other state.
+    WORKER_STARTED.store(true, Ordering::Relaxed);
     if !FIBER_BUSY.load(Ordering::Relaxed) {
         let Some((f, ctx, is_sd, _is_high)) = dequeue() else {
             return false;

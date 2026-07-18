@@ -297,11 +297,20 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the rung-5
+    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
     #[cfg(feature = "storage-owner-audit")]
     debug_assert!(
-        crate::fiber::on_fiber(),
-        "FatFS card transfer off the storage owner (non-fiber context) — \
-         single-owner discipline not yet complete (async-sd staging ladder)"
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
     );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
@@ -323,11 +332,20 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the rung-5
+    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
     #[cfg(feature = "storage-owner-audit")]
     debug_assert!(
-        crate::fiber::on_fiber(),
-        "FatFS card transfer off the storage owner (non-fiber context) — \
-         single-owner discipline not yet complete (async-sd staging ladder)"
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
     );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
@@ -364,11 +382,20 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the rung-5
+    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
     #[cfg(feature = "storage-owner-audit")]
     debug_assert!(
-        crate::fiber::on_fiber(),
-        "FatFS card transfer off the storage owner (non-fiber context) — \
-         single-owner discipline not yet complete (async-sd staging ladder)"
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
     );
     if unit != 0 {
         return DELUGE_ERR_NODEV;
@@ -398,11 +425,20 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the rung-5
+    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
     #[cfg(feature = "storage-owner-audit")]
     debug_assert!(
-        crate::fiber::on_fiber(),
-        "FatFS card transfer off the storage owner (non-fiber context) — \
-         single-owner discipline not yet complete (async-sd staging ladder)"
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
     );
     if unit != 0 {
         return DELUGE_ERR_NODEV;

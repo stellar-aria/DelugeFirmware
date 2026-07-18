@@ -554,12 +554,15 @@ fn dequeue() -> Option<Job> {
 }
 
 /// Is a HIGH-priority job currently resident in the ring (queued, not yet
-/// dequeued)? Read by the running NORMAL op — e.g. the recorder card-write
-/// drain (`SampleRecorder::writeAnyCompletedClusters`) — to decide whether to
-/// step aside at a safe boundary rather than run to completion, so `dequeue`'s
-/// HIGH-before-NORMAL ordering (above) actually bounds a queued HIGH op's
-/// wait instead of it sitting behind an unbounded NORMAL drain. Same
-/// cheap-linear-scan cost class as `dequeue`, over the same ring state.
+/// dequeued)? Read by a running caller that processes several independent
+/// units per dispatch — e.g. `audio_engine::doRecorderCardRoutines`, which
+/// walks every live `SampleRecorder` and drives one `cardRoutine()` each
+/// (each recorder's own per-dispatch write is already bounded to a single
+/// cluster) — to decide whether to stop after the current unit rather than
+/// continue to the next, so `dequeue`'s HIGH-before-NORMAL ordering (above)
+/// actually bounds a queued HIGH op's wait to one more unit instead of it
+/// sitting behind the whole multi-unit loop. Same cheap-linear-scan cost
+/// class as `dequeue`, over the same ring state.
 pub fn higher_priority_waiting() -> bool {
     // SAFETY: single-threaded access to the ring (same contract as enqueue/dequeue).
     unsafe {

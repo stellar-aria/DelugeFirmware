@@ -64,13 +64,16 @@ bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
 ///         and will NOT run — on false NOTHING was enqueued.
 bool deluge_worker_run_priority(void (*fn)(void*), void* ctx);
 
-/// Is a HIGH-priority op currently queued (waiting to run) on the worker? For a
-/// long-running NORMAL op that drains work in a loop (e.g. the recorder
-/// card-write drain, SampleRecorder::writeAnyCompletedClusters) to check
-/// periodically at a safe/resumable boundary and step aside — return early,
-/// leaving its own state such that the next dispatch resumes it — so a queued
-/// HIGH op (an audio-streaming read) isn't stuck waiting behind the whole
-/// drain, only up to the next boundary.
+/// Is a HIGH-priority op currently queued (waiting to run) on the worker? A
+/// long-running caller that processes several independent units per dispatch
+/// (e.g. audio_engine::doRecorderCardRoutines, which walks every live
+/// SampleRecorder and drives one cardRoutine() each — each recorder's own
+/// per-dispatch write is already bounded to a single cluster) can check this
+/// after fully processing one unit and, if true, stop for this dispatch
+/// rather than continuing to the next unit. The next dispatch resumes the
+/// traversal where it left off, so a queued HIGH op (an audio-streaming
+/// read) is bounded to waiting behind at most one more unit instead of the
+/// whole multi-unit loop.
 /// Cooperative/host: always returns false — there is no queue, so there is
 /// never a reason to step aside (inline behaviour is unchanged: the caller
 /// drains fully, exactly as before this existed).

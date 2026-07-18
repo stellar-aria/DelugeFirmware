@@ -42,6 +42,7 @@
 #include "libdeluge/signals.h"
 #include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/system.h"
+#include "libdeluge/worker.h"
 #include "memory/general_memory_allocator.h"
 #include "memory/stack_guard.h"
 #include "model/instrument/kit.h"
@@ -1518,6 +1519,12 @@ void doRecorderCardRoutines() {
 		// Otherwise, move on
 		else {
 			prevPointer = &recorder->next;
+		}
+
+		// Yield the multi-recorder drain to a queued high-priority audio-streaming read: return now
+		// (the next dispatch re-traverses from firstRecorder), bounding the read's wait to one recorder.
+		if (deluge_worker_higher_priority_waiting()) {
+			break;
 		}
 	}
 

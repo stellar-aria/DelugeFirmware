@@ -26,7 +26,6 @@
 #include "libdeluge/control_surface.h"
 #include "libdeluge/file_io.h"
 #include "libdeluge/stream_io.h"
-#include "libdeluge/worker.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/audio_clip.h"
 #include "model/sample/sample.h"
@@ -607,15 +606,6 @@ Error SampleRecorder::writeAnyCompletedClusters() {
 		// firstUnwrittenClusterIndex, and we can't leave that incremented without removing the reason
 		if (error != Error::NONE) {
 			return error;
-		}
-
-		// A queued HIGH-priority op (an audio-streaming read) is waiting on the worker ring — step aside here rather
-		// than draining every remaining cluster. firstUnwrittenClusterIndex has already advanced past the cluster we
-		// just wrote, so this is a safe, resumable boundary: the next doRecorderCardRoutines dispatch picks the drain
-		// back up right where it left off. Cooperative/host: deluge_worker_higher_priority_waiting() is always false
-		// (no queue there), so this never triggers and the loop drains fully, exactly as before.
-		if (deluge_worker_higher_priority_waiting()) {
-			return Error::NONE;
 		}
 	}
 

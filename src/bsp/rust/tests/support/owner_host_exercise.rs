@@ -398,18 +398,23 @@ extern "C" fn prio_d_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
-// Cooperative yield-to-priority (rung 5 task 3): a NORMAL op that models the
-// recorder card-write drain (SampleRecorder::writeAnyCompletedClusters) —
-// loop doing units of "work", each followed by a real suspend point
-// (`yield_until(None, None)`, mirroring writeOneCompletedCluster's SD write,
-// which suspends the fiber via `block_on_fiber` while awaiting the transfer)
-// and then a `higher_priority_waiting()` check; the first time that's true,
-// return early, short of `YIELD_TOTAL_UNITS`. While it's mid-loop, enqueue a
-// HIGH op and confirm it lands on the ring — the next check should trip.
-// Assert: the NORMAL op returned early (didn't complete all its units), and
-// the HIGH op ran before a NORMAL "continuation" op enqueued right after
-// (mirroring doRecorderCardRoutines re-dispatching the drain on its next
-// cadence). Own statics, independent of every other phase.
+// Cooperative yield-to-priority (rung 5 task 3, retargeted): a NORMAL op that
+// models audio_engine::doRecorderCardRoutines' multi-recorder drain — loop
+// doing units of "work" (each unit stands in for one recorder's fully-
+// processed cardRoutine() dispatch), each followed by a real suspend point
+// (`yield_until(None, None)`, mirroring a recorder's SD write, which suspends
+// the fiber via `block_on_fiber` while awaiting the transfer) and then a
+// `higher_priority_waiting()` check taken only after the unit is fully done;
+// the first time that's true, return early, short of `YIELD_TOTAL_UNITS`.
+// While it's mid-loop, enqueue a HIGH op and confirm it lands on the ring —
+// the next check should trip. Assert: the NORMAL op returned early (didn't
+// complete all its units), and the HIGH op ran before a NORMAL
+// "continuation" op enqueued right after (mirroring doRecorderCardRoutines
+// re-dispatching the drain on its next cadence, resuming with the recorder
+// it left off on). This exercises the same ring-scan primitive
+// (`higher_priority_waiting`), which is unchanged by the retarget — only the
+// C++ caller of the primitive moved. Own statics, independent of every other
+// phase.
 // ---------------------------------------------------------------------------
 const YIELD_TOTAL_UNITS: u32 = 30;
 static YIELD_OP_STARTED: AtomicBool = AtomicBool::new(false);

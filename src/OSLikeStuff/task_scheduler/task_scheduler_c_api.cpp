@@ -114,8 +114,8 @@ bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
 // HIGH-priority query. On the cooperative BSPs there is no queue — a NORMAL op
 // runs to completion on the caller's stack before anything else can be
 // dispatched — so there is never a reason to step aside; always false, which
-// keeps a caller like SampleRecorder::writeAnyCompletedClusters draining fully,
-// exactly as before this existed.
+// keeps a multi-unit caller like audio_engine::doRecorderCardRoutines draining
+// every recorder in one dispatch, exactly as before this existed.
 bool deluge_worker_higher_priority_waiting(void) {
 	return false;
 }

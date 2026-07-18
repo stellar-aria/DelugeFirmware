@@ -148,7 +148,7 @@ void LoadMidiDeviceDefinitionUI::enterKeyPress() {
 	// If it's a directory...
 	if (currentFileItem->isFolder) {
 		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
-		// Browser::onListingFailed() (displayError + exitAction) once the listing completes.
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
 		goIntoFolder(currentFileItem->filename.c_str());
 	}
 

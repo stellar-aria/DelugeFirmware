@@ -1020,7 +1020,14 @@ Error Browser::reloadImpl(int32_t direction) {
 		D_PRINTLN("new file Index is %d", newFileIndex);
 	}
 
-	return finishSelectEncoderAction(newFileIndex, offset);
+	error = finishSelectEncoderAction(newFileIndex, offset);
+	if (error != Error::NONE) {
+		// Matches the synchronous no-reload path (selectEncoderAction()): displayError only, browser stays
+		// open. Swallow here rather than propagating to runPendingListing()/onListingFailed(), which would
+		// wrongly close() the browser on a tail error - reload failures never closed the browser pre-migration.
+		display->displayError(error);
+	}
+	return Error::NONE;
 }
 
 bool Browser::predictExtendedText() {

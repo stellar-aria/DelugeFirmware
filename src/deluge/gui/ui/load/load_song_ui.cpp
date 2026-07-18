@@ -191,6 +191,10 @@ void LoadSongUI::displayLoopsRemainingPopup() {
 ActionResult LoadSongUI::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	using namespace deluge::hid::button;
 
+	if (listingInProgress_) {
+		return ActionResult::DEALT_WITH;
+	}
+
 	// Load button or select encoder press. Unlike most (all?) other children of Browser, we override this and don't
 	// just call mainButtonAction(), because unlike all the others, we need to action the load immediately on down-press
 	// rather than waiting for press-release, because of that special action where you hold the button down until you

@@ -21,8 +21,8 @@
 
 namespace deluge::storage {
 
-void Owner::run(void (*fn)(void*), void* ctx) {
-	deluge_worker_run(fn, ctx);
+bool Owner::run(void (*fn)(void*), void* ctx) {
+	return deluge_worker_run(fn, ctx);
 }
 
 void Coalescer::request(void (*fill)(void*), void* ctx) {
@@ -31,7 +31,11 @@ void Coalescer::request(void (*fill)(void*), void* ctx) {
 	}
 	fill_ = fill;
 	ctx_ = ctx;
-	Owner::run(&Coalescer::run_and_release, this);
+	if (!Owner::run(&Coalescer::run_and_release, this)) {
+		// Dispatch was dropped (owner queue full) → run_and_release will never fire, so
+		// release the guard here or the Coalescer would wedge single-flight forever.
+		in_flight_.store(false, std::memory_order_release);
+	}
 }
 
 void Coalescer::run_and_release(void* self_) {

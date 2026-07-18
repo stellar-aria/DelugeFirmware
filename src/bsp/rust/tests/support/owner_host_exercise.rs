@@ -176,7 +176,11 @@ async fn submit_pump() {
     loop {
         let job = SUBMIT_RX.lock().unwrap().as_mut().unwrap().try_recv();
         match job {
-            Ok((f, ctx)) => crate::fiber::deluge_worker_run(f, ctx as *mut core::ffi::c_void),
+            Ok((f, ctx)) => {
+                // deluge_worker_run now returns bool (dispatch accepted?); the exercise's
+                // single-flight submitters never overflow the queue, so ignore it here.
+                let _ = crate::fiber::deluge_worker_run(f, ctx as *mut core::ffi::c_void);
+            }
             Err(TryRecvError::Empty) => embassy_time::Timer::after_millis(1).await,
             Err(TryRecvError::Disconnected) => return,
         }

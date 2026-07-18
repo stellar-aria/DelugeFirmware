@@ -8,6 +8,16 @@
 // mock_file_io.cpp / mock_source.h pattern already used by the other spec dirs.
 #include "libdeluge/worker.h"
 
-extern "C" void deluge_worker_run(void (*fn)(void*), void* ctx) {
+// Test hook: when true, `deluge_worker_run` drops the op (does not run it) and returns
+// false, modelling the Embassy worker queue being full. Lets specs exercise the
+// Coalescer's drop-recovery (that it releases its single-flight guard on a dropped
+// dispatch instead of wedging). Reset to false between tests that use it.
+bool g_mock_worker_drop = false;
+
+extern "C" bool deluge_worker_run(void (*fn)(void*), void* ctx) {
+	if (g_mock_worker_drop) {
+		return false; // dropped — the op does not run
+	}
 	fn(ctx);
+	return true;
 }

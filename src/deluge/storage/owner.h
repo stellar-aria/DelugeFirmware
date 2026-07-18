@@ -35,7 +35,10 @@ namespace deluge::storage {
 /// load-bearing. See docs/superpowers/specs/2026-07-17-async-sd-staging-ladder-roadmap.md.
 struct Owner {
 	/// Queue `fn(ctx)` on the owner. C-ABI-shaped for existing call sites.
-	static void run(void (*fn)(void*), void* ctx);
+	/// @return true if the op ran (inline on legacy/host) or was queued (Embassy fiber);
+	///         false if the dispatch was dropped (Embassy worker queue full) — the op will
+	///         NOT run, so a coalescing caller must reset its single-flight guard.
+	static bool run(void (*fn)(void*), void* ctx);
 };
 
 /// @brief Single-flight coalesced dispatch onto the storage `Owner`.

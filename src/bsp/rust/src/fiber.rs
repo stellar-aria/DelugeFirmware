@@ -390,9 +390,9 @@ fn now_us() -> u64 {
 /// Submit an operation to run on the worker fiber (C++ dispatch boundary). Runs
 /// serialized after any already-queued operations once the worker is pumped.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) {
+pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
     // SAFETY: single-threaded; enqueue only (no switch here).
-    unsafe {
+    let enqueued = unsafe {
         if Q_COUNT < QUEUE_CAP {
             let tail = (Q_HEAD + Q_COUNT) % QUEUE_CAP;
             core::ptr::addr_of_mut!(QUEUE)
@@ -400,11 +400,17 @@ pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_v
                 .add(tail)
                 .write(Some((f, ctx)));
             Q_COUNT += 1;
+            true
+        } else {
+            // Queue full — dropped, the op will NOT run. The caller learns via the
+            // false return (e.g. the storage Coalescer clears its single-flight guard
+            // so a later request can retry rather than wedging forever).
+            false
         }
-        // else: queue full (should not happen for user actions) — drop.
-    }
+    };
     // Wake the pump so the op starts promptly (it may be idle-asleep).
     wake();
+    enqueued
 }
 
 fn dequeue() -> Option<Job> {

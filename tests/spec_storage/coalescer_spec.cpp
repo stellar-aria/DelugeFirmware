@@ -5,6 +5,10 @@
 
 using deluge::storage::Coalescer;
 
+// Test hook in mock_worker.cpp: when true, deluge_worker_run drops the dispatch
+// (models the Embassy worker queue being full).
+extern bool g_mock_worker_drop;
+
 namespace {
 // Shared test state. `reentrant_fill` re-enters `request()` while it is itself the in-flight
 // fill, so the inner request MUST coalesce (single-flight) — proving the guard, not just that
@@ -47,6 +51,17 @@ describe coalescer("deluge::storage::Coalescer", $ {
 		c.request(plain_fill, nullptr);
 		c.request(plain_fill, nullptr);
 		expect(g_runs).to_equal(2);
+	});
+
+	it("releases the guard when the owner drops the dispatch (no permanent wedge)", _ {
+		Coalescer c;
+		g_runs = 0;
+		g_mock_worker_drop = true;
+		c.request(plain_fill, nullptr); // dispatch dropped → fill never runs
+		expect(g_runs).to_equal(0);
+		g_mock_worker_drop = false;
+		c.request(plain_fill, nullptr); // guard was released, so this one runs
+		expect(g_runs).to_equal(1);
 	});
 });
 // clang-format on

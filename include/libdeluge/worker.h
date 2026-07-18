@@ -30,13 +30,18 @@
 #ifndef LIBDELUGE_WORKER_H
 #define LIBDELUGE_WORKER_H
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /// Queue `fn(ctx)` to run on the cooperative worker. Operations are serialized.
 /// `fn` may `yield()` at any call depth; the launching caller returns at once.
-void deluge_worker_run(void (*fn)(void*), void* ctx);
+/// @return true if the operation ran (cooperative/inline) or was queued (Embassy
+///         worker); false if it was dropped because the worker queue was full and
+///         will NOT run — a coalescing caller must treat false as "not dispatched".
+bool deluge_worker_run(void (*fn)(void*), void* ctx);
 
 #ifdef __cplusplus
 }

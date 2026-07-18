@@ -88,8 +88,9 @@ bool yieldToIdle(RunCondition until) {
 // yield()s drive the cooperative task manager exactly as before. The Embassy BSP
 // supplies its own deluge_worker_run (Rust, runs the op on a stackful fiber); that
 // definition wins at link time and this object is not pulled from the archive.
-void deluge_worker_run(void (*fn)(void*), void* ctx) {
+bool deluge_worker_run(void (*fn)(void*), void* ctx) {
 	fn(ctx);
+	return true; // ran inline — never dropped on the cooperative BSPs
 }
 
 // libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the

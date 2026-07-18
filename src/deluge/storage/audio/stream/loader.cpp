@@ -27,6 +27,7 @@
 #include "storage/owner.h"
 
 #include "libdeluge/storage_owner.h" // deluge_storage_on_owner
+#include "libdeluge/system.h"        // deluge_in_interrupt
 
 #include <atomic>
 
@@ -151,6 +152,13 @@ void loader_fill(void*) {
 } // namespace
 
 void request_pump(int32_t max_num, bool may_process_user_actions) {
+	// Never from an ISR / the audio interrupt-executor: there `deluge_storage_on_owner()` is
+	// false (it isn't the worker fiber), so we would take the coalescer path and race its
+	// main-executor-only state. The audio render does no card I/O, so reaching here from an
+	// interrupt is a programming error; do nothing rather than corrupt the coalescer.
+	if (deluge_in_interrupt()) {
+		return;
+	}
 	// Already on the storage owner (the fiber on Embassy; always, on legacy/host where the
 	// caller *is* the owner) — run the fill now rather than dispatching. This makes legacy/host
 	// behaviourally identical to a direct pump() (the coalescer is never touched → golden-inert),

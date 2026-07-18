@@ -171,7 +171,7 @@ dissectionDone:
 	// Browser::onListingFailed() (displayError + close()) once the listing completes — the same
 	// close() the old sdError label used here (not goBackToSoundEditor(), which would left-scroll).
 	beginListing({.action = ListingAction::Open,
-	              .direction = 0,
+	              .direction = 1,
 	              .filenameToStartAt = searchFilename ? searchFilename : "",
 	              .defaultDir = "SAMPLES"});
 

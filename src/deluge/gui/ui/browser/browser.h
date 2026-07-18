@@ -160,7 +160,7 @@ protected:
 	virtual void onListingFailed(Error error); // default: displayError + close() (not exitAction())
 
 	// Bodies of the listing actions, run on the fiber inside runPendingListing().
-	Error openListingImpl(char const* filenameToStartAt, char const* defaultDir);
+	Error openListingImpl(int32_t direction, char const* filenameToStartAt, char const* defaultDir);
 	Error goIntoFolderImpl(char const* folderName);
 	Error goUpOneDirectoryLevelImpl();
 	Error setFileByFullPathImpl(char const* fullPath);

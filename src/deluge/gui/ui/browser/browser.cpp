@@ -109,7 +109,8 @@ void Browser::runPendingListing() {
 	Error error = Error::NONE;
 	switch (pendingListing_.action) {
 	case ListingAction::Open:
-		error = openListingImpl(pendingListing_.filenameToStartAt.c_str(), pendingListing_.defaultDir.c_str());
+		error = openListingImpl(pendingListing_.direction, pendingListing_.filenameToStartAt.c_str(),
+		                        pendingListing_.defaultDir.c_str());
 		break;
 	case ListingAction::IntoFolder:
 		error = goIntoFolderImpl(pendingListing_.folderOrPath.c_str());
@@ -595,8 +596,8 @@ tryReadingItems:
 // is the full synchronous listing body (readFileItemsFromFolderAndMemory + fileIndexSelected
 // search + folderContentsReady() + render) — the same thing opened() used to call inline, so this
 // makes the async Open path faithful to the old behaviour.
-Error Browser::openListingImpl(char const* filenameToStartAt, char const* defaultDir) {
-	return arrivedInNewFolder(0, filenameToStartAt, defaultDir);
+Error Browser::openListingImpl(int32_t direction, char const* filenameToStartAt, char const* defaultDir) {
+	return arrivedInNewFolder(direction, filenameToStartAt, defaultDir);
 }
 
 namespace {

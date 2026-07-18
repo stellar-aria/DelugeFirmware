@@ -86,7 +86,7 @@ bool DxSyxBrowser::opened() {
 	// TODO: fill in last used name!
 	// The listing now happens async: dispatch it and return optimistically. Failure goes through
 	// the base Browser::onListingFailed() (displayError + close()) once the listing completes.
-	beginListing({.action = ListingAction::Open, .direction = 0, .filenameToStartAt = "", .defaultDir = "DX7"});
+	beginListing({.action = ListingAction::Open, .direction = 1, .filenameToStartAt = "", .defaultDir = "DX7"});
 
 	return true;
 }
@@ -119,7 +119,7 @@ void DxSyxBrowser::enterKeyPress() {
 		                  // it returns an empty string (&nothing). Surely this is a compiler error??
 
 		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
-		// Browser::onListingFailed() (displayError + exitAction) once the listing completes.
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
 		goIntoFolder(filenameChars);
 	}
 	else {

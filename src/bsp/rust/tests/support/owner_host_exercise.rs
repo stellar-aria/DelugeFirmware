@@ -234,6 +234,106 @@ async fn drop_test() {
 }
 
 // ---------------------------------------------------------------------------
+// Render-then-complete contract (rung 4b, shape 1): models the async browser
+// op's on-fiber UI callback (`folderContentsReady`/`onBrowserOpened`) — it
+// mutates shared UI-model state and completes. The property "the executor
+// keeps running other tasks while an op is in flight" is already proven above
+// by `special_op` (and re-checked by [`run`]'s driving-thread assertion while
+// it's parked); this phase reuses that same suspend/resume shape rather than
+// re-proving it, and adds the genuinely new assertion: the UI-state write
+// happens exactly once, on the fiber, under the same serialization discipline
+// as every other op body. Kept on its own statics so it can't perturb the
+// COMPLETED/IN_OP accounting the main exercise phase already asserted zero
+// violations on.
+// ---------------------------------------------------------------------------
+static RENDER_STARTED: AtomicBool = AtomicBool::new(false);
+static RENDER_DONE: AtomicBool = AtomicBool::new(false);
+static RENDER_GATE: AtomicBool = AtomicBool::new(false);
+static RENDER_IN_OP: AtomicBool = AtomicBool::new(false);
+static RENDER_SERIALIZATION_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+static RENDER_ON_OWNER_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+/// Models the shared UI-model fields an async browser op's completion writes
+/// (`folderContentsReady`/`onBrowserOpened`): 0 = not yet rendered, 1 = ready.
+static UI_STATE_READY: AtomicU32 = AtomicU32::new(0);
+/// Counts how many times the render op body performed the write — must land
+/// at exactly 1.
+static UI_STATE_WRITES: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn render_gate_predicate() -> bool {
+    RENDER_GATE.load(Ordering::SeqCst)
+}
+
+extern "C" fn render_op(_ctx: *mut core::ffi::c_void) {
+    if !crate::sd::deluge_storage_on_owner() {
+        RENDER_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if RENDER_IN_OP.swap(true, Ordering::SeqCst) {
+        RENDER_SERIALIZATION_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    RENDER_STARTED.store(true, Ordering::SeqCst);
+    // Suspend mid-body — the same mechanism special_op already used to prove
+    // the executor keeps running other queued work (worker_pump/submit_pump)
+    // while an op is parked; not re-asserted here, just reused, so this op
+    // genuinely models "in flight, rendering" rather than a synchronous call.
+    crate::fiber::yield_until(Some(render_gate_predicate), None);
+    // Resumed: still the same logical op, back on the fiber. This is the
+    // "render then complete" write — landing the result into shared
+    // UI-model state, same as onBrowserOpened/folderContentsReady would.
+    if !crate::sd::deluge_storage_on_owner() {
+        RENDER_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    UI_STATE_READY.store(1, Ordering::SeqCst);
+    UI_STATE_WRITES.fetch_add(1, Ordering::SeqCst);
+    RENDER_IN_OP.store(false, Ordering::SeqCst);
+    RENDER_DONE.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// Optimistic-open back-out contract (rung 4b, shape 2): models an optimistic
+// browser-open that tentatively commits, then discovers the listing failed
+// and unwinds (`onListingFailed`) — all inside the same op body, on the
+// fiber. Asserts the unwind genuinely runs on the fiber and that the
+// "browser open committed" flag is NOT left set once the failed open has
+// been unwound. Own statics, independent of every other phase's accounting.
+// ---------------------------------------------------------------------------
+static BACKOUT_STARTED: AtomicBool = AtomicBool::new(false);
+static BACKOUT_DONE: AtomicBool = AtomicBool::new(false);
+static BACKOUT_IN_OP: AtomicBool = AtomicBool::new(false);
+static BACKOUT_SERIALIZATION_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+static BACKOUT_ON_OWNER_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+static UNWIND_ON_OWNER_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+/// Models "the browser has committed to the newly opened folder" — set
+/// optimistically before the listing is confirmed, and expected to be backed
+/// out again if the listing then fails.
+static OPEN_COMMITTED: AtomicBool = AtomicBool::new(false);
+static OPEN_FAILED: AtomicBool = AtomicBool::new(false);
+static UNWIND_RAN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn backout_op(_ctx: *mut core::ffi::c_void) {
+    if !crate::sd::deluge_storage_on_owner() {
+        BACKOUT_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if BACKOUT_IN_OP.swap(true, Ordering::SeqCst) {
+        BACKOUT_SERIALIZATION_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    BACKOUT_STARTED.store(true, Ordering::SeqCst);
+    // Optimistic open: commit tentatively, as if the browser had already
+    // opened the folder ahead of the listing actually confirming it.
+    OPEN_COMMITTED.store(true, Ordering::SeqCst);
+    // The listing fails.
+    OPEN_FAILED.store(true, Ordering::SeqCst);
+    // Unwind (onListingFailed) — same op body, still genuinely on the fiber —
+    // backs the optimistic commit back out.
+    if !crate::sd::deluge_storage_on_owner() {
+        UNWIND_ON_OWNER_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    OPEN_COMMITTED.store(false, Ordering::SeqCst);
+    UNWIND_RAN.store(true, Ordering::SeqCst);
+    BACKOUT_IN_OP.store(false, Ordering::SeqCst);
+    BACKOUT_DONE.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // The submission channel + the two executor-thread pump tasks.
 // ---------------------------------------------------------------------------
 
@@ -471,5 +571,89 @@ pub fn run() {
     assert!(
         DROP_RETRY_OK.load(Ordering::SeqCst),
         "after the ring drained, a resubmission should be accepted again (drop-retry)"
+    );
+
+    // --- render-then-complete (rung 4b, shape 1): submit render_op, let it
+    // park (modelling "in flight, rendering"), then resume it and assert the
+    // UI-state write landed exactly once, on the fiber, serialized ---
+    assert_eq!(
+        UI_STATE_READY.load(Ordering::SeqCst),
+        0,
+        "UI state written before render_op ever ran"
+    );
+    let render_deadline = Instant::now() + Duration::from_secs(20);
+    tx.send((render_op, 0, false)).expect("send render_op");
+    wait_until(render_deadline, "render_op to start", || {
+        RENDER_STARTED.load(Ordering::SeqCst)
+    });
+    // While parked, the write must not have landed yet — it only happens on
+    // resume/completion, not on entry.
+    assert_eq!(
+        UI_STATE_READY.load(Ordering::SeqCst),
+        0,
+        "UI state written before render_op resumed and completed"
+    );
+    RENDER_GATE.store(true, Ordering::SeqCst);
+    wait_until(render_deadline, "render_op to finish", || {
+        RENDER_DONE.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        UI_STATE_READY.load(Ordering::SeqCst),
+        1,
+        "UI state should read 'ready' after render_op completed"
+    );
+    assert_eq!(
+        UI_STATE_WRITES.load(Ordering::SeqCst),
+        1,
+        "the UI-state write should happen exactly once"
+    );
+    assert_eq!(
+        RENDER_ON_OWNER_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "deluge_storage_on_owner() was false while render_op was genuinely \
+         executing on the fiber"
+    );
+    assert_eq!(
+        RENDER_SERIALIZATION_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "render_op overlapped with another op body (serialization contract broken)"
+    );
+
+    // --- optimistic-open back-out (rung 4b, shape 2): submit backout_op,
+    // which commits optimistically then unwinds a simulated listing failure
+    // in the same op body — assert the unwind ran on the fiber and the
+    // "committed" flag is not left set afterward ---
+    let backout_deadline = Instant::now() + Duration::from_secs(20);
+    tx.send((backout_op, 0, false)).expect("send backout_op");
+    wait_until(backout_deadline, "backout_op to finish", || {
+        BACKOUT_DONE.load(Ordering::SeqCst)
+    });
+    assert!(
+        OPEN_FAILED.load(Ordering::SeqCst),
+        "backout_op should have taken the simulated failure path"
+    );
+    assert!(
+        UNWIND_RAN.load(Ordering::SeqCst),
+        "the unwind (onListingFailed) should have run"
+    );
+    assert_eq!(
+        BACKOUT_ON_OWNER_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "deluge_storage_on_owner() was false while backout_op was genuinely \
+         executing on the fiber"
+    );
+    assert_eq!(
+        UNWIND_ON_OWNER_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "the unwind (onListingFailed) did not run on the fiber"
+    );
+    assert_eq!(
+        BACKOUT_SERIALIZATION_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "backout_op overlapped with another op body (serialization contract broken)"
+    );
+    assert!(
+        !OPEN_COMMITTED.load(Ordering::SeqCst),
+        "browser-open-committed flag left set after a failed+unwound optimistic open"
     );
 }

@@ -53,6 +53,17 @@ bool deluge_worker_run(void (*fn)(void*), void* ctx);
 ///         full) and will NOT run — on false NOTHING was enqueued and no hold was taken.
 bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
 
+/// Like deluge_worker_run, but the operation is HIGH-priority: it dequeues ahead of
+/// every already-queued or later-queued deluge_worker_run/deluge_worker_run_sd_routine
+/// (NORMAL) op, FIFO among other HIGH ops. For audio-streaming reads, which must not
+/// queue behind UI/recorder work on the shared worker ring. Does NOT take an
+/// SD-routine hold — priority and the SD-routine hold are orthogonal.
+/// Cooperative/host: identical to deluge_worker_run (inline) — legacy/host has no
+/// queue, so priority is a no-op there.
+/// @return as deluge_worker_run: true if it ran/queued, false if dropped (queue full)
+///         and will NOT run — on false NOTHING was enqueued.
+bool deluge_worker_run_priority(void (*fn)(void*), void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

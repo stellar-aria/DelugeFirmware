@@ -141,8 +141,9 @@ bool has_lowest_priority_queued() {
 namespace {
 // Coalesced dispatch of the fill onto the storage owner (the worker fiber on Embassy).
 // Only ever touched on the main executor (the streaming requesters + the fiber that runs
-// the fill), so not cross-thread.
-deluge::storage::Coalescer g_loader_coalescer;
+// the fill), so not cross-thread. HIGH-priority: the audio-streaming fill must not queue
+// behind UI/recorder work (NORMAL) on the shared worker ring — an underrun is audible.
+deluge::storage::Coalescer g_loader_coalescer{/*sd_routine=*/false, /*priority=*/true};
 // The winning request()'s args, read by loader_fill when it runs. A coalesced-away request
 // on Embassy updates these but its own dispatch is dropped; the in-flight fill picks up the
 // latest values (last-writer-wins). Legacy runs inline, so these are always this call's args.

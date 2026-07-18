@@ -29,14 +29,26 @@ bool Owner::run_sd_routine(void (*fn)(void*), void* ctx) {
 	return deluge_worker_run_sd_routine(fn, ctx);
 }
 
+bool Owner::run_priority(void (*fn)(void*), void* ctx) {
+	return deluge_worker_run_priority(fn, ctx);
+}
+
 void Coalescer::request(void (*fill)(void*), void* ctx) {
 	if (in_flight_.exchange(true, std::memory_order_acq_rel)) {
 		return; // a dispatch is already in flight — it covers this demand
 	}
 	fill_ = fill;
 	ctx_ = ctx;
-	const bool dispatched = sd_routine_ ? Owner::run_sd_routine(&Coalescer::run_and_release, this)
-	                                    : Owner::run(&Coalescer::run_and_release, this);
+	bool dispatched;
+	if (priority_) {
+		dispatched = Owner::run_priority(&Coalescer::run_and_release, this);
+	}
+	else if (sd_routine_) {
+		dispatched = Owner::run_sd_routine(&Coalescer::run_and_release, this);
+	}
+	else {
+		dispatched = Owner::run(&Coalescer::run_and_release, this);
+	}
 	if (!dispatched) {
 		// Dispatch was dropped (owner queue full) → run_and_release will never fire, so
 		// release the guard here or the Coalescer would wedge single-flight forever.

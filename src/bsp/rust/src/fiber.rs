@@ -347,13 +347,29 @@ use crate::sys::RunCondition;
 pub type RunCondition = Option<unsafe extern "C" fn() -> bool>;
 
 /// Pending operations (serialized — these are user actions, at most one active).
-/// The bool is the sd-routine bit: true ops hold `SD_ROUTINE_HELD` from enqueue
-/// to completion (see `deluge_worker_run_sd_routine`).
-type Job = (extern "C" fn(*mut c_void), *mut c_void, bool);
+/// `is_sd` is the sd-routine bit: true ops hold `SD_ROUTINE_HELD` from enqueue
+/// to completion (see `deluge_worker_run_sd_routine`). `is_high` is the
+/// priority bit: true ops dequeue ahead of every `is_high == false` op (see
+/// `deluge_worker_run_priority`). The two bits are orthogonal — either, both,
+/// or neither may be set on a given op.
+type Job = (extern "C" fn(*mut c_void), *mut c_void, bool, bool);
 const QUEUE_CAP: usize = 4;
-static mut QUEUE: [Option<Job>; QUEUE_CAP] = [None; QUEUE_CAP];
-static mut Q_HEAD: usize = 0;
+
+/// The ring's storage: each occupied slot pairs a `Job` with the sequence
+/// number it was enqueued at (`Q_NEXT_SEQ`, monotonic). This is deliberately
+/// NOT a rotating head/tail ring — a job is written into whichever slot is
+/// free at enqueue time — because `dequeue` must be able to remove the oldest
+/// *HIGH* job even when it isn't the physically-oldest slot (a plain
+/// head/tail ring can only ever remove the head). The per-slot sequence gives
+/// `dequeue` a total enqueue order to scan over: see `dequeue` below.
+static mut QUEUE: [Option<(Job, u32)>; QUEUE_CAP] = [None; QUEUE_CAP];
 static mut Q_COUNT: usize = 0;
+/// Monotonic (wrapping) insertion counter, stamped onto each enqueued slot.
+/// Wraparound is not specially handled: at `QUEUE_CAP == 4` outstanding jobs,
+/// a wrong ordering decision would need ~4 billion intervening enqueues
+/// between two still-queued jobs, which cannot happen (the queue drains far
+/// faster than that).
+static mut Q_NEXT_SEQ: u32 = 0;
 
 /// An operation is on the fiber (running or suspended) — distinct from idle.
 static FIBER_BUSY: AtomicBool = AtomicBool::new(false);
@@ -412,15 +428,26 @@ fn now_us() -> u64 {
 /// Enqueue an operation on the worker ring, taking the SD-routine hold when
 /// `is_sd` (synchronously, so it engages before the caller returns). Returns
 /// whether it was accepted; a dropped enqueue (queue full) takes no hold.
-fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool) -> bool {
+/// `is_high` is stamped onto the slot for `dequeue` to prioritize (see there)
+/// — it does not affect acceptance/capacity, which is identical for both
+/// priority levels (a single shared `QUEUE_CAP`, unchanged from before HIGH
+/// existed).
+fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool, is_high: bool) -> bool {
     // SAFETY: single-threaded; enqueue only (no switch here).
     let enqueued = unsafe {
         if Q_COUNT < QUEUE_CAP {
-            let tail = (Q_HEAD + Q_COUNT) % QUEUE_CAP;
-            core::ptr::addr_of_mut!(QUEUE)
-                .cast::<Option<Job>>()
-                .add(tail)
-                .write(Some((f, ctx, is_sd)));
+            let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
+            let mut free: Option<usize> = None;
+            for i in 0..QUEUE_CAP {
+                if queue.add(i).read().is_none() {
+                    free = Some(i);
+                    break;
+                }
+            }
+            let idx = free.expect("Q_COUNT < QUEUE_CAP implies a free slot");
+            let seq = Q_NEXT_SEQ;
+            Q_NEXT_SEQ = Q_NEXT_SEQ.wrapping_add(1);
+            queue.add(idx).write(Some(((f, ctx, is_sd, is_high), seq)));
             Q_COUNT += 1;
             if is_sd {
                 // Take the hold synchronously, before returning, so a RESOURCE_SD_ROUTINE
@@ -444,7 +471,7 @@ fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool) -> bool
 /// serialized after any already-queued operations once the worker is pumped.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
-    enqueue(f, ctx, false)
+    enqueue(f, ctx, false, false)
 }
 
 /// SD-routine-class submission (see include/libdeluge/worker.h). Same enqueue as
@@ -457,23 +484,60 @@ pub extern "C" fn deluge_worker_run_sd_routine(
     f: extern "C" fn(*mut c_void),
     ctx: *mut c_void,
 ) -> bool {
-    enqueue(f, ctx, true)
+    enqueue(f, ctx, true, false)
 }
 
+/// HIGH-priority submission (see include/libdeluge/worker.h): dequeues ahead
+/// of every already-queued or later-queued `deluge_worker_run`/
+/// `deluge_worker_run_sd_routine` (NORMAL) op, FIFO among other HIGH ops —
+/// see `dequeue` below. For audio-streaming reads, which must not queue
+/// behind UI/recorder work on the shared worker ring. Does NOT take an
+/// SD-routine hold (`is_sd = false`): priority and the SD-routine hold are
+/// orthogonal bits.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_worker_run_priority(
+    f: extern "C" fn(*mut c_void),
+    ctx: *mut c_void,
+) -> bool {
+    enqueue(f, ctx, false, true)
+}
+
+/// Dequeue the next op to run: the oldest (lowest-sequence) HIGH-priority job
+/// if any is queued, else the oldest NORMAL job — i.e. HIGH strictly before
+/// NORMAL, FIFO within each level. `QUEUE_CAP` is small (4), so a linear scan
+/// per dequeue is cheap and keeps the ring itself a plain fixed array (no
+/// separate sub-rings to keep in sync).
 fn dequeue() -> Option<Job> {
     // SAFETY: single-threaded access to the ring.
     unsafe {
         if Q_COUNT == 0 {
             return None;
         }
-        let head = Q_HEAD;
-        let job = core::ptr::addr_of_mut!(QUEUE)
-            .cast::<Option<Job>>()
-            .add(head)
-            .replace(None);
-        Q_HEAD = (Q_HEAD + 1) % QUEUE_CAP;
+        let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
+        let mut best: Option<(usize, u32, bool)> = None; // (slot index, seq, is_high)
+        for i in 0..QUEUE_CAP {
+            if let Some((job, seq)) = queue.add(i).read() {
+                let (_, _, _, is_high) = job;
+                let take = match best {
+                    None => true,
+                    // A HIGH candidate beats any NORMAL one outright; within
+                    // the same level, the smaller (older) sequence wins.
+                    Some((_, best_seq, best_high)) => {
+                        (is_high && !best_high) || (is_high == best_high && seq < best_seq)
+                    }
+                };
+                if take {
+                    best = Some((i, seq, is_high));
+                }
+            }
+        }
+        let (idx, _, _) = best.expect("Q_COUNT > 0 implies at least one occupied slot");
+        let (job, _seq) = queue
+            .add(idx)
+            .replace(None)
+            .expect("scanned slot was occupied");
         Q_COUNT -= 1;
-        job
+        Some(job)
     }
 }
 
@@ -486,7 +550,7 @@ fn queue_nonempty() -> bool {
 /// Called from the embassy `app_task` on a ~1 ms ticker.
 pub fn worker_poll() -> bool {
     if !FIBER_BUSY.load(Ordering::Relaxed) {
-        let Some((f, ctx, is_sd)) = dequeue() else {
+        let Some((f, ctx, is_sd, _is_high)) = dequeue() else {
             return false;
         };
         ACTIVE_IS_SD_ROUTINE.store(is_sd, Ordering::Relaxed);

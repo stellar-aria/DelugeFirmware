@@ -103,6 +103,14 @@ bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx) {
 	return true;
 }
 
+// HIGH-priority dispatch. On the cooperative BSPs there is no queue to jump ahead of:
+// the op runs inline, identical to deluge_worker_run. Priority only matters once ops
+// can queue behind each other (the Embassy worker fiber); here it's a no-op.
+bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
+	fn(ctx);
+	return true;
+}
+
 // libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the
 // caller, so the caller is always the owner. Embassy overrides (fiber-only).
 bool deluge_storage_on_owner(void) {

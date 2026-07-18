@@ -31,3 +31,14 @@ extern "C" bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx) {
 	fn(ctx);
 	return true;
 }
+
+// Host stand-in: same inline semantics + drop hook as deluge_worker_run. The priority
+// queue-jump is Embassy-only (there's no queue here), so on host this is
+// behaviourally identical.
+extern "C" bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
+	if (g_mock_worker_drop) {
+		return false;
+	}
+	fn(ctx);
+	return true;
+}

@@ -139,7 +139,11 @@ void Browser::runPendingListing() {
 
 void Browser::onListingFailed(Error error) {
 	display->displayError(error);
-	exitAction(); // default: back out to the previous UI
+	// close(), not exitAction(): matches the six removed inline failure tails exactly. exitAction() is
+	// virtual and some subclasses override it with side effects those tails never triggered (e.g.
+	// LoadSongUI::exitAction() shows a different popup and may not close; LoadInstrumentPresetUI's calls
+	// revertToInitialPreset()).
+	close();
 }
 
 bool Browser::opened() {
@@ -991,7 +995,10 @@ Error Browser::reloadImpl(int32_t direction) {
 		if (error != Error::NONE) {
 			D_PRINTLN("error while reloading, emptying file items");
 			emptyFileItems();
-			return error;
+			// TODO - need to close UI or something?
+			// Reload failure stays silent (no popup, no exit) - swallow it here rather than letting it
+			// propagate to runPendingListing()/onListingFailed(), matching the original inline behaviour.
+			return Error::NONE;
 		}
 
 		newFileIndex = (pendingReloadCatalogSearchDirection_ == CATALOG_SEARCH_LEFT)
@@ -1004,7 +1011,10 @@ Error Browser::reloadImpl(int32_t direction) {
 		if (error != Error::NONE) {
 			D_PRINTLN("error while reloading, emptying file items");
 			emptyFileItems();
-			return error;
+			// TODO - need to close UI or something?
+			// Reload failure stays silent (no popup, no exit) - swallow it here rather than letting it
+			// propagate to runPendingListing()/onListingFailed(), matching the original inline behaviour.
+			return Error::NONE;
 		}
 
 		newFileIndex = searchFileItems(enteredText.c_str()) + offset;
@@ -1470,10 +1480,14 @@ ActionResult Browser::backButtonAction() {
 	if (isSDRoutineActive()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
 	}
-	// goUpOneDirectoryLevel() now dispatches onto the storage owner and always returns Error::NONE
-	// synchronously; NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP (pressing Back at the root folder) is
-	// discovered on the fiber and routed through onListingFailed (displayError + exitAction).
-	goUpOneDirectoryLevel();
+	// goUpOneDirectoryLevel() checks for the root-of-tree case synchronously (see its comment) and returns
+	// NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP without dispatching, so pressing Back at the root is handled
+	// right here exactly as before migration. Any other failure is discovered on the fiber and routed
+	// through onListingFailed (displayError + close()).
+	Error error = goUpOneDirectoryLevel();
+	if (error != Error::NONE) {
+		exitAction();
+	}
 
 	return ActionResult::DEALT_WITH;
 }
@@ -1536,6 +1550,16 @@ Error Browser::goIntoFolderImpl(char const* folderName) {
 }
 
 Error Browser::goUpOneDirectoryLevel() {
+	// The "already at root" case is checked synchronously here, not on the fiber: the original inline
+	// behaviour returned NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP with no popup and no UI transition, and
+	// backButtonAction() depends on getting that back synchronously so it can handle the root case
+	// exactly as before. Only dispatch the (SD-touching) listing when there IS a level to ascend.
+	char const* currentDirChars = currentDir.c_str();
+	char const* slashAddress = strrchr(currentDirChars, '/');
+	if (!slashAddress || slashAddress == currentDirChars) {
+		return Error::NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP;
+	}
+
 	beginListing({.action = ListingAction::UpLevel, .direction = -1});
 	return Error::NONE;
 }
@@ -1543,6 +1567,8 @@ Error Browser::goUpOneDirectoryLevel() {
 // The pre-listing currentDir manipulation (finding the parent, resizing currentDir) runs here, on
 // the fiber alongside the listing, rather than synchronously in goUpOneDirectoryLevel() - it must
 // happen atomically with arrivedInNewFolder()'s SD access, not race the caller's next HID event.
+// goUpOneDirectoryLevel() has already confirmed synchronously that there IS a level to go up before
+// dispatching here; the check is repeated defensively since currentDir is re-read from scratch.
 Error Browser::goUpOneDirectoryLevelImpl() {
 
 	char const* currentDirChars = currentDir.c_str();
@@ -1563,11 +1589,16 @@ Error Browser::goUpOneDirectoryLevelImpl() {
 	return error;
 }
 
+// Returns the SYNCHRONOUS mkdir outcome, not the (now async) listing that follows it on success.
+// acceptCurrentOption() (save_song_or_instrument.cpp) branches on this return to decide whether to
+// close the context menu: mkdir failure must still be reported synchronously so the menu stays open
+// with the error, exactly as before goIntoFolder() started dispatching its listing. A listing failure
+// after a successful mkdir is an inherent, acceptable async delta - it's routed through
+// onListingFailed() instead, after the menu has already closed on the (correct) mkdir success.
 Error Browser::createFolder() {
 	displayText();
 
 	std::string newDirPath;
-	Error error;
 
 	newDirPath = currentDir;
 	if (!newDirPath.empty()) {
@@ -1581,9 +1612,9 @@ Error Browser::createFolder() {
 		return Error::SD_CARD;
 	}
 
-	error = goIntoFolder(enteredText.c_str());
+	goIntoFolder(enteredText.c_str()); // Dispatches the listing async; always returns Error::NONE.
 
-	return error;
+	return Error::NONE;
 }
 
 Error Browser::createFoldersRecursiveIfNotExists(const char* path) {

@@ -157,7 +157,7 @@ protected:
 
 	// Completion hooks (run inside the op, on the fiber):
 	virtual void onBrowserOpened() {}          // open-only bespoke tail (default empty)
-	virtual void onListingFailed(Error error); // default: displayError + exit to previous UI
+	virtual void onListingFailed(Error error); // default: displayError + close() (not exitAction())
 
 	// Bodies of the listing actions, run on the fiber inside runPendingListing().
 	Error openListingImpl(char const* filenameToStartAt, char const* defaultDir);

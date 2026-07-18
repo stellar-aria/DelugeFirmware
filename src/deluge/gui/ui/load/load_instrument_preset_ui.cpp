@@ -361,6 +361,9 @@ ActionResult LoadInstrumentPresetUI::buttonAction(deluge::hid::Button b, bool on
 	else if (b == SYNTH) {
 		newOutputType = OutputType::SYNTH;
 doChangeOutputType:
+		if (listingInProgress_) {
+			return ActionResult::DEALT_WITH;
+		}
 		if (on && currentUIMode == UI_MODE_NONE) {
 			if (inCardRoutine) {
 				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;

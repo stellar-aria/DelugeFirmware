@@ -62,6 +62,16 @@ public:
 		return std::nullopt;
 	}
 
+	/// Force back to idle, discarding any queued target. For when a dispatch the caller
+	/// believed it had issued never actually ran (e.g. the owner queue was full, so the
+	/// op that would have called `complete()` will never fire) — without this the
+	/// single-flight guard would wedge forever. The dropped target is simply lost; the
+	/// next `request()` supersedes it.
+	void reset() {
+		in_flight_ = false;
+		queued_.reset();
+	}
+
 	[[nodiscard]] bool in_flight() const { return in_flight_; }
 	[[nodiscard]] const T& current() const { return current_; }
 

@@ -40,6 +40,15 @@ describe latest_wins("deluge::storage::LatestWins", $ {
 		expect(lw.in_flight()).to_be_false();
 	});
 
+	it("reset() releases the in-flight guard so a later request dispatches again", _ {
+		LatestWins<int> lw;
+		lw.request(1);          // in flight
+		lw.request(2);          // queued
+		lw.reset();             // dispatch was dropped — release, discard the queued target
+		expect(lw.in_flight()).to_be_false();
+		expect(lw.request(9)).to_be_true(); // not wedged: dispatches again
+	});
+
 	it("converges: after the re-dispatch completes with nothing new, it idles", _ {
 		LatestWins<int> lw;
 		lw.request(1);

@@ -179,6 +179,61 @@ extern "C" fn sd_routine_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
+// Drop-retry contract (rung 4a): `deluge_worker_run` returns false when the
+// fixed-capacity ring is full, and once drained a resubmission is accepted
+// again. The one-shot UI/smsysex dispatchers rely on that false return to
+// release their single-flight guard and retry (LatestWins::reset,
+// g_sysex_op_in_flight = false) instead of wedging. Driven as its own phase
+// after the main exercise so its burst can't perturb the accounting above.
+// ---------------------------------------------------------------------------
+
+/// QUEUE_CAP in fiber.rs is 4 (private there); mirrored here. The invariant this phase asserts is
+/// that a burst of CAP+1 *synchronous* enqueues (no executor turn in between, so `worker_pump`
+/// cannot drain a slot mid-burst) yields exactly CAP accepted and one refused.
+const QUEUE_CAP_MIRROR: usize = 4;
+static DROP_TEST_GO: AtomicBool = AtomicBool::new(false);
+static DROP_TEST_DONE: AtomicBool = AtomicBool::new(false);
+static DROP_ACCEPTED: AtomicU32 = AtomicU32::new(0);
+static DROP_DROPPED: AtomicU32 = AtomicU32::new(0);
+static DROP_RETRY_OK: AtomicBool = AtomicBool::new(false);
+
+/// A trivial op for the drop test — it only needs to occupy a queue slot; the burst never depends
+/// on it doing anything, and it runs harmlessly when the ring later drains.
+extern "C" fn drop_test_op(_ctx: *mut core::ffi::c_void) {}
+
+/// The drop-retry phase, run on the executor thread (the only legal caller of `deluge_worker_run`).
+/// Bursts CAP+1 enqueues WITHOUT awaiting between them, so `worker_pump` is starved and the ring
+/// genuinely fills — the last enqueue must be refused. Then it drains (awaits) and proves a
+/// resubmission is accepted again.
+#[embassy_executor::task]
+async fn drop_test() {
+    // Park until the driving thread opens the gate (after the main + sd-routine phases).
+    while !DROP_TEST_GO.load(Ordering::SeqCst) {
+        embassy_time::Timer::after_millis(2).await;
+    }
+    // Synchronous burst: no `.await` here, so worker_pump cannot dequeue and the ring fills.
+    let mut accepted = 0u32;
+    let mut dropped = 0u32;
+    for _ in 0..(QUEUE_CAP_MIRROR + 1) {
+        if crate::fiber::deluge_worker_run(drop_test_op, core::ptr::null_mut()) {
+            accepted += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    DROP_ACCEPTED.store(accepted, Ordering::SeqCst);
+    DROP_DROPPED.store(dropped, Ordering::SeqCst);
+    // Let the executor drain the ring (worker_pump runs the queued ops).
+    embassy_time::Timer::after_millis(50).await;
+    // Ring drained → a fresh submit is accepted again (the retry path succeeds).
+    DROP_RETRY_OK.store(
+        crate::fiber::deluge_worker_run(drop_test_op, core::ptr::null_mut()),
+        Ordering::SeqCst,
+    );
+    DROP_TEST_DONE.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // The submission channel + the two executor-thread pump tasks.
 // ---------------------------------------------------------------------------
 
@@ -268,6 +323,7 @@ pub fn run() {
             executor.run(|spawner: Spawner| {
                 spawner.spawn(worker_pump().unwrap());
                 spawner.spawn(submit_pump().unwrap());
+                spawner.spawn(drop_test().unwrap());
             });
         })
         .expect("spawning the host executor thread");
@@ -394,5 +450,26 @@ pub fn run() {
         sd_deadline,
         "sd_routine_held() false after completion",
         || !crate::fiber::sd_routine_held(),
+    );
+
+    // --- drop-retry contract: a full ring refuses, a drained ring accepts again (rung 4a) ---
+    let drop_deadline = Instant::now() + Duration::from_secs(20);
+    DROP_TEST_GO.store(true, Ordering::SeqCst);
+    wait_until(drop_deadline, "drop_test to finish", || {
+        DROP_TEST_DONE.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        DROP_ACCEPTED.load(Ordering::SeqCst),
+        QUEUE_CAP_MIRROR as u32,
+        "a burst of CAP+1 synchronous enqueues should fill the ring to exactly CAP"
+    );
+    assert_eq!(
+        DROP_DROPPED.load(Ordering::SeqCst),
+        1,
+        "the enqueue past a full ring should be refused (false) exactly once"
+    );
+    assert!(
+        DROP_RETRY_OK.load(Ordering::SeqCst),
+        "after the ring drained, a resubmission should be accepted again (drop-retry)"
     );
 }

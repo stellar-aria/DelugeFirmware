@@ -501,6 +501,11 @@ void writeDevicesToFile() {
 bool successfullyReadDevicesFromFile = false; // We'll only do this one time
 
 void readDevicesFromFile() {
+	// RUNG-5 OWNER-AUDIT EXEMPTION: this runs once at boot, before the storage-owner worker pump is
+	// reliably driving, and reads the card when nothing else does (so it is not a FatFS-reentrancy
+	// hazard). Left inline deliberately — dispatching onto the owner here could queue an op nothing
+	// pumps yet. The rung-5 "FatFS entered only on the owner" audit assert must whitelist this site.
+	// See docs/superpowers/specs/2026-07-17-async-sd-rung4-ui-sync-design.md §7.
 	if (successfullyReadDevicesFromFile) {
 		return; // Yup, we only want to do this once
 	}

@@ -1033,9 +1033,10 @@ pub fn run() {
     );
 
     // --- block_on_fiber (rung 5, the flip): submit block_on_fiber_op (which
-    // drives a real embassy_time::Timer future through the actual
+    // drives a hand-built, AtomicWaker-backed BofFuture through the actual
     // fiber::block_on_fiber fn — the same fn sd.rs's device read/write sites
-    // now use for the real SD transfer future), then while it's suspended
+    // now use for the real SD transfer future; see the header above for why
+    // embassy_time::Timer was tried and rejected), then while it's suspended
     // submit a probe op and confirm it doesn't start until block_on_fiber_op
     // completes, and that completion happens promptly (Waker-driven, not
     // just an unrelated coarse fallback) ---

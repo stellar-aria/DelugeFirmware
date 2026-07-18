@@ -459,12 +459,13 @@ fn main() {
     // Deliberately called here, synchronously, before any executor/fiber
     // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
     // not an app FatFS access, so it has no owner to route through yet. Under
-    // `storage-owner-audit` (rung-5 Task 4's pre-flight gate) this genuinely
-    // — and correctly — trips `sd.rs`'s `on_fiber()` debug_assert!, so it is
-    // skipped when that feature is enabled rather than "migrated" onto an
-    // owner that doesn't exist at this point in boot; see the Task 4 report
-    // (`.superpowers/sdd/task-4-report.md`) for the full audit writeup.
-    #[cfg(not(feature = "storage-owner-audit"))]
+    // `storage-owner-audit` (rung-5 Task 4's pre-flight gate) this does NOT
+    // trip `sd.rs`'s `on_fiber()` debug_assert!: the assert's guard is
+    // `on_fiber() || !worker_started()`, and `worker_started()` only latches
+    // true once the first `worker_poll()` runs, which is after this
+    // synchronous self-test returns — so it runs unconditionally in both
+    // configs. See the Task 4 report (`.superpowers/sdd/task-4-report.md`)
+    // for the full audit writeup and `fiber::worker_started` for the latch.
     {
         const TEST_SECTOR: u32 = 1;
         let mut pattern = [0u8; 512];
@@ -488,11 +489,6 @@ fn main() {
         );
         log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
     }
-    #[cfg(feature = "storage-owner-audit")]
-    log::info!(
-        "deluge-bsp-rust: sd round-trip SKIPPED (storage-owner-audit is on — this bootstrap \
-         self-test predates any owner/fiber by design, see main.rs)"
-    );
 
     // --- Whole-BSP host boot smoke (no C++ app; `host_app` OFF) ------------
     // Bring up a host Embassy executor (platform-std) and spawn the four

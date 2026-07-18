@@ -438,7 +438,7 @@ async fn task_runner(slot: &'static TaskSlot) {
             let run_us = t0.elapsed().as_micros();
             CURRENT.store(prev, Ordering::Relaxed);
             run_us
-            // _sd / _usb gates released here, before the once-check and back-off.
+            // _usb gate released here, before the once-check and back-off.
         };
         slot.record(run_us);
 

@@ -40,6 +40,7 @@
 #include "libdeluge/app.h"
 #include "libdeluge/audio_io.h"
 #include "libdeluge/signals.h"
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/system.h"
 #include "memory/general_memory_allocator.h"
 #include "memory/stack_guard.h"
@@ -63,6 +64,7 @@
 #include "storage/audio/stream/loader.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h" // deluge::storage::Coalescer (SD-routine dispatch)
 #include "storage/storage_manager.h"
 #include "sync/sd_access.h"
 #include "util/functions.h"
@@ -1524,6 +1526,35 @@ void doRecorderCardRoutines() {
 	}
 }
 
+namespace {
+// Coalesced SD-routine dispatch of the recorder card-write drain onto the storage
+// owner (the worker fiber on Embassy). SD-routine-class: while a drain is in flight
+// the RESOURCE_SD_ROUTINE gate holds off audioRecorder.slowRoutine (discardRecorder),
+// so the recorder can't be freed mid-drain. Only ever touched on the main executor.
+deluge::storage::Coalescer g_recorder_coalescer{/*sd_routine=*/true};
+
+void recorder_card_routines_fill(void*) {
+	doRecorderCardRoutines();
+}
+} // namespace
+
+void requestRecorderCardRoutines() {
+	// Never from an ISR / the audio interrupt-executor (see loader::request_pump):
+	// deluge_storage_on_owner() is false there and we'd race the coalescer's
+	// main-executor-only state. The recorder drain is never driven from an ISR.
+	if (deluge_in_interrupt()) {
+		return;
+	}
+	// Already on the owner (fiber on Embassy; always on legacy/host) — run inline,
+	// so legacy/host is byte-identical to the direct call (golden-inert) and a
+	// fiber-context caller doesn't re-dispatch onto the fiber it already runs on.
+	if (deluge_storage_on_owner()) {
+		doRecorderCardRoutines();
+		return;
+	}
+	g_recorder_coalescer.request(recorder_card_routines_fill, nullptr);
+}
+
 void slowRoutine() {
 	if (isSDRoutineActive()) {
 		// can happen if the SD routine is yielding
@@ -1548,8 +1579,9 @@ void slowRoutine() {
 
 	createdNewRecorder = false;
 
-	// Go through all SampleRecorders, getting them to write etc
-	doRecorderCardRoutines();
+	// Go through all SampleRecorders, getting them to write etc — via the storage
+	// owner (SD-routine-class; inline on legacy/host, coalesced on the fiber on Embassy).
+	requestRecorderCardRoutines();
 }
 
 // will need to take in the config argument

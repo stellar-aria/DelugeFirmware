@@ -70,8 +70,6 @@ bool LoadMidiDeviceDefinitionUI::opened() {
 	              .filenameToStartAt = searchFilename,
 	              .defaultDir = MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER});
 
-	focusRegained();
-
 	return true;
 }
 
@@ -133,6 +131,11 @@ void LoadMidiDeviceDefinitionUI::onBrowserOpened() {
 	currentLabelLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	drawKeys();
+
+	// focusRegained() used to run synchronously right after dispatching the listing (see opened());
+	// move it here so it runs after the listing actually completes, matching the Save* browsers'
+	// convention (rung-5 prerequisite #2).
+	focusRegained();
 }
 
 void LoadMidiDeviceDefinitionUI::folderContentsReady(int32_t entryDirection) {

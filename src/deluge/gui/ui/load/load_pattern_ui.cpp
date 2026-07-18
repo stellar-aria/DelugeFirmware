@@ -113,8 +113,6 @@ bool LoadPatternUI::opened() {
 	beginListing(
 	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = defaultDir});
 
-	focusRegained();
-
 	return true;
 }
 
@@ -178,6 +176,11 @@ void LoadPatternUI::onBrowserOpened() {
 	currentLabelLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	drawKeys();
+
+	// focusRegained() used to run synchronously right after dispatching the listing (see opened());
+	// move it here so it runs after the listing actually completes, matching the Save* browsers'
+	// convention (rung-5 prerequisite #2).
+	focusRegained();
 }
 
 void LoadPatternUI::folderContentsReady(int32_t entryDirection) {

@@ -84,6 +84,7 @@ protected:
 	void folderContentsReady(int32_t entryDirection) override;
 	void currentFileChanged(int32_t movementDirection) override;
 	void onBrowserOpened() override;
+	void onListingFailed(Error error) override;
 
 private:
 	bool showingAuditionPads();
@@ -94,6 +95,11 @@ private:
 	void exitAction() override;
 	bool isInstrumentInList(Instrument* searchInstrument, Output* list);
 	bool findUnusedSlotVariation(std::string* oldName, std::string* newName);
+
+	// Tells changeOutputType()'s Open listing apart from opened()'s in the shared onBrowserOpened()/
+	// onListingFailed() hooks (see changeOutputType()'s comment).
+	bool changingOutputType_{};
+	OutputType outputTypeBeforeChange_;
 
 	InstrumentClip* instrumentClipToLoadFor{}; // Can be NULL - if called from Arranger.
 	Instrument* instrumentToReplace{}; // The Instrument that's actually successfully loaded and assigned to the Clip.

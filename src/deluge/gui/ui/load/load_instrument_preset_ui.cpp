@@ -131,16 +131,15 @@ bool LoadInstrumentPresetUI::opened() {
 	              .filenameToStartAt = searchFilename,
 	              .defaultDir = getInstrumentFolder(outputTypeToLoad)});
 
-	focusRegained();
 	return true;
 }
 
 // Computes the LED/icon/title state and currentDir for outputTypeToLoad's category, and returns
 // the filename to search for within it (empty if none). Does NOT perform the listing itself
 // (that used to be fused in here) - callers combine this with getInstrumentFolder(outputTypeToLoad)
-// (the category's default dir) to either dispatch an async Open listing (opened()) or call
-// arrivedInNewFolder() directly (changeOutputType(), which isn't part of the browser-open path and
-// stays synchronous).
+// (the category's default dir) to dispatch an async Open listing, either from opened() or from
+// changeOutputType() (both go through beginListing() now; see changeOutputType()'s comment for how
+// its Open listing is told apart from opened()'s).
 std::string LoadInstrumentPresetUI::setupForOutputType() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false);
@@ -262,9 +261,9 @@ useDefaultFolder:
 	return searchFilename;
 }
 
-// Shared post-listing tail for both the async Open path (onBrowserOpened(), run once beginListing()'s
-// listing completes) and the synchronous changeOutputType() path (which calls arrivedInNewFolder()
-// directly and isn't part of the browser-open migration).
+// Shared post-listing tail for both async Open listings this UI dispatches (onBrowserOpened(), run
+// once beginListing()'s listing completes): the browser-open path from opened(), and the output-type
+// switch path from changeOutputType() (see onBrowserOpened() below for how the two are told apart).
 void LoadInstrumentPresetUI::finishArrivedInFolder(char const* defaultDir) {
 	currentInstrumentLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
@@ -283,6 +282,33 @@ void LoadInstrumentPresetUI::finishArrivedInFolder(char const* defaultDir) {
 
 void LoadInstrumentPresetUI::onBrowserOpened() {
 	finishArrivedInFolder(getInstrumentFolder(outputTypeToLoad));
+
+	if (changingOutputType_) {
+		// This Open listing was dispatched by changeOutputType(), not opened() - run its post-listing
+		// follow-up now that the listing has actually completed (it used to run synchronously, inline,
+		// straight after arrivedInNewFolder() - see changeOutputType()'s comment).
+		changingOutputType_ = false;
+		renderUIsForOled();
+		performLoad();
+	}
+	else {
+		// opened()'s post-listing tail: focusRegained() used to run synchronously right after
+		// dispatching the listing (see opened()); move it here so it runs after the listing actually
+		// completes, matching the Save* browsers' convention (rung-5 prerequisite #2).
+		focusRegained();
+	}
+}
+
+void LoadInstrumentPresetUI::onListingFailed(Error error) {
+	if (changingOutputType_) {
+		// changeOutputType()'s original synchronous path silently reverted outputTypeToLoad on failure
+		// and left the browser open - no displayError(), no close(). Preserve that instead of falling
+		// through to the base Browser::onListingFailed() (displayError + close()).
+		changingOutputType_ = false;
+		outputTypeToLoad = outputTypeBeforeChange_;
+		return;
+	}
+	Browser::onListingFailed(error);
 }
 
 void LoadInstrumentPresetUI::folderContentsReady(int32_t entryDirection) {
@@ -493,16 +519,20 @@ void LoadInstrumentPresetUI::changeOutputType(OutputType newOutputType) {
 		outputTypeToLoad = newOutputType;
 
 		std::string searchFilename = setupForOutputType();
-		char const* defaultDir = getInstrumentFolder(outputTypeToLoad);
-		Error error = arrivedInNewFolder(0, searchFilename.c_str(), defaultDir);
-		if (error != Error::NONE) {
-			outputTypeToLoad = oldOutputType;
-			return;
-		}
-		finishArrivedInFolder(defaultDir);
-
-		renderUIsForOled();
-		performLoad();
+		// Route this listing through the owner too, the same way opened() does - it's the last
+		// browser-listing path in this file that was still calling arrivedInNewFolder() (and the
+		// renderUIsForOled()/performLoad() follow-up) synchronously and inline. changingOutputType_
+		// tells the shared onBrowserOpened()/onListingFailed() hooks apart from opened()'s Open
+		// listing so they can run this path's own follow-up/revert once the listing actually
+		// completes, instead of before it (see onBrowserOpened() and onListingFailed()).
+		// buttonAction()'s doChangeOutputType gate (listingInProgress_) still guards re-entry while
+		// this is in flight.
+		outputTypeBeforeChange_ = oldOutputType;
+		changingOutputType_ = true;
+		beginListing({.action = ListingAction::Open,
+		              .direction = 0,
+		              .filenameToStartAt = searchFilename,
+		              .defaultDir = getInstrumentFolder(outputTypeToLoad)});
 	}
 }
 

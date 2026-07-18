@@ -145,6 +145,13 @@ void Browser::onListingFailed(Error error) {
 	// LoadSongUI::exitAction() shows a different popup and may not close; LoadInstrumentPresetUI's calls
 	// revertToInitialPreset()).
 	close();
+	// The removed inline failure tails (pre-async-listing) all paired their displayError() with a
+	// full force-redraw - e.g. LoadSongUI/LoadInstrumentPresetUI/LoadPatternUI/LoadMidiDeviceDefinitionUI's
+	// opened() and the Save* browsers' opened() called renderingNeededRegardlessOfUI() around the same
+	// error path, because by the time a listing can fail we've usually already drawn the QWERTY pads.
+	// close() alone doesn't force that redraw, so without this a listing failure could leave stale pads
+	// on screen until something else triggers a render.
+	renderingNeededRegardlessOfUI();
 }
 
 bool Browser::opened() {

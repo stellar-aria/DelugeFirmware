@@ -46,6 +46,20 @@ namespace deluge::audio::stream::loader {
 ///        that reentrancy isn't safe (e.g. deep inside the card-access routine).
 void pump(int32_t max_num = 128, bool may_process_user_actions = false);
 
+/// @brief Owner-mediated, coalesced entry point for `pump()` — the streaming call sites' seam.
+///
+/// Routes the cluster fill through the storage `Owner` (the worker fiber on Embassy), so that
+/// at the async-SD ladder's final rung a mid-transfer read can suspend instead of parking the
+/// executor. Single-flight coalesced (see `deluge::storage::Coalescer`): the high-frequency
+/// streaming pumps collapse onto one owner fill at a time rather than flooding the fiber queue.
+///
+/// On legacy/host the owner runs the fill inline, so this is behaviourally identical to a direct
+/// `pump(max_num, may_process_user_actions)`. Use this at the main-executor *streaming* sites;
+/// offline stem-export / drain-all sites keep calling `pump()` directly (they must not dispatch
+/// onto the owner from the audio interrupt-executor). See
+/// docs/superpowers/specs/2026-07-17-async-sd-rung2-loader-design.md.
+void request_pump(int32_t max_num = 128, bool may_process_user_actions = false);
+
 /// @brief Whether any queued (and still-leased) cluster sits at the loader's lowest priority.
 ///
 /// Used as the load-song yield gate: callers wait for the lowest-priority backlog to drain before

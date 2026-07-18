@@ -25,4 +25,19 @@ void Owner::run(void (*fn)(void*), void* ctx) {
 	deluge_worker_run(fn, ctx);
 }
 
+void Coalescer::request(void (*fill)(void*), void* ctx) {
+	if (in_flight_.exchange(true, std::memory_order_acq_rel)) {
+		return; // a dispatch is already in flight — it covers this demand
+	}
+	fill_ = fill;
+	ctx_ = ctx;
+	Owner::run(&Coalescer::run_and_release, this);
+}
+
+void Coalescer::run_and_release(void* self_) {
+	auto* self = static_cast<Coalescer*>(self_);
+	self->fill_(self->ctx_);
+	self->in_flight_.store(false, std::memory_order_release);
+}
+
 } // namespace deluge::storage

@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <atomic>
+
 namespace deluge::storage {
 
 /// @brief The single storage owner: routes FatFS-touching operations through
@@ -34,6 +36,31 @@ namespace deluge::storage {
 struct Owner {
 	/// Queue `fn(ctx)` on the owner. C-ABI-shaped for existing call sites.
 	static void run(void (*fn)(void*), void* ctx);
+};
+
+/// @brief Single-flight coalesced dispatch onto the storage `Owner`.
+///
+/// At most one dispatch from a given `Coalescer` runs at a time: a `request()` made while
+/// a dispatch is still in flight is dropped (the running one covers the demand). The
+/// dispatched `fill` runs on the owner (fire-and-forget on Embassy, inline on legacy/host),
+/// and the `Coalescer` releases itself once `fill` returns. Purpose: a high-frequency caller
+/// (e.g. the streaming loader's ~0.1 ms pump) collapses onto a single owner op instead of
+/// flooding the worker fiber's bounded queue.
+///
+/// @note All calls are expected from the main executor (not cross-thread — the requesters and
+/// the fiber that runs `fill` both live there); the atomic guards re-entrancy (a `request()`
+/// issued from inside a running `fill` coalesces).
+class Coalescer {
+public:
+	/// If no dispatch from this `Coalescer` is in flight, run `fill(ctx)` on the owner;
+	/// otherwise coalesce (no-op).
+	void request(void (*fill)(void*), void* ctx);
+
+private:
+	static void run_and_release(void* self);
+	std::atomic<bool> in_flight_{false};
+	void (*fill_)(void*) = nullptr;
+	void* ctx_ = nullptr;
 };
 
 } // namespace deluge::storage

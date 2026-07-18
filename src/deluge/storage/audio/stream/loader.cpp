@@ -24,6 +24,9 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
+#include "storage/owner.h"
+
+#include <atomic>
 
 #include "deluge_resource.h" // deluge_resource_loader_{next,enqueue,has_lowest}
 
@@ -127,6 +130,28 @@ void pump(int32_t max_num, bool may_process_user_actions) {
 
 bool has_lowest_priority_queued() {
 	return deluge_resource_loader_has_lowest(GeneralMemoryAllocator::get().resourceManager());
+}
+
+namespace {
+// Coalesced dispatch of the fill onto the storage owner (the worker fiber on Embassy).
+// Only ever touched on the main executor (the streaming requesters + the fiber that runs
+// the fill), so not cross-thread.
+deluge::storage::Coalescer g_loader_coalescer;
+// The winning request()'s args, read by loader_fill when it runs. A coalesced-away request
+// on Embassy updates these but its own dispatch is dropped; the in-flight fill picks up the
+// latest values (last-writer-wins). Legacy runs inline, so these are always this call's args.
+std::atomic<int32_t> g_fill_max{128};
+std::atomic<bool> g_fill_mpua{false};
+
+void loader_fill(void*) {
+	pump(g_fill_max.load(std::memory_order_relaxed), g_fill_mpua.load(std::memory_order_relaxed));
+}
+} // namespace
+
+void request_pump(int32_t max_num, bool may_process_user_actions) {
+	g_fill_max.store(max_num, std::memory_order_relaxed);
+	g_fill_mpua.store(may_process_user_actions, std::memory_order_relaxed);
+	g_loader_coalescer.request(loader_fill, nullptr);
 }
 
 } // namespace deluge::audio::stream::loader

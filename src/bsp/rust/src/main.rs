@@ -455,27 +455,44 @@ fn main() {
     // deluge_block_write, read it back via deluge_block_read, and verify the
     // bytes survive — proves the file-backed shim actually persists data, not
     // just that it links. Sector 1 (not 0): leaves a notional boot sector alone.
-    const TEST_SECTOR: u32 = 1;
-    let mut pattern = [0u8; 512];
-    for (i, b) in pattern.iter_mut().enumerate() {
-        *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+    //
+    // Deliberately called here, synchronously, before any executor/fiber
+    // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
+    // not an app FatFS access, so it has no owner to route through yet. Under
+    // `storage-owner-audit` (rung-5 Task 4's pre-flight gate) this genuinely
+    // — and correctly — trips `sd.rs`'s `on_fiber()` debug_assert!, so it is
+    // skipped when that feature is enabled rather than "migrated" onto an
+    // owner that doesn't exist at this point in boot; see the Task 4 report
+    // (`.superpowers/sdd/task-4-report.md`) for the full audit writeup.
+    #[cfg(not(feature = "storage-owner-audit"))]
+    {
+        const TEST_SECTOR: u32 = 1;
+        let mut pattern = [0u8; 512];
+        for (i, b) in pattern.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let status = sd::deluge_block_write(0, pattern.as_ptr(), TEST_SECTOR, 1);
+        assert_eq!(
+            status, 0,
+            "sd round-trip: deluge_block_write failed (status={status})"
+        );
+        let mut readback = [0u8; 512];
+        let status = sd::deluge_block_read(0, readback.as_mut_ptr(), TEST_SECTOR, 1);
+        assert_eq!(
+            status, 0,
+            "sd round-trip: deluge_block_read failed (status={status})"
+        );
+        assert_eq!(
+            pattern, readback,
+            "sd round-trip: readback did not match what was written"
+        );
+        log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
     }
-    let status = sd::deluge_block_write(0, pattern.as_ptr(), TEST_SECTOR, 1);
-    assert_eq!(
-        status, 0,
-        "sd round-trip: deluge_block_write failed (status={status})"
+    #[cfg(feature = "storage-owner-audit")]
+    log::info!(
+        "deluge-bsp-rust: sd round-trip SKIPPED (storage-owner-audit is on — this bootstrap \
+         self-test predates any owner/fiber by design, see main.rs)"
     );
-    let mut readback = [0u8; 512];
-    let status = sd::deluge_block_read(0, readback.as_mut_ptr(), TEST_SECTOR, 1);
-    assert_eq!(
-        status, 0,
-        "sd round-trip: deluge_block_read failed (status={status})"
-    );
-    assert_eq!(
-        pattern, readback,
-        "sd round-trip: readback did not match what was written"
-    );
-    log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
 
     // --- Whole-BSP host boot smoke (no C++ app; `host_app` OFF) ------------
     // Bring up a host Embassy executor (platform-std) and spawn the four

@@ -42,3 +42,9 @@ extern "C" bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
 	fn(ctx);
 	return true;
 }
+
+// Host stand-in: same as the cooperative default (task_scheduler_c_api.cpp) — no
+// queue here either, so always false.
+extern "C" bool deluge_worker_higher_priority_waiting(void) {
+	return false;
+}

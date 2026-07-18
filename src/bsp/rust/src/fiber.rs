@@ -503,6 +503,12 @@ pub extern "C" fn deluge_worker_run_priority(
     enqueue(f, ctx, false, true)
 }
 
+/// C-ABI wrapper for [`higher_priority_waiting`] (see include/libdeluge/worker.h).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
+    higher_priority_waiting()
+}
+
 /// Dequeue the next op to run: the oldest (lowest-sequence) HIGH-priority job
 /// if any is queued, else the oldest NORMAL job — i.e. HIGH strictly before
 /// NORMAL, FIFO within each level. `QUEUE_CAP` is small (4), so a linear scan
@@ -545,6 +551,29 @@ fn dequeue() -> Option<Job> {
         }
         Some(job)
     }
+}
+
+/// Is a HIGH-priority job currently resident in the ring (queued, not yet
+/// dequeued)? Read by the running NORMAL op — e.g. the recorder card-write
+/// drain (`SampleRecorder::writeAnyCompletedClusters`) — to decide whether to
+/// step aside at a safe boundary rather than run to completion, so `dequeue`'s
+/// HIGH-before-NORMAL ordering (above) actually bounds a queued HIGH op's
+/// wait instead of it sitting behind an unbounded NORMAL drain. Same
+/// cheap-linear-scan cost class as `dequeue`, over the same ring state.
+pub fn higher_priority_waiting() -> bool {
+    // SAFETY: single-threaded access to the ring (same contract as enqueue/dequeue).
+    unsafe {
+        let queue = core::ptr::addr_of!(QUEUE).cast::<Option<(Job, u32)>>();
+        for i in 0..QUEUE_CAP {
+            if let Some((job, _seq)) = queue.add(i).read() {
+                let (_, _, _, is_high) = job;
+                if is_high {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn queue_nonempty() -> bool {

@@ -111,6 +111,15 @@ bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
 	return true;
 }
 
+// HIGH-priority query. On the cooperative BSPs there is no queue — a NORMAL op
+// runs to completion on the caller's stack before anything else can be
+// dispatched — so there is never a reason to step aside; always false, which
+// keeps a caller like SampleRecorder::writeAnyCompletedClusters draining fully,
+// exactly as before this existed.
+bool deluge_worker_higher_priority_waiting(void) {
+	return false;
+}
+
 // libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the
 // caller, so the caller is always the owner. Embassy overrides (fiber-only).
 bool deluge_storage_on_owner(void) {

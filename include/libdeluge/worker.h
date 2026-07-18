@@ -64,6 +64,20 @@ bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
 ///         and will NOT run — on false NOTHING was enqueued.
 bool deluge_worker_run_priority(void (*fn)(void*), void* ctx);
 
+/// Is a HIGH-priority op currently queued (waiting to run) on the worker? For a
+/// long-running NORMAL op that drains work in a loop (e.g. the recorder
+/// card-write drain, SampleRecorder::writeAnyCompletedClusters) to check
+/// periodically at a safe/resumable boundary and step aside — return early,
+/// leaving its own state such that the next dispatch resumes it — so a queued
+/// HIGH op (an audio-streaming read) isn't stuck waiting behind the whole
+/// drain, only up to the next boundary.
+/// Cooperative/host: always returns false — there is no queue, so there is
+/// never a reason to step aside (inline behaviour is unchanged: the caller
+/// drains fully, exactly as before this existed).
+/// Embassy: true while any deluge_worker_run_priority-submitted op is resident
+/// in the worker ring (queued, not yet dequeued).
+bool deluge_worker_higher_priority_waiting(void);
+
 #ifdef __cplusplus
 }
 #endif

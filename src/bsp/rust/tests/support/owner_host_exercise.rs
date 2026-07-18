@@ -398,6 +398,70 @@ extern "C" fn prio_d_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
+// Cooperative yield-to-priority (rung 5 task 3): a NORMAL op that models the
+// recorder card-write drain (SampleRecorder::writeAnyCompletedClusters) —
+// loop doing units of "work", each followed by a real suspend point
+// (`yield_until(None, None)`, mirroring writeOneCompletedCluster's SD write,
+// which suspends the fiber via `block_on_fiber` while awaiting the transfer)
+// and then a `higher_priority_waiting()` check; the first time that's true,
+// return early, short of `YIELD_TOTAL_UNITS`. While it's mid-loop, enqueue a
+// HIGH op and confirm it lands on the ring — the next check should trip.
+// Assert: the NORMAL op returned early (didn't complete all its units), and
+// the HIGH op ran before a NORMAL "continuation" op enqueued right after
+// (mirroring doRecorderCardRoutines re-dispatching the drain on its next
+// cadence). Own statics, independent of every other phase.
+// ---------------------------------------------------------------------------
+const YIELD_TOTAL_UNITS: u32 = 30;
+static YIELD_OP_STARTED: AtomicBool = AtomicBool::new(false);
+static YIELD_OP_DONE: AtomicBool = AtomicBool::new(false);
+static YIELD_UNITS_DONE: AtomicU32 = AtomicU32::new(0);
+static YIELD_RETURNED_EARLY: AtomicBool = AtomicBool::new(false);
+
+/// Run-order counter for this phase (mirrors `PRIO_RUN_ORDER` above): each
+/// participant stamps the position it actually ran/finished in.
+static YIELD_RUN_ORDER: AtomicU32 = AtomicU32::new(0);
+static YIELD_HIGH_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
+static YIELD_HIGH_DONE: AtomicBool = AtomicBool::new(false);
+static YIELD_CONTINUATION_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
+static YIELD_CONTINUATION_DONE: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn yield_op(_ctx: *mut core::ffi::c_void) {
+    YIELD_OP_STARTED.store(true, Ordering::SeqCst);
+    for _ in 0..YIELD_TOTAL_UNITS {
+        // A unit of "work" with a real suspend point — gives the executor (and
+        // therefore submit_pump) a window to land a HIGH enqueue between units,
+        // exactly as a real SD write would while this op is genuinely mid-drain.
+        crate::fiber::yield_until(None, None);
+        YIELD_UNITS_DONE.fetch_add(1, Ordering::SeqCst);
+        if crate::fiber::higher_priority_waiting() {
+            YIELD_RETURNED_EARLY.store(true, Ordering::SeqCst);
+            YIELD_OP_DONE.store(true, Ordering::SeqCst);
+            return;
+        }
+    }
+    // Ran to completion without ever observing a HIGH op queued — the race
+    // below failed to set up; still mark done so the driving thread's wait
+    // doesn't hang (the assertions on YIELD_RETURNED_EARLY will fail instead).
+    YIELD_OP_DONE.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn yield_high_op(_ctx: *mut core::ffi::c_void) {
+    YIELD_HIGH_ORDER.store(
+        YIELD_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    YIELD_HIGH_DONE.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn yield_continuation_op(_ctx: *mut core::ffi::c_void) {
+    YIELD_CONTINUATION_ORDER.store(
+        YIELD_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    YIELD_CONTINUATION_DONE.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // The submission channel + the two executor-thread pump tasks.
 // ---------------------------------------------------------------------------
 
@@ -803,5 +867,63 @@ pub fn run() {
         a < d,
         "FIFO within the NORMAL level: A enqueued before D, so A must run \
          first (a={a}, d={d})"
+    );
+
+    // --- cooperative yield-to-priority (rung 5 task 3): submit yield_op, wait
+    // for it to start, then queue a HIGH op and confirm it lands on the ring
+    // while yield_op is still mid-loop. Note: unlike deluge_storage_on_owner
+    // (a single AtomicBool, safe from any thread — see the module doc),
+    // higher_priority_waiting() reads the same unsynchronized `QUEUE` ring
+    // enqueue/dequeue do, so it's only called here from op bodies running on
+    // the fiber (the executor thread), never from this (driving) thread. ---
+    let yield_deadline = Instant::now() + Duration::from_secs(20);
+    tx.send((yield_op, 0, false, false)).expect("send yield_op");
+    wait_until(yield_deadline, "yield_op to start", || {
+        YIELD_OP_STARTED.load(Ordering::SeqCst)
+    });
+
+    let accepted_before = SUBMIT_ACCEPTED.load(Ordering::SeqCst);
+    tx.send((yield_high_op, 0, false, true))
+        .expect("send yield_high_op (high)");
+    wait_until(
+        yield_deadline,
+        "yield_high_op to be accepted onto the ring",
+        || SUBMIT_ACCEPTED.load(Ordering::SeqCst) >= accepted_before + 1,
+    );
+
+    // --- yield_op must observe the queued HIGH op and return early ---
+    wait_until(yield_deadline, "yield_op to return (early)", || {
+        YIELD_OP_DONE.load(Ordering::SeqCst)
+    });
+    assert!(
+        YIELD_RETURNED_EARLY.load(Ordering::SeqCst),
+        "yield_op should have observed higher_priority_waiting() == true and \
+         returned early rather than running to completion"
+    );
+    let units_done = YIELD_UNITS_DONE.load(Ordering::SeqCst);
+    assert!(
+        units_done < YIELD_TOTAL_UNITS,
+        "yield_op should NOT have completed all {YIELD_TOTAL_UNITS} units — \
+         higher_priority_waiting() should have short-circuited it early; \
+         completed {units_done}"
+    );
+
+    // --- re-dispatch a "continuation" NORMAL op, mirroring
+    // doRecorderCardRoutines resuming the drain on its next cadence after an
+    // early return — the already-queued HIGH op must run ahead of it ---
+    tx.send((yield_continuation_op, 0, false, false))
+        .expect("send yield_continuation_op");
+    wait_until(yield_deadline, "yield_high_op to finish", || {
+        YIELD_HIGH_DONE.load(Ordering::SeqCst)
+    });
+    wait_until(yield_deadline, "yield_continuation_op to finish", || {
+        YIELD_CONTINUATION_DONE.load(Ordering::SeqCst)
+    });
+    let high_order = YIELD_HIGH_ORDER.load(Ordering::SeqCst);
+    let cont_order = YIELD_CONTINUATION_ORDER.load(Ordering::SeqCst);
+    assert!(
+        high_order < cont_order,
+        "the HIGH op should have run before the re-dispatched NORMAL \
+         continuation (high_order={high_order}, cont_order={cont_order})"
     );
 }

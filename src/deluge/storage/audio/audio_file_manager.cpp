@@ -53,7 +53,6 @@ extern "C" {
 #include "fatfs/ff.h"
 #include "libdeluge/block_device.h"
 
-extern uint8_t currentlyAccessingCard;
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
 

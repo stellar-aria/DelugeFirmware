@@ -42,6 +42,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/multi_range/multisample_range.h"
 #include "storage/storage_manager.h"
+#include "sync/sd_access.h"
 #include "util/c_string.h"
 #include <string.h>
 
@@ -170,7 +171,7 @@ void AudioRecorder::slowRoutine() {
 	// that cardRoutine() running on freed memory (then freeing it a second time). As a scheduler task we're already
 	// held off by our RESOURCE_SD | RESOURCE_SD_ROUTINE registration; this guard covers the one call site that
 	// bypasses the scheduler, the legacy non-USE_TASK_MANAGER mainLoop.
-	if (isSDRoutineActive() || currentlyAccessingCard) {
+	if (isSDRoutineActive() || deluge::sync::sd_busy()) {
 		return;
 	}
 

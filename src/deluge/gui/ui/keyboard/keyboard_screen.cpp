@@ -41,6 +41,7 @@
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/sound/sound_instrument.h"
+#include "sync/storage_op.h"
 #include <cstring>
 #include <optional>
 
@@ -97,7 +98,7 @@ void KeyboardScreen::killColumnSwitchKey(int32_t column) {
 	}
 }
 ActionResult KeyboardScreen::padAction(int32_t x, int32_t y, int32_t velocity) {
-	if (isSDRoutineActive() && !allowSomeUserActionsEvenWhenInCardRoutine) {
+	if (isSDRoutineActive() && !deluge::sync::user_actions_permitted()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow some of the time when in card routine.
 	}
 
@@ -594,7 +595,7 @@ ActionResult KeyboardScreen::buttonAction(deluge::hid::Button b, bool on, bool i
 }
 
 ActionResult KeyboardScreen::verticalEncoderAction(int32_t offset, bool inCardRoutine) {
-	if (inCardRoutine && !allowSomeUserActionsEvenWhenInCardRoutine) {
+	if (inCardRoutine && !deluge::sync::user_actions_permitted()) {
 		return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow sometimes.
 	}
 

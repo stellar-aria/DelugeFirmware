@@ -644,10 +644,50 @@ fn main() {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(500u64);
+                // Widen the per-step poll budget for a manual demo run (e.g. a very long
+                // `DELUGE_STREAMING_SCENARIO_BLOCKS` window), default unchanged.
+                let step_timeout_secs = std::env::var("DELUGE_STREAMING_SCENARIO_STEP_TIMEOUT_S")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20u64);
+                // Task 6 sanity-check / Phase 2 negative-control knob: optional
+                // `sd::sim_latency` override, applied by `scenario::run` right after song
+                // load completes (see `ScenarioConfig::post_load_sim_latency`'s doc comment
+                // for why post-load, not pre-load) — lets a manual `cargo run` dial the
+                // modeled SD latency from "trivially fast" (unset — no effect) to "absurdly
+                // slow" without a rebuild, to demonstrate the Task 6
+                // `deluge_sim_underrun_*_count()` counters are wired to real fill-vs-drain
+                // behaviour. No effect unless the `sim_latency` feature is enabled.
+                #[cfg(feature = "sim_latency")]
+                let post_load_sim_latency = {
+                    let bps = std::env::var("DELUGE_SIM_LATENCY_THROUGHPUT_BPS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    let us = std::env::var("DELUGE_SIM_LATENCY_OVERHEAD_US")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    match (bps, us) {
+                        (None, None) => None,
+                        (b, u) => {
+                            // Defaults mirror `sd::sim_latency`'s own un-overridden constants
+                            // (20MB/s throughput, 500us overhead) so setting only one of the
+                            // two env vars still produces a sane pair.
+                            let bps = b.unwrap_or(20_000_000);
+                            let us = u.unwrap_or(500);
+                            log::info!(
+                                "deluge-bsp-rust: post-load sim_latency override = {bps} bytes/sec, {us} us overhead"
+                            );
+                            Some((bps, us))
+                        }
+                    }
+                };
+                #[cfg(not(feature = "sim_latency"))]
+                let post_load_sim_latency = None;
                 crate::scenario::ScenarioConfig {
                     song_full_path: Box::leak(song.into_boxed_str()),
                     target_blocks,
-                    step_timeout: embassy_time::Duration::from_secs(20),
+                    step_timeout: embassy_time::Duration::from_secs(step_timeout_secs),
+                    post_load_sim_latency,
                 }
             });
 
@@ -838,7 +878,8 @@ fn main() {
                 "deluge-bsp-rust: HOST APP scenario result: song='{}' boot_ready={} \
                  load_dispatched={} listing_completed={} load_committed={} load_completed={} \
                  playback_started={} playback_confirmed_active={} recording_started={} \
-                 blocks_rendered={} cluster_reads={} recorder_writes={}",
+                 blocks_rendered={} cluster_reads={} recorder_writes={} underrun_wait={} \
+                 underrun_unassign={}",
                 cfg.song_full_path,
                 result.boot_ready,
                 result.song_load_dispatched,
@@ -851,6 +892,8 @@ fn main() {
                 result.blocks_rendered,
                 result.cluster_reads,
                 result.recorder_writes,
+                result.underrun_wait,
+                result.underrun_unassign,
             );
             let ok = result.load_completed
                 && result.playback_confirmed_active

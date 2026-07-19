@@ -25,6 +25,9 @@
 #include "model/sample/sample.h"
 #include "model/sample/sample_cache.h"
 #include "model/voice/voice.h"
+#ifdef DELUGE_HOST
+#include "harness/streaming_underrun.h"
+#endif
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/source.h"
@@ -260,6 +263,13 @@ goodToGo:
 	// If still here, that didn't work, so we have to wait, and come back later when hopefully some loading has taken
 	// place
 	pendingSamplesLate += numSamples;
+#ifdef DELUGE_HOST
+	// The streaming-underrun harness's primary signal: this is the single convergence point for
+	// BOTH `loaded` misses above — clusters[0] not loaded, or clusters[1] not loaded and we're
+	// too far into clusters[0] to spare it the time — so one counter increment here captures
+	// either miss as one WAIT-class underrun (voice playback deferred, not dropped).
+	deluge::harness::noteUnderrunWait();
+#endif
 	return LateStartAttemptStatus::WAIT;
 }
 
@@ -355,6 +365,13 @@ bool VoiceSample::stopReadingFromCache() {
 	// Have to check Cluster is loaded, because we chose not to check this before, cos we didn't know if we'd actually
 	// be reading from it
 	if (!clusters[0] || !clusters[0]->loaded) {
+#ifdef DELUGE_HOST
+		// The streaming-underrun harness's UNASSIGN-class signal: the cache-stop path found the
+		// Cluster it needs to fall back to isn't loaded (or isn't even held), so the caller
+		// (stopUsingCache -> e.g. AudioClip::resumePlayback) is about to do an instant voice
+		// unassign rather than merely deferring - a dropped voice, harder than a WAIT.
+		deluge::harness::noteUnderrunUnassign();
+#endif
 		return false; // If it's not loaded we're screwed - do instant unassign
 	}
 

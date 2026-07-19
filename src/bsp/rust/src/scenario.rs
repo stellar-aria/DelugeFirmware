@@ -46,6 +46,17 @@ unsafe extern "C" {
     fn deluge_scenario_start_recording() -> bool;
 }
 
+// Streaming-underrun harness (Task 6): C-ABI reader for `harness/streaming_underrun.{h,cpp}`'s
+// sim-only `loaded`-miss counters — the harness's PRIMARY underrun signal (the audio thread
+// discovering a needed sample cluster isn't loaded yet, on a play-needed path, and deferring
+// or dropping the voice as a result). Same manual-declaration pattern as the block above:
+// harness-only entry points the app exposes to the platform, not part of the libdeluge C-ABI
+// the app CONSUMES, so not run through the bindgen `sys` module.
+unsafe extern "C" {
+    fn deluge_sim_underrun_wait_count() -> u64;
+    fn deluge_sim_underrun_unassign_count() -> u64;
+}
+
 /// Parameters for [`run`]. `Copy` so [`scenario_task`] can take it by value (embassy task
 /// arguments must be owned).
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +70,18 @@ pub struct ScenarioConfig {
     /// Bound on each polling wait (listing / load-commit / playback-start / block target)
     /// so a wedged app fails the scenario instead of hanging the caller forever.
     pub step_timeout: Duration,
+    /// Task 6 sanity-check / Phase 2 negative-control knob: `(throughput_bytes_per_sec,
+    /// command_overhead_us)` applied to `sd::sim_latency` right after `load_completed`
+    /// succeeds and BEFORE the pre-playback baseline is snapshotted — i.e. it stresses only
+    /// the phase the underrun counters care about (sustained real-time streaming), not the
+    /// song LOAD's own essential-sample reads (which have no real-time deadline and would
+    /// otherwise need an implausibly large `step_timeout` to survive an "absurd" value).
+    /// `None` leaves whatever `sim_latency` throughput/overhead was already in effect
+    /// untouched. No effect unless the `sim_latency` feature is enabled (the field still
+    /// exists without it, so `ScenarioConfig` doesn't need a feature-gated shape — it's
+    /// simply never read).
+    #[cfg_attr(not(feature = "sim_latency"), allow(dead_code))]
+    pub post_load_sim_latency: Option<(u32, u32)>,
 }
 
 /// Outcome of [`run`]. Deliberately plain data, not a `Result`/panic: a step that times
@@ -99,6 +122,17 @@ pub struct ScenarioResult {
     /// On-fiber SD block writes observed over the same window — the recorder's real,
     /// dispatched card writes (`crate::sd::stats::on_fiber_writes()`).
     pub recorder_writes: u64,
+    /// WAIT-class underrun misses over the same window (Task 6): the audio thread found a
+    /// needed sample cluster not loaded yet on a play-needed path and deferred the voice
+    /// rather than dropping it (`deluge_sim_underrun_wait_count()`, baseline-subtracted).
+    /// This — together with `underrun_unassign` — is the harness's PRIMARY underrun signal
+    /// both later lenses (Task 7 timing, Task 9 concurrency) assert on.
+    pub underrun_wait: u64,
+    /// UNASSIGN-class underrun misses over the same window (Task 6): the audio thread found a
+    /// needed sample cluster not loaded and dropped the voice outright
+    /// (`deluge_sim_underrun_unassign_count()`, baseline-subtracted) — a harder failure than a
+    /// WAIT deferral.
+    pub underrun_unassign: u64,
 }
 
 /// Polls `cond` every 5ms (yielding to the executor between polls via
@@ -165,12 +199,25 @@ pub async fn run(cfg: ScenarioConfig) -> ScenarioResult {
         return result;
     }
 
+    // Task 6 sanity-check / Phase 2 negative-control knob: apply the requested `sim_latency`
+    // override HERE — load just finished (under whatever latency was already in effect), so
+    // this stresses only the sustained real-time streaming this task's counters care about,
+    // not load's own essential-sample reads (see `ScenarioConfig::post_load_sim_latency`'s
+    // doc comment).
+    #[cfg(feature = "sim_latency")]
+    if let Some((throughput_bps, overhead_us)) = cfg.post_load_sim_latency {
+        crate::sd::sim_latency::set_throughput_bytes_per_sec(throughput_bps);
+        crate::sd::sim_latency::set_command_overhead_us(overhead_us);
+    }
+
     // Baseline right before starting playback/recording — everything counted from here on
     // is genuinely attributable to THIS run's streaming/recording, not the song load
     // itself (which also issues on-fiber SD reads for its essential-sample clusters).
     let blocks_before = crate::audio_host::drive_count();
     let reads_before = crate::sd::stats::on_fiber_reads();
     let writes_before = crate::sd::stats::on_fiber_writes();
+    let underrun_wait_before = unsafe { deluge_sim_underrun_wait_count() };
+    let underrun_unassign_before = unsafe { deluge_sim_underrun_unassign_count() };
 
     unsafe { deluge_scenario_start_playback() };
     result.playback_started = true;
@@ -191,6 +238,10 @@ pub async fn run(cfg: ScenarioConfig) -> ScenarioResult {
     result.blocks_rendered = crate::audio_host::drive_count().saturating_sub(blocks_before);
     result.cluster_reads = crate::sd::stats::on_fiber_reads().saturating_sub(reads_before);
     result.recorder_writes = crate::sd::stats::on_fiber_writes().saturating_sub(writes_before);
+    result.underrun_wait =
+        unsafe { deluge_sim_underrun_wait_count() }.saturating_sub(underrun_wait_before);
+    result.underrun_unassign =
+        unsafe { deluge_sim_underrun_unassign_count() }.saturating_sub(underrun_unassign_before);
 
     result
 }

@@ -31,6 +31,7 @@
 #include "gui/ui/slicer.h"
 #include "gui/ui_timer_manager.h"
 #include "gui/views/view.h"
+#include "harness/streaming_controls.h" // simRecorderYieldDisabled (Lens-1-only control, DELUGE_HOST-guarded)
 #include "hid/display/display.h"
 #include "hid/encoder_input.h"
 #include "hid/encoders.h"
@@ -1523,7 +1524,15 @@ void doRecorderCardRoutines() {
 
 		// Yield the multi-recorder drain to a queued high-priority audio-streaming read: return now
 		// (the next dispatch re-traverses from firstRecorder), bounding the read's wait to one recorder.
-		if (deluge_worker_higher_priority_waiting()) {
+		// Negative control B, "cooperative yield OFF" (Task 8, harness/streaming_controls.h): Lens 1's
+		// sim can disable this yield to prove the harness detects its benefit. Defaults to the plain
+		// `deluge_worker_higher_priority_waiting()` check (the flag is false everywhere but that
+		// harness) — device builds never see this `#ifdef` at all.
+		if (deluge_worker_higher_priority_waiting()
+#ifdef DELUGE_HOST
+		    && !deluge::harness::simRecorderYieldDisabled()
+#endif
+		) {
 			break;
 		}
 	}

@@ -20,9 +20,10 @@
 #include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "io/stream.hpp"
 #include "libdeluge/stream_io.h"         // DelugeStreamMode
+#include "memory/fast_allocator.h"       // deluge::memory::fast_allocator
 #include "model/sample/sample_cluster.h" // SampleCluster, the residency table's element type
 #include "storage/audio/stream/read_source.h"
-#include "util/containers.h" // deluge::fast_vector
+#include "util/segmented_vector.h" // deluge::SegmentedVector
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -227,10 +228,12 @@ private:
 	std::optional<deluge::io::Stream> read_stream_;
 
 	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
-	/// sole owner of the table.
+	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth
+	/// during recording never moves existing entries under a concurrent reader on another thread
+	/// (see docs/dev/known-concurrency-bugs.md, B2).
 	/// @warning `~SampleStream` destructs `table_` only after `~Sample`'s explicit release_asset() has
 	///          nulled every entry's `cluster` pointer; see release_asset().
-	deluge::fast_vector<SampleCluster> table_{};
+	deluge::SegmentedVector<SampleCluster, 256, deluge::memory::fast_allocator> table_{};
 };
 
 } // namespace deluge::audio::stream

@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <new>
 
-using deluge::util::SegmentedVector;
+using deluge::SegmentedVector;
 
 namespace {
 /// Lifetime-counting, move-only element: proves the container constructs on

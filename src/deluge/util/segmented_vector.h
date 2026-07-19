@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace deluge::util {
+namespace deluge {
 
 /// @brief Growable, indexable container whose elements NEVER move once
 ///        constructed: `T` lives in fixed-size heap segments and growth appends
@@ -132,4 +132,4 @@ private:
 	std::size_t size_ = 0;
 };
 
-} // namespace deluge::util
+} // namespace deluge

@@ -1,0 +1,58 @@
+# Lens 2 (Task 9) TSan classifier: KNOWN, pre-existing, BROAD debt patterns.
+#
+# One extended-regex PATTERN per line (matched with `grep -E` against a normalized TSan
+# `SUMMARY:` line — see run.sh's `normalize()`). Blank lines and `#` comments are ignored.
+# Order matters: run.sh checks `open_findings_patterns.txt` FIRST, so a line matching both
+# (e.g. `loader.cpp:82` below, which is inside a file this list's broad `loader\.cpp`-style
+# reasoning would otherwise also catch) is correctly bucketed as an open finding, not here.
+#
+# WHY PATTERNS, NOT EXACT LINES: an early version of this catalog used exact `SUMMARY:` line
+# matches (Spike B's style). Running the harness fresh a few more times immediately produced
+# a LONG tail of new exact lines — different song-load/UI/Arpeggiator/reverb fields lit up
+# by run-to-run scheduling variance — all belonging to the SAME already-understood debt
+# class: nearly the WHOLE app's main-thread/UI/song-model/reverb/playback-transport state was
+# written assuming cooperative (non-preemptive) scheduling, and none of it was made
+# thread-safe when the audio task moved onto its own real preemptive OS-thread/interrupt
+# executor (a change that predates this task — see the embassy-scheduler-migration and
+# audio-callback-relocation work). Exact-line matching against that class is an unwinnable,
+# ever-growing whack-a-mole; a broad FILE/SUBSYSTEM pattern is the honest, maintainable
+# classification — it says "yes, this is that same well-understood, out-of-scope debt",
+# without pretending to have enumerated every specific field it can touch.
+#
+# What stays OUT of this file (by design, so it is never accidentally swallowed into "known,
+# ignore"): anything on the actual storage/cluster/recorder/resource-manager data path this
+# task exists to check — see open_findings_patterns.txt for that (checked first).
+
+# AudioEngine's own cross-thread bookkeeping/render/reverb-param globals.
+src/deluge/processing/engines/audio_engine\.cpp
+# The reverb DSP internals (freeverb Comb/Allpass/Freeverb, Base/Reverb) — audio-thread
+# render vs main-thread reverb-macro param update.
+src/deluge/dsp/(\.\./dsp/)?reverb/
+# UI root pointer + UI timer manager (main-thread UI state read from the audio-thread idle
+# callback path).
+src/deluge/gui/ui/ui\.cpp
+src/deluge/gui/ui_timer_manager\.cpp
+# LoadSongUI's own progress-flag reads/song-swap orchestration (as opposed to the specific
+# storage-cluster interactions catalogued in open_findings_patterns.txt).
+src/deluge/gui/ui/load/load_song_ui\.cpp
+# Transport / playback-mode state during setup or a song swap.
+src/deluge/playback/playback_handler\.cpp
+src/deluge/playback/mode/arrangement\.cpp
+# Song-model object-graph mutation during a live song swap while the OLD song's audio graph
+# is still rendering on the audio thread (a related but DIFFERENT — and much broader —
+# "song swap isn't preemption-safe" architectural gap than the narrower streaming/cluster
+# property this task targets; see task-9-report.md's "related but out-of-scope" note).
+src/deluge/deluge\.cpp
+src/deluge/modulation/arpeggiator\.cpp
+src/deluge/model/instrument/kit\.cpp
+src/deluge/model/output\.cpp
+# Debug-only allocator bookkeeping (MEM_GUARD's live-alloc-count tracking) and the host-only
+# shared C stdio scratch buffer (two threads' D_PRINTLN sharing one vsnprintf buffer — a host
+# logging artifact, not firmware behaviour).
+src/deluge/memory/alloc_metadata\.cpp
+src/lib/printf\.c
+# loader.cpp's ONE admission-guard read of AudioEngine::audioRoutineLocked (already covered,
+# as the WRITE side, by the audio_engine.cpp pattern above) — deliberately NOT covered by a
+# broad `storage/audio/stream/` pattern (that would also swallow the genuinely-new recorder/
+# cluster findings in open_findings_patterns.txt), so this one line gets its own entry.
+src/deluge/storage/audio/stream/loader\.cpp:82:32 in deluge::audio::stream::loader::pump

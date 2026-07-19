@@ -414,3 +414,31 @@ cross-thread hazards on unsynchronized `AudioEngine` globals
 report for the full TSan output. Whether a given local run reproduces a race
 depends on scheduling, same as any TSan result: a clean run means "not seen
 this time," not "race-free."
+
+### Controlled re-verification: a planted, then-removed C++ race
+
+The organic races above prove this recipe *finds* real bugs, but not by
+design — a controlled positive/negative pair gives a cleaner proof that the
+detector is actually instrumenting a chosen C++ TU rather than getting lucky.
+A later spike (task 2, `feat/streaming-underrun-harness`) added a
+deliberately unsynchronized `int` global to `loader.cpp`, touched from two
+real threads already alive in this harness (`AudioEngine::routine()` on the
+audio thread, `loader::pump()` on the host-executor thread), rebuilt via the
+exact recipe above, and ran 3 times: **3/3 runs reported the planted race**,
+with fully-symbolized C++ stacks on both sides (down through
+`disk_read`/FatFS `move_window` on the host-thread side, and
+`AudioEngine::routine_task`/the embassy task runner on the audio-thread
+side). The planted code was then removed, the tree rebuilt, and 3 more runs
+showed **0/3** reports of that specific race (`grep -c spikeRace` on every
+log → 0; the symbol itself was confirmed absent from the linked binary via
+`nm`) — while the separately-known organic `AudioEngine` races kept
+reproducing, showing the detector discriminates a real fix from ambient
+noise rather than just going silent. Full transcript in
+`.superpowers/sdd/task-2-report.md` (gitignored, local).
+
+One practical note reconfirmed by that pass: after reconfiguring/rebuilding
+the CMake TSan tree, also `rm -rf
+target/x86_64-unknown-linux-gnu-tsan` before the next `cargo build` — belt
+and braces on top of `build.rs`'s own `DELUGE_HOSTAPP_BUILD_DIR`
+rerun-tracking and object-content hash, and cheap enough to do by default
+when iterating on the C++ side under TSan.

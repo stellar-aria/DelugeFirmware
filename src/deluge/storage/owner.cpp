@@ -17,6 +17,7 @@
 
 #include "storage/owner.h"
 
+#include "harness/streaming_controls.h" // simForceNormalPriority: sim-only priority override, DELUGE_HOST-guarded
 #include "libdeluge/worker.h"
 
 namespace deluge::storage {
@@ -40,7 +41,15 @@ void Coalescer::request(void (*fill)(void*), void* ctx) {
 	fill_ = fill;
 	ctx_ = ctx;
 	bool dispatched;
-	if (priority_) {
+	// Sim-only override: lets a host test harness demote what would be a HIGH-priority
+	// dispatch to NORMAL, to confirm the harness actually detects the priority
+	// mechanism's benefit (by disabling it and checking the harness notices). Defaults
+	// to leaving `priority_` unchanged; device builds never see this `#ifdef` at all.
+	if (priority_
+#ifdef DELUGE_HOST
+	    && !deluge::harness::simForceNormalPriority()
+#endif
+	) {
 		dispatched = Owner::run_priority(&Coalescer::run_and_release, this);
 	}
 	else if (sd_routine_) {

@@ -122,11 +122,20 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
+/// Streaming-underrun harness: the reusable, thread-agnostic scenario driver
+/// (load a real song, start playback, start a concurrent recording, step N audio
+/// blocks) — see its module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod scenario;
 /// scheduler.h / OSLikeStuff scheduler_api.h — the cooperative task scheduler,
 /// implemented on the Embassy executor (one task per registered Deluge task).
 mod scheduler;
 /// block_device.h + FatFS diskio — SD card over deluge_bsp::sd.
 mod sd;
+/// Streaming-underrun harness: packs a real FAT SD image from the golden
+/// harness's song/sample corpus for [`scenario`] to load. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod sd_image;
 /// Real impls of the simplest services (system.h, clock.h, memory.h).
 mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
@@ -411,10 +420,23 @@ async fn app_task() {
 /// one-time bring-up, run on the host executor spawned by `fn main`'s
 /// `host_app` boot path. Mirrors the device sequencing exactly (wait for the
 /// PIC handshake, bring SD up, then `deluge_app_init`), minus the device-only
-/// SYNC LED blink (no GPIO on host) and the worker-fiber pump loop (nothing on
-/// the boot-and-idle path dispatches a yielding op onto the worker fiber — see
-/// `fiber.rs`'s module doc — so there is nothing for this task to pump; it
-/// parks instead, exactly as this fn's doc promises).
+/// SYNC LED blink (no GPIO on host).
+///
+/// After init, this runs the SAME worker-fiber pump loop as the device
+/// [`app_task`] (see its doc comment for the full rationale) rather than
+/// parking. The loop is needed here too: `loader::request_pump` (the
+/// streaming loader's ~0.1ms `addRepeatingTask`, registered by
+/// `registerTasks()` above) calls `deluge_storage_on_owner()` (==
+/// `fiber::on_fiber()`) every tick, and off the fiber (always true here,
+/// since nothing ever started it) dispatches onto `Owner::run_priority` →
+/// `deluge_worker_run_priority`, i.e. THIS worker's ring. Without this loop
+/// nothing ever drains that ring: the `Coalescer`'s single-flight guard
+/// latches `in_flight_ = true` on the first dispatch and is never released
+/// (`run_and_release` never runs), so every later `request_pump` tick
+/// silently no-ops — streaming fills would never happen on this harness. This
+/// loop is what lets a real streaming cluster read (once one is queued — see
+/// the `sim_latency`/streaming-underrun harness) genuinely reach the fiber
+/// and, under `sim_latency`, suspend it.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[embassy_executor::task]
 async fn host_app_task() {
@@ -426,13 +448,26 @@ async fn host_app_task() {
     log::info!("deluge-bsp-rust: host deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this
     // executor via scheduler::set_spawner's stashed spawner. They begin running
-    // as soon as we park below.
+    // as soon as we yield below.
     unsafe { deluge_app_init(board::deluge_board()) };
-    log::info!("deluge-bsp-rust: host scheduler running; app_task parking");
+    log::info!("deluge-bsp-rust: host scheduler running; pumping async worker");
 
-    // The scheduler's task runners now own all app work; this task has nothing
-    // left to do (see doc comment above re: the worker-fiber pump).
-    core::future::pending::<()>().await;
+    // Same wake-driven pump shape as the device `app_task` — see there for the
+    // full rationale (busy: race WORKER_WAKE against a coarse 8ms fallback;
+    // idle: sleep on WORKER_WAKE alone).
+    use embassy_futures::select::select;
+    loop {
+        let busy = fiber::worker_poll();
+        if busy {
+            let _ = select(
+                fiber::WORKER_WAKE.wait(),
+                embassy_time::Timer::after_millis(8),
+            )
+            .await;
+        } else {
+            fiber::WORKER_WAKE.wait().await;
+        }
+    }
 }
 
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
@@ -459,13 +494,31 @@ fn main() {
     // Deliberately called here, synchronously, before any executor/fiber
     // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
     // not an app FatFS access, so it has no owner to route through yet. Under
-    // `storage-owner-audit` (rung-5 Task 4's pre-flight gate) this does NOT
+    // `storage-owner-audit` (rung-5's pre-flight gate) this does NOT
     // trip `sd.rs`'s `on_fiber()` debug_assert!: the assert's guard is
     // `on_fiber() || !worker_started()`, and `worker_started()` only latches
     // true once the first `worker_poll()` runs, which is after this
     // synchronous self-test returns — so it runs unconditionally in both
-    // configs. See the Task 4 report (`.superpowers/sdd/task-4-report.md`)
-    // for the full audit writeup and `fiber::worker_started` for the latch.
+    // configs.
+    //
+    // `sim_latency`-on only: SKIPPED here instead. Under `sim_latency`,
+    // `deluge_block_write`/`deluge_block_read` route through
+    // `sim_latency::modeled_write`/`modeled_read` (see sd.rs's module doc),
+    // which pends on `sim_latency::pump` — a genuinely-spawned Embassy task —
+    // to resolve the modeled delay. No executor exists yet at this point in
+    // `fn main()`, so nothing could ever spawn `pump`, and the off-fiber
+    // `block_on` below would busy-spin forever waiting on a modeled transfer
+    // nobody services. The same round trip (write + read, byte-for-byte data
+    // assertion) stays covered under `sim_latency` by
+    // `tests/sim_latency_host.rs`'s exercise, which brings up a real executor
+    // with `sim_latency::pump` running before issuing any transfer.
+    #[cfg(feature = "sim_latency")]
+    log::info!(
+        "deluge-bsp-rust: sd round-trip SKIPPED (sim_latency has no executor/pump \
+         yet at this bootstrap point — see tests/sim_latency_host.rs for the \
+         covered equivalent)"
+    );
+    #[cfg(not(feature = "sim_latency"))]
     {
         const TEST_SECTOR: u32 = 1;
         let mut pattern = [0u8; 512];
@@ -555,6 +608,84 @@ fn main() {
         use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
 
+        // --- Streaming-underrun harness: opt-in scenario mode --------------
+        // Off by default (env var unset) — the boot-and-idle smoke below is byte-for-
+        // byte unchanged from before this task. Set DELUGE_STREAMING_SCENARIO_SONG
+        // (e.g. "SONGS/Cordae.XML") to switch this run into the scenario: pack a real
+        // FAT SD image from the golden harness's corpus (unless DELUGE_SD_IMAGE is
+        // already set, in which case that image is used as-is — must already contain
+        // the requested song), load it, start real-time playback + a concurrent
+        // output recording, and step until DELUGE_STREAMING_SCENARIO_BLOCKS audio
+        // blocks (default 500) have rendered. This MUST run before anything below
+        // touches SD (the audio thread spawn is SD-inert, but `host_app_task` mounts
+        // the card as soon as it starts) — see sd_image.rs's module doc.
+        let scenario_cfg = std::env::var("DELUGE_STREAMING_SCENARIO_SONG")
+            .ok()
+            .map(|song| {
+                if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
+                    let fixture = std::env::var("DELUGE_STREAMING_SCENARIO_FIXTURE")
+                        .unwrap_or_else(|_| "cordae".to_string());
+                    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .ancestors()
+                        .nth(3)
+                        .expect("CARGO_MANIFEST_DIR (src/bsp/rust) has a repo root 3 levels up")
+                        .to_path_buf();
+                    let img = crate::sd_image::pack_golden_fixture(&repo_root, &fixture);
+                    // SAFETY: called before any thread below is spawned (no concurrent
+                    // env access yet) — same precondition sim_latency_host_exercise.rs
+                    // documents for its own DELUGE_SD_IMAGE set_var.
+                    unsafe { std::env::set_var("DELUGE_SD_IMAGE", &img) };
+                }
+                let target_blocks = std::env::var("DELUGE_STREAMING_SCENARIO_BLOCKS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(500u64);
+                // Widen the per-step poll budget for a manual demo run (e.g. a very long
+                // `DELUGE_STREAMING_SCENARIO_BLOCKS` window), default unchanged.
+                let step_timeout_secs = std::env::var("DELUGE_STREAMING_SCENARIO_STEP_TIMEOUT_S")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20u64);
+                // Optional `sd::sim_latency` override, applied by `scenario::run` right
+                // after song load completes (see `ScenarioConfig::post_load_sim_latency`'s
+                // doc comment for why post-load, not pre-load) — lets a manual `cargo run`
+                // dial the modeled SD latency from "trivially fast" (unset — no effect) to
+                // "absurdly slow" without a rebuild, to demonstrate the
+                // `deluge_sim_underrun_*_count()` counters are wired to real fill-vs-drain
+                // behaviour. No effect unless the `sim_latency` feature is enabled.
+                #[cfg(feature = "sim_latency")]
+                let post_load_sim_latency = {
+                    let bps = std::env::var("DELUGE_SIM_LATENCY_THROUGHPUT_BPS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    let us = std::env::var("DELUGE_SIM_LATENCY_OVERHEAD_US")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    match (bps, us) {
+                        (None, None) => None,
+                        (b, u) => {
+                            // Defaults mirror `sd::sim_latency`'s own un-overridden constants
+                            // (20MB/s throughput, 500us overhead) so setting only one of the
+                            // two env vars still produces a sane pair.
+                            let bps = b.unwrap_or(20_000_000);
+                            let us = u.unwrap_or(500);
+                            log::info!(
+                                "deluge-bsp-rust: post-load sim_latency override = {bps} bytes/sec, {us} us overhead"
+                            );
+                            Some((bps, us))
+                        }
+                    }
+                };
+                #[cfg(not(feature = "sim_latency"))]
+                let post_load_sim_latency = None;
+                crate::scenario::ScenarioConfig {
+                    song_full_path: Box::leak(song.into_boxed_str()),
+                    target_blocks,
+                    step_timeout: embassy_time::Duration::from_secs(step_timeout_secs),
+                    post_load_sim_latency,
+                }
+            });
+
         // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
@@ -584,6 +715,22 @@ fn main() {
             .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
+                    // sim_latency harness only: spawned HERE — on this separate OS
+                    // thread's executor, not the host-app executor's — deliberately.
+                    // `deluge_app_init` (called synchronously, off-fiber, from
+                    // `host_app_task` below) can itself issue a `sim_latency`-modeled
+                    // transfer (e.g. the boot-time FatFS mount read) via a plain
+                    // `block_on`, which hijacks its OS thread with a busy poll loop
+                    // and never yields back to that thread's executor — so a `pump`
+                    // spawned on the SAME (host-app) executor would never get polled
+                    // and the transfer would spin forever. `pump` only touches
+                    // cross-thread-safe primitives (`Signal`/`AtomicWaker` over
+                    // `CriticalSectionRawMutex`, `embassy_time::Timer` off the shared
+                    // std time driver — see sd.rs's module doc), so running it on this
+                    // independent thread lets it keep making progress while the
+                    // host-app thread is busy-spinning.
+                    #[cfg(feature = "sim_latency")]
+                    spawner.spawn(crate::sd::sim_latency::pump().unwrap());
                     crate::scheduler::set_audio_spawner(spawner.make_send());
                     log::info!(
                         "deluge-bsp-rust: host audio executor up on thread {:?} — set_audio_spawner done",
@@ -606,7 +753,7 @@ fn main() {
 
         std::thread::Builder::new()
             .name("deluge-bsp-host-app".into())
-            .spawn(|| {
+            .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
                     crate::scheduler::set_spawner(spawner);
@@ -614,7 +761,22 @@ fn main() {
                     spawner.spawn(control::pad_render().unwrap());
                     spawner.spawn(control::encoder_wake_pump().unwrap());
                     spawner.spawn(display::oled_render().unwrap());
+                    // NOTE: `sim_latency::pump` is deliberately NOT spawned on this
+                    // executor — see the audio-thread executor closure above for why
+                    // (this thread's `host_app_task` calls `deluge_app_init`
+                    // synchronously, off-fiber, which can itself busy-spin a
+                    // `block_on`'d sim_latency transfer and would starve a
+                    // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
+                    // Streaming-underrun harness: spawned on THIS executor —
+                    // the same one `host_app_task`'s worker-fiber pump loop runs on —
+                    // so `scenario::run`'s C-ABI calls interleave cooperatively with
+                    // the real app's own task graph, exactly like a real HID event
+                    // handler would (see scenario.rs's module doc: it never spawns a
+                    // thread itself).
+                    if let Some(cfg) = scenario_cfg {
+                        spawner.spawn(crate::scenario::scenario_task(cfg).unwrap());
+                    }
                 });
             })
             .expect("spawning the host app executor thread");
@@ -677,6 +839,73 @@ fn main() {
                 );
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Streaming-underrun harness: if scenario mode was requested, wait
+        // for `scenario::scenario_task` (spawned above, on the host-app executor) to
+        // finish, report its outcome, and exit — this REPLACES the generic soak below
+        // (the scenario's own block-count step already keeps both executors running
+        // concurrently for the requested window; a soak on top would just be dead
+        // time). Bounded by a generous overall deadline so a wedged scenario still
+        // exits nonzero instead of hanging the process forever.
+        if let Some(cfg) = scenario_cfg {
+            // std::time::Duration, not embassy_time::Duration (cfg.step_timeout's type) —
+            // this loop runs on the plain OS thread, same as every other polling loop in
+            // this block.
+            let watchdog = Duration::from_millis(cfg.step_timeout.as_millis() * 8);
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::scenario::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP scenario TIMED OUT after {watchdog:?} with no \
+                         result (scenario_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP scenario result: song='{}' boot_ready={} \
+                 load_dispatched={} listing_completed={} load_committed={} load_completed={} \
+                 playback_started={} playback_confirmed_active={} recording_started={} \
+                 blocks_rendered={} cluster_reads={} recorder_writes={} underrun_wait={} \
+                 underrun_unassign={}",
+                cfg.song_full_path,
+                result.boot_ready,
+                result.song_load_dispatched,
+                result.listing_completed,
+                result.load_committed,
+                result.load_completed,
+                result.playback_started,
+                result.playback_confirmed_active,
+                result.recording_started,
+                result.blocks_rendered,
+                result.cluster_reads,
+                result.recorder_writes,
+                result.underrun_wait,
+                result.underrun_unassign,
+            );
+            let ok = result.load_completed
+                && result.playback_confirmed_active
+                && result.recording_started
+                && result.blocks_rendered >= cfg.target_blocks
+                && result.cluster_reads > 0
+                && result.recorder_writes > 0;
+            if ok {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP scenario PASSED — song streamed + recorded, \
+                     real dispatch drained (cluster_reads={}, recorder_writes={})",
+                    result.cluster_reads,
+                    result.recorder_writes
+                );
+                hard_exit(0);
+            } else {
+                log::error!("deluge-bsp-rust: HOST APP scenario FAILED (see fields above)");
+                hard_exit(1);
+            }
         }
 
         // --- Widen the concurrent window before exit ------------------------

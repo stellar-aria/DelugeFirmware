@@ -42,6 +42,8 @@
 /// `deluge_scenario_song_listing_in_progress` / `deluge_scenario_commit_song_load` below.
 #ifdef DELUGE_HOST
 
+#include <cstdint>
+
 extern "C" {
 
 /// Point `currentSong` at `full_path` (e.g. `"SONGS/Cordae.XML"` — same shape
@@ -81,6 +83,19 @@ bool deluge_scenario_playback_active();
 /// (`AudioRecorder::beginOutputRecording` — the same mechanism a RECORD button press with
 /// nothing armed starts). Runs concurrently with playback/streaming.
 bool deluge_scenario_start_recording();
+
+/// Debug-only: the raw `currentUIMode` bitmask (`gui/ui/ui.h`/`ui.cpp`'s `currentUIMode`
+/// global). Lets a harness stuck waiting on `deluge_scenario_song_load_in_progress()`
+/// distinguish WHICH phase of `LoadSongUI::performLoad()` it's parked in (e.g.
+/// `UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES` vs. `..._UNESSENTIAL_SAMPLES_ARMED`) without a
+/// debugger attach. Not part of the scenario's normal control flow.
+uint32_t deluge_scenario_debug_ui_mode();
+
+/// Debug-only: bit 0 = `LoadSongUI::isLoadingSong()` itself; bit 1 =
+/// `getCurrentUI() == &loadSongUI` (whether the UI has transitioned away from the load
+/// screen yet). Distinguishes "still genuinely loading" from "the UI object just hasn't
+/// been reassigned yet" while a harness is stuck waiting for load completion.
+uint32_t deluge_scenario_debug_load_state();
 
 } // extern "C"
 

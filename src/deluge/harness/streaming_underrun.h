@@ -19,16 +19,16 @@
 
 /// Host-only instrumentation for the streaming-underrun harness's PRIMARY signal: the audio
 /// thread reaching a `clusters[0]->loaded == false` (or `clusters[1]`) check on a play-needed
-/// path in `model/voice/voice_sample.cpp` and either deferring (WAIT) or dropping
-/// (UNASSIGN) the voice as a result. Not a fault, not a blocking wait — just the exact moment
-/// playback discovers the cluster it needs isn't ready yet.
+/// path and either deferring (WAIT) or dropping (UNASSIGN) the voice as a result. Not a
+/// fault, not a blocking wait — just the exact moment playback discovers the cluster it needs
+/// isn't ready yet.
 ///
 /// `DELUGE_HOST`-only (see `sim/CMakeLists.txt`'s `add_compile_definitions(DELUGE_HOST)`,
 /// same guard `harness/streaming_scenario.h` uses): compiled into every x86 build off this
-/// tree, never into the ARM device firmware. The call sites in `voice_sample.cpp` are
-/// themselves wrapped in `#ifdef DELUGE_HOST` (not just relying on these being no-ops), so a
-/// device/golden build doesn't even see the call — byte-for-byte unchanged from before this
-/// file existed.
+/// tree, never into the ARM device firmware. Every call site (`model/voice/voice_sample.cpp`,
+/// `model/sample/sample_low_level_reader.cpp`) is itself wrapped in `#ifdef DELUGE_HOST` (not
+/// just relying on these being no-ops), so a device/golden build doesn't even see the calls —
+/// byte-for-byte unchanged from before this file existed.
 #ifdef DELUGE_HOST
 
 #include <cstdint>
@@ -43,10 +43,18 @@ namespace deluge::harness {
 /// converge there.
 void noteUnderrunWait();
 
-/// Count one UNASSIGN-class underrun miss: `VoiceSample::stopReadingFromCache` found
-/// `clusters[0]` null or not loaded on the cache-stop path and is returning `false`, which its
-/// caller (`stopUsingCache`, and beyond that `AudioClip::resumePlayback`) turns into an
-/// immediate voice unassign — a dropped voice, not just a deferral.
+/// Count one UNASSIGN-class underrun miss: a voice found the Cluster it needs isn't loaded on
+/// a path that returns `false` all the way up to `Voice::render`'s `goto instantUnassign` — a
+/// dropped voice, not just a deferral. Two call sites converge here, both the same severity:
+///   - `VoiceSample::stopReadingFromCache`: the repitch-cache-stop path (only reached by
+///     voices actively using the timestretch/repitch `SampleCache`).
+///   - `SampleLowLevelReader::moveOnToNextCluster` (Task 7 addition): ordinary (non-cache,
+///     non-time-stretch) forward playback crossing a Cluster boundary mid-stream and finding
+///     the next Cluster not loaded — the common-case sustained-streaming underrun, and the one
+///     most voices actually hit (most playback never uses the repitch cache at all). Without
+///     this site the harness's counters could stay at zero even under genuine SD-latency
+///     starvation of ordinary sustained streaming, because the miss would silently unassign
+///     the voice via a wholly uninstrumented path.
 void noteUnderrunUnassign();
 
 } // namespace deluge::harness

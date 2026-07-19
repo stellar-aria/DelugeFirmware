@@ -582,12 +582,15 @@ pub extern "C" fn deluge_block_read(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    let fut = sim_latency::modeled_read(sector, count, out);
-    match if on_fiber {
-        block_on_fiber(fut)
+    let result = if on_fiber {
+        block_on_fiber(sim_latency::modeled_read(sector, count, out))
+    } else if sim_latency::off_fiber_instant() {
+        // See `sim_latency::off_fiber_instant`'s doc comment (Lens 1 only).
+        block_on(sd::read_sectors(sector, count, out))
     } else {
-        block_on(fut)
-    } {
+        block_on(sim_latency::modeled_read(sector, count, out))
+    };
+    match result {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!(
@@ -625,12 +628,15 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    let fut = sim_latency::modeled_write(sector, count, data);
-    match if on_fiber {
-        block_on_fiber(fut)
+    let result = if on_fiber {
+        block_on_fiber(sim_latency::modeled_write(sector, count, data))
+    } else if sim_latency::off_fiber_instant() {
+        // See `sim_latency::off_fiber_instant`'s doc comment (Lens 1 only).
+        block_on(sd::write_sectors(sector, count, data))
     } else {
-        block_on(fut)
-    } {
+        block_on(sim_latency::modeled_write(sector, count, data))
+    };
+    match result {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!(
@@ -712,6 +718,46 @@ pub mod sim_latency {
     /// Override the modeled fixed command overhead (microseconds).
     pub fn set_command_overhead_us(us: u32) {
         COMMAND_OVERHEAD_US.store(us, Ordering::Relaxed);
+    }
+
+    /// Lens-1-only (deterministic virtual-time streaming harness, Task 7) escape
+    /// hatch: when true, a modeled read/write issued OFF the storage-owner fiber
+    /// (`deluge_block_read`/`_write`'s `on_fiber` branch above) skips
+    /// [`delay`]/[`pump`] entirely and goes straight to the real transfer. Off
+    /// (`false`) by default, preserving today's behavior for every existing
+    /// consumer — manual `cargo run --features host_app,sim_latency` testing, and
+    /// Lens 2's TSan preemptive-thread harness, which resolves the equivalent
+    /// off-fiber livelock by running [`pump`] on a SEPARATE OS THREAD instead
+    /// (`.superpowers/sdd/task-4-report.md`).
+    ///
+    /// Lens 1 cannot spawn that escape-hatch thread — a single-threaded custom
+    /// `raw::Executor` + virtual clock has no second thread to run `pump` on, and
+    /// `deluge_app_init` calls the boot-time FatFS mount SYNCHRONOUSLY
+    /// (`embassy_futures::block_on`'s tight poll loop never yields back to the
+    /// executor, so `pump`'s `Timer` could never be polled — see
+    /// `.superpowers/sdd/task-7-report.md`'s boot-livelock section). The only
+    /// off-fiber `sim_latency` transfers on this harness are that boot-time mount
+    /// (before the worker/owner exists, so nothing else could usefully run
+    /// concurrently with it anyway — see `deluge_block_read`'s own
+    /// `worker_started()` doc comment) plus a handful of essential-sample reads
+    /// `deluge_app_init` may issue synchronously during the same call — none of
+    /// which have a real-time deadline the underrun counters care about (matches
+    /// `ScenarioConfig::post_load_sim_latency`'s existing "load's own reads don't
+    /// need modeling" rationale). Lens 1 sets this once at startup, before any
+    /// transfer, and never touches it again; ON-fiber reads (the actual streaming
+    /// path, post-boot) are UNAFFECTED and keep modeling latency normally — those
+    /// suspend via [`crate::fiber::block_on_fiber`]'s genuine coroutine yield,
+    /// which the normal quiescence-loop-driven executor handles without any
+    /// special-casing.
+    static OFF_FIBER_INSTANT: AtomicBool = AtomicBool::new(false);
+
+    /// See [`OFF_FIBER_INSTANT`]'s doc comment.
+    pub fn set_off_fiber_instant(instant: bool) {
+        OFF_FIBER_INSTANT.store(instant, Ordering::Relaxed);
+    }
+
+    pub(super) fn off_fiber_instant() -> bool {
+        OFF_FIBER_INSTANT.load(Ordering::Relaxed)
     }
 
     /// Modeled latency for a `bytes`-byte transfer: fixed command overhead

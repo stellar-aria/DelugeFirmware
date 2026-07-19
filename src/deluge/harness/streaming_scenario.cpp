@@ -63,6 +63,23 @@ bool deluge_scenario_start_recording() {
 	return audioRecorder.beginOutputRecording();
 }
 
+uint32_t deluge_scenario_debug_ui_mode() {
+	return currentUIMode;
+}
+
+uint32_t deluge_scenario_debug_load_state() {
+	// bit 0: isLoadingSong() itself (the OR of the two conditions below).
+	// bit 1: getCurrentUI() == &loadSongUI (the UI object hasn't transitioned away yet).
+	uint32_t bits = 0;
+	if (loadSongUI.isLoadingSong()) {
+		bits |= 1u;
+	}
+	if (getCurrentUI() == &loadSongUI) {
+		bits |= 2u;
+	}
+	return bits;
+}
+
 } // extern "C"
 
 #endif // DELUGE_HOST

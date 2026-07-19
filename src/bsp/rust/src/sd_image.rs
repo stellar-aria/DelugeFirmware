@@ -68,7 +68,7 @@ pub fn pack_golden_fixture(repo_root: &Path, fixture: &str) -> PathBuf {
 /// Deluge SD card uses; mtools' size-based default would pick tiny 2 KB clusters, which
 /// makes the firmware stream in far smaller Clusters than on-device), then `mcopy -s` the
 /// whole project tree onto the image root.
-fn pack_image(project_dir: &Path) -> PathBuf {
+pub(crate) fn pack_image(project_dir: &Path) -> PathBuf {
     let img = std::env::temp_dir().join(format!(
         "deluge-streaming-scenario-{}.img",
         std::process::id()

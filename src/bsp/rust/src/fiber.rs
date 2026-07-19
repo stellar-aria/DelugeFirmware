@@ -527,9 +527,56 @@ pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
     higher_priority_waiting()
 }
 
+/// Lens-1-only (deterministic virtual-time streaming-underrun harness, Task 7)
+/// starvation guard for [`dequeue`]'s HIGH-before-NORMAL policy. 0 (the
+/// default) preserves today's UNBOUNDED policy exactly for every other
+/// consumer (device, Lens 2, manual host_app runs) — see [`dequeue`]'s use of
+/// this below.
+///
+/// **Why this exists**: on a real clock (device or Lens 2's wall-clock host),
+/// `loader::request_pump`'s periodic HIGH-priority dispatch
+/// (`deluge.cpp`'s `addRepeatingTask(..., 0.0001, 0.0001, ...)`, single-flight
+/// via `Coalescer::in_flight_`) and this executor's own wake-driven poll loop
+/// both ride real timer hardware/OS scheduling, which has enough jitter that a
+/// NORMAL job (song load, a browser listing, …) sitting behind a HIGH job
+/// almost always gets a turn once the HIGH ring is transiently empty. Lens 1's
+/// virtual clock has **zero** jitter: `request_pump`'s task re-arms itself
+/// (~100-200us later) strictly before the `worker_poll` loop's 8ms fallback
+/// timer could ever fire, and `enqueue`'s unconditional `wake()` call means
+/// `WORKER_WAKE` fires the INSTANT that re-armed job lands — so in a run with
+/// no wall-clock noise to break the tie, a HIGH job is *always* sitting in the
+/// ring by the time `dequeue` is next called, and `dequeue`'s strict
+/// HIGH-before-NORMAL rule starves every NORMAL job (song load, in
+/// particular) forever. Confirmed by direct instrumentation
+/// (`.superpowers/sdd/task-7-report.md`): with the bound unset, `dequeue`
+/// picks the SAME HIGH job's re-enqueued successor thousands of times in a
+/// row while `LoadSongUI::performLoad`'s dispatched job never runs even once.
+///
+/// This is priority AGING, a standard fix for exactly this class of
+/// starvation: once `dequeue` has picked HIGH this many times in a row WHILE
+/// a NORMAL job was also waiting, the next pick is forced to NORMAL instead
+/// (then the HIGH streak resets). It does not change relative ordering WITHIN
+/// a priority level, and only ever fires when both levels are simultaneously
+/// non-empty — the actual audio-streaming urgency this priority scheme exists
+/// for (a HIGH job queued alone, nothing NORMAL waiting) is completely
+/// unaffected. Lens 1 sets a small bound (e.g. 8) once at startup, before
+/// `deluge_app_init`; nothing else ever calls this, so the static stays 0
+/// (disabled) everywhere else.
+static HIGH_PRIORITY_FAIRNESS_BOUND: AtomicU32 = AtomicU32::new(0);
+/// Consecutive HIGH-priority dequeues since the last NORMAL one (or boot).
+/// Only consulted/updated when [`HIGH_PRIORITY_FAIRNESS_BOUND`] is nonzero.
+static CONSECUTIVE_HIGH_DEQUEUES: AtomicU32 = AtomicU32::new(0);
+
+/// See [`HIGH_PRIORITY_FAIRNESS_BOUND`]'s doc comment.
+pub fn set_high_priority_fairness_bound(bound: u32) {
+    HIGH_PRIORITY_FAIRNESS_BOUND.store(bound, Ordering::Relaxed);
+}
+
 /// Dequeue the next op to run: the oldest (lowest-sequence) HIGH-priority job
 /// if any is queued, else the oldest NORMAL job — i.e. HIGH strictly before
-/// NORMAL, FIFO within each level. `QUEUE_CAP` is small (4), so a linear scan
+/// NORMAL, FIFO within each level — UNLESS [`HIGH_PRIORITY_FAIRNESS_BOUND`] is
+/// set and has been hit (see its doc comment; a no-op when unset, which is
+/// every consumer except Lens 1). `QUEUE_CAP` is small (4), so a linear scan
 /// per dequeue is cheap and keeps the ring itself a plain fixed array (no
 /// separate sub-rings to keep in sync).
 fn dequeue() -> Option<Job> {
@@ -540,6 +587,7 @@ fn dequeue() -> Option<Job> {
         }
         let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
         let mut best: Option<(usize, u32, bool)> = None; // (slot index, seq, is_high)
+        let mut best_normal: Option<(usize, u32)> = None; // oldest NORMAL candidate, for aging
         for i in 0..QUEUE_CAP {
             if let Some((job, seq)) = queue.add(i).read() {
                 let (_, _, _, is_high) = job;
@@ -554,9 +602,25 @@ fn dequeue() -> Option<Job> {
                 if take {
                     best = Some((i, seq, is_high));
                 }
+                if !is_high && best_normal.is_none_or(|(_, s)| seq < s) {
+                    best_normal = Some((i, seq));
+                }
             }
         }
-        let (idx, _, _) = best.expect("Q_COUNT > 0 implies at least one occupied slot");
+        let mut chosen = best.expect("Q_COUNT > 0 implies at least one occupied slot");
+        let bound = HIGH_PRIORITY_FAIRNESS_BOUND.load(Ordering::Relaxed);
+        if bound > 0 && chosen.2 {
+            // Chose HIGH — only relevant to aging if a NORMAL job is ALSO waiting.
+            if let Some((n_idx, n_seq)) = best_normal {
+                if CONSECUTIVE_HIGH_DEQUEUES.fetch_add(1, Ordering::Relaxed) + 1 >= bound {
+                    chosen = (n_idx, n_seq, false); // force the aged-out NORMAL job instead
+                }
+            }
+        }
+        if !chosen.2 {
+            CONSECUTIVE_HIGH_DEQUEUES.store(0, Ordering::Relaxed);
+        }
+        let (idx, _, _dq_is_high) = chosen;
         let (job, _seq) = queue
             .add(idx)
             .replace(None)
@@ -615,7 +679,8 @@ pub fn worker_poll() -> bool {
         };
         ACTIVE_IS_SD_ROUTINE.store(is_sd, Ordering::Relaxed);
         FIBER_BUSY.store(true, Ordering::Relaxed);
-        if start(f, ctx) {
+        let completed = start(f, ctx);
+        if completed {
             // Completed without ever yielding.
             complete_active_op();
         }
@@ -636,7 +701,8 @@ pub fn worker_poll() -> bool {
     let timed_out = deadline != 0 && now_us() >= deadline;
     if met || timed_out {
         unsafe { core::ptr::addr_of_mut!(WAIT_MET).write(met) };
-        if resume() {
+        let completed = resume();
+        if completed {
             complete_active_op();
         }
     }

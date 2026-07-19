@@ -274,6 +274,40 @@ fn audio_spawner() -> Option<SendSpawner> {
     unsafe { *core::ptr::addr_of!(AUDIO_SPAWNER) }
 }
 
+/// Lens-1-only (deterministic virtual-time streaming-underrun harness, Task 7)
+/// override for the priority-0 (audio) task's schedule. `AudioEngine::routine_task`'s
+/// registered period (`deluge.cpp`: `8 / 44100.` seconds) is a scheduler poll/backoff
+/// hint tuned for the DEVICE's real DMA-paced render throttling
+/// (`AudioEngine::routine` decides internally whether a new block is actually due,
+/// based on the free-running DMA play head) — the host null-sink render pump
+/// (`audio_host.rs`'s `deluge_audio_drive`) has no such throttling and renders
+/// exactly one block every call, so on host the REGISTERED period does not
+/// correspond to "one real-time block period" at all (it fires ~1.6ms apart, vs.
+/// the true 128/44100s ≈ 2.9ms block period). Lens 1's virtual-time race needs the
+/// audio consumer to advance in a KNOWN, exact per-block virtual-time increment to
+/// make the SD-latency race meaningful, so it overrides the audio slot's
+/// `period_us`/`backoff_us` at spawn time via this knob. `None` (unset, the
+/// default) preserves today's behavior for every other consumer (device, Lens 2,
+/// manual host_app runs) — see [`claim`]'s use of this below. Host-only: the whole
+/// mechanism is `#[cfg(not(target_os = "none"))]`, so it costs the device build
+/// nothing (not even a dead branch).
+#[cfg(not(target_os = "none"))]
+static AUDIO_PERIOD_OVERRIDE_US: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static AUDIO_BACKOFF_OVERRIDE_US: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static AUDIO_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
+
+/// See [`AUDIO_PERIOD_OVERRIDE_US`]'s doc comment. Call once at startup, before
+/// `deluge_app_init` runs `registerTasks()` (i.e. before the audio task is
+/// claimed).
+#[cfg(not(target_os = "none"))]
+pub fn set_audio_period_override_us(period_us: u64, backoff_us: u64) {
+    AUDIO_PERIOD_OVERRIDE_US.store(period_us, Ordering::Relaxed);
+    AUDIO_BACKOFF_OVERRIDE_US.store(backoff_us, Ordering::Relaxed);
+    AUDIO_OVERRIDE_SET.store(true, Ordering::Relaxed);
+}
+
 /// Claim a free slot, populate it, and spawn its runner. Returns the slot index as
 /// the `TaskID`, or -1 if the table is full or the spawner is unavailable.
 fn claim(
@@ -286,6 +320,20 @@ fn claim(
     enabled: bool,
     on_audio: bool,
 ) -> TaskID {
+    // Lens 1 only: substitute the virtual-time block-period override for the
+    // audio task's registered schedule — see `AUDIO_PERIOD_OVERRIDE_US`'s doc
+    // comment. A no-op (`period_us`/`backoff_us` pass through unchanged) unless
+    // `set_audio_period_override_us` was called, which only Lens 1 ever does.
+    #[cfg(not(target_os = "none"))]
+    let (period_us, backoff_us) = if on_audio && AUDIO_OVERRIDE_SET.load(Ordering::Relaxed) {
+        (
+            AUDIO_PERIOD_OVERRIDE_US.load(Ordering::Relaxed),
+            AUDIO_BACKOFF_OVERRIDE_US.load(Ordering::Relaxed),
+        )
+    } else {
+        (period_us, backoff_us)
+    };
+
     // Route the audio task to the preemptive audio interrupt-executor when it's
     // available; everything else (and audio, if that executor isn't up) runs on
     // the cooperative thread executor.

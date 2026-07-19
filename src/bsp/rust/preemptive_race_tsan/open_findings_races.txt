@@ -1,66 +1,56 @@
-# Lens 2 (Task 9) TSan open findings: REAL, NEW races on the cluster/loaded/recorder
-# state this task exists to check — found by this harness, NOT suppressed, NOT fixed here
-# (fixing is out of this task's scope; see .superpowers/sdd/task-9-report.md for the full
-# writeup, both racing stacks, and why each is a genuine bug reachable under sustained
-# playback + concurrent recording once the audio task is genuinely preemptive relative to
-# the loader/fiber thread).
+# Lens 2 TSan open findings: REAL races on the cluster/loaded/resource-manager/scheduler
+# state this harness checks — found by this harness, NOT suppressed, NOT fixed here. These
+# fire under sustained playback + concurrent recording once the audio task is genuinely
+# preemptive relative to the loader/fiber thread (the Embassy InterruptExecutor target;
+# the cooperative BSP is unaffected). run.sh reports matches here as "OPEN FINDING (real,
+# not suppressed)" — kept visible in every run's summary, distinct from the broad
+# pre-existing baseline in known_patterns.txt.
 #
-# One extended-regex PATTERN per line (matched with `grep -E`, same as known_patterns.txt —
-# NOT exact-line: an early version of this file used exact `file:line:col` keys and a fresh
-# run immediately produced a same-finding hit at a different column (`sample_stream.cpp:
-# 380:23` vs `:380:9` — two different sub-expression reads on the same source line) and a
-# different-but-same-family function (`SampleRecorder::writeCluster`, not yet seen when this
-# file was first written, also touches the same `SampleStream::entry`/`table_`). Matching by
-# FUNCTION NAME instead is precise enough to stay a real, narrow allowlist (unlike
-# known_patterns.txt's deliberately broad file-level patterns) while surviving that kind of
-# harmless run-to-run variance. `run.sh` reports matches against this file as
-# "OPEN FINDING (real, not suppressed, not fixed)" rather than "known", so they stay visible
-# in every run's summary instead of disappearing into the broader baseline.
+# One extended-regex PATTERN per line (grep -E). IMPORTANT: run.sh matches each race by its
+# normalized TSan SUMMARY LINE — the top-frame "... in <function>" — NOT the full stack. So a
+# pattern must name the symbol that appears as the race's TOP frame, not a deeper caller.
+#
+# ── STATUS (2026-07-19): the SampleRecorder/SampleStream recorder-hand-off races formerly
+#    listed here are FIXED — see docs/dev/known-concurrency-bugs.md (B2 table_ realloc UAF;
+#    B3 index/payload hand-off). Verified GONE by this harness: no SUMMARY race on
+#    SampleRecorder::createNextCluster / cardRoutine / writeCluster or SampleStream::chunk_at /
+#    entry, and no recorder-payload torn write. Those patterns are retired. The recorder's
+#    createNextCluster now only participates in B1, via get_cluster -> Manager::request.
 
-# --- deluge_resource::manager::Manager's Cell<ChunkSlot> chunk table: Manager::release
-#     (audio thread, via Voice/SampleLowLevelReader unassign -> cluster::remove_reason ->
-#     release_lease) races Manager::loader_next (loader/fiber thread, picking the next
-#     queued cluster to load) on the SAME Cell<ChunkSlot> slot, and other combinations
-#     (loader_enqueue/loader_remove/acquire/request/evict_lowest could plausibly hit the
-#     same table too, given they all just Cell::get/Cell::set with no synchronization) —
-#     Manager was written as `single-threaded` (see its own `stat()` doc comment) but is
-#     reached from Rust-unsafe `extern "C"` entry points with no lock, so nothing enforces
-#     that assumption once C++ calls it from two real OS threads. HIGH severity: a
-#     non-atomic read-modify-write race on lease counts / queued flags can silently lose an
-#     update (a lease undercounted -> premature eviction of a still-playing cluster, or a
-#     queued flag never cleared -> the loader spins on a phantom queue entry).
+# --- [B1] deluge_resource::manager::Manager's Cell<ChunkSlot> chunk table (HIGH, STILL OPEN).
+#     Manager::release (audio thread, via Voice/SampleLowLevelReader unassign ->
+#     cluster::remove_reason -> release_lease) races Manager::loader_next / request / acquire /
+#     evict_lowest (loader-fiber OR audio thread, picking/leasing the next cluster) on the SAME
+#     Cell<ChunkSlot> slot. Manager was written single-threaded (see its own stat() doc) but is
+#     reached from Rust-unsafe extern "C" entry points with no lock, so nothing enforces that
+#     assumption once C++ calls it from two real OS threads. A non-atomic lease-count RMW race
+#     can silently lose an update -> premature eviction of a still-playing cluster, or a queued
+#     flag never cleared -> the loader spins on a phantom queue entry. Reached from BOTH
+#     playback (Voice::render -> SampleLowLevelReader::moveOnToNextCluster -> SampleStream::
+#     get_cluster -> deluge_resource_request -> Manager::request) AND — now that B2/B3 are
+#     fixed — the recorder (SampleRecorder::createNextCluster -> get_cluster -> Manager::request).
 Cell<deluge_resource::manager::ChunkSlot>
 core::mem::replace::<deluge_resource::manager::ChunkSlot>
-
-# --- SampleRecorder/SampleStream recording-cluster state: SampleRecorder::createNextCluster()
-#     (audio thread, real-time capture path — increments currentRecordClusterIndex and grows
-#     SampleStream's table_ std::vector<SampleCluster>) races SampleRecorder::cardRoutine()
-#     -> writeOneCompletedCluster() -> SampleStream::chunk_at() (loader/fiber thread, the
-#     card-write drain) on the SAME currentRecordClusterIndex field and the SAME table_
-#     vector. HIGH severity, worse than the ChunkSlot race: `table_` is a growing
-#     std::vector — if it reallocates (moves its backing storage) on the audio thread at the
-#     exact moment the fiber thread is mid-index into the OLD backing array, that is a
-#     genuine use-after-free / OOB read, not just a torn value (a real, if narrow-window,
-#     crash/corruption hazard during sustained recording, not merely a benign lost update).
-in SampleRecorder::cardRoutine\(\)
-in SampleRecorder::createNextCluster\(\)
-in SampleRecorder::writeCluster\(int, unsigned long\)
-in deluge::audio::stream::SampleStream::chunk_at\(unsigned int\) const
-in deluge::audio::stream::SampleStream::entry\(unsigned int\)
-
-# --- The same recording path's raw payload buffer: audio-thread std::copy_n (feeding
-#     captured samples into the in-progress record cluster's buffer, via
-#     std::__copy_n_a/__tsan_memmove) races the fiber thread's real `write(2)` syscall
-#     (deluge_bsp::sd::host::write_sectors) writing that SAME buffer's bytes out to disk —
-#     the fiber can read a torn/half-written buffer if the audio thread's copy lands
-#     mid-write. Same root cause as the two entries above (SampleRecorder's cluster
-#     hand-off from audio-thread producer to fiber-thread consumer has no synchronization),
-#     not a separate bug. The generic compiler-helper symbol names below (`in write`,
-#     `in __tsan_memmove`) are ambiguous on their own — confirmed by manual trace inspection
-#     (see the report) that all observed instances traced to this SampleRecorder hand-off,
-#     both racing on the `deluge_rust::services::HOST_SDRAM` region; re-verify the paired
-#     stack before treating a future match as this same finding rather than something new.
-in write$
+# B1 also surfaces as a bare compiler-helper SUMMARY with no source frame, when the ChunkSlot
+# move is lowered to a memory intrinsic (observed: `in __tsan_memset`, whose stack is
+# core::mem::replace::<ChunkSlot> -> Cell::set -> Manager::request). B3's recorder-payload
+# memmove/write is FIXED, so a bare memmove/memset/memcpy SUMMARY now traces to B1's Manager,
+# NOT the recorder — re-verify the paired stack before treating a future match as anything else.
 in __tsan_memmove$
 in __tsan_memset$
 in __tsan_memcpy$
+
+# --- [SCHED] rung-5 two-level priority queue, async-SD staging ladder (STILL OPEN, out of
+#     scope for the recorder fix). deluge_rust::fiber::enqueue writes deluge_rust::fiber::Q_COUNT
+#     (and the priority ring links) on the AUDIO thread — via
+#     loader::request_pump -> Coalescer::request -> deluge::storage::Owner::run_priority ->
+#     deluge_worker_run_priority -> fiber::enqueue — while the fiber (owner) thread reads
+#     Q_COUNT in deluge_rust::fiber::queue_nonempty / dequeue. The rung-5 priority-queue
+#     counters have no synchronization between the audio-thread HIGH-priority enqueue and the
+#     fiber's queue check. NOT introduced by the recorder-hand-off fix (which touched none of
+#     fiber.rs / owner.cpp / loader.cpp) — a pre-existing async-SD scheduler race, surfaced
+#     here under preemptive audio + sustained streaming. Same class as B1 (single-threaded-by-
+#     assumption structure reached from two OS threads).
+in deluge_rust::fiber::enqueue$
+in deluge_rust::fiber::queue_nonempty$
+in deluge_rust::fiber::dequeue$

@@ -398,8 +398,12 @@ void SampleStream::resize(size_t n) {
 	table_.resize(n);
 }
 
+void SampleStream::reserve(size_t num_clusters) {
+	table_.reserve(num_clusters);
+}
+
 void SampleStream::erase_from(size_t index) {
-	table_.erase(table_.begin() + static_cast<std::ptrdiff_t>(index), table_.end());
+	table_.resize(index); // SegmentedVector: shrink-to-size destroys the removed tail (same effect as erase-to-end)
 }
 
 } // namespace deluge::audio::stream

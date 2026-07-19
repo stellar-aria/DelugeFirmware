@@ -20,9 +20,10 @@
 #include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "io/stream.hpp"
 #include "libdeluge/stream_io.h"         // DelugeStreamMode
+#include "memory/fast_allocator.h"       // deluge::memory::fast_allocator
 #include "model/sample/sample_cluster.h" // SampleCluster, the residency table's element type
 #include "storage/audio/stream/read_source.h"
-#include "util/containers.h" // deluge::fast_vector
+#include "util/segmented_vector.h" // deluge::SegmentedVector
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -185,6 +186,16 @@ public:
 	/// @brief Resize the residency table to @p n entries (grows the table as a recording extends).
 	void resize(size_t n);
 
+	/// @brief Reserve the residency table's segment-pointer index for up to @p num_clusters entries.
+	///
+	/// Reserves index capacity only (allocates no cluster entries) so subsequent growth up to
+	/// @p num_clusters will not reallocate the segment-pointer index. Required BEFORE concurrent
+	/// (recording) growth: the recorder's audio thread grows the table via resize() while the fiber
+	/// reads it via chunk_at(); the `SegmentedVector` keeps element addresses stable, but its pointer
+	/// index must be pre-reserved to the final capacity, single-threaded, to stay stable under that
+	/// concurrent growth (see docs/dev/known-concurrency-bugs.md B2).
+	void reserve(size_t num_clusters);
+
 	/// @brief Erase every entry from @p index to the end (shrinks the table on record-stop / truncate).
 	void erase_from(size_t index);
 
@@ -227,10 +238,14 @@ private:
 	std::optional<deluge::io::Stream> read_stream_;
 
 	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
-	/// sole owner of the table.
+	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth
+	/// during recording never moves existing entries under a concurrent reader on another thread
+	/// (see docs/dev/known-concurrency-bugs.md, B2). The third template argument pins segment storage to
+	/// the fast/SRAM-preferred heap (`fast_allocator`), matching the retired `fast_vector`'s placement —
+	/// do not drop it back to the `std::allocator` default, which would move the table to SDRAM.
 	/// @warning `~SampleStream` destructs `table_` only after `~Sample`'s explicit release_asset() has
 	///          nulled every entry's `cluster` pointer; see release_asset().
-	deluge::fast_vector<SampleCluster> table_{};
+	deluge::SegmentedVector<SampleCluster, 256, deluge::memory::fast_allocator> table_{};
 };
 
 } // namespace deluge::audio::stream

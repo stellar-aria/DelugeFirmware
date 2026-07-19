@@ -21,6 +21,7 @@
 #include "dsp/envelope_follower/absolute_value.h"
 #include "dsp/stereo_sample.h"
 #include "io/stream.hpp"
+#include <atomic>
 #include <cstddef>
 #include <gsl/gsl>
 #include <optional>
@@ -84,8 +85,10 @@ public:
 
 	int32_t firstUnwrittenClusterIndex = 0;
 
-	// Put things in valid state so if we get destructed before any recording, it's all ok
-	int32_t currentRecordClusterIndex = -1;
+	// Put things in valid state so if we get destructed before any recording, it's all ok.
+	// Atomic: the producer (audio) publishes a completed cluster via a release store at createNextCluster;
+	// the consumer (fiber) reads it acquire as its drain bound. See docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<int32_t> currentRecordClusterIndex = -1;
 
 	// Note! If this is NULL, that means that currentRecordClusterIndex refers to a cluster that never got created (cos
 	// some error or max file size reached)
@@ -102,7 +105,12 @@ public:
 	// This will be the temp file path if there is one.
 	std::string filePathCreated{};
 
-	RecorderStatus status = RecorderStatus::CAPTURING_DATA;
+	// Atomic: the finishCapturing (audio) -> ABORTED (either thread) transitions are release stores; the
+	// fiber's cardRoutine() decision reads are acquire loads, so seeing FINISHED_CAPTURING_BUT_STILL_WRITING
+	// (or ABORTED) also makes visible the producer's final currentRecordClusterIndex/payload writes before
+	// the fiber takes over as producer in finalizeRecordedFile(). See docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<RecorderStatus> status = RecorderStatus::CAPTURING_DATA;
+	static_assert(std::atomic<RecorderStatus>::is_always_lock_free);
 	AudioInputChannel mode;
 	Output* outputRecordingFrom{}; // for when recording from a specific output
 

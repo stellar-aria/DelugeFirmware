@@ -38,9 +38,13 @@
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <algorithm>
+#include <atomic>
 #include <new>
 
 #include "deluge_resource.h" // mark_dirty: hold recording clusters un-evictable until flushed
+
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+              "recorder hand-off relies on a lock-free atomic index on this target");
 
 extern "C" {
 #include "fatfs/diskio.h"
@@ -84,7 +88,7 @@ void SampleRecorder::detachSample() {
 		}
 	}
 
-	int32_t removeForClustersUntilIndex = currentRecordClusterIndex;
+	int32_t removeForClustersUntilIndex = currentRecordClusterIndex.load(std::memory_order_relaxed);
 	if (currentRecordCluster) {
 		removeForClustersUntilIndex++; // If there's a currentRecordCluster (usually will be if aborting), need to
 		                               // remove its "reason" too
@@ -127,6 +131,15 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 	}
 
 	sample = new (sample_memory) Sample;
+
+	// Reserve the residency table's segment-pointer index to the max recording size up front
+	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that
+	// growth never reallocates the index under the fiber's concurrent chunk_at reads. B2: the
+	// SegmentedVector keeps element addresses stable, but its pointer index must be pre-reserved
+	// to stay stable under concurrent growth. maxClusters is derived from the runtime cluster size,
+	// so this imposes no recording-length limit beyond the existing MAX_FILE_SIZE cap.
+	sample->stream().reserve(1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude));
+
 	audioFileManager.adoptAudioFileObject(sample); // resource-manager evictable object (before addReason)
 	sample->addReason(); // Must call this so it's protected from stealing, before we call initialize().
 	Error error = sample->initialize(1);
@@ -163,7 +176,7 @@ gotError:
 
 	pointerHeldElsewhere = true;
 	mode = newMode;
-	currentRecordClusterIndex = 0;
+	currentRecordClusterIndex.store(0, std::memory_order_relaxed);
 
 	numSamplesToRunBeforeBeginningCapturing = numSamplesExtraToCaptureAtEndSyncingWise =
 	    (mode < AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) ? kAudioRecordLagCompensation : 0;
@@ -345,14 +358,18 @@ void SampleRecorder::setRecordingThreshold(RecorderConfig config) {
 // status, then do the descrutcion and file deletion when we know we're out of the card routine. Also, this gets called
 // in audio routine! So don't do anything drastic.
 void SampleRecorder::abort() {
-	status = RecorderStatus::ABORTED; // Note: it may already equal this!
+	// RELEASE: abort() is callable cross-thread (audio or fiber); pairs with the acquire loads in
+	// cardRoutine()/finalizeRecordedFile() so a fiber that observes ABORTED also observes any writes
+	// that preceded this call on whichever thread invoked it.
+	status.store(RecorderStatus::ABORTED, std::memory_order_release); // Note: it may already equal this!
 }
 
 // Returns error if one occurred just now - not if one was already noted before
 Error SampleRecorder::cardRoutine() {
 
 	// If aborted, delete the file.
-	if (status == RecorderStatus::ABORTED) {
+	// ACQUIRE: synchronizes-with abort()'s release store.
+	if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 
 aborted:
 		if (sample != nullptr) { // This might get called multiple times, so check we haven't already detached it.
@@ -403,12 +420,14 @@ aborted:
 		// only happen from AudioRecorder. Or if the abort comes from a failure within this class and the AudioClip
 		// hasn't realised yet?
 		if (!pointerHeldElsewhere) {
-			status = RecorderStatus::AWAITING_DELETION;
+			// RELAXED: fiber-owned write; no other thread reads AWAITING_DELETION as a hand-off signal.
+			status.store(RecorderStatus::AWAITING_DELETION, std::memory_order_relaxed);
 		}
 		return Error::NONE;
 	}
 
-	if (status >= RecorderStatus::COMPLETE) {
+	// ACQUIRE: cardRoutine() decision read.
+	if (status.load(std::memory_order_acquire) >= RecorderStatus::COMPLETE) {
 		return Error::NONE;
 	}
 
@@ -460,7 +479,8 @@ aborted:
 				error = audioFileManager.getUnusedAudioRecordingFilePath(filePath, &tempFilePathForRecording, folderID,
 				                                                         &audioFileNumber, name, &currentSong->name);
 			}
-			if (status == RecorderStatus::ABORTED) {
+			// ACQUIRE: cardRoutine() decision read.
+			if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 				goto aborted; // In case aborted during
 			}
 			if (error != Error::NONE) {
@@ -534,7 +554,8 @@ cutRecordingFolderPathAndTryCreating:
 				this->file = std::move(openedStream.value());
 			}
 
-			if (status == RecorderStatus::ABORTED) {
+			// ACQUIRE: cardRoutine() decision read.
+			if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 				goto aborted; // In case aborted during
 			}
 
@@ -552,7 +573,7 @@ cutRecordingFolderPathAndTryCreating:
 		}
 
 		// Might want to write just one cluster
-		if (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+		if (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 			error = writeOneCompletedCluster();
 
 			if (error != Error::NONE) {
@@ -562,7 +583,7 @@ gotError:
 
 			else {
 				// If more clusters still to write, come back later to do them
-				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_relaxed)) {
 					goto allDoneForNow;
 				}
 			}
@@ -570,7 +591,9 @@ gotError:
 	}
 
 	// If we've actually finished recording...
-	if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
+	// ACQUIRE: synchronizes-with finishCapturing()'s release store, publishing the audio thread's final
+	// currentRecordClusterIndex/payload writes before we take over as producer in finalizeRecordedFile().
+	if (status.load(std::memory_order_acquire) == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		if (!hadCardError) {
 			error = finalizeRecordedFile();
 			if (error != Error::NONE) {
@@ -584,12 +607,15 @@ gotError:
 				abort();
 			}
 			else {
-				status = RecorderStatus::COMPLETE;
+				// RELAXED: fiber-owned write.
+				status.store(RecorderStatus::COMPLETE, std::memory_order_relaxed);
 			}
 			error = Error::MAX_FILE_SIZE_REACHED;
 		}
 		else {
-			status = autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE;
+			// RELAXED: fiber-owned write.
+			status.store(autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE,
+			             std::memory_order_relaxed);
 		}
 	}
 
@@ -598,7 +624,7 @@ allDoneForNow:
 }
 
 Error SampleRecorder::writeAnyCompletedClusters() {
-	while (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+	while (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 
 		Error error = writeOneCompletedCluster();
 
@@ -651,7 +677,8 @@ Error SampleRecorder::writeOneCompletedCluster() {
 
 Error SampleRecorder::finalizeRecordedFile() {
 
-	if (ALPHA_OR_BETA_VERSION && (status == RecorderStatus::ABORTED || hadCardError)) {
+	// ACQUIRE: cardRoutine() decision read (debug assertion, same fiber path as the flip observation above).
+	if (ALPHA_OR_BETA_VERSION && (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED || hadCardError)) {
 		FREEZE_WITH_ERROR("E273");
 	}
 
@@ -684,7 +711,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 		int32_t bytesToWrite = writePos - reinterpret_cast<char*>(currentRecordCluster->payload().data());
 		if (bytesToWrite > 0) { // Will always be true
-			Error error = writeCluster(currentRecordClusterIndex, bytesToWrite);
+			Error error = writeCluster(currentRecordClusterIndex.load(std::memory_order_relaxed), bytesToWrite);
 			if (error != Error::NONE) {
 				return error;
 			}
@@ -695,7 +722,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// Having incremented firstUnwrittenClusterIndex, we need to remove the "reason" for that final cluster.
 		// Normally that happens in writeAnyCompletedClusters(), but well this cluster wasn't "complete" so we're doing
 		// the whole thing here instead
-		if (!keepingReasonsForFirstClusters || currentRecordClusterIndex >= kNumClustersLoadedAhead) {
+		if (!keepingReasonsForFirstClusters
+		    || currentRecordClusterIndex.load(std::memory_order_relaxed) >= kNumClustersLoadedAhead) {
 
 			// Some bug-hunting
 			if (!currentRecordCluster->num_reasons_held_by_sample_recorder) {
@@ -705,7 +733,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 			deluge::cluster::remove_reason(*currentRecordCluster, "E047");
 		}
-		currentRecordClusterIndex++;    // We've finished with that cluster
+		currentRecordClusterIndex.fetch_add(1, std::memory_order_relaxed); // We've finished with that cluster
 		currentRecordCluster = nullptr; // But currentRecordClusterIndex now refers to a cluster that'll never exist
 	}
 
@@ -911,14 +939,17 @@ Error SampleRecorder::createNextCluster() {
 	    currentRecordCluster; // Cos we're gonna set that to NULL just below here, but still
 	                          // want to be able to access the old one a bit further down
 
-	currentRecordClusterIndex++; // Mark record-cluster we were on as finished
+	// Mark the record-cluster we were on as finished. RELEASE: publishes that the just-completed
+	// cluster's payload writes are visible to a consumer that later acquire-loads this index.
+	int32_t newIndex = currentRecordClusterIndex.load(std::memory_order_relaxed) + 1;
+	currentRecordClusterIndex.store(newIndex, std::memory_order_release);
 
 	currentRecordCluster = nullptr; // Note that we haven't yet created our next record-cluster - we'll do that below
 	                                // if no error first; and if there is an error and we don't create one, this has to
 	                                // remain NULL to indicate that we never created one
 
 	// If this new cluster would actually put us past the 4GB limit...
-	if (currentRecordClusterIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
+	if (newIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
 
 		// See if we actually already had any bytes to write into that new cluster we can't have...
 		int32_t bytesTilClusterEnd = clusterEndPos - writePos;
@@ -940,7 +971,7 @@ Error SampleRecorder::createNextCluster() {
 		return Error::INSUFFICIENT_RAM;
 	}
 
-	currentRecordCluster = sample->stream().get_cluster(currentRecordClusterIndex, CLUSTER_DONT_LOAD);
+	currentRecordCluster = sample->stream().get_cluster(newIndex, CLUSTER_DONT_LOAD);
 
 	// If couldn't allocate cluster (would normally only happen if no SD card present so recording only to RAM)
 	if (!currentRecordCluster) {
@@ -972,7 +1003,10 @@ Error SampleRecorder::createNextCluster() {
 // Gets called when we've captured all the samples of audio that we wanted - either as a direct result of user
 // action, or after being fed a few more samples to make up for latency.
 void SampleRecorder::finishCapturing() {
-	status = RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING;
+	// RELEASE: this is the producer-role hand-off to the fiber. Pairs with the acquire load in
+	// cardRoutine() so the fiber, on seeing this status, also observes our final currentRecordClusterIndex
+	// and payload writes before it takes over as producer in finalizeRecordedFile(). See B3.
+	status.store(RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING, std::memory_order_release);
 	if (getRootUI()) {
 		getRootUI()->sampleNeedsReRendering(sample);
 	}
@@ -998,7 +1032,9 @@ void SampleRecorder::feedAudio(std::span<StereoSample> input, bool applyGain, ui
 		else {
 			int32_t samplesLeft;
 
-			if (status == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
+			// RELAXED: audio-thread-owned (only feedAudio/endSyncedRecording/finishCapturing, all on the
+			// audio side, write this value before the release hand-off).
+			if (status.load(std::memory_order_relaxed) == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
 
 				samplesLeft = sample->lengthInSamples - numSamplesCaptured;
 				if (samplesLeft <= 0) {
@@ -1163,19 +1199,21 @@ doFinishCapturing:
 
 void SampleRecorder::endSyncedRecording(int32_t buttonLatencyForTempolessRecording) {
 #if ALPHA_OR_BETA_VERSION
-	if (status == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
+	// RELAXED: audio-thread-owned debug assertions (this function only runs on the audio side, before the
+	// release hand-off in finishCapturing()/abort()).
+	if (status.load(std::memory_order_relaxed) == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
 		FREEZE_WITH_ERROR("E272");
 	}
-	else if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		FREEZE_WITH_ERROR("E288");
 	}
-	else if (status == RecorderStatus::COMPLETE) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::COMPLETE) {
 		FREEZE_WITH_ERROR("E289");
 	}
-	else if (status == RecorderStatus::ABORTED) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::ABORTED) {
 		FREEZE_WITH_ERROR("E290");
 	}
-	else if (status == RecorderStatus::AWAITING_DELETION) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::AWAITING_DELETION) {
 		FREEZE_WITH_ERROR("E291");
 	}
 #endif
@@ -1203,7 +1241,8 @@ void SampleRecorder::endSyncedRecording(int32_t buttonLatencyForTempolessRecordi
 			finishCapturing();
 		}
 		else {
-			status = RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP;
+			// RELAXED: audio-thread-owned write (pre-hand-off).
+			status.store(RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP, std::memory_order_relaxed);
 		}
 	}
 	else {

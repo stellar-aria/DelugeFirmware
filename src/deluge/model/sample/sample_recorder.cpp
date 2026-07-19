@@ -38,9 +38,13 @@
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <algorithm>
+#include <atomic>
 #include <new>
 
 #include "deluge_resource.h" // mark_dirty: hold recording clusters un-evictable until flushed
+
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+              "recorder hand-off relies on a lock-free atomic index on this target");
 
 extern "C" {
 #include "fatfs/diskio.h"
@@ -84,7 +88,7 @@ void SampleRecorder::detachSample() {
 		}
 	}
 
-	int32_t removeForClustersUntilIndex = currentRecordClusterIndex;
+	int32_t removeForClustersUntilIndex = currentRecordClusterIndex.load(std::memory_order_relaxed);
 	if (currentRecordCluster) {
 		removeForClustersUntilIndex++; // If there's a currentRecordCluster (usually will be if aborting), need to
 		                               // remove its "reason" too
@@ -163,7 +167,7 @@ gotError:
 
 	pointerHeldElsewhere = true;
 	mode = newMode;
-	currentRecordClusterIndex = 0;
+	currentRecordClusterIndex.store(0, std::memory_order_relaxed);
 
 	numSamplesToRunBeforeBeginningCapturing = numSamplesExtraToCaptureAtEndSyncingWise =
 	    (mode < AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) ? kAudioRecordLagCompensation : 0;
@@ -552,7 +556,7 @@ cutRecordingFolderPathAndTryCreating:
 		}
 
 		// Might want to write just one cluster
-		if (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+		if (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 			error = writeOneCompletedCluster();
 
 			if (error != Error::NONE) {
@@ -562,7 +566,7 @@ gotError:
 
 			else {
 				// If more clusters still to write, come back later to do them
-				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_relaxed)) {
 					goto allDoneForNow;
 				}
 			}
@@ -598,7 +602,7 @@ allDoneForNow:
 }
 
 Error SampleRecorder::writeAnyCompletedClusters() {
-	while (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+	while (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 
 		Error error = writeOneCompletedCluster();
 
@@ -684,7 +688,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 		int32_t bytesToWrite = writePos - reinterpret_cast<char*>(currentRecordCluster->payload().data());
 		if (bytesToWrite > 0) { // Will always be true
-			Error error = writeCluster(currentRecordClusterIndex, bytesToWrite);
+			Error error = writeCluster(currentRecordClusterIndex.load(std::memory_order_relaxed), bytesToWrite);
 			if (error != Error::NONE) {
 				return error;
 			}
@@ -695,7 +699,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// Having incremented firstUnwrittenClusterIndex, we need to remove the "reason" for that final cluster.
 		// Normally that happens in writeAnyCompletedClusters(), but well this cluster wasn't "complete" so we're doing
 		// the whole thing here instead
-		if (!keepingReasonsForFirstClusters || currentRecordClusterIndex >= kNumClustersLoadedAhead) {
+		if (!keepingReasonsForFirstClusters
+		    || currentRecordClusterIndex.load(std::memory_order_relaxed) >= kNumClustersLoadedAhead) {
 
 			// Some bug-hunting
 			if (!currentRecordCluster->num_reasons_held_by_sample_recorder) {
@@ -705,7 +710,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 			deluge::cluster::remove_reason(*currentRecordCluster, "E047");
 		}
-		currentRecordClusterIndex++;    // We've finished with that cluster
+		currentRecordClusterIndex.fetch_add(1, std::memory_order_relaxed); // We've finished with that cluster
 		currentRecordCluster = nullptr; // But currentRecordClusterIndex now refers to a cluster that'll never exist
 	}
 
@@ -911,14 +916,17 @@ Error SampleRecorder::createNextCluster() {
 	    currentRecordCluster; // Cos we're gonna set that to NULL just below here, but still
 	                          // want to be able to access the old one a bit further down
 
-	currentRecordClusterIndex++; // Mark record-cluster we were on as finished
+	// Mark the record-cluster we were on as finished. RELEASE: publishes that the just-completed
+	// cluster's payload writes are visible to a consumer that later acquire-loads this index.
+	int32_t newIndex = currentRecordClusterIndex.load(std::memory_order_relaxed) + 1;
+	currentRecordClusterIndex.store(newIndex, std::memory_order_release);
 
 	currentRecordCluster = nullptr; // Note that we haven't yet created our next record-cluster - we'll do that below
 	                                // if no error first; and if there is an error and we don't create one, this has to
 	                                // remain NULL to indicate that we never created one
 
 	// If this new cluster would actually put us past the 4GB limit...
-	if (currentRecordClusterIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
+	if (newIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
 
 		// See if we actually already had any bytes to write into that new cluster we can't have...
 		int32_t bytesTilClusterEnd = clusterEndPos - writePos;
@@ -940,7 +948,7 @@ Error SampleRecorder::createNextCluster() {
 		return Error::INSUFFICIENT_RAM;
 	}
 
-	currentRecordCluster = sample->stream().get_cluster(currentRecordClusterIndex, CLUSTER_DONT_LOAD);
+	currentRecordCluster = sample->stream().get_cluster(newIndex, CLUSTER_DONT_LOAD);
 
 	// If couldn't allocate cluster (would normally only happen if no SD card present so recording only to RAM)
 	if (!currentRecordCluster) {

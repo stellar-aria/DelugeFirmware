@@ -21,6 +21,7 @@
 #include "dsp/envelope_follower/absolute_value.h"
 #include "dsp/stereo_sample.h"
 #include "io/stream.hpp"
+#include <atomic>
 #include <cstddef>
 #include <gsl/gsl>
 #include <optional>
@@ -84,8 +85,10 @@ public:
 
 	int32_t firstUnwrittenClusterIndex = 0;
 
-	// Put things in valid state so if we get destructed before any recording, it's all ok
-	int32_t currentRecordClusterIndex = -1;
+	// Put things in valid state so if we get destructed before any recording, it's all ok.
+	// Atomic: the producer (audio) publishes a completed cluster via a release store at createNextCluster;
+	// the consumer (fiber) reads it acquire as its drain bound. See docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<int32_t> currentRecordClusterIndex = -1;
 
 	// Note! If this is NULL, that means that currentRecordClusterIndex refers to a cluster that never got created (cos
 	// some error or max file size reached)

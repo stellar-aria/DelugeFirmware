@@ -138,6 +138,18 @@ host_app = ["dep:deluge_resource"]
 ## pre-flight gate at the rung-5 yield flip, where everything IS expected to be
 ## on the owner). See include/libdeluge/storage_owner.h.
 storage-owner-audit = []
+## Sim-only (host streaming-underrun harness). Gives host SD reads/writes a
+## MODELED per-transfer latency and routes them through the same
+## `on_fiber()`-guarded `block_on_fiber`/`block_on` shape the device transfer
+## sites already use (rung 5), so a read/write issued on the storage-owner
+## fiber genuinely SUSPENDS (yields to the executor) for the modeled delay
+## instead of the plain host path's `block_on`-only (never-suspends) shape.
+## Data is unchanged (still the real file-backed image) — only the observed
+## TIMING is modeled. See `sd.rs`'s `sim_latency` module. OFF by default: with
+## it off, `sd.rs`'s host `deluge_block_read`/`deluge_block_write` compile to
+## exactly the code that existed before this feature — device/normal-host/
+## golden builds are byte-unchanged.
+sim_latency = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

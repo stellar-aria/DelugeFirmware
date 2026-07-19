@@ -230,7 +230,9 @@ private:
 	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
 	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth
 	/// during recording never moves existing entries under a concurrent reader on another thread
-	/// (see docs/dev/known-concurrency-bugs.md, B2).
+	/// (see docs/dev/known-concurrency-bugs.md, B2). The third template argument pins segment storage to
+	/// the fast/SRAM-preferred heap (`fast_allocator`), matching the retired `fast_vector`'s placement —
+	/// do not drop it back to the `std::allocator` default, which would move the table to SDRAM.
 	/// @warning `~SampleStream` destructs `table_` only after `~Sample`'s explicit release_asset() has
 	///          nulled every entry's `cluster` pointer; see release_asset().
 	deluge::SegmentedVector<SampleCluster, 256, deluge::memory::fast_allocator> table_{};

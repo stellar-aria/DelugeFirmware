@@ -77,6 +77,12 @@ public:
 		}
 		while (size_ < n) {
 			if ((size_ >> kShift) >= segments_.size()) {
+				// Reserve BEFORE allocating the segment: if the pointer-array grow
+				// itself throws (OOM; e.g. `fast_allocator::allocate` throws
+				// `BAD_ALLOC`), no Segment has been allocated yet, so there is
+				// nothing to orphan. Once reserved, the subsequent push_back into
+				// spare capacity cannot reallocate/throw.
+				segments_.reserve(segments_.size() + 1);
 				segments_.push_back(alloc_segment());
 			}
 			std::construct_at(slot(size_));
@@ -92,7 +98,14 @@ private:
 
 	static Segment* alloc_segment() {
 		SegAlloc a;
-		return a.allocate(1); // raw, alignof(T)-aligned storage; Segment is trivial
+		// `allocate(1)` only returns raw storage; it does not start Segment's
+		// lifetime. Implicit-lifetime-object creation (P0593) is guaranteed for
+		// `std::allocator` (built on `::operator new`), but NOT for an arbitrary
+		// `Alloc` -- `deluge::memory::fast_allocator` routes through the bespoke
+		// `deluge::memory::alloc_fast`, which is not a standard
+		// implicit-object-creation function. `construct_at` is free here (Segment's
+		// default constructor is trivial) and makes this correct for every `Alloc`.
+		return std::construct_at(a.allocate(1));
 	}
 	static void free_segment(Segment* s) {
 		SegAlloc a;

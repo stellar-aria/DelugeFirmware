@@ -2,6 +2,7 @@
 
 #include "cppspec.hpp"
 #include <cstddef>
+#include <new>
 
 using deluge::util::SegmentedVector;
 
@@ -15,6 +16,34 @@ struct Tracked {
 	Tracked(const Tracked&) = delete;
 	Tracked& operator=(const Tracked&) = delete;
 	~Tracked() { --live; }
+};
+
+/// @brief Minimal, self-contained non-default `Alloc` for `SegmentedVector`'s
+///        `template <typename> class Alloc` parameter. Deliberately NOT
+///        `fast_allocator` (that needs a live BSP heap, which this host CppSpec
+///        harness doesn't have) -- this exists purely to prove the allocator
+///        template plumbing (both `SegAlloc` for segment storage and the
+///        segment-pointer index's `std::vector<Segment*, Alloc<Segment*>>`)
+///        actually threads a non-default allocator through end-to-end.
+template <typename U>
+struct MinimalAlloc {
+	using value_type = U;
+
+	MinimalAlloc() = default;
+	template <typename V>
+	MinimalAlloc(const MinimalAlloc<V>&) noexcept {} // NOLINT: allocator rebind ctor
+
+	[[nodiscard]] U* allocate(std::size_t n) { return static_cast<U*>(::operator new(n * sizeof(U))); }
+	void deallocate(U* p, std::size_t /*n*/) noexcept { ::operator delete(p); }
+
+	template <typename V>
+	bool operator==(const MinimalAlloc<V>&) const noexcept {
+		return true;
+	}
+	template <typename V>
+	bool operator!=(const MinimalAlloc<V>&) const noexcept {
+		return false;
+	}
 };
 } // namespace
 
@@ -85,6 +114,24 @@ describe segmented_vector("SegmentedVector<T, N>", $ {
 			expect(Tracked::live).to_equal(20);
 		}
 		expect(Tracked::live).to_equal(0);
+	});
+
+	it("plumbs a non-default Alloc through both segment storage and the pointer index", _{
+		Tracked::live = 0;
+		{
+			SegmentedVector<Tracked, 4, MinimalAlloc> v;
+			v.resize(10); // grow: spans 3 segments of 4, allocated via MinimalAlloc
+			expect(v.size()).to_equal(std::size_t{10});
+			expect(Tracked::live).to_equal(10);
+
+			v[7].value = 42;
+			expect(v[7].value).to_equal(42);
+
+			v.resize(3); // shrink: destroys tail, frees trailing segments via MinimalAlloc
+			expect(v.size()).to_equal(std::size_t{3});
+			expect(Tracked::live).to_equal(3);
+		}
+		expect(Tracked::live).to_equal(0); // destructor freed the rest via MinimalAlloc too
 	});
 });
 // clang-format on

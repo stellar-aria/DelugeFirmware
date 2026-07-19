@@ -265,8 +265,8 @@ goodToGo:
 	pendingSamplesLate += numSamples;
 #ifdef DELUGE_HOST
 	// The streaming-underrun harness's primary signal: this is the single convergence point for
-	// BOTH `loaded` misses above — clusters[0] not loaded, or clusters[1] not loaded and we're
-	// too far into clusters[0] to spare it the time — so one counter increment here captures
+	// both "loaded" misses above - clusters[0] not loaded, or clusters[1] not loaded and we're
+	// too far into clusters[0] to spare it the time - so one counter increment here captures
 	// either miss as one WAIT-class underrun (voice playback deferred, not dropped).
 	deluge::harness::noteUnderrunWait();
 #endif

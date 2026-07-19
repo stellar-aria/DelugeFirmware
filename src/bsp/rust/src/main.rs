@@ -122,7 +122,7 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
-/// Streaming-underrun harness (Task 5): the reusable, thread-agnostic scenario driver
+/// Streaming-underrun harness: the reusable, thread-agnostic scenario driver
 /// (load a real song, start playback, start a concurrent recording, step N audio
 /// blocks) — see its module doc. `host_app`-only.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
@@ -132,7 +132,7 @@ mod scenario;
 mod scheduler;
 /// block_device.h + FatFS diskio — SD card over deluge_bsp::sd.
 mod sd;
-/// Streaming-underrun harness (Task 5): packs a real FAT SD image from the golden
+/// Streaming-underrun harness: packs a real FAT SD image from the golden
 /// harness's song/sample corpus for [`scenario`] to load. `host_app`-only.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod sd_image;
@@ -422,22 +422,21 @@ async fn app_task() {
 /// PIC handshake, bring SD up, then `deluge_app_init`), minus the device-only
 /// SYNC LED blink (no GPIO on host).
 ///
-/// Unlike an earlier version of this fn, it does NOT just park after init: it
-/// runs the SAME worker-fiber pump loop as the device [`app_task`] (see its
-/// doc comment for the full rationale). That loop used to be pointless here —
-/// nothing on the boot-and-idle path dispatched a yielding op onto the worker
-/// fiber — but `loader::request_pump` (the streaming loader's ~0.1ms
-/// `addRepeatingTask`, registered by `registerTasks()` above) calls
-/// `deluge_storage_on_owner()` (== `fiber::on_fiber()`) every tick, and off
-/// the fiber (always true here, since nothing ever started it) dispatches
-/// onto `Owner::run_priority` → `deluge_worker_run_priority`, i.e. THIS
-/// worker's ring. Without this loop nothing ever drained that ring: the
-/// `Coalescer`'s single-flight guard latched `in_flight_ = true` on the first
-/// dispatch and never released it (`run_and_release` never ran), so every
-/// later `request_pump` tick silently no-op'd forever — streaming fills never
-/// happened on this harness at all. Restored so a real streaming cluster read
-/// (once one is queued — see the `sim_latency`/streaming-underrun harness)
-/// genuinely reaches the fiber and, under `sim_latency`, suspends it.
+/// After init, this runs the SAME worker-fiber pump loop as the device
+/// [`app_task`] (see its doc comment for the full rationale) rather than
+/// parking. The loop is needed here too: `loader::request_pump` (the
+/// streaming loader's ~0.1ms `addRepeatingTask`, registered by
+/// `registerTasks()` above) calls `deluge_storage_on_owner()` (==
+/// `fiber::on_fiber()`) every tick, and off the fiber (always true here,
+/// since nothing ever started it) dispatches onto `Owner::run_priority` →
+/// `deluge_worker_run_priority`, i.e. THIS worker's ring. Without this loop
+/// nothing ever drains that ring: the `Coalescer`'s single-flight guard
+/// latches `in_flight_ = true` on the first dispatch and is never released
+/// (`run_and_release` never runs), so every later `request_pump` tick
+/// silently no-ops — streaming fills would never happen on this harness. This
+/// loop is what lets a real streaming cluster read (once one is queued — see
+/// the `sim_latency`/streaming-underrun harness) genuinely reach the fiber
+/// and, under `sim_latency`, suspend it.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[embassy_executor::task]
 async fn host_app_task() {
@@ -495,7 +494,7 @@ fn main() {
     // Deliberately called here, synchronously, before any executor/fiber
     // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
     // not an app FatFS access, so it has no owner to route through yet. Under
-    // `storage-owner-audit` (rung-5 Task 4's pre-flight gate) this does NOT
+    // `storage-owner-audit` (rung-5's pre-flight gate) this does NOT
     // trip `sd.rs`'s `on_fiber()` debug_assert!: the assert's guard is
     // `on_fiber() || !worker_started()`, and `worker_started()` only latches
     // true once the first `worker_poll()` runs, which is after this
@@ -509,13 +508,10 @@ fn main() {
     // to resolve the modeled delay. No executor exists yet at this point in
     // `fn main()`, so nothing could ever spawn `pump`, and the off-fiber
     // `block_on` below would busy-spin forever waiting on a modeled transfer
-    // nobody services (confirmed experimentally: `cargo run --features
-    // sim_latency` hung indefinitely right here before this guard was added —
-    // see the Task 4 report, `.superpowers/sdd/task-4-report.md`). The same
-    // round trip (write + read, byte-for-byte data assertion) stays covered
-    // under `sim_latency` by `tests/sim_latency_host.rs`'s exercise, which
-    // brings up a real executor with `sim_latency::pump` running before
-    // issuing any transfer.
+    // nobody services. The same round trip (write + read, byte-for-byte data
+    // assertion) stays covered under `sim_latency` by
+    // `tests/sim_latency_host.rs`'s exercise, which brings up a real executor
+    // with `sim_latency::pump` running before issuing any transfer.
     #[cfg(feature = "sim_latency")]
     log::info!(
         "deluge-bsp-rust: sd round-trip SKIPPED (sim_latency has no executor/pump \
@@ -612,7 +608,7 @@ fn main() {
         use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
 
-        // --- Streaming-underrun harness (Task 5): opt-in scenario mode -----
+        // --- Streaming-underrun harness: opt-in scenario mode --------------
         // Off by default (env var unset) — the boot-and-idle smoke below is byte-for-
         // byte unchanged from before this task. Set DELUGE_STREAMING_SCENARIO_SONG
         // (e.g. "SONGS/Cordae.XML") to switch this run into the scenario: pack a real
@@ -650,12 +646,11 @@ fn main() {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(20u64);
-                // Task 6 sanity-check / Phase 2 negative-control knob: optional
-                // `sd::sim_latency` override, applied by `scenario::run` right after song
-                // load completes (see `ScenarioConfig::post_load_sim_latency`'s doc comment
-                // for why post-load, not pre-load) — lets a manual `cargo run` dial the
-                // modeled SD latency from "trivially fast" (unset — no effect) to "absurdly
-                // slow" without a rebuild, to demonstrate the Task 6
+                // Optional `sd::sim_latency` override, applied by `scenario::run` right
+                // after song load completes (see `ScenarioConfig::post_load_sim_latency`'s
+                // doc comment for why post-load, not pre-load) — lets a manual `cargo run`
+                // dial the modeled SD latency from "trivially fast" (unset — no effect) to
+                // "absurdly slow" without a rebuild, to demonstrate the
                 // `deluge_sim_underrun_*_count()` counters are wired to real fill-vs-drain
                 // behaviour. No effect unless the `sim_latency` feature is enabled.
                 #[cfg(feature = "sim_latency")]
@@ -728,14 +723,12 @@ fn main() {
                     // `block_on`, which hijacks its OS thread with a busy poll loop
                     // and never yields back to that thread's executor — so a `pump`
                     // spawned on the SAME (host-app) executor would never get polled
-                    // and the transfer would spin forever (confirmed experimentally:
-                    // `cargo run --features host_app,sim_latency` livelocked here
-                    // before this was moved — see the Task 4 report). `pump` only
-                    // touches cross-thread-safe primitives (`Signal`/`AtomicWaker`
-                    // over `CriticalSectionRawMutex`, `embassy_time::Timer` off the
-                    // shared std time driver — see sd.rs's module doc), so running it
-                    // on this independent thread lets it keep making progress while
-                    // the host-app thread is busy-spinning.
+                    // and the transfer would spin forever. `pump` only touches
+                    // cross-thread-safe primitives (`Signal`/`AtomicWaker` over
+                    // `CriticalSectionRawMutex`, `embassy_time::Timer` off the shared
+                    // std time driver — see sd.rs's module doc), so running it on this
+                    // independent thread lets it keep making progress while the
+                    // host-app thread is busy-spinning.
                     #[cfg(feature = "sim_latency")]
                     spawner.spawn(crate::sd::sim_latency::pump().unwrap());
                     crate::scheduler::set_audio_spawner(spawner.make_send());
@@ -775,7 +768,7 @@ fn main() {
                     // `block_on`'d sim_latency transfer and would starve a
                     // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
-                    // Streaming-underrun harness (Task 5): spawned on THIS executor —
+                    // Streaming-underrun harness: spawned on THIS executor —
                     // the same one `host_app_task`'s worker-fiber pump loop runs on —
                     // so `scenario::run`'s C-ABI calls interleave cooperatively with
                     // the real app's own task graph, exactly like a real HID event
@@ -848,7 +841,7 @@ fn main() {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // Streaming-underrun harness (Task 5): if scenario mode was requested, wait
+        // Streaming-underrun harness: if scenario mode was requested, wait
         // for `scenario::scenario_task` (spawned above, on the host-app executor) to
         // finish, report its outcome, and exit — this REPLACES the generic soak below
         // (the scenario's own block-count step already keeps both executors running

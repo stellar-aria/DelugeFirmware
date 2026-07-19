@@ -359,17 +359,16 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->cluster_index);
 
 #ifdef DELUGE_HOST
-		// The streaming-underrun harness's UNASSIGN-class signal (Task 7 addition; see
-		// `VoiceSample::stopReadingFromCache`'s sibling site for the repitch-cache-stop case
-		// this complements): ordinary (non-cache, non-time-stretch) forward playback just
-		// crossed a Cluster boundary and the next Cluster isn't loaded -- the SD loader hasn't
-		// kept up with real-time consumption. This is the common-case sustained-streaming
-		// underrun path: `stopReadingFromCache`'s site only fires for repitch-cache playback,
-		// but most voices never use that cache, so without this site the harness's counters
-		// stayed at zero even under genuinely SD-latency-starved sustained streaming -- the
-		// caller (`VoiceSample::render` -> `Voice::render`) treats this `false` return as an
-		// instant voice unassign (`goto instantUnassign`), the same severity as the cache-stop
-		// site, just reached from the far more common code path.
+		// Streaming-underrun harness, UNASSIGN-class signal: ordinary (non-cache, non-time-stretch)
+		// forward playback just crossed a Cluster boundary and the next Cluster isn't loaded -- the
+		// SD loader hasn't kept up with real-time consumption. This is the common-case
+		// sustained-streaming underrun path, complementing `VoiceSample::stopReadingFromCache`'s
+		// sibling site (which only fires for repitch-cache playback): most voices never use that
+		// cache, so without this site the harness's counters stayed at zero even under genuinely
+		// SD-latency-starved sustained streaming. The caller (`VoiceSample::render` ->
+		// `Voice::render`) treats this `false` return as an instant voice unassign (`goto
+		// instantUnassign`), the same severity as the cache-stop site, just reached from the far
+		// more common code path.
 		deluge::harness::noteUnderrunUnassign();
 #endif
 		return false;

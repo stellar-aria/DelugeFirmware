@@ -1,10 +1,10 @@
-//! Exercise for the `sim_latency` feature (streaming-underrun harness, Phase
-//! 1 shared substrate): proves that a host SD read issued ON THE WORKER FIBER
-//! genuinely SUSPENDS the fiber — the executor keeps running other tasks
-//! while the read is modeled-in-flight — for roughly the modeled per-transfer
-//! delay, then resumes with the correct file-image data. With `sim_latency`
-//! off, `sd.rs`'s host path is `block_on`-only and never suspends; this
-//! exercise is the "it now suspends" proof.
+//! Exercise for the `sim_latency` feature (streaming-underrun harness):
+//! proves that a host SD read issued ON THE WORKER FIBER genuinely SUSPENDS
+//! the fiber — the executor keeps running other tasks while the read is
+//! modeled-in-flight — for roughly the modeled per-transfer delay, then
+//! resumes with the correct file-image data. With `sim_latency` off, `sd.rs`'s
+//! host path is `block_on`-only and never suspends; this exercise is the "it
+//! now suspends" proof.
 //!
 //! Same `#[path]`-included shape as `owner_host_exercise.rs`'s: driven by the
 //! real `fiber.rs` (`deluge_worker_run`/`worker_poll`) and `sd.rs`
@@ -18,10 +18,10 @@
 //! that file's module doc), so the driving (test) thread hands the op to
 //! [`submit_pump`] over a channel rather than calling it directly.
 //!
-//! ## Phase 2 (Task 4): the `request_pump` HIGH-priority dispatch shape
+//! ## HIGH-priority dispatch: the `request_pump` shape
 //!
-//! [`run`]'s original phase (above) proves suspension via `deluge_worker_run`
-//! (NORMAL). The streaming loader's real host dispatch path
+//! The first block of [`run`] (above) proves suspension via
+//! `deluge_worker_run` (NORMAL). The streaming loader's real host dispatch path
 //! (`deluge::audio::stream::loader::request_pump`, `loader.cpp:158`) is
 //! different in one respect: once off the storage owner
 //! (`deluge_storage_on_owner()` false — always true for a task-runner
@@ -44,14 +44,13 @@
 //! are trivial passthroughs with no logic of their own beyond the
 //! single-flight in-flight guard (irrelevant to suspension timing) — so
 //! calling [`crate::fiber::deluge_worker_run_priority`] directly, as [`run`]'s
-//! Phase 2 does (via [`submit_pump_priority`]/[`priority_read_op`]), exercises
-//! the exact same queue path `request_pump` reaches, without needing a real
-//! queued `StreamedChunk`
-//! (which would need the full C++ `deluge_app` linked — see
-//! `.superpowers/sdd/task-4-report.md` for why that's out of scope here) or
-//! duplicating `owner_host_exercise.rs`'s existing HIGH-vs-NORMAL ordering
-//! coverage (`deluge_worker_run_priority` dequeuing ahead of NORMAL ops is
-//! already proven there — this phase's only new claim is "HIGH dispatch +
+//! HIGH-priority block does (via [`submit_pump_priority`]/[`priority_read_op`]),
+//! exercises the exact same queue path `request_pump` reaches, without
+//! needing a real queued `StreamedChunk` (which would need the full C++
+//! `deluge_app` linked, out of scope here) or duplicating
+//! `owner_host_exercise.rs`'s existing HIGH-vs-NORMAL ordering coverage
+//! (`deluge_worker_run_priority` dequeuing ahead of NORMAL ops is already
+//! proven there — this block's only new claim is "HIGH dispatch +
 //! `sim_latency` suspension compose correctly").
 #![cfg(all(not(target_os = "none"), feature = "sim_latency"))]
 
@@ -129,12 +128,12 @@ async fn submit_pump() {
     }
 }
 
-/// Phase 2 (Task 4) sibling of [`SUBMIT_RX`]/[`submit_pump`]: the ONLY caller
-/// of `deluge_worker_run_priority` — the HIGH-priority entry point
+/// HIGH-priority-dispatch sibling of [`SUBMIT_RX`]/[`submit_pump`]: the ONLY
+/// caller of `deluge_worker_run_priority` — the HIGH-priority entry point
 /// `request_pump`'s off-owner dispatch (via `Owner::run_priority`/
-/// `Coalescer`) actually reaches on host. See the module doc's "Phase 2"
-/// section for why exercising this call directly is a faithful proxy for
-/// `request_pump`'s real dispatch shape.
+/// `Coalescer`) actually reaches on host. See the module doc's
+/// "HIGH-priority dispatch" section for why exercising this call directly is
+/// a faithful proxy for `request_pump`'s real dispatch shape.
 static SUBMIT_RX_PRIORITY: Mutex<Option<mpsc::Receiver<Job>>> = Mutex::new(None);
 
 #[embassy_executor::task]
@@ -182,7 +181,7 @@ extern "C" fn read_op(_ctx: *mut core::ffi::c_void) {
     READ_DONE.store(true, Ordering::SeqCst);
 }
 
-/// Sector for the Phase 2 (HIGH-priority-dispatch) read — distinct from
+/// Sector for the HIGH-priority-dispatch read — distinct from
 /// [`TEST_SECTOR`] so the two phases' writes/reads can't collide within the
 /// same backing image.
 const TEST_SECTOR_PRIORITY: u32 = 4001;
@@ -201,7 +200,7 @@ fn pattern_priority() -> [u8; PATTERN_LEN] {
     p
 }
 
-/// Phase 2 (Task 4) sibling of [`read_op`]: same shape (runs on the fiber,
+/// HIGH-priority-dispatch sibling of [`read_op`]: same shape (runs on the fiber,
 /// issues the real `deluge_block_read` C-ABI call), but reached via
 /// `deluge_worker_run_priority` (see [`submit_pump_priority`]) instead of
 /// `deluge_worker_run` — the HIGH-priority path `request_pump` actually
@@ -363,12 +362,13 @@ pub fn run() {
          modeled delay — suggests it isn't being driven promptly by its Waker"
     );
 
-    // --- Phase 2 (Task 4): the SAME suspend-and-yield proof, but dispatched
-    // via `deluge_worker_run_priority` — the exact primitive `request_pump`'s
-    // real off-owner path (`Coalescer{priority: true}` -> `Owner::run_priority`)
-    // forwards to with no intervening logic (see the module doc's "Phase 2"
-    // section). Proves the HIGH-priority queue path and `sim_latency`
-    // suspension compose correctly, not just NORMAL dispatch (Phase 1 above).
+    // --- the same suspend-and-yield proof, but dispatched via
+    // `deluge_worker_run_priority` — the exact primitive `request_pump`'s real
+    // off-owner path (`Coalescer{priority: true}` -> `Owner::run_priority`)
+    // forwards to with no intervening logic (see the module doc's
+    // "HIGH-priority dispatch" section). Proves the HIGH-priority queue path
+    // and `sim_latency` suspension compose correctly, not just NORMAL
+    // dispatch (above). ---
     let pat2 = pattern_priority();
     let write_start2 = Instant::now();
     let status2 = crate::sd::deluge_block_write(0, pat2.as_ptr(), TEST_SECTOR_PRIORITY, 1);
@@ -395,7 +395,7 @@ pub fn run() {
     });
 
     // Sample partway through the modeled delay: same suspend-and-yield check
-    // as Phase 1, this time for the HIGH-priority-dispatched op.
+    // as above, this time for the HIGH-priority-dispatched op.
     std::thread::sleep(Duration::from_millis(u64::from(OVERHEAD_US) / 1000 / 2));
     assert!(
         !PRIO_READ_DONE.load(Ordering::SeqCst),

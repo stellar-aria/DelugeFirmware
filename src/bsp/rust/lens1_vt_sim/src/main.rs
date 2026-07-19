@@ -1,22 +1,22 @@
-//! Lens 1 (streaming-underrun harness, Task 7): a single-threaded, DETERMINISTIC
+//! Lens 1 (streaming-underrun harness): a single-threaded, DETERMINISTIC
 //! virtual-time discrete-event simulation of the real `host_app` (song load,
 //! sustained playback, concurrent record), measuring `loaded`-miss underruns
 //! (`deluge::harness::noteUnderrunWait`/`noteUnderrunUnassign`) as a function of
 //! modeled SD latency / audio compute budget — reproducibly, independent of host
 //! CPU speed.
 //!
-//! # Executor + clock (Spike A's shape, `.superpowers/sdd/task-1-report.md`)
+//! # Executor + clock
 //!
 //! `embassy_executor::raw::Executor` + a custom `AtomicBool` `__pender` + a
-//! `PeekableMockDriver` ([`clock`] — the exact shape Spike A proved in
-//! `../spike_mock_clock/`). The driver loop: poll the executor to quiescence,
+//! `PeekableMockDriver` ([`clock`] — the same discrete-event shape prototyped
+//! in `../spike_mock_clock/`). The driver loop: poll the executor to quiescence,
 //! peek the next due deadline, jump the virtual clock to exactly that deadline,
 //! repeat. No `platform-std`/`executor-thread` embassy-executor feature is
 //! enabled (see `Cargo.toml`), so there is exactly one `__pender` in this binary
 //! and it is ours.
 //!
-//! # The boot livelock (the hardest part — see `sd.rs`'s
-//! `sim_latency::off_fiber_instant` doc comment for the full mechanism)
+//! # The boot livelock (see `sd.rs`'s `sim_latency::off_fiber_instant` doc
+//! comment for the full mechanism)
 //!
 //! `deluge_app_init` calls the boot-time FatFS mount SYNCHRONOUSLY, off the
 //! worker fiber, via `embassy_futures::block_on` — a tight busy-spin poll loop
@@ -33,7 +33,7 @@
 //! sidesteps this by running `pump` on a second real OS thread — not available
 //! here (single-threaded, virtual clock; a real thread would reintroduce
 //! wall-clock waiting and a second executor outside this loop's quiescence
-//! check, defeating determinism — see the task brief).
+//! check, defeating determinism).
 //!
 //! Fix: `sd.rs`'s `sim_latency::set_off_fiber_instant` (a small, additive,
 //! off-by-default change to that SHARED file) makes an off-fiber modeled
@@ -42,9 +42,9 @@
 //! for the busy-spin to wait ON. Safe/faithful because the only off-fiber
 //! transfers that can ever occur here are the boot-time FatFS mount plus
 //! whatever essential-sample reads `deluge_app_init` issues synchronously
-//! before the fiber exists — Task 6's report already established "load's own
-//! essential-sample reads have no real-time deadline the underrun counters care
-//! about"; this extends that reasoning one step earlier, to the mount itself.
+//! before the fiber exists — load's own essential-sample reads have no
+//! real-time deadline the underrun counters care about, and this extends that
+//! reasoning one step earlier, to the mount itself.
 //! Every transfer AFTER the fiber exists (song load's essential-sample fetches,
 //! sustained streaming, recording) is genuinely ON-fiber (`block_on_fiber`, a
 //! coroutine YIELD — not a busy spin: it suspends the fiber and returns control
@@ -137,7 +137,7 @@ unsafe extern "C" {
     fn deluge_sim_underrun_unassign_count() -> u64;
 }
 
-// Task 8 negative-control-B knobs (`harness/streaming_controls.h`): sim-only, off by
+// Negative-control-B knobs (`harness/streaming_controls.h`): sim-only, off by
 // default, demote the loader's HIGH-priority dispatch to NORMAL / disable the recorder
 // drain's cooperative yield-to-HIGH check, so a mechanism-on run can be compared against a
 // mechanism-off run at the same modeled latency. See `main`'s
@@ -148,10 +148,10 @@ unsafe extern "C" {
 }
 
 /// `AudioEngine::routine_task`'s virtual per-block cadence: exactly one
-/// 128-frame block's worth of real time, in microseconds — the brief's "128 /
-/// 44100 s per block". This is the default `scheduler::set_audio_period_override_us`
-/// value (the "compute-budget" knob); overridable via `LENS1_AUDIO_BLOCK_US` for
-/// a later margin sweep (Task 8).
+/// 128-frame block's worth of real time, in microseconds (128 / 44100 s per
+/// block). This is the default `scheduler::set_audio_period_override_us`
+/// value (the "compute-budget" knob); overridable via `LENS1_AUDIO_BLOCK_US`
+/// for a later margin sweep.
 const DEFAULT_AUDIO_BLOCK_PERIOD_US: u64 = 128 * 1_000_000 / 44_100; // 2902 (floor)
 
 /// Boot task: mirrors `deluge-bsp-rust`'s `host_app_task` exactly (PIC-ready
@@ -224,7 +224,7 @@ async fn scenario_runner(cfg: scenario::ScenarioConfig, done: &'static AtomicBoo
 static RESULT: std::sync::Mutex<Option<scenario::ScenarioResult>> = std::sync::Mutex::new(None);
 
 /// Our own pender: no thread, no parking — just a flag the driver loop polls
-/// itself between `raw::Executor::poll()` calls (Spike A's shape).
+/// itself between `raw::Executor::poll()` calls.
 static PENDED: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(export_name = "__pender")]
@@ -273,7 +273,7 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
-    // Task 8 negative-control-B knobs (see the `extern "C"` block above's doc comment).
+    // Negative-control-B knobs (see the `extern "C"` block above's doc comment).
     // Both default OFF (production/mechanism-on behaviour) — set either to `1` to run the
     // SAME scenario with that rung-5 mechanism forced off, for an on-vs-off comparison at a
     // fixed challenging latency.
@@ -292,7 +292,7 @@ fn main() {
     );
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same tooling
-    // Task 5's scenario driver uses. Must run before anything below touches SD.
+    // the scenario driver uses. Must run before anything below touches SD.
     if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -315,13 +315,13 @@ fn main() {
     // urgent HIGH burst still wins comfortably, small enough that a starved
     // NORMAL job waits at most ~8 HIGH cycles (under 2ms of virtual time).
     fiber::set_high_priority_fairness_bound(8);
-    // Task 8 negative-control-B knobs: apply before anything spawns (same rule as the two
+    // Negative-control-B knobs: apply before anything spawns (same rule as the two
     // hooks above) — see the `extern "C"` block's doc comment.
     unsafe { deluge_sim_set_force_normal_priority(force_normal_priority) };
     unsafe { deluge_sim_set_recorder_yield_disabled(disable_recorder_yield) };
-    // Task 6's `post_load_sim_latency` design applies the modeled latency ONLY
-    // after load completes, deliberately sparing the essential-sample preload
-    // (load has no real-time deadline). That's also WHY it can never produce a
+    // `post_load_sim_latency`'s design applies the modeled latency ONLY after
+    // load completes, deliberately sparing the essential-sample preload (load
+    // has no real-time deadline). That's also WHY it can never produce a
     // WAIT-class underrun on its own: `SampleHolder::claimClusterReasons`
     // (called during load, `CLUSTER_ENQUEUE`) always leaves `clusters[0]`
     // loaded by the time playback starts (see `LoadSongUI::performLoad`'s
@@ -333,7 +333,7 @@ fn main() {
     // proceeds anyway with `clusters[0]->loaded == false`, and
     // `attemptLateSampleStart`'s WAIT branch should fire the instant
     // `resumePlayback`/note-on checks it. This is the harness's positive-
-    // control lever (Task 7's GATE) — see the report for evidence either way.
+    // control lever for exercising that WAIT branch.
     let preload_latency = std::env::var("LENS1_PRELOAD_LATENCY")
         .ok()
         .is_some_and(|s| s == "1");
@@ -354,13 +354,13 @@ fn main() {
     };
 
     // Pin the audio (priority-0) task to the exact virtual block cadence — see
-    // `scheduler.rs`'s `AUDIO_PERIOD_OVERRIDE_US` doc comment (the brief's
+    // `scheduler.rs`'s `AUDIO_PERIOD_OVERRIDE_US` doc comment (the
     // "compute-budget" knob).
     scheduler::set_audio_period_override_us(audio_block_us, 0);
 
     // SAFETY: `raw::Executor` needs `&'static`; leaking a Box is the standard
-    // pattern for a `fn main` that doesn't itself run forever (Spike A /
-    // `embassy_executor::Executor::run`'s own doc use the same pattern).
+    // pattern for a `fn main` that doesn't itself run forever
+    // (`embassy_executor::Executor::run`'s own doc uses the same pattern).
     let executor: &'static raw::Executor =
         Box::leak(Box::new(raw::Executor::new(std::ptr::null_mut())));
     let spawner = executor.spawner();
@@ -387,7 +387,7 @@ fn main() {
     static DONE: AtomicBool = AtomicBool::new(false);
     spawner.spawn(scenario_runner(cfg, &DONE).unwrap());
 
-    // --- Spike A's discrete-event driver loop -------------------------------
+    // --- Discrete-event driver loop -----------------------------------------
     let driver = clock::PeekableMockDriver::get();
     let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
     let wall_start = std::time::Instant::now();

@@ -399,16 +399,15 @@ pub extern "C" fn deluge_block_write(
 
 /// Host-only instrumentation (streaming-underrun harness): counts SD block reads/writes
 /// that happen ON THE STORAGE-OWNER FIBER (`fiber::on_fiber()` true at the call site) —
-/// i.e. transfers that genuinely reached the fiber+priority dispatch machinery (Task 4),
-/// as opposed to the boot-time FatFS mount or any other off-fiber access (which always
-/// runs `block_on`-only, never suspends, and isn't what the harness cares about proving).
-/// This is the evidence the streaming-underrun harness's scenario driver (`scenario.rs`)
-/// asserts on: a real queued cluster read (`loader::request_pump`, HIGH priority) or
-/// recorder card-write (`requestRecorderCardRoutines`, SD-routine) actually DRAINED
-/// through `fiber::worker_poll()`, not just that the dispatch was attempted (Task 4's own
-/// proxy proof, which never queued a real cluster). Compiled for every host build (not
-/// gated on `host_app`/`sim_latency`), same as the 4 functions below it — the counters sit
-/// idle (never read) unless something calls the `on_fiber_*` getters.
+/// i.e. transfers that genuinely reached the fiber+priority dispatch machinery, as
+/// opposed to the boot-time FatFS mount or any other off-fiber access (which always
+/// runs `block_on`-only and never suspends). This is the evidence the streaming-underrun
+/// harness's scenario driver (`scenario.rs`) asserts on: a real queued cluster read
+/// (`loader::request_pump`, HIGH priority) or recorder card-write
+/// (`requestRecorderCardRoutines`, SD-routine) actually DRAINED through
+/// `fiber::worker_poll()`, not just that the dispatch was attempted. Compiled for every
+/// host build (not gated on `host_app`/`sim_latency`) — the counters sit idle (never
+/// read) unless something calls the `on_fiber_*` getters below.
 #[cfg(not(target_os = "none"))]
 pub(crate) mod stats {
     use core::sync::atomic::{AtomicU64, Ordering};
@@ -585,7 +584,7 @@ pub extern "C" fn deluge_block_read(
     let result = if on_fiber {
         block_on_fiber(sim_latency::modeled_read(sector, count, out))
     } else if sim_latency::off_fiber_instant() {
-        // See `sim_latency::off_fiber_instant`'s doc comment (Lens 1 only).
+        // See `sim_latency::off_fiber_instant`'s doc comment.
         block_on(sd::read_sectors(sector, count, out))
     } else {
         block_on(sim_latency::modeled_read(sector, count, out))
@@ -631,7 +630,7 @@ pub extern "C" fn deluge_block_write(
     let result = if on_fiber {
         block_on_fiber(sim_latency::modeled_write(sector, count, data))
     } else if sim_latency::off_fiber_instant() {
-        // See `sim_latency::off_fiber_instant`'s doc comment (Lens 1 only).
+        // See `sim_latency::off_fiber_instant`'s doc comment.
         block_on(sd::write_sectors(sector, count, data))
     } else {
         block_on(sim_latency::modeled_write(sector, count, data))
@@ -663,12 +662,9 @@ pub extern "C" fn deluge_block_write(
 /// and `embassy-time`'s integrated timer queue (this workspace pins the
 /// `timer-item-size-*`/integrated variant — see `Cargo.toml`'s patch section)
 /// panics on exactly that (`TimerQueueItem::from_embassy_waker`: "Panics if
-/// called with a non-embassy waker"). This is the SAME constraint already
+/// called with a non-embassy waker"). This is the same constraint already
 /// documented at this file's `boot_init` (`sd::init()`'s Timers can't run
-/// under `block_on`) and independently re-discovered by
-/// `tests/support/owner_host_exercise.rs`'s `block_on_fiber` phase (which
-/// tried `embassy_time::Timer` first and had to fall back to an
-/// `AtomicWaker`-driven stand-in future).
+/// under `block_on`).
 ///
 /// So the actual `Timer::after` await happens in [`pump`], a genuine spawned
 /// Embassy task (a real per-task waker — whichever executor/harness spawns
@@ -701,8 +697,8 @@ pub mod sim_latency {
 
     /// Modeled throughput, bytes/sec — the `bytes / throughput` term of the
     /// latency model. Overridable at runtime (a plain `Relaxed` static, not a
-    /// `const`) so a Phase-2 harness sweep can vary it per run without a
-    /// rebuild. Default: a plausible sustained SD sequential-transfer rate.
+    /// `const`) so a harness sweep can vary it per run without a rebuild.
+    /// Default: a plausible sustained SD sequential-transfer rate.
     static THROUGHPUT_BYTES_PER_SEC: AtomicU32 = AtomicU32::new(20_000_000);
     /// Modeled fixed per-command overhead, microseconds — the command/
     /// response round-trip latency independent of transfer size. Overridable
@@ -720,35 +716,33 @@ pub mod sim_latency {
         COMMAND_OVERHEAD_US.store(us, Ordering::Relaxed);
     }
 
-    /// Lens-1-only (deterministic virtual-time streaming harness, Task 7) escape
-    /// hatch: when true, a modeled read/write issued OFF the storage-owner fiber
+    /// Escape hatch for single-threaded deterministic-clock harnesses: when true,
+    /// a modeled read/write issued OFF the storage-owner fiber
     /// (`deluge_block_read`/`_write`'s `on_fiber` branch above) skips
     /// [`delay`]/[`pump`] entirely and goes straight to the real transfer. Off
     /// (`false`) by default, preserving today's behavior for every existing
     /// consumer — manual `cargo run --features host_app,sim_latency` testing, and
-    /// Lens 2's TSan preemptive-thread harness, which resolves the equivalent
-    /// off-fiber livelock by running [`pump`] on a SEPARATE OS THREAD instead
-    /// (`.superpowers/sdd/task-4-report.md`).
+    /// any multi-threaded harness, which can instead resolve the same off-fiber
+    /// livelock by running [`pump`] on a separate OS thread.
     ///
-    /// Lens 1 cannot spawn that escape-hatch thread — a single-threaded custom
-    /// `raw::Executor` + virtual clock has no second thread to run `pump` on, and
-    /// `deluge_app_init` calls the boot-time FatFS mount SYNCHRONOUSLY
-    /// (`embassy_futures::block_on`'s tight poll loop never yields back to the
-    /// executor, so `pump`'s `Timer` could never be polled — see
-    /// `.superpowers/sdd/task-7-report.md`'s boot-livelock section). The only
-    /// off-fiber `sim_latency` transfers on this harness are that boot-time mount
-    /// (before the worker/owner exists, so nothing else could usefully run
-    /// concurrently with it anyway — see `deluge_block_read`'s own
-    /// `worker_started()` doc comment) plus a handful of essential-sample reads
-    /// `deluge_app_init` may issue synchronously during the same call — none of
-    /// which have a real-time deadline the underrun counters care about (matches
-    /// `ScenarioConfig::post_load_sim_latency`'s existing "load's own reads don't
-    /// need modeling" rationale). Lens 1 sets this once at startup, before any
-    /// transfer, and never touches it again; ON-fiber reads (the actual streaming
-    /// path, post-boot) are UNAFFECTED and keep modeling latency normally — those
-    /// suspend via [`crate::fiber::block_on_fiber`]'s genuine coroutine yield,
-    /// which the normal quiescence-loop-driven executor handles without any
-    /// special-casing.
+    /// A single-threaded executor has no second thread available for that
+    /// thread-based fix, and needs this flag instead: `deluge_app_init` calls the
+    /// boot-time FatFS mount SYNCHRONOUSLY, and `embassy_futures::block_on`'s
+    /// tight poll loop never yields back to the executor, so `pump`'s `Timer`
+    /// could never be polled — the mount would livelock waiting on a delay
+    /// nothing can ever complete. The only off-fiber `sim_latency` transfers on
+    /// such a harness are that boot-time mount (before the worker/owner exists,
+    /// so nothing else could usefully run concurrently with it anyway — see
+    /// `deluge_block_read`'s own `worker_started()` doc comment) plus a handful
+    /// of essential-sample reads `deluge_app_init` may issue synchronously during
+    /// the same call — none of which have a real-time deadline the underrun
+    /// counters care about (matches `ScenarioConfig::post_load_sim_latency`'s
+    /// existing "load's own reads don't need modeling" rationale). Set this once
+    /// at startup, before any transfer; ON-fiber reads (the actual streaming
+    /// path, post-boot) are UNAFFECTED and keep modeling latency normally —
+    /// those suspend via [`crate::fiber::block_on_fiber`]'s genuine coroutine
+    /// yield, which the normal quiescence-loop-driven executor handles without
+    /// any special-casing.
     static OFF_FIBER_INSTANT: AtomicBool = AtomicBool::new(false);
 
     /// See [`OFF_FIBER_INSTANT`]'s doc comment.
@@ -825,11 +819,9 @@ pub mod sim_latency {
     }
 
     /// The modeled-latency wrapper future for a host read: pends on the
-    /// modeled per-transfer delay, THEN performs the real (synchronous,
-    /// file-backed) read — matching the design brief's "pends on a clock
-    /// timer of modeled per-transfer latency... before returning the
-    /// file-image data". Only the timing is modeled; the data comes from the
-    /// same `deluge_bsp::sd::read_sectors` the plain host path uses.
+    /// modeled per-transfer delay, then performs the real (synchronous,
+    /// file-backed) read. Only the timing is modeled; the data comes from
+    /// the same `deluge_bsp::sd::read_sectors` the plain host path uses.
     pub async fn modeled_read(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
         delay(count as usize * SECTOR_SIZE).await;
         sd::read_sectors(lba, count, buf).await

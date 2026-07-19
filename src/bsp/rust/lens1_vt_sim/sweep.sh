@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Lens 1 (streaming-underrun harness) margin sweep + negative controls (Task 8,
-# .superpowers/sdd/task-8-brief.md). Formalizes what Task 7 ran by hand: a repeatable,
+# Lens 1 (streaming-underrun harness) margin sweep + negative controls. Formalizes
+# what was originally run by hand: a repeatable,
 # deterministic sweep of `lens1-vt-sim` over modeled SD latency (the `sim_latency`
 # throughput/overhead lever — see `../src/sd.rs`'s `latency_for`), reporting the underrun
 # curve and the THRESHOLD throughput at which underruns first appear (the "margin": "keeps
@@ -17,8 +17,8 @@
 #     mechanisms are FOR, not just that underrun goes up under stress.
 #
 # Every run is a single deterministic virtual-time simulation (no wall-clock, no RNG) —
-# repeat any invocation and the numbers reproduce exactly (see task-7-report.md's
-# determinism check). This script just automates running `lens1-vt-sim` several times as
+# repeat any invocation and the numbers reproduce exactly. This script just automates
+# running `lens1-vt-sim` several times as
 # separate PROCESSES (not an in-process loop): the C++ app's static/global state
 # (`currentSong`, the storage owner, ...) is never designed to be reset and re-driven twice
 # in one process lifetime, so a fresh process per data point is the safe, simple shape —
@@ -33,7 +33,7 @@
 #   sweep.sh control-b-scan   # control B's on/off deltas across SEVERAL latencies (diagnostic:
 #                             # the single-point control-b result at CHALLENGE_BPS is not
 #                             # perfectly representative — the priority mechanism's effect is
-#                             # non-monotonic across the latency range, see task-8-report.md)
+#                             # non-monotonic across the latency range)
 #
 # Env overrides:
 #   FIXTURE          song fixture                              (default: cordae)
@@ -80,8 +80,8 @@ field() { # field <LENS1_RESULT line> <name>
 
 # --- Margin sweep --------------------------------------------------------------------
 # Geometric-ish descent from a fast/default-plausible throughput down to the extreme low
-# end Task 7 characterized, denser in the 300k-2M band where the curve was expected (from
-# Task 7's coarser table) to cross from 0 to positive, to pin the threshold tightly.
+# end characterized by hand, denser in the 300k-2M band where the curve was expected (from
+# a coarser hand-run table) to cross from 0 to positive, to pin the threshold tightly.
 MARGIN_THROUGHPUTS=(2000000 1500000 1000000 800000 600000 500000 400000 300000 200000 150000 100000 50000 20000 10000 5000)
 
 run_margin_sweep() {
@@ -160,8 +160,8 @@ run_control_b() {
     fi
 }
 
-# --- Negative control B diagnostic scan (priority mechanism is non-monotonic — see
-# task-8-report.md) ---------------------------------------------------------------------
+# --- Negative control B diagnostic scan (priority mechanism is non-monotonic across
+# the latency range) --------------------------------------------------------------------
 CONTROL_B_SCAN_THROUGHPUTS=(500000 300000 200000 150000 100000 50000 20000 5000)
 
 run_control_b_scan() {

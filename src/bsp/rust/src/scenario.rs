@@ -1,14 +1,14 @@
-//! The streaming-underrun harness's REUSABLE scenario driver (Phase 1 shared substrate,
-//! Task 5): load a real song, start real-time playback, start a concurrent output
-//! recording, then step until a target number of audio blocks have rendered — the
-//! substrate both lenses (Task 7's deterministic virtual-time sim, Task 9's preemptive-
-//! audio TSan check) assert over.
+//! The streaming-underrun harness's reusable scenario driver: load a real song, start
+//! real-time playback, start a concurrent output recording, then step until a target
+//! number of audio blocks have rendered — the substrate two verification approaches assert
+//! over: a deterministic virtual-time simulation and a preemptive-audio ThreadSanitizer
+//! check.
 //!
 //! [`run`] is deliberately THREAD-AGNOSTIC: it never spawns an OS thread, never touches
-//! [`crate::sd::sim_latency::pump`] (that mechanism is Lens-2-only — Task 7's Lens 1 runs
-//! on a single-threaded custom executor and cannot spawn an escape-hatch thread, see
-//! `.superpowers/sdd/task-4-report.md`'s cross-lens note), and makes no assumption about
-//! which embassy executor is driving it (`platform-std`, Lens 1's future custom
+//! [`crate::sd::sim_latency::pump`] (that mechanism needs to spawn an escape-hatch OS
+//! thread, which isn't available to a single-threaded custom executor — the shape the
+//! deterministic virtual-time simulation runs on), and makes no assumption about which
+//! embassy executor is driving it (`platform-std`, a future single-threaded custom
 //! `raw::Executor`+`MockDriver`, ...) — it only `.await`s [`embassy_time::Timer`]s in a
 //! plain poll loop, which every embassy executor variant supports identically. The caller
 //! is responsible for having already booted the real C++ app (`deluge_app_init` returned,
@@ -21,7 +21,7 @@
 //! [`scenario_task`] is a thin, NOT-reusable convenience wrapper used only by this crate's
 //! own `host_app` boot path (`main.rs`): it spawns [`run`] as an embassy task and stashes
 //! the result in a static so the OS thread that owns that executor (which cannot `.await`
-//! directly) can poll for completion. Lens 1/2 harnesses are expected to call [`run`]
+//! directly) can poll for completion. Other harnesses are expected to call [`run`]
 //! directly from their own executor's task graph instead of reusing this wrapper.
 #![cfg(all(not(target_os = "none"), feature = "host_app"))]
 
@@ -46,7 +46,7 @@ unsafe extern "C" {
     fn deluge_scenario_start_recording() -> bool;
 }
 
-// Streaming-underrun harness (Task 6): C-ABI reader for `harness/streaming_underrun.{h,cpp}`'s
+// Streaming-underrun harness: C-ABI reader for `harness/streaming_underrun.{h,cpp}`'s
 // sim-only `loaded`-miss counters — the harness's PRIMARY underrun signal (the audio thread
 // discovering a needed sample cluster isn't loaded yet, on a play-needed path, and deferring
 // or dropping the voice as a result). Same manual-declaration pattern as the block above:
@@ -70,7 +70,7 @@ pub struct ScenarioConfig {
     /// Bound on each polling wait (listing / load-commit / playback-start / block target)
     /// so a wedged app fails the scenario instead of hanging the caller forever.
     pub step_timeout: Duration,
-    /// Task 6 sanity-check / Phase 2 negative-control knob: `(throughput_bytes_per_sec,
+    /// Sanity-check / negative-control knob: `(throughput_bytes_per_sec,
     /// command_overhead_us)` applied to `sd::sim_latency` right after `load_completed`
     /// succeeds and BEFORE the pre-playback baseline is snapshotted — i.e. it stresses only
     /// the phase the underrun counters care about (sustained real-time streaming), not the
@@ -86,8 +86,8 @@ pub struct ScenarioConfig {
 
 /// Outcome of [`run`]. Deliberately plain data, not a `Result`/panic: a step that times
 /// out just leaves the later fields at their default and `run` returns early — the caller
-/// decides what counts as pass/fail (matters for the later lens tasks' NEGATIVE controls,
-/// which need to observe "the harness correctly detects failure", not just "it panicked").
+/// decides what counts as pass/fail (matters for NEGATIVE-control scenarios, which need to
+/// observe "the harness correctly detects failure", not just "it panicked").
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScenarioResult {
     /// The app finished enough of boot (`registerTasks()` claimed at least one scheduler
@@ -116,19 +116,19 @@ pub struct ScenarioResult {
     pub blocks_rendered: u64,
     /// On-fiber SD block reads observed over the same window — the loader's real,
     /// dispatched cluster reads (`crate::sd::stats::on_fiber_reads()`). This is the
-    /// upgrade over Task 4's proxy: proof `request_pump`'s REAL dispatch, with a REAL
-    /// queued cluster (this song's samples), drained through `fiber::worker_poll()`.
+    /// proof of `request_pump`'s REAL dispatch, with a REAL queued cluster (this song's
+    /// samples), drained through `fiber::worker_poll()`.
     pub cluster_reads: u64,
     /// On-fiber SD block writes observed over the same window — the recorder's real,
     /// dispatched card writes (`crate::sd::stats::on_fiber_writes()`).
     pub recorder_writes: u64,
-    /// WAIT-class underrun misses over the same window (Task 6): the audio thread found a
+    /// WAIT-class underrun misses over the same window: the audio thread found a
     /// needed sample cluster not loaded yet on a play-needed path and deferred the voice
     /// rather than dropping it (`deluge_sim_underrun_wait_count()`, baseline-subtracted).
-    /// This — together with `underrun_unassign` — is the harness's PRIMARY underrun signal
-    /// both later lenses (Task 7 timing, Task 9 concurrency) assert on.
+    /// This — together with `underrun_unassign` — is the harness's PRIMARY underrun signal,
+    /// the one both the timing simulation and the concurrency check assert on.
     pub underrun_wait: u64,
-    /// UNASSIGN-class underrun misses over the same window (Task 6): the audio thread found a
+    /// UNASSIGN-class underrun misses over the same window: the audio thread found a
     /// needed sample cluster not loaded and dropped the voice outright
     /// (`deluge_sim_underrun_unassign_count()`, baseline-subtracted) — a harder failure than a
     /// WAIT deferral.
@@ -199,9 +199,9 @@ pub async fn run(cfg: ScenarioConfig) -> ScenarioResult {
         return result;
     }
 
-    // Task 6 sanity-check / Phase 2 negative-control knob: apply the requested `sim_latency`
+    // Sanity-check / negative-control knob: apply the requested `sim_latency`
     // override HERE — load just finished (under whatever latency was already in effect), so
-    // this stresses only the sustained real-time streaming this task's counters care about,
+    // this stresses only the sustained real-time streaming the underrun counters care about,
     // not load's own essential-sample reads (see `ScenarioConfig::post_load_sim_latency`'s
     // doc comment).
     #[cfg(feature = "sim_latency")]

@@ -1,13 +1,13 @@
-//! Streaming-underrun harness: assembles a REAL FAT-formatted SD card image containing a
-//! song + its samples for the [`crate::scenario`] driver to load, reusing the GOLDEN
-//! HARNESS's own corpus/packing tooling instead of hand-rolling a FAT image (per the Task
-//! 5 brief). Two steps, both delegated to already-proven tooling rather than reimplemented
-//! here:
-//!   1. the project TREE (`SONGS/…`, `SAMPLES/…`) — `scripts/golden_mixdown.sh
+//! Builds a real FAT32-formatted SD card image (a song plus its samples) for the
+//! [`crate::scenario`] streaming-underrun harness to load, by reusing the golden-master
+//! harness's own corpus/packing tooling rather than hand-rolling FAT image assembly.
+//!
+//! Two steps, both delegated to already-proven tooling:
+//!   1. the project tree (`SONGS/…`, `SAMPLES/…`) — `scripts/golden_mixdown.sh
 //!      reconstruct`, the exact script the golden-master harness uses to rebuild its
 //!      fixture from the developer's local `~/Deluge Backup` corpus (see this repo's
 //!      song-corpus-location note).
-//!   2. the FAT IMAGE itself — mtools (`mformat`+`mcopy`), the SAME approach
+//!   2. the FAT image itself — mtools (`mformat`+`mcopy`), the same approach
 //!      `src/bsp/host/host_render_main.cpp`'s `pack_image()` uses for `deluge_render`/
 //!      `deluge_host` (32 KB clusters, >= 2.5 GB floor — FAT32 needs >= 65525 clusters at
 //!      that cluster size, matching real Deluge SD card geometry).
@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Ensures fixture `name`'s project tree exists locally (reconstructing it from
+/// Ensures `fixture`'s project tree exists locally (reconstructing it from
 /// `DELUGE_BACKUP`/`DELUGE_GOLDEN_DIR` via `scripts/golden_mixdown.sh reconstruct` if not
 /// already cached — same env-var conventions as the golden harness), then packs it into a
 /// fresh temporary FAT32 image. Returns the image path (a process-unique temp file; the
@@ -66,7 +66,7 @@ pub fn pack_golden_fixture(repo_root: &Path, fixture: &str) -> PathBuf {
 /// `host_render_main.cpp`'s `pack_image()` exactly: `truncate` a sparse file (only written
 /// samples occupy real disk blocks), `mformat -c 64` (32 KB clusters — the geometry a real
 /// Deluge SD card uses; mtools' size-based default would pick tiny 2 KB clusters, which
-/// makes the firmware stream in far smaller Clusters than on-device), then `mcopy -s` the
+/// makes the firmware stream in far smaller clusters than on-device), then `mcopy -s` the
 /// whole project tree onto the image root.
 pub(crate) fn pack_image(project_dir: &Path) -> PathBuf {
     let img = std::env::temp_dir().join(format!(
@@ -83,7 +83,7 @@ pub(crate) fn pack_image(project_dir: &Path) -> PathBuf {
     bytes = (bytes + 511) & !511u64;
 
     // Shelled out (not separate `Command`s with Rust-side globbing) so `mcopy`'s `*` gets
-    // the SAME shell glob expansion `host_render_main.cpp`'s `system()` calls rely on.
+    // the same shell glob expansion `host_render_main.cpp`'s `system()` calls rely on.
     let script = format!(
         "set -e; truncate -s {bytes} '{img}'; mformat -i '{img}' -F -c 64 ::; \
          mcopy -s -Q -i '{img}' '{proj}'/* ::/",

@@ -274,7 +274,7 @@ fn audio_spawner() -> Option<SendSpawner> {
     unsafe { *core::ptr::addr_of!(AUDIO_SPAWNER) }
 }
 
-/// Lens-1-only (deterministic virtual-time streaming-underrun harness, Task 7)
+/// Lens-1-only (deterministic virtual-time streaming-underrun harness)
 /// override for the priority-0 (audio) task's schedule. `AudioEngine::routine_task`'s
 /// registered period (`deluge.cpp`: `8 / 44100.` seconds) is a scheduler poll/backoff
 /// hint tuned for the DEVICE's real DMA-paced render throttling

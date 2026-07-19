@@ -6,7 +6,6 @@
 //! `[[bin]]`-only build script with no library surface to import, and duplicating
 //! ~150 lines of straight-line archiving/linking logic is far lower risk here than
 //! inventing a new shared build-script crate for a single (harness-only) consumer.
-//! See `.superpowers/sdd/task-7-report.md` for why this package exists at all.
 use std::env;
 use std::fs;
 use std::path::PathBuf;

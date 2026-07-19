@@ -1,17 +1,17 @@
-# Lens 1 (streaming-underrun harness, Task 7): a single-threaded, DETERMINISTIC
+# Lens 1 (streaming-underrun harness): a single-threaded, deterministic
 # virtual-time discrete-event simulation of the real host_app (song load + sustained
 # playback + concurrent record), used to measure `loaded`-miss underruns as a
 # function of modeled SD latency / audio compute budget — reproducibly, independent
 # of host CPU speed.
 #
-# Deliberately a FULLY SEPARATE Cargo package from `deluge-bsp-rust` (../Cargo.toml),
-# per Spike A's verdict (`.superpowers/sdd/task-1-report.md`): `embassy-time`'s `std`
-# feature (deluge-bsp-rust's own host target) and a custom/`mock-driver`-shaped time
-# driver both define `#[no_mangle] _embassy_time_now`/`_embassy_time_schedule_wake` —
-# a hard duplicate-symbol compile error if both land in one package's dependency
-# graph (Cargo unifies a dependency's features across every target in ONE Cargo.toml;
-# there is no per-`[[bin]]` override). Same shape as the Spike A package
-# (`../spike_mock_clock/`), extended to link the real C++ host_app object closure.
+# Deliberately a fully separate Cargo package from `deluge-bsp-rust` (../Cargo.toml):
+# `embassy-time`'s `std` feature (deluge-bsp-rust's own host target) and a
+# custom/`mock-driver`-shaped time driver both define
+# `#[no_mangle] _embassy_time_now`/`_embassy_time_schedule_wake` — a hard
+# duplicate-symbol compile error if both land in one package's dependency graph
+# (Cargo unifies a dependency's features across every target in one Cargo.toml;
+# there is no per-`[[bin]]` override). Same shape as the sibling `../spike_mock_clock/`
+# package, extended to link the real C++ host_app object closure.
 #
 # Reuses deluge-bsp-rust's own source files via `#[path]` (see src/main.rs) — the
 # same pattern `tests/*.rs` already use to reuse `fiber.rs`/`sd.rs`/`scheduler.rs`
@@ -29,14 +29,14 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-# No `platform-*` feature (see src/main.rs's driver, same shape as Spike A's
+# No `platform-*` feature (see src/main.rs's driver, same shape as the sibling
 # `spike_mock_clock`): keeps the crate from defining its own `__pender`, so we
 # supply one ourselves and drive a poll-to-quiescence/advance-to-next-deadline
 # loop instead of a thread-parking executor.
 embassy-executor = { version = "0.10.0", default-features = false, features = ["nightly"] }
-# No `std`/`mock-driver` feature: keeps embassy-time from registering its OWN time
-# driver, so the hand-rolled `PeekableMockDriver` (src/clock.rs, same shape as
-# Spike A's) can be the sole one.
+# No `std`/`mock-driver` feature: keeps embassy-time from registering its own time
+# driver, so the hand-rolled `PeekableMockDriver` (src/clock.rs, same shape as the
+# sibling spike's) can be the sole one.
 embassy-time = { version = "0.5.1", default-features = false }
 embassy-time-driver = { version = "0.2.2", features = ["tick-hz-1_000_000"] }
 embassy-time-queue-utils = "0.3.2"

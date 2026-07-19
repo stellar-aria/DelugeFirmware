@@ -527,11 +527,11 @@ pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
     higher_priority_waiting()
 }
 
-/// Lens-1-only (deterministic virtual-time streaming-underrun harness, Task 7)
-/// starvation guard for [`dequeue`]'s HIGH-before-NORMAL policy. 0 (the
-/// default) preserves today's UNBOUNDED policy exactly for every other
-/// consumer (device, Lens 2, manual host_app runs) — see [`dequeue`]'s use of
-/// this below.
+/// Lens-1-only (deterministic virtual-time streaming-underrun harness) starvation guard
+/// for [`dequeue`]'s HIGH-before-NORMAL policy.
+/// 0 (the default) preserves today's UNBOUNDED policy exactly for every
+/// other consumer (device, Lens 2, manual host_app runs) — see [`dequeue`]'s
+/// use of this below.
 ///
 /// **Why this exists**: on a real clock (device or Lens 2's wall-clock host),
 /// `loader::request_pump`'s periodic HIGH-priority dispatch
@@ -543,14 +543,11 @@ pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
 /// virtual clock has **zero** jitter: `request_pump`'s task re-arms itself
 /// (~100-200us later) strictly before the `worker_poll` loop's 8ms fallback
 /// timer could ever fire, and `enqueue`'s unconditional `wake()` call means
-/// `WORKER_WAKE` fires the INSTANT that re-armed job lands — so in a run with
-/// no wall-clock noise to break the tie, a HIGH job is *always* sitting in the
+/// `WORKER_WAKE` fires the INSTANT that re-armed job lands — so with no
+/// wall-clock noise to break the tie, a HIGH job is *always* sitting in the
 /// ring by the time `dequeue` is next called, and `dequeue`'s strict
 /// HIGH-before-NORMAL rule starves every NORMAL job (song load, in
-/// particular) forever. Confirmed by direct instrumentation
-/// (`.superpowers/sdd/task-7-report.md`): with the bound unset, `dequeue`
-/// picks the SAME HIGH job's re-enqueued successor thousands of times in a
-/// row while `LoadSongUI::performLoad`'s dispatched job never runs even once.
+/// particular) forever.
 ///
 /// This is priority AGING, a standard fix for exactly this class of
 /// starvation: once `dequeue` has picked HIGH this many times in a row WHILE

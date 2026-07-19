@@ -24,10 +24,10 @@
 namespace deluge::harness {
 
 namespace {
-// Relaxed atomics: these are counters, not synchronization. Task 9's concurrency lens may read
-// them from a different thread than the audio-render thread that increments them; relaxed is
-// sufficient because the harness only cares about the eventual totals, not ordering against
-// other memory operations.
+// Relaxed atomics: these are counters, not synchronization. A reader may load them from a
+// different thread than the audio-render thread that increments them; relaxed is sufficient
+// because the harness only cares about the eventual totals, not ordering against other memory
+// operations.
 std::atomic<uint64_t> underrunWaitCount{0};
 std::atomic<uint64_t> underrunUnassignCount{0};
 } // namespace

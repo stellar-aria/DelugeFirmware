@@ -105,7 +105,12 @@ public:
 	// This will be the temp file path if there is one.
 	std::string filePathCreated{};
 
-	RecorderStatus status = RecorderStatus::CAPTURING_DATA;
+	// Atomic: the finishCapturing (audio) -> ABORTED (either thread) transitions are release stores; the
+	// fiber's cardRoutine() decision reads are acquire loads, so seeing FINISHED_CAPTURING_BUT_STILL_WRITING
+	// (or ABORTED) also makes visible the producer's final currentRecordClusterIndex/payload writes before
+	// the fiber takes over as producer in finalizeRecordedFile(). See docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<RecorderStatus> status = RecorderStatus::CAPTURING_DATA;
+	static_assert(std::atomic<RecorderStatus>::is_always_lock_free);
 	AudioInputChannel mode;
 	Output* outputRecordingFrom{}; // for when recording from a specific output
 

@@ -122,11 +122,20 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
+/// Streaming-underrun harness (Task 5): the reusable, thread-agnostic scenario driver
+/// (load a real song, start playback, start a concurrent recording, step N audio
+/// blocks) — see its module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod scenario;
 /// scheduler.h / OSLikeStuff scheduler_api.h — the cooperative task scheduler,
 /// implemented on the Embassy executor (one task per registered Deluge task).
 mod scheduler;
 /// block_device.h + FatFS diskio — SD card over deluge_bsp::sd.
 mod sd;
+/// Streaming-underrun harness (Task 5): packs a real FAT SD image from the golden
+/// harness's song/sample corpus for [`scenario`] to load. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod sd_image;
 /// Real impls of the simplest services (system.h, clock.h, memory.h).
 mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
@@ -603,6 +612,45 @@ fn main() {
         use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
 
+        // --- Streaming-underrun harness (Task 5): opt-in scenario mode -----
+        // Off by default (env var unset) — the boot-and-idle smoke below is byte-for-
+        // byte unchanged from before this task. Set DELUGE_STREAMING_SCENARIO_SONG
+        // (e.g. "SONGS/Cordae.XML") to switch this run into the scenario: pack a real
+        // FAT SD image from the golden harness's corpus (unless DELUGE_SD_IMAGE is
+        // already set, in which case that image is used as-is — must already contain
+        // the requested song), load it, start real-time playback + a concurrent
+        // output recording, and step until DELUGE_STREAMING_SCENARIO_BLOCKS audio
+        // blocks (default 500) have rendered. This MUST run before anything below
+        // touches SD (the audio thread spawn is SD-inert, but `host_app_task` mounts
+        // the card as soon as it starts) — see sd_image.rs's module doc.
+        let scenario_cfg = std::env::var("DELUGE_STREAMING_SCENARIO_SONG")
+            .ok()
+            .map(|song| {
+                if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
+                    let fixture = std::env::var("DELUGE_STREAMING_SCENARIO_FIXTURE")
+                        .unwrap_or_else(|_| "cordae".to_string());
+                    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .ancestors()
+                        .nth(3)
+                        .expect("CARGO_MANIFEST_DIR (src/bsp/rust) has a repo root 3 levels up")
+                        .to_path_buf();
+                    let img = crate::sd_image::pack_golden_fixture(&repo_root, &fixture);
+                    // SAFETY: called before any thread below is spawned (no concurrent
+                    // env access yet) — same precondition sim_latency_host_exercise.rs
+                    // documents for its own DELUGE_SD_IMAGE set_var.
+                    unsafe { std::env::set_var("DELUGE_SD_IMAGE", &img) };
+                }
+                let target_blocks = std::env::var("DELUGE_STREAMING_SCENARIO_BLOCKS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(500u64);
+                crate::scenario::ScenarioConfig {
+                    song_full_path: Box::leak(song.into_boxed_str()),
+                    target_blocks,
+                    step_timeout: embassy_time::Duration::from_secs(20),
+                }
+            });
+
         // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
@@ -672,7 +720,7 @@ fn main() {
 
         std::thread::Builder::new()
             .name("deluge-bsp-host-app".into())
-            .spawn(|| {
+            .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
                     crate::scheduler::set_spawner(spawner);
@@ -687,6 +735,15 @@ fn main() {
                     // `block_on`'d sim_latency transfer and would starve a
                     // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
+                    // Streaming-underrun harness (Task 5): spawned on THIS executor —
+                    // the same one `host_app_task`'s worker-fiber pump loop runs on —
+                    // so `scenario::run`'s C-ABI calls interleave cooperatively with
+                    // the real app's own task graph, exactly like a real HID event
+                    // handler would (see scenario.rs's module doc: it never spawns a
+                    // thread itself).
+                    if let Some(cfg) = scenario_cfg {
+                        spawner.spawn(crate::scenario::scenario_task(cfg).unwrap());
+                    }
                 });
             })
             .expect("spawning the host app executor thread");
@@ -749,6 +806,70 @@ fn main() {
                 );
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Streaming-underrun harness (Task 5): if scenario mode was requested, wait
+        // for `scenario::scenario_task` (spawned above, on the host-app executor) to
+        // finish, report its outcome, and exit — this REPLACES the generic soak below
+        // (the scenario's own block-count step already keeps both executors running
+        // concurrently for the requested window; a soak on top would just be dead
+        // time). Bounded by a generous overall deadline so a wedged scenario still
+        // exits nonzero instead of hanging the process forever.
+        if let Some(cfg) = scenario_cfg {
+            // std::time::Duration, not embassy_time::Duration (cfg.step_timeout's type) —
+            // this loop runs on the plain OS thread, same as every other polling loop in
+            // this block.
+            let watchdog = Duration::from_millis(cfg.step_timeout.as_millis() * 8);
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::scenario::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP scenario TIMED OUT after {watchdog:?} with no \
+                         result (scenario_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP scenario result: song='{}' boot_ready={} \
+                 load_dispatched={} listing_completed={} load_committed={} load_completed={} \
+                 playback_started={} playback_confirmed_active={} recording_started={} \
+                 blocks_rendered={} cluster_reads={} recorder_writes={}",
+                cfg.song_full_path,
+                result.boot_ready,
+                result.song_load_dispatched,
+                result.listing_completed,
+                result.load_committed,
+                result.load_completed,
+                result.playback_started,
+                result.playback_confirmed_active,
+                result.recording_started,
+                result.blocks_rendered,
+                result.cluster_reads,
+                result.recorder_writes,
+            );
+            let ok = result.load_completed
+                && result.playback_confirmed_active
+                && result.recording_started
+                && result.blocks_rendered >= cfg.target_blocks
+                && result.cluster_reads > 0
+                && result.recorder_writes > 0;
+            if ok {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP scenario PASSED — song streamed + recorded, \
+                     real dispatch drained (cluster_reads={}, recorder_writes={})",
+                    result.cluster_reads,
+                    result.recorder_writes
+                );
+                hard_exit(0);
+            } else {
+                log::error!("deluge-bsp-rust: HOST APP scenario FAILED (see fields above)");
+                hard_exit(1);
+            }
         }
 
         // --- Widen the concurrent window before exit ------------------------

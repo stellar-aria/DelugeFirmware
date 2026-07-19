@@ -397,6 +397,50 @@ pub extern "C" fn deluge_block_write(
     }
 }
 
+/// Host-only instrumentation (streaming-underrun harness): counts SD block reads/writes
+/// that happen ON THE STORAGE-OWNER FIBER (`fiber::on_fiber()` true at the call site) —
+/// i.e. transfers that genuinely reached the fiber+priority dispatch machinery (Task 4),
+/// as opposed to the boot-time FatFS mount or any other off-fiber access (which always
+/// runs `block_on`-only, never suspends, and isn't what the harness cares about proving).
+/// This is the evidence the streaming-underrun harness's scenario driver (`scenario.rs`)
+/// asserts on: a real queued cluster read (`loader::request_pump`, HIGH priority) or
+/// recorder card-write (`requestRecorderCardRoutines`, SD-routine) actually DRAINED
+/// through `fiber::worker_poll()`, not just that the dispatch was attempted (Task 4's own
+/// proxy proof, which never queued a real cluster). Compiled for every host build (not
+/// gated on `host_app`/`sim_latency`), same as the 4 functions below it — the counters sit
+/// idle (never read) unless something calls the `on_fiber_*` getters.
+#[cfg(not(target_os = "none"))]
+pub(crate) mod stats {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static ON_FIBER_READS: AtomicU64 = AtomicU64::new(0);
+    static ON_FIBER_WRITES: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn note_read(on_fiber: bool) {
+        if on_fiber {
+            ON_FIBER_READS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn note_write(on_fiber: bool) {
+        if on_fiber {
+            ON_FIBER_WRITES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Total SD block reads observed while `fiber::on_fiber()` was true (any host
+    /// `deluge_block_read` variant — plain or `sim_latency`).
+    pub fn on_fiber_reads() -> u64 {
+        ON_FIBER_READS.load(Ordering::Relaxed)
+    }
+
+    /// Total SD block writes observed while `fiber::on_fiber()` was true (any host
+    /// `deluge_block_write` variant — plain or `sim_latency`).
+    pub fn on_fiber_writes() -> u64 {
+        ON_FIBER_WRITES.load(Ordering::Relaxed)
+    }
+}
+
 /// Host: read `count` sectors via `deluge_bsp::sd::read_sectors` — the SAME
 /// call the device path (above) makes, now backed by `deluge_bsp::sd`'s
 /// file-backed disk image instead of a local shim. No card-detect concept on
@@ -435,6 +479,7 @@ pub extern "C" fn deluge_block_read(
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
+    stats::note_read(crate::fiber::on_fiber());
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
@@ -484,6 +529,7 @@ pub extern "C" fn deluge_block_write(
     if sd::is_write_protected() {
         return DELUGE_ERR_WRITE_PROTECTED;
     }
+    stats::note_write(crate::fiber::on_fiber());
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
@@ -531,11 +577,13 @@ pub extern "C" fn deluge_block_read(
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
+    let on_fiber = crate::fiber::on_fiber();
+    stats::note_read(on_fiber);
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
     let fut = sim_latency::modeled_read(sector, count, out);
-    match if crate::fiber::on_fiber() {
+    match if on_fiber {
         block_on_fiber(fut)
     } else {
         block_on(fut)
@@ -572,11 +620,13 @@ pub extern "C" fn deluge_block_write(
     if sd::is_write_protected() {
         return DELUGE_ERR_WRITE_PROTECTED;
     }
+    let on_fiber = crate::fiber::on_fiber();
+    stats::note_write(on_fiber);
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
     let fut = sim_latency::modeled_write(sector, count, data);
-    match if crate::fiber::on_fiber() {
+    match if on_fiber {
         block_on_fiber(fut)
     } else {
         block_on(fut)

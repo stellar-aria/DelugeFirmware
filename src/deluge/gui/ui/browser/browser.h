@@ -104,6 +104,13 @@ public:
 	static OutputType outputTypeToLoad;
 	static char const* filenameToStartSearchAt;
 
+	/// True while an async listing (beginListing()'s dispatch onto the storage-owner fiber) is
+	/// in flight. A caller that drives beginListing() from outside the normal HID-event flow
+	/// (e.g. a headless harness) needs this to know when it's safe to act on the listing's
+	/// result (getCurrentFileItem() etc) instead of racing it. Pure read-only accessor of
+	/// existing state — no behaviour change.
+	static bool isListingInProgress() { return listingInProgress_; }
+
 	// ui
 	ActionResult exitUI() override {
 		exitAction();

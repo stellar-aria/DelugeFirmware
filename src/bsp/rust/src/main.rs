@@ -411,10 +411,24 @@ async fn app_task() {
 /// one-time bring-up, run on the host executor spawned by `fn main`'s
 /// `host_app` boot path. Mirrors the device sequencing exactly (wait for the
 /// PIC handshake, bring SD up, then `deluge_app_init`), minus the device-only
-/// SYNC LED blink (no GPIO on host) and the worker-fiber pump loop (nothing on
-/// the boot-and-idle path dispatches a yielding op onto the worker fiber — see
-/// `fiber.rs`'s module doc — so there is nothing for this task to pump; it
-/// parks instead, exactly as this fn's doc promises).
+/// SYNC LED blink (no GPIO on host).
+///
+/// Unlike an earlier version of this fn, it does NOT just park after init: it
+/// runs the SAME worker-fiber pump loop as the device [`app_task`] (see its
+/// doc comment for the full rationale). That loop used to be pointless here —
+/// nothing on the boot-and-idle path dispatched a yielding op onto the worker
+/// fiber — but `loader::request_pump` (the streaming loader's ~0.1ms
+/// `addRepeatingTask`, registered by `registerTasks()` above) calls
+/// `deluge_storage_on_owner()` (== `fiber::on_fiber()`) every tick, and off
+/// the fiber (always true here, since nothing ever started it) dispatches
+/// onto `Owner::run_priority` → `deluge_worker_run_priority`, i.e. THIS
+/// worker's ring. Without this loop nothing ever drained that ring: the
+/// `Coalescer`'s single-flight guard latched `in_flight_ = true` on the first
+/// dispatch and never released it (`run_and_release` never ran), so every
+/// later `request_pump` tick silently no-op'd forever — streaming fills never
+/// happened on this harness at all. Restored so a real streaming cluster read
+/// (once one is queued — see the `sim_latency`/streaming-underrun harness)
+/// genuinely reaches the fiber and, under `sim_latency`, suspends it.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[embassy_executor::task]
 async fn host_app_task() {
@@ -426,13 +440,26 @@ async fn host_app_task() {
     log::info!("deluge-bsp-rust: host deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this
     // executor via scheduler::set_spawner's stashed spawner. They begin running
-    // as soon as we park below.
+    // as soon as we yield below.
     unsafe { deluge_app_init(board::deluge_board()) };
-    log::info!("deluge-bsp-rust: host scheduler running; app_task parking");
+    log::info!("deluge-bsp-rust: host scheduler running; pumping async worker");
 
-    // The scheduler's task runners now own all app work; this task has nothing
-    // left to do (see doc comment above re: the worker-fiber pump).
-    core::future::pending::<()>().await;
+    // Same wake-driven pump shape as the device `app_task` — see there for the
+    // full rationale (busy: race WORKER_WAKE against a coarse 8ms fallback;
+    // idle: sleep on WORKER_WAKE alone).
+    use embassy_futures::select::select;
+    loop {
+        let busy = fiber::worker_poll();
+        if busy {
+            let _ = select(
+                fiber::WORKER_WAKE.wait(),
+                embassy_time::Timer::after_millis(8),
+            )
+            .await;
+        } else {
+            fiber::WORKER_WAKE.wait().await;
+        }
+    }
 }
 
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
@@ -464,8 +491,29 @@ fn main() {
     // `on_fiber() || !worker_started()`, and `worker_started()` only latches
     // true once the first `worker_poll()` runs, which is after this
     // synchronous self-test returns — so it runs unconditionally in both
-    // configs. See the Task 4 report (`.superpowers/sdd/task-4-report.md`)
-    // for the full audit writeup and `fiber::worker_started` for the latch.
+    // configs.
+    //
+    // `sim_latency`-on only: SKIPPED here instead. Under `sim_latency`,
+    // `deluge_block_write`/`deluge_block_read` route through
+    // `sim_latency::modeled_write`/`modeled_read` (see sd.rs's module doc),
+    // which pends on `sim_latency::pump` — a genuinely-spawned Embassy task —
+    // to resolve the modeled delay. No executor exists yet at this point in
+    // `fn main()`, so nothing could ever spawn `pump`, and the off-fiber
+    // `block_on` below would busy-spin forever waiting on a modeled transfer
+    // nobody services (confirmed experimentally: `cargo run --features
+    // sim_latency` hung indefinitely right here before this guard was added —
+    // see the Task 4 report, `.superpowers/sdd/task-4-report.md`). The same
+    // round trip (write + read, byte-for-byte data assertion) stays covered
+    // under `sim_latency` by `tests/sim_latency_host.rs`'s exercise, which
+    // brings up a real executor with `sim_latency::pump` running before
+    // issuing any transfer.
+    #[cfg(feature = "sim_latency")]
+    log::info!(
+        "deluge-bsp-rust: sd round-trip SKIPPED (sim_latency has no executor/pump \
+         yet at this bootstrap point — see tests/sim_latency_host.rs for the \
+         covered equivalent)"
+    );
+    #[cfg(not(feature = "sim_latency"))]
     {
         const TEST_SECTOR: u32 = 1;
         let mut pattern = [0u8; 512];
@@ -584,6 +632,24 @@ fn main() {
             .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
+                    // sim_latency harness only: spawned HERE — on this separate OS
+                    // thread's executor, not the host-app executor's — deliberately.
+                    // `deluge_app_init` (called synchronously, off-fiber, from
+                    // `host_app_task` below) can itself issue a `sim_latency`-modeled
+                    // transfer (e.g. the boot-time FatFS mount read) via a plain
+                    // `block_on`, which hijacks its OS thread with a busy poll loop
+                    // and never yields back to that thread's executor — so a `pump`
+                    // spawned on the SAME (host-app) executor would never get polled
+                    // and the transfer would spin forever (confirmed experimentally:
+                    // `cargo run --features host_app,sim_latency` livelocked here
+                    // before this was moved — see the Task 4 report). `pump` only
+                    // touches cross-thread-safe primitives (`Signal`/`AtomicWaker`
+                    // over `CriticalSectionRawMutex`, `embassy_time::Timer` off the
+                    // shared std time driver — see sd.rs's module doc), so running it
+                    // on this independent thread lets it keep making progress while
+                    // the host-app thread is busy-spinning.
+                    #[cfg(feature = "sim_latency")]
+                    spawner.spawn(crate::sd::sim_latency::pump().unwrap());
                     crate::scheduler::set_audio_spawner(spawner.make_send());
                     log::info!(
                         "deluge-bsp-rust: host audio executor up on thread {:?} — set_audio_spawner done",
@@ -614,6 +680,12 @@ fn main() {
                     spawner.spawn(control::pad_render().unwrap());
                     spawner.spawn(control::encoder_wake_pump().unwrap());
                     spawner.spawn(display::oled_render().unwrap());
+                    // NOTE: `sim_latency::pump` is deliberately NOT spawned on this
+                    // executor — see the audio-thread executor closure above for why
+                    // (this thread's `host_app_task` calls `deluge_app_init`
+                    // synchronously, off-fiber, which can itself busy-spin a
+                    // `block_on`'d sim_latency transfer and would starve a
+                    // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
                 });
             })

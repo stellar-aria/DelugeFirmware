@@ -131,6 +131,15 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 	}
 
 	sample = new (sample_memory) Sample;
+
+	// Reserve the residency table's segment-pointer index to the max recording size up front
+	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that
+	// growth never reallocates the index under the fiber's concurrent chunk_at reads. B2: the
+	// SegmentedVector keeps element addresses stable, but its pointer index must be pre-reserved
+	// to stay stable under concurrent growth. maxClusters is derived from the runtime cluster size,
+	// so this imposes no recording-length limit beyond the existing MAX_FILE_SIZE cap.
+	sample->stream().reserve(1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude));
+
 	audioFileManager.adoptAudioFileObject(sample); // resource-manager evictable object (before addReason)
 	sample->addReason(); // Must call this so it's protected from stealing, before we call initialize().
 	Error error = sample->initialize(1);

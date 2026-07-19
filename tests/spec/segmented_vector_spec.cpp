@@ -116,6 +116,35 @@ describe segmented_vector("SegmentedVector<T, N>", $ {
 		expect(Tracked::live).to_equal(0);
 	});
 
+	it("keeps addresses stable and values intact across growth after reserve(n)", _{
+		Tracked::live = 0;
+		SegmentedVector<Tracked, 4> v;
+		v.reserve(1000);           // pre-reserve the segment-pointer index to the final capacity
+		v.resize(2);
+		v[0].value = 7;
+		v[1].value = 99;
+		Tracked* addr0 = &v[0];
+		Tracked* addr1 = &v[1];
+		v.resize(1000);            // grow across many segments; index must not reallocate/move elements
+		expect(&v[0] == addr0).to_be_true();
+		expect(&v[1] == addr1).to_be_true();
+		expect(v[0].value).to_equal(7);
+		expect(v[1].value).to_equal(99);
+		expect(v.size()).to_equal(std::size_t{1000});
+		expect(Tracked::live).to_equal(1000);
+	});
+
+	it("drains fully on a direct resize(0)", _{
+		Tracked::live = 0;
+		SegmentedVector<Tracked, 4> v;
+		v.resize(10);
+		expect(Tracked::live).to_equal(10);
+		v.resize(0);
+		expect(v.size()).to_equal(std::size_t{0});
+		expect(v.empty()).to_be_true();
+		expect(Tracked::live).to_equal(0);
+	});
+
 	it("plumbs a non-default Alloc through both segment storage and the pointer index", _{
 		Tracked::live = 0;
 		{

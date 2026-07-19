@@ -186,6 +186,16 @@ public:
 	/// @brief Resize the residency table to @p n entries (grows the table as a recording extends).
 	void resize(size_t n);
 
+	/// @brief Reserve the residency table's segment-pointer index for up to @p num_clusters entries.
+	///
+	/// Reserves index capacity only (allocates no cluster entries) so subsequent growth up to
+	/// @p num_clusters will not reallocate the segment-pointer index. Required BEFORE concurrent
+	/// (recording) growth: the recorder's audio thread grows the table via resize() while the fiber
+	/// reads it via chunk_at(); the `SegmentedVector` keeps element addresses stable, but its pointer
+	/// index must be pre-reserved to the final capacity, single-threaded, to stay stable under that
+	/// concurrent growth (see docs/dev/known-concurrency-bugs.md B2).
+	void reserve(size_t num_clusters);
+
 	/// @brief Erase every entry from @p index to the end (shrinks the table on record-stop / truncate).
 	void erase_from(size_t index);
 

@@ -38,6 +38,12 @@ class SegmentedVector {
 	              "SegmentSize must be a non-zero power of two");
 
 	struct Segment {
+		// User-provided (not defaulted) default ctor: makes Segment a non-trivially-default-constructible
+		// type so `std::construct_at(a.allocate(1))` value-initialization runs THIS no-op ctor instead of
+		// zero-filling `storage`. The storage bytes are raw backing for `T` slots that are individually
+		// lifetime-managed by resize/pop_back; zero-filling them on every segment alloc is pure wasted
+		// SRAM write traffic.
+		Segment() noexcept {}
 		alignas(T) std::byte storage[sizeof(T) * SegmentSize];
 	};
 
@@ -77,24 +83,49 @@ public:
 		}
 		while (size_ < n) {
 			if ((size_ >> kShift) >= segments_.size()) {
-				// Reserve BEFORE allocating the segment: if the pointer-array grow
-				// itself throws (OOM; e.g. `fast_allocator::allocate` throws
-				// `BAD_ALLOC`), no Segment has been allocated yet, so there is
-				// nothing to orphan. Once reserved, the subsequent push_back into
-				// spare capacity cannot reallocate/throw.
-				segments_.reserve(segments_.size() + 1);
-				segments_.push_back(alloc_segment());
+				// Allocate the Segment first, then hand it to the pointer-array. push_back
+				// grows the index GEOMETRICALLY (std::vector's own strategy), so back-to-back
+				// growth reallocates the index rarely, not on every segment. If that grow
+				// throws (OOM; e.g. `fast_allocator::allocate` throws `BAD_ALLOC`), free the
+				// segment we just allocated so a throw can't orphan it.
+				//
+				// @warning This reallocates `segments_` unless the caller pre-reserved (see
+				//          `reserve`). Growth CONCURRENT with a reader (the recorder's audio
+				//          thread growing while the fiber reads via `operator[]`) MUST
+				//          `reserve` to the final capacity first, single-threaded.
+				Segment* seg = alloc_segment();
+				try {
+					segments_.push_back(seg);
+				} catch (...) {
+					free_segment(seg);
+					throw;
+				}
 			}
-			std::construct_at(slot(size_));
+			// Construct through the RAW address, not `slot(size_)`: no `T` exists at this
+			// index yet, so laundering here would be UB (nothing to launder). `slot` (which
+			// launders) is used only where a live object exists (`operator[]`, `pop_back`).
+			std::construct_at(reinterpret_cast<T*>(raw_at(size_)));
 			++size_;
 		}
 	}
 
+	/// @brief Reserve the internal segment-pointer index so growth up to @p n elements will not
+	///        reallocate it. Does NOT allocate any Segment and does NOT construct any element.
+	///
+	/// After `reserve(N)`, growth up to N elements will not reallocate the internal segment-pointer
+	/// array. Growing this container CONCURRENTLY with readers (e.g. the recorder's audio-thread growth
+	/// via `resize` vs the fiber's `operator[]`/`chunk_at`) REQUIRES reserving to the final capacity
+	/// first, single-threaded; single-threaded growth is unrestricted.
+	void reserve(std::size_t n) { segments_.reserve((n + SegmentSize - 1) / SegmentSize); }
+
 private:
-	[[nodiscard]] T* slot(std::size_t i) const {
-		std::byte* base = segments_[i >> kShift]->storage;
-		return std::launder(reinterpret_cast<T*>(base + (i & kMask) * sizeof(T)));
+	/// @return The RAW backing address of index @p i. No object need exist there — use this for
+	///         `construct_at` (starting a lifetime) where laundering would be UB.
+	[[nodiscard]] std::byte* raw_at(std::size_t i) const {
+		return segments_[i >> kShift]->storage + (i & kMask) * sizeof(T);
 	}
+	/// @return A launderable `T*` for index @p i. Use ONLY where a live `T` exists (access/destroy).
+	[[nodiscard]] T* slot(std::size_t i) const { return std::launder(reinterpret_cast<T*>(raw_at(i))); }
 
 	static Segment* alloc_segment() {
 		SegAlloc a;
@@ -103,8 +134,9 @@ private:
 		// `std::allocator` (built on `::operator new`), but NOT for an arbitrary
 		// `Alloc` -- `deluge::memory::fast_allocator` routes through the bespoke
 		// `deluge::memory::alloc_fast`, which is not a standard
-		// implicit-object-creation function. `construct_at` is free here (Segment's
-		// default constructor is trivial) and makes this correct for every `Alloc`.
+		// implicit-object-creation function. `construct_at` here runs Segment's no-op
+		// default ctor (which leaves `storage` uninitialized) and makes this correct for
+		// every `Alloc`.
 		return std::construct_at(a.allocate(1));
 	}
 	static void free_segment(Segment* s) {

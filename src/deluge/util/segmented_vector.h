@@ -27,7 +27,12 @@ namespace deluge::util {
 /// @tparam T           Element type; default-constructible, nothrow-destructible;
 ///                     may be move-only.
 /// @tparam SegmentSize Elements per segment; a compile-time power of two.
-template <typename T, std::size_t SegmentSize = 256>
+/// @tparam Alloc       Segment/heap allocator; defaults to `std::allocator` so this
+///                     header stays BSP-free (links in the plain host CppSpec
+///                     harness with no initialized heap); firmware call sites pass
+///                     a heap-specific allocator (e.g. `deluge::memory::fast_allocator`)
+///                     to control placement.
+template <typename T, std::size_t SegmentSize = 256, template <typename> class Alloc = std::allocator>
 class SegmentedVector {
 	static_assert((SegmentSize & (SegmentSize - 1)) == 0 && SegmentSize != 0,
 	              "SegmentSize must be a non-zero power of two");
@@ -38,12 +43,7 @@ class SegmentedVector {
 
 	static constexpr std::size_t kMask = SegmentSize - 1;
 	static constexpr std::size_t kShift = std::countr_zero(SegmentSize);
-	// Deliberately `std::allocator`, not `deluge::memory::fast_allocator`: like
-	// `spsc_ring.h`, this header stays dependency-free (no BSP-initialized-heap
-	// requirement), so it links in the plain host CppSpec harness as well as
-	// firmware/sim. A production call site that wants SRAM-preferred segment
-	// storage can layer that in when it wires this container up.
-	using SegAlloc = std::allocator<Segment>;
+	using SegAlloc = Alloc<Segment>;
 
 public:
 	SegmentedVector() = default;
@@ -115,7 +115,7 @@ private:
 		segments_.clear();
 	}
 
-	std::vector<Segment*> segments_{};
+	std::vector<Segment*, Alloc<Segment*>> segments_{};
 	std::size_t size_ = 0;
 };
 

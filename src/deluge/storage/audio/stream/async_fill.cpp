@@ -77,6 +77,19 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 
 	cluster.convert_data_if_necessary();
 
+#if ALPHA_OR_BETA_VERSION
+	// i040, restored to its pre-split position: a checkpoint after convert_data_if_necessary()
+	// and before the stitch step below. convert_data_if_necessary() cooperatively yields back to
+	// AudioEngine::runRoutine() roughly every 1024 bytes while converting (see convert.h:220-226)
+	// -- the same re-entrancy window loader.cpp's pump() guards against (loader.cpp:78-82). i038
+	// (in read_cluster_data, just after the read) does not cover this window, so this check stays
+	// a distinct, non-redundant safety net rather than a duplicate of i038. All current callers of
+	// read_cluster_data pass min_reasons_after == 0, so this reduces to "still leased".
+	if (deluge::cluster::lease_count(cluster.resource_slot) < 1) {
+		FREEZE_WITH_ERROR("i040");
+	}
+#endif
+
 	// Gather the neighbor edge spans and hand off to the pure stitch core. A neighbor is only
 	// passed when it is both present and loaded.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;

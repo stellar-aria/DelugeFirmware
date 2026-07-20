@@ -211,14 +211,11 @@ bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] in
 	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
 		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
-
-	// i040 originally sat between convert_data_if_necessary() and the neighbor-edge gather, both
-	// of which now run inside finish_fill(); neither touches lease state, so the check stays
-	// valid here, clustered with i038/i039 around the read (see async_fill.h).
-	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
-		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
 #endif
+
+	// i040 (the post-convert/pre-stitch checkpoint) now lives inside deluge_streaming_finish_fill
+	// (async_fill.cpp), immediately after convert_data_if_necessary() -- see the comment there for
+	// why it must stay distinct from i038/i039 rather than collapse into them.
 
 	// Phase 2: convert + stitch the just-read payload and publish readiness (a no-op that
 	// returns false when the read above failed).

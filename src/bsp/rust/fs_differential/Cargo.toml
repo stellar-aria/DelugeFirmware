@@ -15,6 +15,14 @@ embedded-io-async = "0.7"
 # never really "blocks" -- it's just a driver loop). Same crate already used
 # elsewhere in this repo's Rust BSP; not tokio.
 embassy-futures = "0.1.2"
+# Host `BlockDevice` bridge (SP1 Task 2): re-points EFatFs's storage from the
+# byte-granular `MemIo` shortcut onto the real device-driver/adapter stack
+# (`crates/block-device-driver`, `crates/block-device-adapters`) so the SP0
+# differential exercises the same adapters + #68/#62 the on-device SD path
+# will use.
+block-device-driver = { path = "../../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../../crates/block-device-adapters" }
+aligned = "0.4"
 
 [build-dependencies]
 cc = "1"

@@ -6,10 +6,10 @@ publish = false
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# embedded-fatfs is never published to crates.io; git-pinned to a rev.
-embedded-fatfs = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112", default-features = false, features = ["lfn", "alloc"] }
+# embedded-fatfs is never published to crates.io; vendored in-tree as an owned
+# copy (see crates/embedded-fatfs/VENDOR.md) rather than a git dependency.
+embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"] }
 embedded-io-async = "0.7"
-block-device-adapters = "0.2"   # buffering/streaming adapters over a block device (same repo)
 
 [build-dependencies]
 cc = "1"

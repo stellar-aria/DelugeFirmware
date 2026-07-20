@@ -25,12 +25,11 @@
 #include "storage/cluster/cluster.h"
 #include <memory>
 #include <new>
-#include <optional>
 #include <span>
 #include <utility>
 
-#include "deluge_resource.h"             // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
-#include "storage/audio/stream/stitch.h" // StitchPrevEdge/StitchNextEdge/stitch_boundaries
+#include "deluge_resource.h"                 // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "storage/audio/stream/async_fill.h" // deluge_streaming_begin_fill/finish_fill (StreamingFillDescriptor)
 
 namespace deluge::audio::stream {
 
@@ -148,30 +147,14 @@ std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 // read from the read source, conversion, and the inter-cluster boundary fixups. No orchestration (the
 // card-state guards, the loading "reason", and the loading queue stay with the caller).
 bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after) {
-	Sample* sample = cluster.sample;
 	int32_t clusterIndex = cluster.cluster_index;
 
-	// Failure exits jump here (kept above the local inits so the backward gotos don't cross them).
-	if (false) {
-getOutEarly:
+	// Phase 1: resolve the fill (destination buffer, physical sector, sector count). Pure
+	// lookup + arithmetic (the last-cluster short-read sector-count calc lives here) — no SD
+	// access, no FatFS. See storage/audio/stream/async_fill.{h,cpp}.
+	StreamingFillDescriptor fill = deluge_streaming_begin_fill(&cluster);
+	if (!fill.ok) {
 		return false;
-	}
-
-	int32_t numSectors = Cluster::size >> 9;
-
-	// If this is the last Cluster, and we do know what the audio data length is...
-	if (sample->audioDataLengthBytes && sample->audioDataLengthBytes != 0x8FFFFFFFFFFFFFFF) {
-		uint32_t audioDataEndPosBytes = sample->audioDataLengthBytes + sample->audioDataStartPosBytes;
-		uint32_t startByteThisCluster = clusterIndex << Cluster::size_magnitude;
-		int32_t bytesToRead = audioDataEndPosBytes - startByteThisCluster;
-		if (bytesToRead <= 0) {
-			D_PRINTLN("fail thing"); // Shouldn't really still happen
-			goto getOutEarly;
-		}
-		if (bytesToRead < Cluster::size) {
-			numSectors = ((bytesToRead - 1) >> 9) + 1;
-		}
-		// Otherwise, just leave it at the normal number of sectors
 	}
 
 #if ALPHA_OR_BETA_VERSION
@@ -192,7 +175,7 @@ getOutEarly:
 	}
 #endif
 
-	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
+	uint32_t bytesRequested = fill.num_sectors * 512u;
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
 	{
@@ -201,7 +184,7 @@ getOutEarly:
 		// sample_stream.h and design §6/§7.
 		auto source = make_read_source();
 		auto readResult = source->read(static_cast<uint32_t>(clusterIndex),
-		                               std::span<std::byte>(cluster.payload().data(), bytesRequested));
+		                               std::span<std::byte>(reinterpret_cast<std::byte*>(fill.dest), bytesRequested));
 		if (readResult) {
 			bytesRead = readResult.value();
 			status = DELUGE_OK;
@@ -228,65 +211,18 @@ getOutEarly:
 	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
 		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
-#endif
 
-	// If that failed, get out
-	if (status != DELUGE_OK) {
-		goto getOutEarly;
-	}
-
-	cluster.convert_data_if_necessary();
-
-#if ALPHA_OR_BETA_VERSION
+	// i040 originally sat between convert_data_if_necessary() and the neighbor-edge gather, both
+	// of which now run inside finish_fill(); neither touches lease state, so the check stays
+	// valid here, clustered with i038/i039 around the read (see async_fill.h).
 	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
 		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
 	}
 #endif
 
-	// Gather the neighbor edge spans and hand off to the pure stitch core. A neighbor is only
-	// passed when it is both present and loaded.
-	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
-	if (clusterIndex > 0) {
-		StreamedChunk* prevCluster = chunk_at(cluster.cluster_index - 1);
-		if (prevCluster && prevCluster->loaded) {
-			prev_edge = deluge::audio::stream::StitchPrevEdge{
-			    .tail = std::span<std::byte>(prevCluster->payload().data() + (Cluster::size - 4), 11),
-			    .end_boundary_converted = &prevCluster->extra_bytes_at_end_converted,
-			};
-		}
-	}
-	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
-
-	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
-	if (clusterIndex < static_cast<int32_t>(num_clusters()) - 1) {
-		StreamedChunk* nextCluster = chunk_at(cluster.cluster_index + 1);
-		if (nextCluster && nextCluster->loaded) {
-			next_edge = deluge::audio::stream::StitchNextEdge{
-			    .head = std::span<std::byte>(nextCluster->payload().data(), 7),
-			    .unconverted_head = std::span<const std::byte, 3>(
-			        reinterpret_cast<const std::byte*>(nextCluster->first_three_bytes_pre_data_conversion), 3),
-			    .start_boundary_converted = &nextCluster->extra_bytes_at_start_converted,
-			};
-		}
-	}
-	deluge::audio::stream::StitchNextEdge* next_ptr = next_edge ? &*next_edge : nullptr;
-
-	std::span<std::byte> self_span = cluster.payload_with_trailing_slack();
-	deluge::audio::stream::stitch_boundaries(
-	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
-	    cluster.extra_bytes_at_start_converted, cluster.extra_bytes_at_end_converted, prev_ptr, next_ptr);
-
-	cluster.loaded = true;
-	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in
-	// the Loading state; now its data is read, signal the manager so the async/RT `try_acquire` path
-	// sees it ready. `cluster.loaded` stays the C++ sync-path field; this keeps the manager in sync.
-	{
-		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-		if (mgr != nullptr) {
-			deluge_resource_mark_ready(mgr, &cluster);
-		}
-	}
-	return true;
+	// Phase 2: convert + stitch the just-read payload and publish readiness (a no-op that
+	// returns false when the read above failed).
+	return deluge_streaming_finish_fill(&cluster, status == DELUGE_OK);
 }
 
 // Cluster residency dispatch + table accessors (contract documented in sample_stream.h).

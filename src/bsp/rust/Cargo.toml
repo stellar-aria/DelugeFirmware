@@ -52,6 +52,22 @@ rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 [target.'cfg(target_os = "none")'.dependencies]
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
 
+# SP1: the device `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
+# (`fat_block_device.rs`) — same vendored crates `fs_differential`'s host
+# adapter already exercises, wired here onto the real SD driver.
+block-device-driver = { path = "../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../crates/block-device-adapters" }
+aligned = "0.4"
+embedded-fatfs = { path = "../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"] }
+# `embedded-fatfs`'s `alloc` feature (above) is the first thing on this
+# no_std target to actually need `extern crate alloc`, which requires a
+# registered `#[global_allocator]` (see main.rs's `FS_ALLOCATOR`) — nothing
+# here used `alloc` before. Renamed via `package =` to `fs_alloc`: this
+# crate's OWN `crates/deluge_alloc` (TLSF heap) would otherwise collide, as
+# an unqualified dependency, with the sibling deluge-sdk `deluge-alloc` crate
+# already above (both normalize to the same `deluge_alloc` identifier).
+fs_alloc = { package = "deluge_alloc", path = "../../../crates/deluge_alloc" }
+
 # DelugeFirmware's residency/eviction engine + GeneralMemoryAllocator backing
 # (TLSF + slab), exposed as C ABIs the archived C++ deluge_app calls. Linked
 # directly (not via the `deluge_rust` umbrella crate, whose #[panic_handler]

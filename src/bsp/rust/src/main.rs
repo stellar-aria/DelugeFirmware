@@ -98,6 +98,11 @@ mod control;
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
+/// SP1: `block_device_driver::BlockDevice<512>` over the real SD driver
+/// (`deluge_bsp::sd`), feeding the `BufStream`/`embedded-fatfs` stack —
+/// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.
+#[cfg(target_os = "none")]
+mod fat_block_device;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
 /// Compiled on host too under `host_app` (bodies are already host-safe).
 #[cfg(any(target_os = "none", feature = "host_app"))]
@@ -178,6 +183,30 @@ unsafe extern "C" {
 /// allocates from SRAM yet; sized small.
 #[cfg(target_os = "none")]
 static mut RUST_SRAM_POOL: [u8; 64 * 1024] = [0; 64 * 1024];
+
+/// SP1: `#[global_allocator]` binding for `extern crate alloc` — required as
+/// soon as any dependency needs it, which `fat_block_device.rs`'s
+/// `embedded-fatfs` (`alloc` feature) is the first to on this target; nothing
+/// else here used `alloc` before. Backed by `fs_alloc::DelugeGlobalAlloc` — the
+/// same TLSF heap *implementation* `deluge_resource` uses for the residency
+/// engine's C ABI, but a DISTINCT instance/arena (its own `DelugeHeap`, not
+/// shared with `deluge_resource`'s). Aliased to the `fs_alloc` crate name to
+/// avoid colliding with the sibling deluge-sdk `deluge-alloc` crate
+/// (`RUST_SRAM_POOL`/`allocator`, above) — both would otherwise normalize to
+/// the identifier `deluge_alloc`.
+///
+/// NOT YET INITIALISED with a real backing arena (`fs_alloc::DelugeGlobalAlloc
+/// ::init` is never called): this registration exists purely so `alloc` has a
+/// `GlobalAlloc` impl to bind to at link time, satisfying the whole-stack
+/// cross-compile. `deluge_alloc::deluge_alloc`'s null-handle guard makes an
+/// allocation through an uninitialised instance return null (not UB), so this
+/// is safe to add now without a live heap — but nothing that actually needs
+/// `alloc` (e.g. a real on-device `embedded-fatfs` mount) can run correctly
+/// until a future task calls `.init()` with a real arena and decides where it
+/// comes from (dedicated pool vs. shared with an existing heap).
+#[cfg(target_os = "none")]
+#[global_allocator]
+static FS_ALLOCATOR: fs_alloc::DelugeGlobalAlloc = fs_alloc::DelugeGlobalAlloc::new();
 
 #[cfg(target_os = "none")]
 #[panic_handler]

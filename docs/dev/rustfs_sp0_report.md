@@ -238,3 +238,31 @@ Recorded in full in `crates/embedded-fatfs/VENDOR.md`; summary:
 PR #68/#62 fixes, wire the sector→byte bridge over the real `deluge_bsp::sd` device,
 Embassy device wiring, and run the real on-device throughput measurement as the
 hardware gate).
+
+## Differential blind spots — SP1 must treat these as UNCOVERED, not validated
+
+The differential compares a `.`/`..`-filtered, name-sorted logical tree of
+`Entry { name, size, is_dir }` plus byte-exact file content. Anything outside that
+surface is invisible to "differential clean." The whole-branch review named five
+classes SP1's hardening differential must add explicit coverage for — do **not** assume
+this harness proved them:
+
+1. **Timestamps — actively diverge today.** C FatFS `get_fattime` returns 2024-01-01;
+   embedded-fatfs's `NullTimeProvider` returns 1980-01-01. `Entry` carries no timestamp,
+   so create/modify dates are silently uncompared (and any raw-image compare will differ).
+2. **SFN aliases.** Only the long name is compared; the 8.3 short name / `~N` collision
+   numbering (`altname`) is never checked — two implementations can generate different SFNs
+   undetected.
+3. **Attributes beyond `is_dir`** (read-only / hidden / system / archive) — uncompared.
+4. **FAT-chain / free-space integrity — the most important uncovered class.** The logical
+   tree cannot see leaked/orphaned clusters, wrong free counts, or an inconsistent FAT after
+   delete/truncate. A delete that fails to free clusters looks perfectly clean. SP1 needs a
+   lost-cluster scan or raw-FAT diff.
+5. **Corpus gaps in the fixes themselves:** the non-root branch of the `..`-cluster fix,
+   cross-directory rename (`self != dst_dir` — BUG-A's start-point half was verified only by
+   upstream-match, not by the differential), and directory *move* (PR #66, deferred) are all
+   unexercised. SP1's corpus should add nested `mkdir`, cross-dir rename, and directory move.
+
+SP1's hardening differential should therefore add an SFN/attribute/timestamp-aware compare,
+a FAT-chain/free-space integrity check, and the corpus ops above — plus the NEEDS-HARDWARE
+gates (real SD throughput/underruns, power-loss safety) that no host harness can cover.

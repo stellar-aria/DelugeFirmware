@@ -178,16 +178,19 @@ mod raw_fat32 {
     }
 }
 
-/// DEMONSTRATION (not a fix -- see Task 6B): the vendoring survey flagged
-/// that embedded-fatfs's `Dir::create_dir` writes the ROOT's own first
-/// cluster into a new directory's `..` entry when that directory is created
-/// directly under the FAT32 root, instead of the FAT convention (which both
-/// the FAT spec and C FatFS follow) of writing 0 there to mean "parent is
-/// the root". This divergence is invisible to `write_diff_fat32` above
-/// because both `FsOps::read_dir` implementations filter `.`/`..` out (see
-/// `raw_fat32` module doc) -- so this probe reads the raw on-disk `..`
-/// entry directly, bypassing both backends' directory-listing APIs, and
-/// prints/asserts the concrete cluster numbers each one wrote.
+/// REGRESSION PROOF for BUG-B (Task 6B): Task 6's vendoring survey flagged,
+/// and this probe originally demonstrated, that embedded-fatfs's
+/// `Dir::create_dir` wrote the ROOT's own first cluster into a new
+/// directory's `..` entry when that directory is created directly under the
+/// FAT32 root, instead of the FAT convention (which both the FAT spec and C
+/// FatFS follow) of writing 0 there to mean "parent is the root". Task 6B
+/// ported upstream rust-fatfs's `c4bb769` fix into
+/// `crates/embedded-fatfs/src/dir.rs`'s `create_dir` (an `is_root_dir()`
+/// distinction on `DirRawStream`/`File`), so this now asserts EQUALITY: both
+/// backends must write 0. This divergence is invisible to `write_diff_fat32`
+/// above because both `FsOps::read_dir` implementations filter `.`/`..` out
+/// (see `raw_fat32` module doc) -- so this probe reads the raw on-disk `..`
+/// entry directly, bypassing both backends' directory-listing APIs.
 #[test]
 fn fat32_dotdot_cluster_probe() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -219,18 +222,10 @@ fn fat32_dotdot_cluster_probe() {
     // actual first-cluster number.
     assert_eq!(c_dotdot_cluster, 0, "C FatFS should write 0 into '..' under root");
 
-    // The known embedded-fatfs bug: it writes the root's own first cluster
-    // instead of 0. If this ever starts asserting `e_dotdot_cluster == 0`,
-    // the bug has been fixed upstream/in-vendor -- update this probe (and
-    // Task 6B) rather than treating that as a probe failure.
-    assert_ne!(
-        e_dotdot_cluster, 0,
-        "expected embedded-fatfs's known '..'-under-root bug (writes root cluster, not 0); \
-         if this fails, the bug appears fixed -- see Task 6B"
-    );
-    let bpb_root_cluster = u32::from_le_bytes([e_image[44], e_image[45], e_image[46], e_image[47]]);
+    // BUG-B, fixed (Task 6B): embedded-fatfs must now agree -- 0, not the
+    // root's own actual first cluster.
     assert_eq!(
-        e_dotdot_cluster, bpb_root_cluster,
-        "expected embedded-fatfs to have written the root's own first cluster"
+        e_dotdot_cluster, 0,
+        "embedded-fatfs should write 0 into '..' under root, matching C FatFS (BUG-B, Task 6B)"
     );
 }

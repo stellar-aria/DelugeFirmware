@@ -41,6 +41,17 @@ impl<IO: ReadWriteSeek, TP, OCC> DirRawStream<'_, IO, TP, OCC> {
             DirRawStream::Root(_) => None,
         }
     }
+
+    /// Whether this stream is the volume's root directory. FAT12/16 always
+    /// use the dedicated `Root` region; FAT32 represents the root as an
+    /// ordinary `File`-backed directory with no owning `DirEntryEditor`
+    /// (see `File::is_root_dir`).
+    pub(crate) fn is_root_dir(&self) -> bool {
+        match self {
+            DirRawStream::File(file) => file.is_root_dir(),
+            DirRawStream::Root(_) => true,
+        }
+    }
 }
 
 // Note: derive cannot be used because of invalid bounds. See: https://github.com/rust-lang/rust/issues/26925
@@ -415,7 +426,17 @@ impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC: OemCpConverter> Dir<'a, IO, T
                 let sfn_entry = e.create_sfn_entry(dot_sfn, FileAttributes::DIRECTORY, entry.first_cluster());
                 dir.write_entry(".", sfn_entry).await?;
                 let dotdot_sfn = ShortNameGenerator::generate_dotdot();
-                let sfn_entry = e.create_sfn_entry(dotdot_sfn, FileAttributes::DIRECTORY, e.stream.first_cluster());
+                // The FAT spec's convention (and C FatFS's): a directory
+                // whose parent is the volume root writes cluster 0 into its
+                // ".." entry, not the root's own actual first-cluster
+                // number. FAT12/16 already get this for free -- their root
+                // is the dedicated `DirRawStream::Root` region, whose
+                // `first_cluster()` is always `None` -- but FAT32's root is
+                // an ordinary `File`-backed directory with a real cluster
+                // number, so it needs this explicit special-case (ported
+                // from upstream rust-fatfs `c4bb769`).
+                let dotdot_cluster = if e.stream.is_root_dir() { None } else { e.stream.first_cluster() };
+                let sfn_entry = e.create_sfn_entry(dotdot_sfn, FileAttributes::DIRECTORY, dotdot_cluster);
                 dir.write_entry("..", sfn_entry).await?;
                 Ok(dir)
             }

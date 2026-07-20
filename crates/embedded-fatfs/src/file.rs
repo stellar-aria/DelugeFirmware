@@ -251,6 +251,14 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
         self.context.first_cluster
     }
 
+    /// Whether this `File` is actually the FAT32 root directory's backing
+    /// stream (`FileSystem::root_dir` builds it with `entry: None` -- see
+    /// `FileContext::entry`'s doc comment -- unlike every other directory
+    /// or file, which owns a `DirEntryEditor` into its parent).
+    pub(crate) fn is_root_dir(&self) -> bool {
+        self.context.entry.is_none()
+    }
+
     async fn flush(&mut self) -> Result<(), Error<IO::Error>> {
         self.flush_dir_entry().await?;
         let mut disk = self.fs.disk.borrow_mut();

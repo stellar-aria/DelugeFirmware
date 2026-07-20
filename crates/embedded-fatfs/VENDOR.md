@@ -75,26 +75,32 @@ hardening commits in this owned copy.
   calls `Dir::rename` directly — and `write_diff_fat32`/`write_diff_fat16`
   (`src/bsp/rust/fs_differential/tests/differential.rs`) are the regression proof, driving the real fix
   through a multi-component rename destination.
-
-## Deferred (write-differential loop — Task 6, evidence-driven hand-ports)
-
-- **FAT32 `..`-cluster-zero bug** (upstream `rafalh/rust-fatfs` commit `c4bb769`; lives in our
-  `dir.rs:418` write path, root-directory `..` entries should point at cluster 0 but the vendored code
-  doesn't special-case it in all write paths). No clean upstream PR against `embedded-fatfs` to apply;
-  plan is to let Task 6's write-differential harness demonstrate the bug on our vendored copy first,
-  then fix + show the fix green — evidence before the patch, not a blind hand-port.
-  **DEMONSTRATED (Task 6, 2026-07-20):** `fs_differential`'s `fat32_dotdot_cluster_probe` test creates a
-  directory directly under a FAT32 root on independent image copies through each backend, then reads
-  the raw 32-byte `..` directory entry (both backends' `read_dir` filter `.`/`..` out, so this needs a
-  raw byte read to see). Confirmed exactly as predicted: C FatFS writes cluster **0** into `..`;
-  embedded-fatfs writes cluster **2** (the root's own actual first cluster, read from the same image's
-  BPB `BPB_RootClus`) — `dir.rs:418`'s `e.stream.first_cluster()` (`Some(root_dir_first_cluster)` for a
-  FAT32 root, since `FileSystem::root_dir` gives the root a real `DirRawStream::File`, unlike FAT12/16
-  where it's `DirRawStream::Root`) instead of the FAT-spec convention of 0 for "parent is root". Still
-  **not fixed here** — the fix is Task 6B, per the original plan.
-- **PR #66** — rename `..`-update fix; shares the same root-cluster caveat as the item above. Deferred
-  for the same evidence-driven reason. (Task 6's write corpus renames a *file*, not a directory, so this
-  one wasn't exercised/re-confirmed this round.)
+- **BUG-B — FAT32 `..`-cluster-zero** (upstream `rafalh/rust-fatfs` commit `c4bb769`, "Fix .. cluster
+  number for first-level dirs"; found via Task 6's `fat32_dotdot_cluster_probe`, 2026-07-20; fixed Task
+  6B, `crates/embedded-fatfs/src/dir.rs`'s `create_dir` + `src/file.rs`). A new subdirectory's `..` entry
+  must carry first-cluster `0` when its parent is the volume root (the FAT spec's convention, followed by
+  C FatFS), not the root's own actual first-cluster number. FAT12/16 already got this for free — their
+  root is the dedicated `DirRawStream::Root` region, whose `first_cluster()` is always `None` — but
+  FAT32's root is an ordinary `File`-backed directory with a real cluster number (`FileSystem::root_dir`
+  gives it a `DirRawStream::File` wrapping `File::new(Some(bpb.root_dir_first_cluster), None, ..)`), so
+  `create_dir` wrote that real cluster (`e.stream.first_cluster()`) into `..` instead. **Demonstrated
+  (Task 6):** `fat32_dotdot_cluster_probe` created a directory directly under a FAT32 root through both
+  backends and read the raw 32-byte `..` directory entry (both backends' `read_dir` filter `.`/`..` out,
+  so this needs a raw byte read to see); confirmed C FatFS writes cluster **0**, embedded-fatfs writes
+  cluster **2** (the root's own actual first cluster, read from the same image's BPB `BPB_RootClus`).
+  **Fixed (Task 6B):** ported `c4bb769` — added `is_root_dir()` on `DirRawStream` (`dir.rs`) and `File`
+  (`file.rs`, `self.context.entry.is_none()` — the root's `File` is the only one built with no owning
+  `DirEntryEditor`), and `create_dir` now writes `None` (serializes to cluster 0) for the `..` entry
+  when the parent is the root. `fat32_dotdot_cluster_probe` now asserts the two backends' `..`
+  first-cluster fields are EQUAL (both 0) — flipped from its Task 6 form, which asserted the known
+  divergence — and is the regression proof.
+- **PR #66** — rename `..`-update fix (when *moving a directory*, not just a file, its own `..` entry
+  should be updated to point at the new parent). Deferred: shares the same root-cluster caveat as BUG-B
+  above (evidence-driven — Task 6's write corpus renames a *file*, not a directory, so this path wasn't
+  exercised/confirmed) and is a distinct bug from BUG-A (BUG-A is about `rename_internal`'s destination
+  *parent* resolution; PR #66 is about updating the *moved directory's own* `..` entry after the move
+  completes). Not applied — candidate for a future hardening commit once a differential exercises a
+  directory rename/move.
 
 ## Skipped (rejected, not deferred)
 

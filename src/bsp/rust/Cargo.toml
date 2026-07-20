@@ -101,7 +101,7 @@ corosensei = "0.3"
 deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 
 [features]
-default = ["rtt"]
+default = ["rtt", "async_streaming_loader"]
 ## RTT (SEGGER Real-Time Transfer) logging over a debug probe. Selects the
 ## rza1l_rtt.x linker script (via build.rs) + registers the log logger.
 rtt = ["dep:rtt-target", "rza1l-hal/rtt"]

@@ -141,6 +141,12 @@ mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
 #[cfg(target_os = "none")]
 mod signals;
+/// The async cluster-fill task (R1): drains the resource manager's loader queue
+/// on this executor, awaiting the SD read instead of running it inline in the
+/// C++ fiber pump. `async_streaming_loader`-gated and, until a later rung spawns
+/// it, entirely inert. See its module doc for the DI structure and why.
+#[cfg(feature = "async_streaming_loader")]
+mod streaming_loader;
 /// USB device bring-up — USB-MIDI 1.0 peripheral (Deluge → computer).
 #[cfg(target_os = "none")]
 mod usb;

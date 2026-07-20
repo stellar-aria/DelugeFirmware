@@ -150,6 +150,14 @@ storage-owner-audit = []
 ## exactly the code that existed before this feature — device/normal-host/
 ## golden builds are byte-unchanged.
 sim_latency = []
+## Off by default. Builds the R1 async cluster-fill task (`streaming_loader.rs`):
+## drains the resource manager's loader queue on this executor, awaiting the SD
+## read instead of running it inline in the C++ fiber pump. Purely additive and
+## inert while off — no other module references `streaming_loader`, and nothing
+## spawns its task yet (a later rung does both). See streaming_loader.rs's module
+## doc for the dependency-injection split that makes its drain loop host-testable
+## without a real C++ resource manager.
+async_streaming_loader = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

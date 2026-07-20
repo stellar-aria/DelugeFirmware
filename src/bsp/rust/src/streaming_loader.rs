@@ -1,0 +1,209 @@
+//! The Rust async cluster-fill task (R1.1): drains the resource manager's loader
+//! queue (`deluge_resource_loader_next`) on the same thread-mode Embassy executor
+//! the fiber pump and the C++ enqueue path run on, awaiting the actual SD read
+//! instead of running it synchronously inside the C++ `pump()` fiber op. Feature-
+//! gated behind `async_streaming_loader` and, until a later rung spawns
+//! [`streaming_fill_task`] and signals [`FILL_WAKE`], entirely inert — nothing in
+//! this module is reachable from `main()` yet.
+//!
+//! ## Why the drain loop is generic over [`FillOps`]
+//!
+//! Constructing a real `StreamedChunk`/`SampleStream`/`Sample` plus a seeded
+//! resource manager inside a Rust host test is impractical, and mocking the
+//! `#[no_mangle]` C symbols below would collide with the real ones whenever this
+//! crate also links the C++ app (`host_app`). So the orchestration itself
+//! ([`fill_once`]) takes its four operations — `next`/`begin`/`read`/`finish` (plus
+//! the failure-path re-enqueue) — through the [`FillOps`] trait instead of calling
+//! the `extern "C"` functions directly. [`ProdOps`] below wires that trait to the
+//! real C ABI + [`crate::sd::locked_read_sectors`]; the host unit test
+//! (`tests/streaming_fill_host.rs`) wires it to an in-memory fake queue instead.
+//! This is the whole reason [`fill_once`] is independently testable — the real
+//! end-to-end fill (real manager, real chunks) is validated later, in R1.2 (TSan)
+//! and R3.2 (full scenario).
+//!
+//! ## Concurrency
+//!
+//! The manager (`DelugeResource*`) is `!Send`/`!Sync` by design — single-executor
+//! only. [`streaming_fill_task`] and the C++ enqueue path (`loader.cpp`) both run
+//! on the one thread-mode Embassy executor the whole app runs on, so the raw
+//! pointer never needs to (and must never) cross threads.
+use core::ffi::c_void;
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+
+/// Raised to wake [`streaming_fill_task`] out of its idle wait — e.g. when a
+/// cluster is newly enqueued. Same shape as `fiber::WORKER_WAKE`.
+pub static FILL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Mirrors `include/libdeluge/streaming_fill.h`'s `StreamingFillDescriptor`
+/// exactly (verbatim field order/types) — this is the C-ABI boundary type.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StreamingFillDescriptor {
+    pub dest: *mut u8,
+    pub sector: u32,
+    pub num_sectors: u32,
+    pub ok: bool,
+}
+
+/// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
+/// read just failed while still wanted, so it sinks behind everything else
+/// instead of being popped again immediately.
+const LOWEST_PRIORITY: u32 = 0xFFFF_FFFF;
+
+/// The four operations [`fill_once`] drains the loader queue through. `chunk`
+/// values are opaque `StreamedChunk*` backing pointers, as returned by
+/// [`FillOps::next`] and passed back unchanged to `begin`/`finish`/
+/// `enqueue_lowest` — this trait never interprets them, only threads them
+/// through, so a test double can hand back whatever identity it likes.
+///
+/// A generic `fill_once<O: FillOps>` (rather than `dyn FillOps` or free
+/// functions) keeps this a zero-cost, monomorphized boundary in the production
+/// path while still being fully substitutable in tests.
+pub trait FillOps {
+    /// Pop the most-urgent queued+still-leased chunk, or a null pointer if the
+    /// queue is empty (`deluge_resource_loader_next`).
+    fn next(&self) -> *mut c_void;
+    /// Resolve `chunk`'s destination buffer + physical sector range
+    /// (`deluge_streaming_begin_fill`). `ok == false` means skip this chunk
+    /// entirely (unloadable / geometry error) — no read, no `finish`.
+    fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor;
+    /// Await the sector read into `buf`. Returns whether it succeeded.
+    async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool;
+    /// Run the post-read convert/stitch/publish tail
+    /// (`deluge_streaming_finish_fill`). Returns true on success; false exactly
+    /// when `read_ok` was false.
+    fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool;
+    /// Re-enqueue `chunk` at [`LOWEST_PRIORITY`] (`deluge_resource_loader_enqueue`)
+    /// — the read failed while the chunk was still wanted.
+    fn enqueue_lowest(&self, chunk: *mut c_void);
+}
+
+/// Drain the loader queue: for each queued cluster, resolve → await the read →
+/// convert/stitch/mark-ready. Mirrors `loader.cpp`'s `pump()` exactly (same
+/// skip-on-`!ok`, same re-enqueue-and-stop-on-read-failure shape at
+/// `loader.cpp:122-127`), just with the read awaited instead of run inline.
+pub async fn fill_once<O: FillOps>(ops: &O) {
+    loop {
+        let chunk = ops.next();
+        if chunk.is_null() {
+            return;
+        }
+
+        let d = ops.begin(chunk);
+        if !d.ok {
+            // Unloadable / geometry error — already dequeued by `next`; skip it,
+            // don't loop on it, keep draining the rest of the queue.
+            continue;
+        }
+
+        // SAFETY: `d.ok` is true, so `dest` is a valid, exclusively-owned
+        // destination for exactly `num_sectors * 512` bytes (the production
+        // `begin` resolves it from the chunk's own payload buffer; the test
+        // double's `begin` hands back its own owned backing storage).
+        let buf =
+            unsafe { core::slice::from_raw_parts_mut(d.dest, (d.num_sectors as usize) * 512) };
+        let read_ok = ops.read(d.sector, d.num_sectors, buf).await;
+        let done = ops.finish(chunk, read_ok);
+        if !done {
+            // Read failed while still wanted — re-queue at lowest priority and
+            // stop, else we'd keep re-popping the same cluster until the card is
+            // back (same rationale as loader.cpp's pump()).
+            ops.enqueue_lowest(chunk);
+            return;
+        }
+    }
+}
+
+// ── Production wiring ───────────────────────────────────────────────────────
+// Only compiled where the real C-ABI symbols below are actually linked: always
+// on device, and on host only under `host_app` (which links the host-built C++
+// app object closure — see Cargo.toml). Kept separate from `fill_once`/`FillOps`
+// above (which compile under `async_streaming_loader` alone) so a plain host
+// build of this feature — no `host_app` — never emits a reference to an
+// undefined extern symbol.
+#[cfg(any(target_os = "none", feature = "host_app"))]
+mod prod {
+    use super::{FillOps, LOWEST_PRIORITY, StreamingFillDescriptor};
+    use core::ffi::c_void;
+
+    unsafe extern "C" {
+        fn deluge_streaming_resource_manager() -> *mut c_void;
+        fn deluge_streaming_begin_fill(chunk: *mut c_void) -> StreamingFillDescriptor;
+        fn deluge_streaming_finish_fill(chunk: *mut c_void, read_ok: bool) -> bool;
+        fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
+        fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
+        fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
+    }
+
+    /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
+    /// `deluge_resource.h`'s loader-queue C ABI and
+    /// [`crate::sd::locked_read_sectors`]. `!Send`/`!Sync` (a raw
+    /// `DelugeResource*`) by construction — must only ever run on the single
+    /// thread-mode executor the C++ enqueue path also runs on.
+    pub struct ProdOps {
+        mgr: *mut c_void,
+    }
+
+    impl ProdOps {
+        /// Must only be constructed and used on the single thread-mode Embassy
+        /// executor the whole app (and the C++ enqueue path) runs on — see the
+        /// module doc's Concurrency section.
+        pub fn new() -> Self {
+            // SAFETY: returns the one process-wide GeneralMemoryAllocator
+            // resource manager; no aliasing/ownership concern, it's a stable
+            // singleton pointer.
+            let mgr = unsafe { deluge_streaming_resource_manager() };
+            Self { mgr }
+        }
+    }
+
+    impl FillOps for ProdOps {
+        fn next(&self) -> *mut c_void {
+            // SAFETY: `mgr` is the valid singleton resource manager.
+            unsafe { deluge_resource_loader_next(self.mgr) }
+        }
+
+        fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {
+            // SAFETY: `chunk` was just returned by `next()` (a queued, still-
+            // leased `StreamedChunk*`).
+            unsafe { deluge_streaming_begin_fill(chunk) }
+        }
+
+        async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool {
+            crate::sd::locked_read_sectors(lba, count, buf)
+                .await
+                .is_ok()
+        }
+
+        fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool {
+            // SAFETY: `chunk` is the same pointer `begin` was just called with.
+            unsafe { deluge_streaming_finish_fill(chunk, read_ok) }
+        }
+
+        fn enqueue_lowest(&self, chunk: *mut c_void) {
+            // SAFETY: `mgr`/`chunk` are both still valid (the chunk hasn't been
+            // freed — it's still leased, just its read failed).
+            let slot = unsafe { deluge_resource_slot_of(self.mgr, chunk) };
+            unsafe { deluge_resource_loader_enqueue(self.mgr, slot, LOWEST_PRIORITY) };
+        }
+    }
+}
+
+#[cfg(any(target_os = "none", feature = "host_app"))]
+pub use prod::ProdOps;
+
+/// The fill task: wakes on [`FILL_WAKE`], drains the loader queue via the real
+/// [`ProdOps`], then goes back to sleep. Not yet spawned anywhere — a later rung
+/// adds the `spawner.spawn(streaming_fill_task())` call and the `FILL_WAKE.signal`
+/// sites; until then this function exists but is never polled.
+#[cfg(any(target_os = "none", feature = "host_app"))]
+#[embassy_executor::task]
+pub async fn streaming_fill_task() {
+    let ops = ProdOps::new();
+    loop {
+        FILL_WAKE.wait().await;
+        fill_once(&ops).await;
+    }
+}

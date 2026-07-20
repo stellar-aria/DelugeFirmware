@@ -165,6 +165,15 @@ pub async fn boot_init() {
     );
 }
 
+/// Thin async wrapper around `deluge_bsp::sd::read_sectors` for the R1 streaming
+/// fill task (`streaming_loader.rs`). Same dual-target shape as the rest of this
+/// file — no `#[cfg]` needed at the call site. R3: wrap in SD_BUS mutex (the real
+/// cross-owner exclusion against the recorder / other SD callers lands there);
+/// for now this just forwards.
+pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
+    sd::read_sectors(lba, count, buf).await
+}
+
 /// FatFS DSTATUS bits for the current card state. Device-only (see [`sd`]).
 #[cfg(target_os = "none")]
 fn status_bits() -> u8 {

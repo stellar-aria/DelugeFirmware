@@ -17,7 +17,13 @@
 #    entry, and no recorder-payload torn write. Those patterns are retired. The recorder's
 #    createNextCluster now only participates in B1, via get_cluster -> Manager::request.
 
-# --- [B1] deluge_resource::manager::Manager's Cell<ChunkSlot> chunk table (HIGH, STILL OPEN).
+# --- [B1] deluge_resource::manager::Manager's Cell<ChunkSlot> chunk table — FIXED (2026-07-19).
+#     RETIRED from the active patterns: the four B1 signatures below are commented out so a
+#     re-appearance surfaces as UNCATALOGUED (failing the run) instead of being silently
+#     absorbed here. Fix = asymmetric fiber-side critical sections around every Manager
+#     Cell RMW (crates/deluge_resource/src/sync.rs `Masked` + m_get/m_set/m_rmw, gated on
+#     !deluge_in_interrupt()) + a per-thread host critical section (src/bsp/rust/src/services.rs).
+#     See docs/dev/known-concurrency-bugs.md (B1). Historical race description kept below.
 #     Manager::release (audio thread, via Voice/SampleLowLevelReader unassign ->
 #     cluster::remove_reason -> release_lease) races Manager::loader_next / request / acquire /
 #     evict_lowest (loader-fiber OR audio thread, picking/leasing the next cluster) on the SAME
@@ -29,16 +35,19 @@
 #     playback (Voice::render -> SampleLowLevelReader::moveOnToNextCluster -> SampleStream::
 #     get_cluster -> deluge_resource_request -> Manager::request) AND — now that B2/B3 are
 #     fixed — the recorder (SampleRecorder::createNextCluster -> get_cluster -> Manager::request).
-Cell<deluge_resource::manager::ChunkSlot>
-core::mem::replace::<deluge_resource::manager::ChunkSlot>
-# B1 also surfaces as a bare compiler-helper SUMMARY with no source frame, when the ChunkSlot
-# move is lowered to a memory intrinsic (observed: `in __tsan_memset`, whose stack is
+# RETIRED (B1 FIXED 2026-07-19) — was:
+#Cell<deluge_resource::manager::ChunkSlot>
+#core::mem::replace::<deluge_resource::manager::ChunkSlot>
+# B1 also surfaced as a bare compiler-helper SUMMARY with no source frame, when the ChunkSlot
+# move was lowered to a memory intrinsic (observed: `in __tsan_memset`, whose stack is
 # core::mem::replace::<ChunkSlot> -> Cell::set -> Manager::request). B3's recorder-payload
-# memmove/write is FIXED, so a bare memmove/memset/memcpy SUMMARY now traces to B1's Manager,
-# NOT the recorder — re-verify the paired stack before treating a future match as anything else.
-in __tsan_memmove$
-in __tsan_memset$
-in __tsan_memcpy$
+# memmove/write is FIXED, and no other catalogued finding relies on the bare intrinsic trio
+# (not in known_patterns.txt; [SCHED] uses named fiber frames), so the trio is retired with
+# the rest of B1 — a future bare memmove/memset/memcpy SUMMARY should surface as UNCATALOGUED
+# and be investigated (re-verify the paired stack) rather than silently matched here.
+#in __tsan_memmove$
+#in __tsan_memset$
+#in __tsan_memcpy$
 
 # --- [SCHED] rung-5 two-level priority queue, async-SD staging ladder (STILL OPEN, out of
 #     scope for the recorder fix). deluge_rust::fiber::enqueue writes deluge_rust::fiber::Q_COUNT

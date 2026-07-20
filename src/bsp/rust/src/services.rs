@@ -3,6 +3,7 @@
 //! for the same symbols (the stubs were removed there to avoid duplicates).
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "none")]
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(target_os = "none")]
@@ -34,52 +35,68 @@ unsafe extern "C" {
 
 // ── system.h ────────────────────────────────────────────────────────────────
 
-/// Nesting depth for ENTER/EXIT_CRITICAL_SECTION — only the outermost pair
-/// actually toggles interrupts (device) / acquires the lock (host).
+/// Device nesting depth for ENTER/EXIT — only the outermost pair toggles the
+/// CPU interrupt mask. Single context per core, so a plain atomic is correct.
+#[cfg(target_os = "none")]
 static CS_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// Host stand-in for the ARM interrupt mask: the outermost ENTER's
-/// `critical-section` restore token, consumed by the matching outermost EXIT.
-/// The `critical-section/std` impl is itself reentrancy-safe per-thread, but we
-/// still gate on [`CS_DEPTH`] (rather than acquiring on every call) to keep the
-/// nesting shape identical to the device path above and avoid needing a stack
-/// of tokens. Single-threaded executor (see scheduler.rs's concurrency note),
-/// so plain `static mut` access here is not racing with itself.
+// Host per-thread critical-section nesting depth. Each thread independently
+// acquires the global `critical-section` mutex on its OUTERMOST enter and
+// nests within itself, so two real OS threads (the `"deluge-audio"` executor
+// and the fiber/executor thread in the preemptive harness) are mutually
+// excluded — unlike a process-global depth, which would let a second thread
+// enter while the first still holds the lock. Device uses the CPU IRQ mask
+// (`CS_DEPTH` below), which is genuinely single-context per core.
 #[cfg(not(target_os = "none"))]
-static mut CS_TOKEN: Option<critical_section::RestoreState> = None;
+std::thread_local! {
+    static CS_DEPTH_TL: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    static CS_TOKEN_TL: core::cell::Cell<Option<critical_section::RestoreState>> =
+        const { core::cell::Cell::new(None) };
+}
 
 /// Mask interrupts (nestable). [task] [isr]
 #[unsafe(no_mangle)]
 pub extern "C" fn ENTER_CRITICAL_SECTION() {
     #[cfg(target_os = "none")]
-    cortex_ar::interrupt::disable();
-    #[cfg(not(target_os = "none"))]
-    if CS_DEPTH.load(Ordering::Relaxed) == 0 {
-        // SAFETY: paired with the release in EXIT_CRITICAL_SECTION once
-        // CS_DEPTH returns to 0; single-threaded, so no concurrent writer.
-        let token = unsafe { critical_section::acquire() };
-        unsafe { *core::ptr::addr_of_mut!(CS_TOKEN) = Some(token) };
+    {
+        cortex_ar::interrupt::disable();
+        CS_DEPTH.fetch_add(1, Ordering::Relaxed);
     }
-    CS_DEPTH.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(target_os = "none"))]
+    CS_DEPTH_TL.with(|depth| {
+        if depth.get() == 0 {
+            // SAFETY: paired with the release in EXIT once this thread's depth
+            // returns to 0. `critical_section::acquire` is per-thread reentrant
+            // and blocks until any other thread's outstanding section releases.
+            let token = unsafe { critical_section::acquire() };
+            CS_TOKEN_TL.with(|t| t.set(Some(token)));
+        }
+        depth.set(depth.get() + 1);
+    });
 }
 
-/// Unmask interrupts if this closes the outermost critical section. [task] [isr]
+/// Unmask interrupts if this closes this context's outermost critical section. [task] [isr]
 #[unsafe(no_mangle)]
 pub extern "C" fn EXIT_CRITICAL_SECTION() {
+    #[cfg(target_os = "none")]
     if CS_DEPTH.fetch_sub(1, Ordering::Relaxed) <= 1 {
-        #[cfg(target_os = "none")]
         // SAFETY: balanced with ENTER_CRITICAL_SECTION; re-enabling at depth 0.
-        unsafe {
-            cortex_ar::interrupt::enable()
-        };
-        #[cfg(not(target_os = "none"))]
-        // SAFETY: the token was stashed by the matching outermost ENTER above.
-        unsafe {
-            if let Some(token) = (*core::ptr::addr_of_mut!(CS_TOKEN)).take() {
-                critical_section::release(token);
+        unsafe { cortex_ar::interrupt::enable() };
+    }
+    #[cfg(not(target_os = "none"))]
+    CS_TOKEN_TL.with(|t| {
+        let closed = CS_DEPTH_TL.with(|depth| {
+            let d = depth.get().saturating_sub(1);
+            depth.set(d);
+            d == 0
+        });
+        if closed {
+            // SAFETY: the token was stashed by this thread's matching outermost ENTER.
+            if let Some(token) = t.take() {
+                unsafe { critical_section::release(token) };
             }
         }
-    }
+    });
 }
 
 /// True if executing in IRQ/FIQ context (CPSR mode bits). [task] [isr]
@@ -362,3 +379,55 @@ pub extern "C" fn deluge_cache_clean(_addr: *const core::ffi::c_void, _size: u32
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_cache_invalidate(_addr: *const core::ffi::c_void, _size: u32) {}
+
+#[cfg(all(test, not(target_os = "none")))]
+mod cs_tests {
+    use super::{ENTER_CRITICAL_SECTION, EXIT_CRITICAL_SECTION};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    #[test]
+    fn cross_thread_exclusion_no_lost_updates() {
+        // A deliberately non-atomic counter shared by raw pointer, mutated only
+        // inside ENTER/EXIT. If the section provides real cross-thread exclusion,
+        // no increment is lost.
+        let counter = Box::into_raw(Box::new(0u32));
+        let shared = Arc::new(AtomicPtr::new(counter));
+        const ITERS: u32 = 200_000;
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    let p = shared.load(Ordering::Relaxed);
+                    for _ in 0..ITERS {
+                        ENTER_CRITICAL_SECTION();
+                        // SAFETY: p is live for the test; the section serializes access.
+                        unsafe { *p = (*p).wrapping_add(1) };
+                        EXIT_CRITICAL_SECTION();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // SAFETY: all threads joined; sole owner again.
+        let final_val = unsafe { *shared.load(Ordering::Relaxed) };
+        // SAFETY: reclaim the box.
+        unsafe { drop(Box::from_raw(shared.load(Ordering::Relaxed))) };
+        assert_eq!(
+            final_val,
+            2 * ITERS,
+            "lost updates ⇒ no cross-thread exclusion"
+        );
+    }
+
+    #[test]
+    fn nesting_on_one_thread_does_not_deadlock() {
+        ENTER_CRITICAL_SECTION();
+        ENTER_CRITICAL_SECTION();
+        EXIT_CRITICAL_SECTION();
+        EXIT_CRITICAL_SECTION();
+    }
+}

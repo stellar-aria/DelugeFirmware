@@ -28,3 +28,4 @@ deluge_alloc = { path = "../deluge_alloc" }
 
 [dev-dependencies]
 proptest = "1"
+critical-section = { version = "1", features = ["std"] }

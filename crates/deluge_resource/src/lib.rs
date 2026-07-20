@@ -13,6 +13,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod manager;
+mod sync;
 pub mod value;
 
 #[cfg(any(test, feature = "fuzzing"))]
@@ -145,6 +146,43 @@ mod tests {
         // Cache hit: same chunk → same pointer, no re-materialize.
         let p2 = unsafe { deluge_resource_acquire(mgr, a, 0, 4096) };
         assert_eq!(p, p2, "cache hit should return the resident pointer");
+    }
+
+    #[test]
+    fn cache_hit_same_asset_index_still_leases() {
+        // Guards the Fix-1 identity revalidation: a genuine cache hit for a resident
+        // (asset,index) must still lease and return the SAME backing, not be rejected
+        // by the strengthened bail (which only fires when the slot's identity changed
+        // out from under the scan).
+        let (_buf, h) = arena(1 << 20);
+        let mgr = unsafe { deluge_resource_create(h, 16, 64) };
+        assert!(!mgr.is_null());
+        let a = unsafe {
+            deluge_resource_define_asset(
+                mgr,
+                owner(1),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let p1 = unsafe { deluge_resource_acquire(mgr, a, 0, 4096) };
+        assert!(!p1.is_null());
+        let p2 = unsafe { deluge_resource_acquire(mgr, a, 0, 4096) };
+        assert!(!p2.is_null());
+        assert_eq!(
+            p1, p2,
+            "same (asset,index) must hit the same resident chunk"
+        );
+
+        let mut s = Stats::default();
+        unsafe { deluge_resource_stats(mgr, &mut s) };
+        assert!(
+            s.acquire_hits >= 1,
+            "the second acquire must have been recorded as a cache hit"
+        );
     }
 
     #[test]
@@ -1022,5 +1060,120 @@ mod tests {
         // `a` was freed/reused above so this id may now be in use by a new owner; just
         // assert the manager is still functional (no leak/corruption).
         let _ = again;
+    }
+
+    #[test]
+    fn eviction_revalidate_never_frees_leased() {
+        reset_evicts();
+        let mut buf = std::vec![0u128; (256 * 1024usize).div_ceil(16)];
+        let heap = unsafe { deluge_heap_create(buf.as_mut_ptr() as *mut u8, buf.len() * 16) };
+        let m = unsafe { deluge_resource_create(heap, 2, 2) }; // 2 chunk slots
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                crate::COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        // Fill both slots; keep a hard lease on the first.
+        let p0 = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+        let p1 = unsafe { deluge_resource_acquire(m, asset, 1, 4096) };
+        assert!(!p0.is_null() && !p1.is_null());
+        unsafe { deluge_resource_release(m, p1) }; // slot 1 now evictable, slot 0 leased
+                                                   // Force an eviction: acquire a third distinct chunk (table full ⇒ evict lowest).
+        let p2 = unsafe { deluge_resource_acquire(m, asset, 2, 4096) };
+        assert!(
+            !p2.is_null(),
+            "should have evicted the unleased slot and succeeded"
+        );
+        // The leased chunk (index 0) must still be resident + un-corrupted.
+        assert_eq!(
+            unsafe { *p0 },
+            pattern(owner(1), 0),
+            "leased chunk was wrongly evicted"
+        );
+        assert_eq!(evicts(), 1, "exactly the one unleased chunk was evicted");
+        let _ = buf;
+    }
+
+    #[test]
+    fn concurrent_lease_churn_holds_invariants() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Manager handle is !Sync (Cell); the C++ side shares it across threads, so
+        // model that with a Send wrapper. Backing memory + tables outlive both threads.
+        #[derive(Clone, Copy)]
+        struct H(*mut crate::DelugeResource);
+        // SAFETY: the manager's shared state is now guarded by the masked helpers,
+        // which is exactly what this test exercises.
+        unsafe impl Send for H {}
+
+        let mut buf = std::vec![0u128; (512 * 1024usize).div_ceil(16)];
+        let heap = unsafe { deluge_heap_create(buf.as_mut_ptr() as *mut u8, buf.len() * 16) };
+        let m = unsafe { deluge_resource_create(heap, 2, 16) };
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                None,
+                core::ptr::null_mut(),
+                crate::COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let handle = H(m);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_a = Arc::clone(&stop);
+        let a = std::thread::spawn(move || {
+            // Force whole-struct capture: RFC 2229 disjoint closure capture would
+            // otherwise capture just the raw-pointer field, bypassing `H`'s Send.
+            let handle = handle;
+            let H(m) = handle;
+            for _ in 0..20_000 {
+                let p = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+                if !p.is_null() {
+                    unsafe { deluge_resource_add_lease(m, p) };
+                    unsafe { deluge_resource_touch(m, p) };
+                    unsafe { deluge_resource_release(m, p) };
+                    unsafe { deluge_resource_release(m, p) };
+                }
+                if stop_a.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+        let b = std::thread::spawn(move || {
+            let handle = handle; // see note in thread `a` above.
+            let H(m) = handle;
+            for i in 0..20_000u32 {
+                let p = unsafe { deluge_resource_acquire(m, asset, i % 4, 4096) };
+                if !p.is_null() {
+                    unsafe { deluge_resource_mark_dirty(m, p, true) };
+                    unsafe { deluge_resource_mark_dirty(m, p, false) };
+                    unsafe { deluge_resource_release(m, p) };
+                }
+            }
+        });
+        a.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        b.join().unwrap();
+        // Liveness + no panic/deadlock is the assertion; lease counts never went
+        // negative (release guards leases>0) and no still-leased chunk was evicted.
+
+        // Post-condition: after all leases are dropped, the chunk cache is intact —
+        // re-acquiring a chunk returns its materialize pattern (no torn/lost state from
+        // the concurrent churn), and its lease is accountable.
+        let p = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+        assert!(!p.is_null(), "acquire after churn must succeed");
+        check_pattern(p, owner(1), 0, 4096);
+        unsafe { deluge_resource_release(m, p) };
+        let _ = buf; // keep the arena alive to here
     }
 }

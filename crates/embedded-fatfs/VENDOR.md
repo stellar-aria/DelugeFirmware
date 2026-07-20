@@ -30,7 +30,12 @@ hardening commits in this owned copy.
 
 ## Applied upstream PR fixes (each its own commit, individually revertible)
 
-(none yet — filled in as each fix lands, one commit per PR)
+- **PR #64** — FAT16 BPB `reserved_1` dirty-flag corruption fix (status flags/dirty-flag writes are
+  gated to FAT32 only; FAT12/16 do not carry status flags in the BPB) + `total_sectors_16`/
+  `total_sectors_32` mutual-exclusivity validation fix + `NullTimeProvider` now returns a valid
+  1980-01-01 date/time instead of decoding an all-zero (invalid) date. Applied to `src/boot_sector.rs`,
+  `src/fs.rs`, `src/time.rs` (the `tests/write.rs` hunk in the upstream PR was not applied — `tests/`
+  is not vendored).
 
 ## Deferred (SP1 — block-device-adapters path, not vendored yet)
 

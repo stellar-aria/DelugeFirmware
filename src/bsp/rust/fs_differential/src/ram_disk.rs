@@ -17,7 +17,17 @@ impl RamDisk {
     /// Load a card image file into the shared in-RAM disk, replacing
     /// whatever was there before.
     pub fn load(image_path: &str) -> Self {
-        *DISK.lock().unwrap() = std::fs::read(image_path).expect("read image");
+        Self::load_bytes(&std::fs::read(image_path).expect("read image"))
+    }
+
+    /// Load raw image bytes into the shared in-RAM disk, replacing whatever
+    /// was there before. Used by the write-path differential
+    /// (`diff::replay_and_compare`) to give each backend its OWN fresh copy
+    /// of the same starting fixture -- write ops mutate the shared `DISK`,
+    /// so C FatFS and embedded-fatfs must never run against one image at
+    /// the same time (see `tests/differential.rs`'s `TEST_LOCK`).
+    pub fn load_bytes(bytes: &[u8]) -> Self {
+        *DISK.lock().unwrap() = bytes.to_vec();
         RamDisk
     }
 

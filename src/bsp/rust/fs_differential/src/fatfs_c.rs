@@ -1,5 +1,6 @@
-//! Safe wrapper over the vendored C FatFS (compiled by `build.rs`), read
-//! path only.
+//! Safe wrapper over the vendored C FatFS (compiled by `build.rs`): read
+//! path (Task 3/5) plus write path (Task 6 -- mkdir/write/append/delete/
+//! rename).
 //!
 //! `extern "C"` declarations mirror the exact R0.14b signatures in
 //! `src/fatfs/ff.h` under this harness's `ffconf.h` (FF_FS_EXFAT=0,
@@ -55,12 +56,21 @@ extern "C" {
     fn f_opendir(dp: *mut DIR, path: *const u8) -> i32;
     fn f_readdir(dp: *mut DIR, fno: *mut FILINFO) -> i32;
     fn f_closedir(dp: *mut DIR) -> i32;
+    // Write path (Task 6).
+    fn f_write(fp: *mut FIL, buff: *const u8, btw: u32, bw: *mut u32) -> i32;
+    fn f_mkdir(path: *const u8) -> i32;
+    fn f_unlink(path: *const u8) -> i32;
+    fn f_rename(path_old: *const u8, path_new: *const u8) -> i32;
+    fn f_sync(fp: *mut FIL) -> i32;
 }
 
 const FA_READ: u8 = 0x01;
+const FA_WRITE: u8 = 0x02;
+const FA_CREATE_ALWAYS: u8 = 0x08;
+const FA_OPEN_APPEND: u8 = 0x30;
 const AM_DIR: u8 = 0x10;
 
-/// A mounted C-FatFS volume, read path only.
+/// A mounted C-FatFS volume, read + write path.
 pub struct CFatFs {
     // Never read directly after `mount()` -- FatFs's internal `FatFs[]`
     // table holds the raw pointer this Box owns, so the field's whole job
@@ -137,6 +147,82 @@ impl CFatFs {
         }
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v
+    }
+
+    /// Create a directory. `path`'s parent must already exist.
+    pub fn mkdir(&mut self, path: &str) {
+        let c = std::ffi::CString::new(path).unwrap();
+        assert_eq!(
+            unsafe { f_mkdir(c.as_ptr() as *const u8) },
+            0,
+            "f_mkdir({path})"
+        );
+    }
+
+    /// Open `path` with `mode`, write the whole of `bytes` (looping `f_write`
+    /// until it's all landed -- a single RAM-disk write is expected to
+    /// finish in one call, but nothing guarantees that), sync, and close.
+    fn open_write(&mut self, path: &str, mode: u8, bytes: &[u8]) {
+        let c = std::ffi::CString::new(path).unwrap();
+        let mut fp = FIL { _o: [0; 640] };
+        assert_eq!(
+            unsafe { f_open(&mut fp, c.as_ptr() as *const u8, mode) },
+            0,
+            "f_open({path}, mode={mode:#x})"
+        );
+        let mut written = 0usize;
+        while written < bytes.len() {
+            let mut bw = 0u32;
+            let rc = unsafe {
+                f_write(
+                    &mut fp,
+                    bytes[written..].as_ptr(),
+                    (bytes.len() - written) as u32,
+                    &mut bw,
+                )
+            };
+            assert_eq!(rc, 0, "f_write({path})");
+            assert!(bw > 0, "f_write({path}) made no progress -- disk full?");
+            written += bw as usize;
+        }
+        assert_eq!(unsafe { f_sync(&mut fp) }, 0, "f_sync({path})");
+        unsafe {
+            f_close(&mut fp);
+        }
+    }
+
+    /// Create (or truncate, if it already exists) `path` and write `bytes`
+    /// as its whole contents.
+    pub fn write_new(&mut self, path: &str, bytes: &[u8]) {
+        self.open_write(path, FA_WRITE | FA_CREATE_ALWAYS, bytes);
+    }
+
+    /// Open the existing file at `path` and append `bytes`. `FA_OPEN_APPEND`
+    /// makes `f_open` itself seek to end-of-file, so no separate `f_lseek`
+    /// call (or extern declaration) is needed here.
+    pub fn append(&mut self, path: &str, bytes: &[u8]) {
+        self.open_write(path, FA_WRITE | FA_OPEN_APPEND, bytes);
+    }
+
+    /// Delete an existing file or (empty) directory.
+    pub fn delete(&mut self, path: &str) {
+        let c = std::ffi::CString::new(path).unwrap();
+        assert_eq!(
+            unsafe { f_unlink(c.as_ptr() as *const u8) },
+            0,
+            "f_unlink({path})"
+        );
+    }
+
+    /// Rename/move `from` to `to`.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        let cf = std::ffi::CString::new(from).unwrap();
+        let ct = std::ffi::CString::new(to).unwrap();
+        assert_eq!(
+            unsafe { f_rename(cf.as_ptr() as *const u8, ct.as_ptr() as *const u8) },
+            0,
+            "f_rename({from} -> {to})"
+        );
     }
 }
 

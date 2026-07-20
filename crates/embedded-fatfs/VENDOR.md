@@ -64,8 +64,31 @@ hardening commits in this owned copy.
   doesn't special-case it in all write paths). No clean upstream PR against `embedded-fatfs` to apply;
   plan is to let Task 6's write-differential harness demonstrate the bug on our vendored copy first,
   then fix + show the fix green — evidence before the patch, not a blind hand-port.
+  **DEMONSTRATED (Task 6, 2026-07-20):** `fs_differential`'s `fat32_dotdot_cluster_probe` test creates a
+  directory directly under a FAT32 root on independent image copies through each backend, then reads
+  the raw 32-byte `..` directory entry (both backends' `read_dir` filter `.`/`..` out, so this needs a
+  raw byte read to see). Confirmed exactly as predicted: C FatFS writes cluster **0** into `..`;
+  embedded-fatfs writes cluster **2** (the root's own actual first cluster, read from the same image's
+  BPB `BPB_RootClus`) — `dir.rs:418`'s `e.stream.first_cluster()` (`Some(root_dir_first_cluster)` for a
+  FAT32 root, since `FileSystem::root_dir` gives the root a real `DirRawStream::File`, unlike FAT12/16
+  where it's `DirRawStream::Root`) instead of the FAT-spec convention of 0 for "parent is root". Still
+  **not fixed here** — the fix is Task 6B, per the original plan.
 - **PR #66** — rename `..`-update fix; shares the same root-cluster caveat as the item above. Deferred
-  for the same evidence-driven reason.
+  for the same evidence-driven reason. (Task 6's write corpus renames a *file*, not a directory, so this
+  one wasn't exercised/re-confirmed this round.)
+- **NEW: `Dir::rename` silently drops multi-component `dst_path` (found via Task 6, 2026-07-20, not one
+  of the two items above).** `dir.rs:520-559`: `rename()` traverses `dst_path` relative to `dst_dir`
+  into a local `e_dst` (lines 543-557) but then calls `rename_internal` with the raw, untraversed
+  `dst_dir` parameter instead of `e_dst` (line 559) — `e_dst` is dead code. Observed directly:
+  `root.rename("REC/SHORT.RAW", &root, "REC/Renamed Long.raw")` renamed the file to `/Renamed Long.raw`
+  (root level), not `/REC/Renamed Long.raw`, because the `"REC/"` component of `dst_path` was silently
+  dropped. Worked around in `fs_differential/src/efatfs.rs::EFatFs::rename` by resolving both parent
+  directories ourselves and calling `Dir::rename` with leaf-only names, which never reaches the buggy
+  branch (a leaf name has no `/`, so `dst_path`'s traversal loop breaks on its first iteration and
+  `e_dst` trivially already equals `dst_dir`) — not a fix to the vendored crate, just a call pattern
+  that avoids triggering it. Real callers of `Dir::rename` with a multi-component `dst_path` against a
+  coarser `dst_dir` (e.g. root) will still hit this. Not fixed here; candidate for a future hardening
+  commit alongside the two items above.
 
 ## Skipped (rejected, not deferred)
 

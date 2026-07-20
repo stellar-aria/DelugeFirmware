@@ -28,6 +28,20 @@
 //!       (dir_entry.rs:617,712,637; `file_name`/`len` need the `alloc` feature,
 //!       already on in this crate's `Cargo.toml`).
 //!
+//! Write path (Task 6), same vendored source:
+//!   `Dir::create_file(&self, path: &str) -> Result<File<'a,IO,TP,OCC>, Error<IO::Error>>`
+//!       -- async; opens if it already exists, creates (empty) otherwise.   (dir.rs:339)
+//!   `File::truncate(&mut self) -> Result<(), Error<IO::Error>>`
+//!       -- async; resets size to the file's current offset.               (file.rs:102)
+//!   `File` implements `embedded_io_async::Write`: `write`/`write_all`/`flush`.
+//!       `flush` MUST be called (or `File::close`) -- `update_dir_entry_after_write`
+//!       only updates the in-memory entry; the on-disk directory entry (size,
+//!       modified time) is written by `flush`, not by `write` itself.       (file.rs:254,371-444)
+//!   `Dir::create_dir(&self, path: &str) -> Result<Self, Error<IO::Error>>`  (dir.rs:384)
+//!   `Dir::remove(&self, path: &str) -> Result<(), Error<IO::Error>>`       (dir.rs:456)
+//!   `Dir::rename(&self, src_path: &str, dst_dir: &Dir<'_,IO,TP,OCC>, dst_path: &str)
+//!       -> Result<(), Error<IO::Error>>`                                   (dir.rs:520)
+//!
 //! `IO: ReadWriteSeek` is a blanket impl over any `T: embedded_io_async::{Read,
 //! Write, Seek}` (fs.rs:130-132), and `IntoStorage<T> for T` is blanket too
 //! (fs.rs:343), so `MemIo` below needs only those three trait impls -- no
@@ -82,9 +96,9 @@ impl Seek for MemIo {
     }
 }
 
-/// A mounted `embedded-fatfs` volume, read path only. Same public surface as
-/// `fatfs_c::CFatFs` (`mount`/`read_file`/`read_dir`) so Task 5's `FsOps`
-/// trait can wrap both identically.
+/// A mounted `embedded-fatfs` volume, read + write path. Same public
+/// surface as `fatfs_c::CFatFs` (`mount`/`read_file`/`read_dir`/write ops)
+/// so `ops::FsOps`/`ops::FsOpsMut` can wrap both identically.
 pub struct EFatFs {
     fs: FileSystem<MemIo, DefaultTimeProvider, LossyOemCpConverter>,
 }
@@ -148,5 +162,92 @@ impl EFatFs {
             v.sort_by(|a, b| a.name.cmp(&b.name));
             v
         })
+    }
+
+    /// Create a directory. `path`'s parent must already exist.
+    pub fn mkdir(&mut self, path: &str) {
+        block_on(async {
+            self.fs.root_dir().create_dir(path).await.expect("create_dir");
+        });
+    }
+
+    /// Create (or truncate, if it already exists) `path` and write `bytes`
+    /// as its whole contents.
+    pub fn write_new(&mut self, path: &str, bytes: &[u8]) {
+        block_on(async {
+            let root = self.fs.root_dir();
+            let mut file = root.create_file(path).await.expect("create_file");
+            file.truncate().await.expect("truncate");
+            file.write_all(bytes).await.expect("write_all");
+            file.flush().await.expect("flush");
+        });
+    }
+
+    /// Open the existing file at `path`, seek to its end, and append
+    /// `bytes`.
+    pub fn append(&mut self, path: &str, bytes: &[u8]) {
+        block_on(async {
+            let root = self.fs.root_dir();
+            let mut file = root.open_file(path).await.expect("open_file");
+            file.seek(SeekFrom::End(0)).await.expect("seek end");
+            file.write_all(bytes).await.expect("write_all");
+            file.flush().await.expect("flush");
+        });
+    }
+
+    /// Delete an existing file or (empty) directory.
+    pub fn delete(&mut self, path: &str) {
+        block_on(async {
+            self.fs.root_dir().remove(path).await.expect("remove");
+        });
+    }
+
+    /// Rename/move `from` to `to`, both absolute paths.
+    ///
+    /// WORKAROUND for a real embedded-fatfs bug found via Task 6's write
+    /// differential: `Dir::rename`'s own multi-component `dst_path`
+    /// traversal (computed into a local `e_dst`) is never used --
+    /// `rename_internal` is called with the raw, untraversed `dst_dir`
+    /// parameter instead (`dir.rs:559`). So a naive `root.rename(from,
+    /// &root, to)` with a multi-component `to` (e.g. `"/REC/foo.raw"`)
+    /// silently drops `to`'s directory components and writes the renamed
+    /// entry into `dst_dir` itself (root) instead of the directory `to`
+    /// names -- observed directly: `/REC/SHORT.RAW` renamed to
+    /// `/REC/Renamed Long.raw` landed at `/Renamed Long.raw`, not
+    /// `/REC/Renamed Long.raw`. Recorded in `crates/embedded-fatfs/
+    /// VENDOR.md`'s Task-6 "Deferred" list (a new entry alongside the two
+    /// already-known rename/`..` bugs -- this one is neither of those).
+    /// Resolved here by opening both parent directories ourselves and
+    /// calling `Dir::rename` with LEAF-ONLY names: a leaf name has no `/`,
+    /// so `Dir::rename`'s own `dst_path` loop breaks on its first
+    /// iteration without ever reaching the buggy line -- this is not
+    /// patching the vendored bug, just never triggering it.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        block_on(async {
+            let (from_parent, from_leaf) = split_parent(from);
+            let (to_parent, to_leaf) = split_parent(to);
+            let root = self.fs.root_dir();
+            let src_dir = if from_parent.is_empty() {
+                root.clone()
+            } else {
+                root.open_dir(from_parent).await.expect("open_dir(from_parent)")
+            };
+            let dst_dir = if to_parent.is_empty() {
+                root.clone()
+            } else {
+                root.open_dir(to_parent).await.expect("open_dir(to_parent)")
+            };
+            src_dir.rename(from_leaf, &dst_dir, to_leaf).await.expect("rename");
+        });
+    }
+}
+
+/// Splits an absolute, `/`-separated path into `(parent, leaf)`. `parent` is
+/// `""` for a top-level path (e.g. `"/foo.txt"`), meaning "the root".
+fn split_parent(path: &str) -> (&str, &str) {
+    let trimmed = path.trim_start_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+        None => ("", trimmed),
     }
 }

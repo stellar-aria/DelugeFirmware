@@ -178,6 +178,91 @@ mod raw_fat32 {
     }
 }
 
+/// `bytes / elapsed_secs`, in MB/s (MiB, strictly: 1024*1024 bytes/sec).
+fn mb_per_sec(bytes: usize, secs: f64) -> f64 {
+    (bytes as f64 / (1024.0 * 1024.0)) / secs.max(1e-9)
+}
+
+/// Host throughput PROXY (Task 7). **NOT a real SD-throughput measurement --
+/// read this caveat before citing these numbers anywhere.**
+///
+/// This times both backends doing a contiguous multi-MB write followed by a
+/// full sequential read-back, against the SAME shared in-RAM image
+/// (`ram_disk.rs`, `disk_read`/`disk_write`/`MemIo`). There is no SDHI
+/// controller, no DMA, no real block-device command/response latency, no
+/// multi-block row-thrashing, and no card erase-block/wear-leveling
+/// behavior anywhere in this path -- RAM reads/writes are ~1000x faster and
+/// have none of an SD card's access-pattern sensitivity. All this CAN show
+/// is each stack's own per-operation software overhead (allocation, buffer
+/// copies, FAT-chain walking, cluster-boundary bookkeeping) relative to the
+/// other -- a gross-overhead sanity check, not a throughput-parity verdict.
+/// The real on-device number is deferred to SP1 (needs the
+/// `block-device-adapters` bridge + Embassy device wiring) and is a
+/// hardware gate, not an SP0 correctness blocker -- see
+/// `docs/dev/rustfs_sp0_report.md`.
+///
+/// Run against the FAT32 fixture: 32 KiB clusters, matching the real target
+/// SD card layout in `src/bsp/rust/src/sd_image.rs` (unlike the FAT16
+/// fixture's 2 KiB clusters, which exist only to exercise the FAT16 code
+/// path elsewhere in this harness).
+#[test]
+fn throughput_proxy_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img_path = std::env::var("SP0_FAT32").expect("run mk_fixture.sh; set SP0_FAT32=/tmp/fat32.img");
+    let orig = std::fs::read(&img_path).unwrap_or_else(|e| panic!("read fixture image {img_path}: {e}"));
+
+    // 4 MiB: comfortably multi-cluster on both fixtures' cluster sizes, and
+    // large enough that fixed per-open/per-close overhead is a small
+    // fraction of the timed span. Non-constant byte pattern (not all-zero /
+    // all-same) so a read-back that silently returned zeros or a stale
+    // buffer would be caught, not just a length match.
+    const SIZE: usize = 4 * 1024 * 1024;
+    let payload: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+
+    let (c_write_mb_s, c_read_mb_s) = {
+        let _disk = RamDisk::load_bytes(&orig);
+        let mut c = CFatFs::mount();
+
+        let t0 = std::time::Instant::now();
+        c.write_new("/THROUGHPUT.BIN", &payload);
+        let write_secs = t0.elapsed().as_secs_f64();
+
+        let t1 = std::time::Instant::now();
+        let read_back = c.read_file("/THROUGHPUT.BIN");
+        let read_secs = t1.elapsed().as_secs_f64();
+        assert_eq!(read_back, payload, "C FatFS throughput-proxy read-back mismatch");
+
+        (mb_per_sec(SIZE, write_secs), mb_per_sec(SIZE, read_secs))
+    };
+
+    let (e_write_mb_s, e_read_mb_s) = {
+        let _disk = RamDisk::load_bytes(&orig);
+        let mut e = EFatFs::mount();
+
+        let t0 = std::time::Instant::now();
+        e.write_new("/THROUGHPUT.BIN", &payload);
+        let write_secs = t0.elapsed().as_secs_f64();
+
+        let t1 = std::time::Instant::now();
+        let read_back = e.read_file("/THROUGHPUT.BIN");
+        let read_secs = t1.elapsed().as_secs_f64();
+        assert_eq!(read_back, payload, "embedded-fatfs throughput-proxy read-back mismatch");
+
+        (mb_per_sec(SIZE, write_secs), mb_per_sec(SIZE, read_secs))
+    };
+
+    // Deliberately NOT an assertion on relative speed -- see the caveat
+    // above. `--nocapture` is required to see this line; it's also written
+    // verbatim (with these exact numbers) into `docs/dev/rustfs_sp0_report.md`.
+    eprintln!(
+        "THROUGHPUT PROXY (host, RAM-backed -- NOT SD-representative, algorithmic-overhead only), \
+         {size_mb} MiB payload, FAT32 fixture:\n\
+         \tC FatFS        : write={c_write_mb_s:>8.1} MB/s   read={c_read_mb_s:>8.1} MB/s\n\
+         \tembedded-fatfs : write={e_write_mb_s:>8.1} MB/s   read={e_read_mb_s:>8.1} MB/s",
+        size_mb = SIZE / (1024 * 1024),
+    );
+}
+
 /// REGRESSION PROOF for BUG-B (Task 6B): Task 6's vendoring survey flagged,
 /// and this probe originally demonstrated, that embedded-fatfs's
 /// `Dir::create_dir` wrote the ROOT's own first cluster into a new

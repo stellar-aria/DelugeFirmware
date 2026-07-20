@@ -270,7 +270,7 @@ impl Manager {
         if i >= self.chunks.len() {
             return 0;
         }
-        let s = self.chunks[i].get();
+        let s = m_get(&self.chunks[i]);
         if s.backing.is_null() {
             return 0;
         }
@@ -286,13 +286,13 @@ impl Manager {
         if i >= self.chunks.len() {
             return;
         }
-        let mut s = self.chunks[i].get();
-        if s.backing.is_null() {
-            return;
-        }
-        s.queued = true;
-        s.queue_priority = priority;
-        self.chunks[i].set(s);
+        m_rmw(&self.chunks[i], |s| {
+            if s.backing.is_null() {
+                return;
+            }
+            s.queued = true;
+            s.queue_priority = priority;
+        });
     }
 
     /// Remove the chunk at `slot` from the load queue (the C++ `erase`). No-op if not queued.
@@ -301,11 +301,11 @@ impl Manager {
         if i >= self.chunks.len() {
             return;
         }
-        let mut s = self.chunks[i].get();
-        if s.queued {
-            s.queued = false;
-            self.chunks[i].set(s);
-        }
+        m_rmw(&self.chunks[i], |s| {
+            if s.queued {
+                s.queued = false;
+            }
+        });
     }
 
     /// Pop the most-urgent (lowest `queue_priority`) queued chunk that is still leased; clear its
@@ -314,15 +314,13 @@ impl Manager {
     /// the owner pointer is only ever nulled via the proper on_evict path). Returns null if none.
     /// O(n) scan, consistent with `evict_lowest`.
     fn loader_next(&self) -> *mut u8 {
-        // Pure read-priority selector: return the most-urgent (lowest queue_priority) queued + still-
-        // leased chunk (de-queuing it), else null. Abandoned (unleased) queued chunks are left in
-        // place — they carry no data (culled before loading) and are reclaimed by the manager's normal
-        // value-scored eviction (which clears `queued` when it frees the slot) or reused if the owner
-        // re-leases them. loader_next never evicts: the manager stays the single eviction authority.
+        // Scan unmasked (coherent per-slot m_get, mask released between slots) for the
+        // most-urgent queued + still-leased chunk. The pick is a heuristic; the commit
+        // re-validates under the mask.
         let mut best: Option<usize> = None;
         let mut best_pri = u32::MAX;
-        for (i, c) in self.chunks.iter().enumerate() {
-            let s = c.get();
+        for i in 0..self.chunks.len() {
+            let s = m_get(&self.chunks[i]);
             if !s.queued || s.backing.is_null() || s.leases == 0 {
                 continue;
             }
@@ -334,7 +332,13 @@ impl Manager {
         let Some(i) = best else {
             return ptr::null_mut();
         };
+        // Winner-commit under one masked window: re-check it is still queued+leased
+        // (audio may have released/evicted it since the scan), clear queued, return backing.
+        let _m = Masked::enter();
         let mut s = self.chunks[i].get();
+        if !s.queued || s.backing.is_null() || s.leases == 0 {
+            return ptr::null_mut(); // changed under us — caller retries next poll
+        }
         s.queued = false;
         self.chunks[i].set(s);
         s.backing
@@ -343,8 +347,8 @@ impl Manager {
     /// Any queued + leased chunk at the lowest priority value (u32::MAX) — the `load_song_ui` yield
     /// predicate ("is there still lowest-priority background load work").
     fn loader_has_lowest(&self) -> bool {
-        self.chunks.iter().any(|c| {
-            let s = c.get();
+        (0..self.chunks.len()).any(|i| {
+            let s = m_get(&self.chunks[i]);
             s.queued && !s.backing.is_null() && s.leases > 0 && s.queue_priority == u32::MAX
         })
     }
@@ -352,8 +356,8 @@ impl Manager {
     /// Is `index` the highest-index resident chunk of `asset`? (No resident chunk of the
     /// asset has a greater index.) Used to gate tail-first eviction.
     fn is_highest_resident(&self, asset: u32, index: u32) -> bool {
-        !self.chunks.iter().any(|c| {
-            let s = c.get();
+        !(0..self.chunks.len()).any(|i| {
+            let s = m_get(&self.chunks[i]);
             !s.backing.is_null() && s.asset == asset && s.index > index
         })
     }
@@ -641,9 +645,7 @@ impl Manager {
         if ai >= self.assets.len() {
             return;
         }
-        let mut a = self.assets[ai].get();
-        a.source.construct = construct;
-        self.assets[ai].set(a);
+        m_rmw(&self.assets[ai], |a| a.source.construct = construct);
     }
 
     fn set_evict_tail_first(&self, asset: u32, on: bool) {
@@ -651,9 +653,7 @@ impl Manager {
         if ai >= self.assets.len() {
             return;
         }
-        let mut a = self.assets[ai].get();
-        a.evict_tail_first = on;
-        self.assets[ai].set(a);
+        m_rmw(&self.assets[ai], |a| a.evict_tail_first = on);
     }
 
     fn set_self_protect(&self, asset: u32, on: bool) {
@@ -661,9 +661,7 @@ impl Manager {
         if ai >= self.assets.len() {
             return;
         }
-        let mut a = self.assets[ai].get();
-        a.self_protect = on;
-        self.assets[ai].set(a);
+        m_rmw(&self.assets[ai], |a| a.self_protect = on);
     }
 
     /// Drop a specific resident chunk by its backing pointer: clear its slot and free the
@@ -772,14 +770,21 @@ impl Manager {
     }
 
     fn define_asset(&self, owner: *mut c_void, source: Source) -> u32 {
-        for (i, cell) in self.assets.iter().enumerate() {
-            let mut a = cell.get();
-            if !a.in_use {
+        for i in 0..self.assets.len() {
+            if m_get(&self.assets[i]).in_use {
+                continue;
+            }
+            let claimed = m_rmw(&self.assets[i], |a| {
+                if a.in_use {
+                    return false; // lost the race for this slot
+                }
                 a.in_use = true;
                 a.owner = owner;
                 a.source = source;
                 a.soft_refs = 0;
-                cell.set(a);
+                true
+            });
+            if claimed {
                 return i as u32;
             }
         }
@@ -847,13 +852,13 @@ impl Manager {
         if ai >= self.assets.len() {
             return;
         }
-        let mut a = self.assets[ai].get();
-        if delta > 0 {
-            a.soft_refs += delta as u32;
-        } else {
-            a.soft_refs = a.soft_refs.saturating_sub((-delta) as u32);
-        }
-        self.assets[ai].set(a);
+        m_rmw(&self.assets[ai], |a| {
+            if delta > 0 {
+                a.soft_refs += delta as u32;
+            } else {
+                a.soft_refs = a.soft_refs.saturating_sub((-delta) as u32);
+            }
+        });
     }
 }
 

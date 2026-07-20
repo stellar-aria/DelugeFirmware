@@ -222,6 +222,16 @@ impl Manager {
         m_rmw(&self.stats, |s| f(s));
     }
 
+    /// Masked snapshot of the instrumentation counters (the FFI read path — the audio
+    /// thread writes these via `stat`, so the reader must mask to avoid a torn copy).
+    fn stats_snapshot(&self) -> Stats {
+        m_get(&self.stats)
+    }
+    /// Masked reset of the instrumentation counters.
+    fn stats_reset(&self) {
+        m_set(&self.stats, Stats::default());
+    }
+
     fn find_resident(&self, asset: u32, index: u32) -> Option<usize> {
         (0..self.chunks.len()).find(|&i| {
             let s = m_get(&self.chunks[i]);
@@ -541,7 +551,7 @@ impl Manager {
         if let Some(c) = self.find_resident(asset, index) {
             let r = self.bump();
             let hit = self.rmw_by_ptr_slot(c, |s| {
-                if s.backing.is_null() {
+                if s.backing.is_null() || s.asset != asset || s.index != index {
                     return ptr::null_mut();
                 }
                 s.leases += 1;
@@ -646,7 +656,7 @@ impl Manager {
         if let Some(c) = self.find_resident(asset, index) {
             let r = self.bump();
             let hit = self.rmw_by_ptr_slot(c, |s| {
-                if s.backing.is_null() {
+                if s.backing.is_null() || s.asset != asset || s.index != index {
                     return ptr::null_mut();
                 }
                 s.leases += 1;
@@ -819,7 +829,7 @@ impl Manager {
         };
         let r = self.bump();
         m_rmw(&self.chunks[c], |s| {
-            if s.backing.is_null() || !s.ready {
+            if s.backing.is_null() || !s.ready || s.asset != asset || s.index != index {
                 return ptr::null_mut();
             }
             s.leases += 1;
@@ -905,7 +915,7 @@ impl Manager {
     }
 
     fn set_slab(&self, slab: *mut DelugeSlab) {
-        self.slab.set(slab);
+        m_set(&self.slab, slab);
     }
 
     fn reference(&self, asset: u32, delta: i32) {
@@ -1258,14 +1268,14 @@ pub unsafe extern "C" fn deluge_resource_stats(handle: *mut DelugeResource, out:
         return;
     }
     // SAFETY: `out` is a caller-provided DelugeResourceStats (layout matches Stats).
-    unsafe { *out = mgr(handle).stats.get() };
+    unsafe { *out = mgr(handle).stats_snapshot() };
 }
 
 /// Zero the manager's instrumentation counters (e.g. to measure a single render in isolation).
 #[no_mangle]
 pub unsafe extern "C" fn deluge_resource_stats_reset(handle: *mut DelugeResource) {
     if !handle.is_null() {
-        mgr(handle).stats.set(Stats::default());
+        mgr(handle).stats_reset();
     }
 }
 

@@ -40,13 +40,13 @@ unsafe extern "C" {
 #[cfg(target_os = "none")]
 static CS_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// Host per-thread critical-section nesting depth. Each thread independently
-/// acquires the global `critical-section` mutex on its OUTERMOST enter and
-/// nests within itself, so two real OS threads (the `"deluge-audio"` executor
-/// and the fiber/executor thread in the preemptive harness) are mutually
-/// excluded — unlike a process-global depth, which would let a second thread
-/// enter while the first still holds the lock. Device uses the CPU IRQ mask
-/// (`CS_DEPTH` below), which is genuinely single-context per core.
+// Host per-thread critical-section nesting depth. Each thread independently
+// acquires the global `critical-section` mutex on its OUTERMOST enter and
+// nests within itself, so two real OS threads (the `"deluge-audio"` executor
+// and the fiber/executor thread in the preemptive harness) are mutually
+// excluded — unlike a process-global depth, which would let a second thread
+// enter while the first still holds the lock. Device uses the CPU IRQ mask
+// (`CS_DEPTH` below), which is genuinely single-context per core.
 #[cfg(not(target_os = "none"))]
 std::thread_local! {
     static CS_DEPTH_TL: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };

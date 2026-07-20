@@ -149,6 +149,43 @@ mod tests {
     }
 
     #[test]
+    fn cache_hit_same_asset_index_still_leases() {
+        // Guards the Fix-1 identity revalidation: a genuine cache hit for a resident
+        // (asset,index) must still lease and return the SAME backing, not be rejected
+        // by the strengthened bail (which only fires when the slot's identity changed
+        // out from under the scan).
+        let (_buf, h) = arena(1 << 20);
+        let mgr = unsafe { deluge_resource_create(h, 16, 64) };
+        assert!(!mgr.is_null());
+        let a = unsafe {
+            deluge_resource_define_asset(
+                mgr,
+                owner(1),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let p1 = unsafe { deluge_resource_acquire(mgr, a, 0, 4096) };
+        assert!(!p1.is_null());
+        let p2 = unsafe { deluge_resource_acquire(mgr, a, 0, 4096) };
+        assert!(!p2.is_null());
+        assert_eq!(
+            p1, p2,
+            "same (asset,index) must hit the same resident chunk"
+        );
+
+        let mut s = Stats::default();
+        unsafe { deluge_resource_stats(mgr, &mut s) };
+        assert!(
+            s.acquire_hits >= 1,
+            "the second acquire must have been recorded as a cache hit"
+        );
+    }
+
+    #[test]
     fn leased_chunk_is_never_evicted() {
         // Small heap, 64 KB chunks: hold one leased, then hammer acquisitions that
         // force reclaim — the leased chunk must survive and keep its bytes.

@@ -16,6 +16,7 @@
 //! `unsafe` is at the edges: the FFI entry points, the one-time table setup over the
 //! heap bytes, the `materialize`/`on_evict` fn-pointer calls, and the alloc/free calls.
 
+use crate::sync::{m_get, m_rmw, m_set};
 use crate::value::evict_rank;
 use core::cell::Cell;
 use core::ffi::c_void;
@@ -202,24 +203,23 @@ struct ProtectGuard<'a> {
 }
 impl Drop for ProtectGuard<'_> {
     fn drop(&mut self) {
-        self.mgr.protect.set(self.prev);
+        m_set(&self.mgr.protect, self.prev);
     }
 }
 
 impl Manager {
     #[inline]
     fn bump(&self) -> u64 {
-        let t = self.tick.get() + 1;
-        self.tick.set(t);
-        t
+        m_rmw(&self.tick, |t| {
+            *t += 1;
+            *t
+        })
     }
 
-    /// Mutate the instrumentation counters (get/modify/set — single-threaded; events are
-    /// chunk-granular so the whole-struct copy is negligible). Pure bookkeeping, never gates behaviour.
+    /// Mutate the instrumentation counters (masked get/modify/set). Pure bookkeeping,
+    /// never gates behaviour; events are chunk-granular so the whole-struct copy is negligible.
     fn stat(&self, f: impl FnOnce(&mut Stats)) {
-        let mut s = self.stats.get();
-        f(&mut s);
-        self.stats.set(s);
+        m_rmw(&self.stats, |s| f(s));
     }
 
     fn find_resident(&self, asset: u32, index: u32) -> Option<usize> {
@@ -342,8 +342,8 @@ impl Manager {
 
     /// Set the transient self-protection to `asset`, restoring the previous value on drop.
     fn protect_asset(&self, asset: u32) -> ProtectGuard<'_> {
-        let prev = self.protect.get();
-        self.protect.set(asset);
+        let prev = m_get(&self.protect);
+        m_set(&self.protect, asset);
         ProtectGuard { mgr: self, prev }
     }
 
@@ -351,10 +351,10 @@ impl Manager {
     /// chunk) is always heap-backed (the owner allocated it from the heap).
     #[inline]
     fn slab_for(&self, asset: u32) -> *mut DelugeSlab {
-        let slab = self.slab.get();
+        let slab = m_get(&self.slab);
         if asset != NONE
             && !slab.is_null()
-            && self.assets[asset as usize].get().source.backing == BACKING_SLAB
+            && m_get(&self.assets[asset as usize]).source.backing == BACKING_SLAB
         {
             slab
         } else {

@@ -23,10 +23,28 @@
 #include "storage/audio/stream/sample_stream.h"
 #include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"
+#include <cstddef>
 #include <optional>
 #include <span>
 
 #include "deluge_resource.h" // deluge_resource_mark_ready
+
+// FFI layout guard (M4): `StreamingFillDescriptor` crosses the C++/Rust boundary by value (see
+// streaming_fill.h) with a hand-written `#[repr(C)]` mirror in streaming_loader.rs. These
+// static_asserts catch field drift at compile time on whichever side notices first. Expressed
+// pointer-width-relative (not hardcoded byte offsets) so the same assertions hold unchanged on
+// both the 32-bit ARM device and the 64-bit host_app build: `dest` leads at offset 0, `sector`
+// and `num_sectors` follow packed at 4-byte strides, `ok` follows those, and the struct's overall
+// size pads up to the pointer's own alignment (its strictest member) — 2*sizeof(ptr)+8 covers
+// that on both widths (16 on 32-bit: dest[4]+sector[4]+num_sectors[4]+ok[1]->pad[4]=16; 24 on
+// 64-bit: dest[8]+sector[4]+num_sectors[4]+ok[1]->pad[8]=24). Verified by compiling both builds,
+// not derived from the naive "trailing 4-byte pad" guess (that undercounts the 64-bit case, whose
+// 8-byte pointer alignment pads the tail further).
+static_assert(offsetof(StreamingFillDescriptor, dest) == 0);
+static_assert(offsetof(StreamingFillDescriptor, sector) == sizeof(uint8_t*));
+static_assert(offsetof(StreamingFillDescriptor, num_sectors) == sizeof(uint8_t*) + 4);
+static_assert(offsetof(StreamingFillDescriptor, ok) == sizeof(uint8_t*) + 8);
+static_assert(sizeof(StreamingFillDescriptor) == 2 * sizeof(uint8_t*) + 8);
 
 // begin_fill() mirrors read_cluster_data's "resolve where/how much" step (including the
 // sd_address_at lookup); finish_fill() mirrors its post-read "convert + stitch + publish" step.

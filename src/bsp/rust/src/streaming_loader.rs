@@ -92,6 +92,21 @@ pub struct StreamingFillDescriptor {
     pub ok: bool,
 }
 
+/// FFI layout guard (M4), mirroring the `static_assert`s in `async_fill.cpp` — see that file's
+/// comment for the byte-offset derivation. `core::mem::offset_of!` + `size_of` are both `const`,
+/// so this is a compile-time check with no runtime cost; a field-order/type drift on either side
+/// fails the build instead of silently corrupting the read across the boundary.
+#[cfg(feature = "async_streaming_loader")]
+const _: () = {
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, dest) == 0);
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, sector) == size_of::<*mut u8>());
+    assert!(
+        core::mem::offset_of!(StreamingFillDescriptor, num_sectors) == size_of::<*mut u8>() + 4
+    );
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, ok) == size_of::<*mut u8>() + 8);
+    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 8);
+};
+
 /// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
 /// read just failed while still wanted, so it sinks behind everything else
 /// instead of being popped again immediately.

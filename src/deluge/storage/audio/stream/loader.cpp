@@ -27,8 +27,9 @@
 #include "storage/owner.h"
 #include "sync/storage_op.h"
 
-#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
-#include "libdeluge/system.h"        // deluge_in_interrupt
+#include "libdeluge/storage_owner.h"  // deluge_storage_on_owner
+#include "libdeluge/streaming_fill.h" // deluge_streaming_async_active
+#include "libdeluge/system.h"         // deluge_in_interrupt
 
 #include <atomic>
 
@@ -76,6 +77,16 @@ bool reconstruct_one(StreamedChunk* cluster) {
 } // namespace
 
 void pump(int32_t max_num, bool may_process_user_actions) {
+	// When the Rust async streaming-fill task owns the loader queue (see
+	// deluge_streaming_async_active()'s doc), the fiber's own drain must step aside entirely —
+	// the loader queue is streaming-only (recorder/preview dispatch through
+	// deluge::storage::Owner::run, not this queue), so nothing else needs to keep running here.
+	// deluge_streaming_async_active() is false while the feature is disabled, so this gate is a
+	// no-op then and behaviour stays byte-identical to before this gate existed.
+	if (deluge_streaming_async_active()) {
+		return;
+	}
+
 	// Admission. Nothing below may touch the SD card except read_cluster_data(), or it would re-enter here.
 	// Refuse while the card is mid-access or the audio routine holds the lock (the latter guards the
 	// cooperative convert-yield re-entrancy; its necessity is unverified but retained).
@@ -156,6 +167,11 @@ void loader_fill(void*) {
 } // namespace
 
 void request_pump(int32_t max_num, bool may_process_user_actions) {
+	// Same gate as pump() above — when the async task owns the loader queue, don't even dispatch
+	// onto the fiber for what would be a no-op pump().
+	if (deluge_streaming_async_active()) {
+		return;
+	}
 	// Never from an ISR / the audio interrupt-executor: there `deluge_storage_on_owner()` is
 	// false (it isn't the worker fiber), so we would take the coalescer path and race its
 	// main-executor-only state. The audio render does no card I/O, so reaching here from an

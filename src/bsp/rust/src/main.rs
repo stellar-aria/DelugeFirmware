@@ -141,6 +141,16 @@ mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
 #[cfg(target_os = "none")]
 mod signals;
+/// The async cluster-fill task (R1) and its selector/wakeup C ABI (R2.1): drains
+/// the resource manager's loader queue on this executor, awaiting the SD read
+/// instead of running it inline in the C++ fiber pump. Compiled on the Embassy
+/// BSP unconditionally (device, or host under `host_app`) so
+/// `deluge_streaming_async_active`/`deluge_streaming_signal_fill` always link;
+/// the task itself (spawned below) and the rest of the drain machinery stay
+/// gated behind `async_streaming_loader` — see its module doc's "Two
+/// compilation tiers".
+#[cfg(any(target_os = "none", feature = "host_app"))]
+mod streaming_loader;
 /// USB device bring-up — USB-MIDI 1.0 peripheral (Deluge → computer).
 #[cfg(target_os = "none")]
 mod usb;
@@ -344,6 +354,12 @@ pub extern "C" fn main() -> ! {
         spawner.spawn(usb::midi_rx_task(usb_midi.ep_out).unwrap());
         spawner.spawn(usb::midi_tx_task(usb_midi.ep_in).unwrap());
         spawner.spawn(app_task().unwrap());
+        // R2.1: the async cluster-fill task, selectable via `async_streaming_loader`.
+        // Owns the streaming loader queue when active (see loader.cpp's
+        // `deluge_streaming_async_active()` gate); inert (never polled beyond its
+        // idle wait) unless the C++ enqueue path signals `FILL_WAKE`.
+        #[cfg(feature = "async_streaming_loader")]
+        spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
     });
 }
 
@@ -768,6 +784,13 @@ fn main() {
                     // `block_on`'d sim_latency transfer and would starve a
                     // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
+                    // R2.1: same async cluster-fill task as the device `main` above,
+                    // spawned on this executor (the one `host_app_task`'s worker-fiber
+                    // pump loop and the C++ enqueue path also run on) — required for
+                    // `host_app async_streaming_loader` to actually own the loader
+                    // queue rather than just link the symbol.
+                    #[cfg(feature = "async_streaming_loader")]
+                    spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
                     // Streaming-underrun harness: spawned on THIS executor —
                     // the same one `host_app_task`'s worker-fiber pump loop runs on —
                     // so `scenario::run`'s C-ABI calls interleave cooperatively with

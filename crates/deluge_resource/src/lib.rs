@@ -1176,4 +1176,134 @@ mod tests {
         unsafe { deluge_resource_release(m, p) };
         let _ = buf; // keep the arena alive to here
     }
+
+    #[test]
+    fn concurrent_enqueue_drain_holds_invariants() {
+        // R1.2: proves the one genuinely-new R1 concurrency contract — the loader
+        // queue drained by an async task (`streaming_loader::fill_once`'s
+        // `deluge_resource_loader_next`, then the B1 readiness publish
+        // `deluge_resource_mark_ready`) racing concurrently against enqueue from
+        // another context (`deluge_resource_loader_enqueue`, the C++/producer
+        // side that decides a chunk needs a fill). `concurrent_lease_churn_*`
+        // above already TSan-proved the underlying masked `ChunkSlot` access for
+        // acquire/lease churn; this test targets the specific
+        // enqueue↔drain↔mark_ready triple `streaming_loader.rs` actually adds,
+        // including the re-enqueue-updates-priority path: the enqueued
+        // priority varies independently of the slot index (see the producer
+        // loop below), so a still-queued slot gets a genuinely *different*
+        // priority value on re-enqueue — exercising a real priority-value
+        // race under `loader_next`'s most-urgent-first scan, not just a
+        // repeat enqueue of the same value — while the consumer may be
+        // mid-scan/mid-pop of that same slot.
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Manager handle is !Sync (Cell); real usage is one thread-mode executor
+        // only (the module doc's Concurrency section), but this test — like
+        // `concurrent_lease_churn_*` above — stresses the masked guards directly
+        // with genuine cross-thread contention, which is a strictly harder bar.
+        #[derive(Clone, Copy)]
+        struct H(*mut crate::DelugeResource);
+        // SAFETY: every access below goes through the same masked helpers B1
+        // proved race-free.
+        unsafe impl Send for H {}
+
+        const CHUNK_CAP: usize = 16;
+        const NUM_INDICES: u32 = 4; // < CHUNK_CAP: leaves headroom, no eviction pressure
+        const ITERS: u32 = 20_000;
+
+        let mut buf = std::vec![0u128; (512 * 1024usize).div_ceil(16)];
+        let heap = unsafe { deluge_heap_create(buf.as_mut_ptr() as *mut u8, buf.len() * 16) };
+        let m = unsafe { deluge_resource_create(heap, 2, CHUNK_CAP) };
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                None,
+                core::ptr::null_mut(),
+                crate::COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        unsafe { deluge_resource_set_construct(m, asset, Some(mock_construct)) };
+        let handle = H(m);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Producer thread: the C++ enqueue context. `request()` reserves +
+        // constructs (no I/O) a chunk under a live lease — mirroring whatever
+        // upstream call gives a cluster its initial lease before wanting it
+        // filled — then enqueues it with a priority that varies independently
+        // of the slot index (`priority` cycles on a slower period than
+        // `index`, so the two are decorrelated), so a still-queued slot is
+        // genuinely re-enqueued with a *different* priority value — not the
+        // same one it already had — while the consumer may be mid-scan/
+        // mid-pop of the same slot. This exercises a real priority-value race
+        // under `loader_next`'s most-urgent-first scan, not just a no-op
+        // rewrite of the existing value.
+        let stop_p = Arc::clone(&stop);
+        let producer = std::thread::spawn(move || {
+            // Force whole-struct capture (see concurrent_lease_churn_* above).
+            let handle = handle;
+            let H(m) = handle;
+            for i in 0..ITERS {
+                let index = i % NUM_INDICES;
+                let priority = (i / NUM_INDICES) % 4;
+                let p = unsafe { deluge_resource_request(m, asset, index, 4096) };
+                if !p.is_null() {
+                    let slot = unsafe { deluge_resource_slot_of(m, p) };
+                    unsafe { deluge_resource_loader_enqueue(m, slot, priority) };
+                }
+                if stop_p.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+
+        // Consumer thread: the async-drain stand-in. Pops the most-urgent
+        // queued+leased chunk, publishes it ready (the B1 readiness publish),
+        // then drops the lease the pop implicitly took ownership of.
+        let consumer = std::thread::spawn(move || {
+            let handle = handle; // see note in thread `producer` above.
+            let H(m) = handle;
+            let mut drained = 0u32;
+            for _ in 0..ITERS {
+                let p = unsafe { deluge_resource_loader_next(m) };
+                if !p.is_null() {
+                    unsafe { deluge_resource_mark_ready(m, p) };
+                    unsafe { deluge_resource_release(m, p) };
+                    drained += 1;
+                }
+            }
+            drained
+        });
+
+        producer.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let drained = consumer.join().unwrap();
+
+        // Drain whatever the producer left queued after it stopped, leaving the
+        // manager fully drained before the post-condition below.
+        loop {
+            let p = unsafe { deluge_resource_loader_next(m) };
+            if p.is_null() {
+                break;
+            }
+            unsafe { deluge_resource_mark_ready(m, p) };
+            unsafe { deluge_resource_release(m, p) };
+        }
+
+        assert!(
+            drained > 0,
+            "the consumer should have drained at least one enqueued chunk"
+        );
+
+        // Post-condition: the manager is still coherent after the concurrent
+        // churn — a fresh request for an already-resident index is a cache hit
+        // returning a valid, usable backing.
+        let p = unsafe { deluge_resource_request(m, asset, 0, 4096) };
+        assert!(!p.is_null(), "request after churn must succeed");
+        unsafe { deluge_resource_release(m, p) };
+        let _ = buf; // keep the arena alive to here
+    }
 }

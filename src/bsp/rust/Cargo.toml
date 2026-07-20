@@ -52,15 +52,12 @@ rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 [target.'cfg(target_os = "none")'.dependencies]
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
 
-# DelugeFirmware's own Rust crate providing the residency/eviction engine + the
-# GeneralMemoryAllocator backing (TLSF + slab), both as C ABIs the C++ app calls.
-# Linked here (not via the `deluge_rust` umbrella crate, which carries its own
-# #[panic_handler] and would collide with ours) so the archived deluge_app object
-# closure resolves its deluge_resource_* AND deluge_{alloc,slab_*} symbols. This is
-# a distinct allocator from the sibling `deluge-alloc` above: disjoint memory,
-# disjoint consumers (C++ app vs. Rust BSP), no C-symbol overlap. deluge_alloc
-# rides in transitively (deluge_resource depends on it), so it stays out of this
-# bin's extern prelude and doesn't clash with `use deluge_alloc` (the sibling).
+# DelugeFirmware's residency/eviction engine + GeneralMemoryAllocator backing
+# (TLSF + slab), exposed as C ABIs the archived C++ deluge_app calls. Linked
+# directly (not via the `deluge_rust` umbrella crate, whose #[panic_handler]
+# would collide with ours). A distinct allocator from the sibling `deluge-alloc`
+# above — disjoint memory and consumers, no C-symbol overlap; deluge_alloc rides
+# in transitively via deluge_resource.
 deluge_resource = { path = "../../../crates/deluge_resource" }
 
 # Embassy runtime — versions match deluge-sdk's workspace pins.
@@ -82,74 +79,54 @@ embassy-time = { version = "0.5.1", features = ["std"] }
 critical-section = { version = "1", features = ["std"] }
 # Host `main`'s logger (device uses `log` over RTT instead; see the `rtt` feature).
 env_logger = "0.11"
-# Host implementation of the fiber.rs low-level switch (`corosensei::Coroutine`/
+# Host implementation of fiber.rs's low-level switch (`corosensei::Coroutine`/
 # `Yielder`), standing in for the device's ARM `fiber_switch` global_asm. Its
-# `sanitize` feature below was originally chosen with ThreadSanitizer in mind,
-# but M1 Task 5 found it's actually ASan-only (see that feature's comment) —
-# TSan itself needs no fiber annotations for a same-OS-thread coroutine switch
-# (it tracks happens-before per real thread, not per stack), so the M1 Task 5
-# TSan run does not enable this feature. Kept for a future ASan pass.
+# `sanitize` feature (below) is ASan-only — see that feature's comment.
 corosensei = "0.3"
-# The host-built C++ `deluge_app` object closure (see build.rs, `host_app`
-# feature) calls the deluge_resource_* residency C ABI and the
-# deluge_{alloc,slab_*,heap_*} allocator C ABI — the same symbols the device
-# build resolves via the `deluge_resource` dep above. `deluge_resource` and its
-# `deluge_alloc` dependency are `#![cfg_attr(target_os = "none", no_std)]`, so on
-# host they're plain std rlibs (no panic_handler, no dup-panic-handler risk) and
-# link cleanly against std. Optional + gated by `host_app` so a plain host build
-# (M1-M3 harness, no C++ app linked) never pulls it in.
+# The host-built C++ `deluge_app` closure (host_app feature) calls the same
+# deluge_resource_* / deluge_{alloc,slab_*,heap_*} C ABIs the device resolves via
+# the dep above. On host these crates are plain std rlibs (no panic_handler, no
+# dup-handler risk). Optional + gated by `host_app` so a plain host build never
+# pulls it in.
 deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 
 [features]
-default = ["rtt"]
-## RTT (SEGGER Real-Time Transfer) logging over a debug probe. Selects the
-## rza1l_rtt.x linker script (via build.rs) + registers the log logger.
+default = ["rtt", "async_streaming_loader"]
+
+## RTT (SEGGER Real-Time Transfer) logging over a debug probe: selects the
+## rza1l_rtt.x linker script (via build.rs) and registers the log logger.
 rtt = ["dep:rtt-target", "rza1l-hal/rtt"]
-## Enable corosensei's sanitizer instrumentation (host fiber switch only). OFF
-## by default: enabling it without actually building under a sanitizer causes
-## linker errors (the instrumentation calls into the sanitizer runtime, which
-## isn't linked in a plain build). NOTE (M1 Task 5): this wires
-## `__sanitizer_start/finish_switch_fiber` + `__asan_unpoison_memory_region` —
-## AddressSanitizer's fiber-switch API. ThreadSanitizer's runtime
-## (`librustc-nightly_rt.tsan.a`) does NOT implement that API (it has its own,
-## unrelated `__tsan_create_fiber`/`__tsan_switch_to_fiber` family instead), so
-## `--features sanitize` fails to link under `-Zsanitizer=thread` with
-## undefined-symbol errors. This feature is therefore only usable under
-## `-Zsanitizer=address`; the M1 Task 5 TSan run builds WITHOUT it (see
-## HOST_HARNESS.md) and TSan neither needs nor benefits from it here — a
-## same-thread corosensei stack switch has no other thread to misattribute
-## happens-before to, unlike ASan's per-stack redzone tracking which does.
+
+## corosensei sanitizer instrumentation for the host fiber switch. ASan-only: it
+## wires AddressSanitizer's `__sanitizer_*_switch_fiber` API, which ThreadSanitizer's
+## runtime doesn't implement, so `-Zsanitizer=thread` fails to link with it on.
+## Off by default (enabling it without a sanitizer build causes linker errors).
 sanitize = ["corosensei/sanitizer"]
-## Off by default. Bindgens the libdeluge C-ABI headers for the HOST ABI
-## (x86-64 + `-fshort-enums`) into the real `mod sys` (replacing the M3
-## `sys_host.rs` stand-ins) and links the host-built C++ `deluge_app` object
-## closure (see build.rs). Lets the host binary reach the C++ app boundary for
-## bring-up/link-checking without a device build. See m4a-spike-report.md.
-## Pulls in the host-side `deluge_resource` dep above (dep:) so the linked
-## object closure's deluge_resource_*/deluge_{alloc,slab_*,heap_*} symbols
-## resolve — see host_link_stubs.rs for the remaining (peripheral) stubs.
+
+## Link the host-built C++ `deluge_app` object and bindgen the libdeluge headers
+## for the host ABI, so the host binary can reach the C++ app boundary without a
+## device build. Pulls in the host-side `deluge_resource` dep. Off by default.
 host_app = ["dep:deluge_resource"]
-## Off by default. Turns `deluge_storage_on_owner`'s single-owner discipline into
-## an opt-in completeness diagnostic: `deluge_block_read`/`deluge_block_write`
-## debug_assert! the caller is on the worker fiber. Until later async-sd rungs
-## migrate the loader / MIDI-SysEx / recorder / UI FatFS access onto the fiber,
-## most card transfers still legitimately happen off it, so this stays OFF for
-## normal builds — enable it to see what's not yet migrated (it becomes the
-## pre-flight gate at the rung-5 yield flip, where everything IS expected to be
-## on the owner). See include/libdeluge/storage_owner.h.
+
+## Diagnostic: make `deluge_block_read`/`deluge_block_write` debug_assert! the
+## caller is on the storage worker fiber, surfacing card transfers not yet on the
+## single-owner path. Off by default. See include/libdeluge/storage_owner.h.
 storage-owner-audit = []
-## Sim-only (host streaming-underrun harness). Gives host SD reads/writes a
-## MODELED per-transfer latency and routes them through the same
-## `on_fiber()`-guarded `block_on_fiber`/`block_on` shape the device transfer
-## sites already use (rung 5), so a read/write issued on the storage-owner
-## fiber genuinely SUSPENDS (yields to the executor) for the modeled delay
-## instead of the plain host path's `block_on`-only (never-suspends) shape.
-## Data is unchanged (still the real file-backed image) — only the observed
-## TIMING is modeled. See `sd.rs`'s `sim_latency` module. OFF by default: with
-## it off, `sd.rs`'s host `deluge_block_read`/`deluge_block_write` compile to
-## exactly the code that existed before this feature — device/normal-host/
-## golden builds are byte-unchanged.
+
+## Host-harness only: give host SD reads/writes a modeled per-transfer latency so
+## a transfer on the storage-owner fiber genuinely suspends (yields the executor)
+## instead of the host's never-suspend `block_on`. Data is unchanged — only timing
+## is modeled. Off by default (off = byte-identical to no feature).
 sim_latency = []
+
+## Build + spawn the Rust async cluster-fill task (`streaming_loader.rs`), which
+## drains the resource-manager loader queue and awaits the SD read instead of the
+## C++ fiber pump running it inline. The selector/wakeup C-ABI
+## (`deluge_streaming_async_active`/`_signal_fill`) is always compiled so the C++
+## side always has a real symbol; `async_active()`'s return value is the switch
+## (false ⇒ `loader.cpp`'s fiber pump behaves exactly as before). On by default;
+## opt out with --no-default-features.
+async_streaming_loader = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

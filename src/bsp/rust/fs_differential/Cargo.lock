@@ -19,6 +19,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-futures"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
+
+[[package]]
 name = "embedded-fatfs"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +58,7 @@ name = "fs-differential"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "embassy-futures",
  "embedded-fatfs",
  "embedded-io-async",
 ]

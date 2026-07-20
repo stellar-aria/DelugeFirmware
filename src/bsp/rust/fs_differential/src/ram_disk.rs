@@ -26,6 +26,41 @@ impl RamDisk {
     pub fn snapshot(&self) -> Vec<u8> {
         DISK.lock().unwrap().clone()
     }
+
+    /// Byte-granular read from the shared image into `buf`, starting at byte
+    /// offset `pos`. Returns the number of bytes actually copied (`0` once
+    /// `pos` is at or past the end of the image -- EOF). Thin wrapper over
+    /// the same `DISK` mutex `disk_read` uses, so the C FatFS bridge
+    /// (sector-granular) and `efatfs::MemIo` (byte-granular) both see one
+    /// image.
+    pub fn read_at(pos: u64, buf: &mut [u8]) -> usize {
+        let d = DISK.lock().unwrap();
+        let pos = pos as usize;
+        if pos >= d.len() {
+            return 0;
+        }
+        let n = buf.len().min(d.len() - pos);
+        buf[..n].copy_from_slice(&d[pos..pos + n]);
+        n
+    }
+
+    /// Byte-granular write into the shared image at byte offset `pos`,
+    /// growing the image (zero-filled) if the write runs past its current
+    /// end. Same `DISK` mutex as `read_at`/`disk_write`.
+    pub fn write_at(pos: u64, buf: &[u8]) {
+        let mut d = DISK.lock().unwrap();
+        let pos = pos as usize;
+        let end = pos + buf.len();
+        if end > d.len() {
+            d.resize(end, 0);
+        }
+        d[pos..end].copy_from_slice(buf);
+    }
+
+    /// Current size of the shared image, in bytes.
+    pub fn len() -> u64 {
+        DISK.lock().unwrap().len() as u64
+    }
 }
 
 /// The vendored `src/fatfs/ff.c` bakes in a Deluge-specific extern global

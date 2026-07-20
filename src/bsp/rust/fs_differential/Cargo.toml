@@ -1,0 +1,20 @@
+[package]
+name = "fs-differential"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+
+[dependencies]
+# embedded-fatfs is never published to crates.io; vendored in-tree as an owned
+# copy (see crates/embedded-fatfs/VENDOR.md) rather than a git dependency.
+embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"] }
+embedded-io-async = "0.7"
+# Trivial single-thread executor to drive embedded-fatfs's async API from this
+# harness's synchronous test/CLI surface (MemIo never actually pends, so this
+# never really "blocks" -- it's just a driver loop). Same crate already used
+# elsewhere in this repo's Rust BSP; not tokio.
+embassy-futures = "0.1.2"
+
+[build-dependencies]
+cc = "1"

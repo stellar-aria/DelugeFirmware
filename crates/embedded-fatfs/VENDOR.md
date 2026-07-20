@@ -57,6 +57,25 @@ hardening commits in this owned copy.
 - **PR #62** — `BufStream`/`StreamSlice` seek sign/overflow bug, also in block-device-adapters.
   Deferred alongside #68 for the same reason.
 
+## Applied local fixes (beyond upstream, evidence-driven hand-ports)
+
+- **BUG-A — `Dir::rename` silently dropped a multi-component `dst_path`** (found via Task 6's write
+  differential, 2026-07-20; fixed Task 6B, `crates/embedded-fatfs/src/dir.rs`'s `rename`). `rename()`
+  traverses `dst_path` relative to `dst_dir` into a local `e_dst`, but the destination traversal loop
+  started from `self` instead of `dst_dir`, and the final call to `rename_internal` then discarded
+  `e_dst` entirely and passed the raw, untraversed `dst_dir` parameter instead. Both only happened to
+  cancel out when a caller passed the same directory as `self` and `dst_dir` (this fn's own "no moving"
+  case). **Demonstrated (Task 6):** `root.rename("REC/SHORT.RAW", &root, "REC/Renamed Long.raw")` renamed
+  the file to `/Renamed Long.raw` (root level), not `/REC/Renamed Long.raw` — the `"REC/"` destination
+  component was silently dropped. Task 6 worked around this in the differential harness
+  (`fs_differential/src/efatfs.rs::EFatFs::rename`) by resolving both parent directories itself and
+  calling `Dir::rename` with leaf-only names, never reaching the buggy path. **Fixed (Task 6B):** the
+  destination traversal now starts at `dst_dir` and `rename_internal` is called with the traversed
+  `e_dst`, not the raw `dst_dir` parameter. The harness workaround was removed — `EFatFs::rename` now
+  calls `Dir::rename` directly — and `write_diff_fat32`/`write_diff_fat16`
+  (`src/bsp/rust/fs_differential/tests/differential.rs`) are the regression proof, driving the real fix
+  through a multi-component rename destination.
+
 ## Deferred (write-differential loop — Task 6, evidence-driven hand-ports)
 
 - **FAT32 `..`-cluster-zero bug** (upstream `rafalh/rust-fatfs` commit `c4bb769`; lives in our
@@ -76,19 +95,6 @@ hardening commits in this owned copy.
 - **PR #66** — rename `..`-update fix; shares the same root-cluster caveat as the item above. Deferred
   for the same evidence-driven reason. (Task 6's write corpus renames a *file*, not a directory, so this
   one wasn't exercised/re-confirmed this round.)
-- **NEW: `Dir::rename` silently drops multi-component `dst_path` (found via Task 6, 2026-07-20, not one
-  of the two items above).** `dir.rs:520-559`: `rename()` traverses `dst_path` relative to `dst_dir`
-  into a local `e_dst` (lines 543-557) but then calls `rename_internal` with the raw, untraversed
-  `dst_dir` parameter instead of `e_dst` (line 559) — `e_dst` is dead code. Observed directly:
-  `root.rename("REC/SHORT.RAW", &root, "REC/Renamed Long.raw")` renamed the file to `/Renamed Long.raw`
-  (root level), not `/REC/Renamed Long.raw`, because the `"REC/"` component of `dst_path` was silently
-  dropped. Worked around in `fs_differential/src/efatfs.rs::EFatFs::rename` by resolving both parent
-  directories ourselves and calling `Dir::rename` with leaf-only names, which never reaches the buggy
-  branch (a leaf name has no `/`, so `dst_path`'s traversal loop breaks on its first iteration and
-  `e_dst` trivially already equals `dst_dir`) — not a fix to the vendored crate, just a call pattern
-  that avoids triggering it. Real callers of `Dir::rename` with a multi-component `dst_path` against a
-  coarser `dst_dir` (e.g. root) will still hit this. Not fixed here; candidate for a future hardening
-  commit alongside the two items above.
 
 ## Skipped (rejected, not deferred)
 

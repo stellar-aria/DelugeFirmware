@@ -541,8 +541,22 @@ impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC: OemCpConverter> Dir<'a, IO, T
         }
 
         // traverse destination path
+        //
+        // BUG-A (found via SP0 Task 6's write differential, fixed in Task
+        // 6B): per this fn's own doc comment, `dst_path` is relative to
+        // `dst_dir`, so this traversal must start at `dst_dir`, not `self`
+        // -- starting at `self` only happened to work when a caller passes
+        // `self` and `dst_dir` as the same directory (the doc comment's
+        // "no moving" case). Also, further down, the traversed destination
+        // parent (`e_dst`) was computed here and then discarded -- the raw,
+        // untraversed `dst_dir` parameter was passed to `rename_internal`
+        // instead, which is only the correct destination parent when
+        // `dst_path` has no `/` in it. Together those silently dropped
+        // every leading path component of a multi-component `dst_path`
+        // (e.g. renaming into `"REC/foo"` landed in `dst_dir` itself, not
+        // `dst_dir`'s `REC` subdirectory).
         let mut split_dst = split_path(dst_path);
-        let mut e_dst = self.clone();
+        let mut e_dst = dst_dir.clone();
         loop {
             let (name, rest_opt) = split_dst;
             match rest_opt {
@@ -556,7 +570,7 @@ impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC: OemCpConverter> Dir<'a, IO, T
             }
         }
 
-        e_src.rename_internal(split_src.0, &dst_dir, split_dst.0).await
+        e_src.rename_internal(split_src.0, &e_dst, split_dst.0).await
     }
 
     async fn rename_internal(

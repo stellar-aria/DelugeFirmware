@@ -1188,8 +1188,13 @@ mod tests {
         // above already TSan-proved the underlying masked `ChunkSlot` access for
         // acquire/lease churn; this test targets the specific
         // enqueue↔drain↔mark_ready triple `streaming_loader.rs` actually adds,
-        // including the re-enqueue-updates-priority path (a still-queued slot
-        // enqueued again while the drain thread may be mid-pop of it).
+        // including the re-enqueue-updates-priority path: the enqueued
+        // priority varies independently of the slot index (see the producer
+        // loop below), so a still-queued slot gets a genuinely *different*
+        // priority value on re-enqueue — exercising a real priority-value
+        // race under `loader_next`'s most-urgent-first scan, not just a
+        // repeat enqueue of the same value — while the consumer may be
+        // mid-scan/mid-pop of that same slot.
         use core::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
@@ -1228,9 +1233,14 @@ mod tests {
         // Producer thread: the C++ enqueue context. `request()` reserves +
         // constructs (no I/O) a chunk under a live lease — mirroring whatever
         // upstream call gives a cluster its initial lease before wanting it
-        // filled — then enqueues it, churning the priority so a still-queued
-        // slot is genuinely re-enqueued (not just freshly queued) while the
-        // consumer may be mid-scan/mid-pop of the same slot.
+        // filled — then enqueues it with a priority that varies independently
+        // of the slot index (`priority` cycles on a slower period than
+        // `index`, so the two are decorrelated), so a still-queued slot is
+        // genuinely re-enqueued with a *different* priority value — not the
+        // same one it already had — while the consumer may be mid-scan/
+        // mid-pop of the same slot. This exercises a real priority-value race
+        // under `loader_next`'s most-urgent-first scan, not just a no-op
+        // rewrite of the existing value.
         let stop_p = Arc::clone(&stop);
         let producer = std::thread::spawn(move || {
             // Force whole-struct capture (see concurrent_lease_churn_* above).
@@ -1238,10 +1248,11 @@ mod tests {
             let H(m) = handle;
             for i in 0..ITERS {
                 let index = i % NUM_INDICES;
+                let priority = (i / NUM_INDICES) % 4;
                 let p = unsafe { deluge_resource_request(m, asset, index, 4096) };
                 if !p.is_null() {
                     let slot = unsafe { deluge_resource_slot_of(m, p) };
-                    unsafe { deluge_resource_loader_enqueue(m, slot, i % 4) };
+                    unsafe { deluge_resource_loader_enqueue(m, slot, priority) };
                 }
                 if stop_p.load(Ordering::Relaxed) {
                     break;

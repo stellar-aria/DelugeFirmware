@@ -83,6 +83,10 @@ mod audio;
 /// stub in `host_link_stubs.rs`.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod audio_host;
+/// SP1 Task 4: on-device read-throughput benchmark, `embedded-fatfs` vs the
+/// vendored C FatFS — see its module doc. Non-default: `bench_fs` feature.
+#[cfg(all(target_os = "none", feature = "bench_fs"))]
+mod bench_fs;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
 /// too under `host_app` (the descriptor/probe are pure data/logic; the GPIO/CV
 /// bring-up bodies get host no-op siblings — see board.rs).
@@ -426,6 +430,14 @@ async fn app_task() {
     // block_on (integrated timer queue).
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
+
+    // SP1 Task 4 (`bench_fs` feature, off by default): run the on-device
+    // embedded-fatfs-vs-C-FatFS read-throughput benchmark right here — the SD
+    // block driver is up but nothing has touched the card yet, so its two
+    // reads are genuinely uncontended. Prints its `SP1_BENCH …` result line
+    // over RTT/log and returns either way; boot continues normally after.
+    #[cfg(feature = "bench_fs")]
+    bench_fs::run().await;
 
     log::info!("deluge-rust: deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this

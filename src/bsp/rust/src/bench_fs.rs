@@ -106,10 +106,15 @@ const READ_CHUNK: usize = 4096;
 ///   `sizeof(FATFS) == 640, alignof(FATFS) == 32`
 ///   `sizeof(FIL)   == 576, alignof(FIL)   == 32`
 mod cfatfs {
+    // Oversized opaque guards (>= the measured device sizeof above), mirroring
+    // `fs_differential/src/fatfs_c.rs`'s "generous headroom" convention: FatFS only
+    // writes within the real struct, so a larger guard is always safe, and the margin
+    // means a future `ff.h`/`ffconf.h` change can't silently make these undersized (UB)
+    // without a re-probe. Both remain multiples of 32 to preserve `align(32)`.
     #[repr(C, align(32))]
-    pub struct Fatfs(pub [u8; 640]); // sizeof(FATFS) == 640 on device (see module doc)
+    pub struct Fatfs(pub [u8; 704]); // >= measured sizeof(FATFS)==640 on device (22*32)
     #[repr(C, align(32))]
-    pub struct Fil(pub [u8; 576]); // sizeof(FIL) == 576 on device (see module doc)
+    pub struct Fil(pub [u8; 640]); // >= measured sizeof(FIL)==576 on device (20*32)
 
     // Edition 2024: extern blocks must be `unsafe`. Mirrors the exact
     // signatures `fs_differential/src/fatfs_c.rs`'s host harness declares
@@ -250,7 +255,7 @@ async fn efatfs_bench_read(fs: &Efatfs, path: &str) -> Option<(u64, f64)> {
 /// app's own subsequent mount starts clean either way — the same reasoning
 /// `fs_differential::CFatFs`'s `Drop` documents for the host harness.
 fn cfatfs_bench_read(path: &str) -> Option<(u64, f64)> {
-    let mut fs = cfatfs::Fatfs([0; 640]);
+    let mut fs = cfatfs::Fatfs([0; 704]);
     // SAFETY: `fs` is a freshly zeroed, correctly sized+aligned `FATFS` blob
     // (see `cfatfs`'s module doc); `f_mount` initialises it in place. `path`
     // "" + `opt` 1 mounts the sole logical drive (`FF_VOLUMES == 1`)
@@ -268,7 +273,7 @@ fn cfatfs_bench_read(path: &str) -> Option<(u64, f64)> {
         return None;
     };
 
-    let mut fp = cfatfs::Fil([0; 576]);
+    let mut fp = cfatfs::Fil([0; 640]);
     // SAFETY: `fp` is a freshly zeroed, correctly sized+aligned `FIL` blob;
     // `f_open` initialises it in place on success.
     let rc = unsafe { cfatfs::f_open(&mut fp, cpath.as_ptr().cast::<u8>(), cfatfs::FA_READ) };

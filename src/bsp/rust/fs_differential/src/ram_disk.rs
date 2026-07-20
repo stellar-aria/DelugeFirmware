@@ -41,8 +41,8 @@ impl RamDisk {
     /// offset `pos`. Returns the number of bytes actually copied (`0` once
     /// `pos` is at or past the end of the image -- EOF). Thin wrapper over
     /// the same `DISK` mutex `disk_read` uses, so the C FatFS bridge
-    /// (sector-granular) and `efatfs::MemIo` (byte-granular) both see one
-    /// image.
+    /// (sector-granular, via `disk_read`) and embedded-fatfs (via
+    /// `block_dev::FileBlockDevice` → `BufStream`) both see one image.
     pub fn read_at(pos: u64, buf: &mut [u8]) -> usize {
         let d = DISK.lock().unwrap();
         let pos = pos as usize;

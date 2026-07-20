@@ -44,16 +44,28 @@ typedef struct StreamingFillDescriptor {
 extern "C" {
 #endif
 
-/// Phase 1: resolve the fill for a queued StreamedChunk backing pointer (as returned by
-/// deluge_resource_loader_next). Pure lookup + arithmetic; touches no SD hardware, no FatFS.
+/// @brief Resolve the destination buffer and physical sector range for a queued chunk fill.
+///
+/// @note Pure lookup and arithmetic — touches no SD hardware and no FatFS.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+/// @return The fill descriptor; `ok` is false if the chunk is unloadable or the geometry lookup
+///         failed.
 StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing);
 
-/// Phase 2: run convert + stitch on the just-read payload and publish readiness.
-/// read_ok=false => mark the read failed (caller re-enqueues at lowest priority, as pump() does today).
-/// Returns true on success.
+/// @brief Convert, stitch, and publish readiness for a chunk's just-read payload.
+///
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer; the same value passed to the
+///                       matching deluge_streaming_begin_fill call.
+/// @param read_ok        False if the underlying sector read failed: the fill is abandoned (this
+///                        function returns false without touching the chunk) and the caller must
+///                        re-enqueue it at lowest priority, as pump() does.
+/// @return true on success.
 bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok);
 
-/// The single resource-manager instance the loader queue lives on (== GeneralMemoryAllocator resourceManager()).
+/// @brief The resource-manager instance the streaming loader queue lives on.
+/// @return The single DelugeResource instance — the same one returned by
+///         GeneralMemoryAllocator's resourceManager().
 DelugeResource* deluge_streaming_resource_manager(void);
 
 /// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
@@ -66,6 +78,7 @@ DelugeResource* deluge_streaming_resource_manager(void);
 /// `__attribute__((weak))` fallback in `async_fill.cpp`, which always returns false. When true,
 /// `deluge::audio::stream::loader::pump()`/`request_pump()` no-op — the task drains the (streaming-
 /// only) loader queue instead.
+/// @return true if the async task owns the loader queue on this build/BSP.
 bool deluge_streaming_async_active(void);
 
 /// @brief Wake the async streaming-fill task out of its idle wait.

@@ -28,12 +28,9 @@
 
 #include "deluge_resource.h" // deluge_resource_mark_ready
 
-// Body lifted verbatim (behaviour-inert split) from the pre-refactor
-// deluge::audio::stream::SampleStream::read_cluster_data — see git history for the monolithic
-// version. begin_fill() is the "resolve where/how much" half (sample_stream.cpp:161-176 +
-// sd_address_at lookup); finish_fill() is the post-read "convert + stitch + publish" half
-// (sample_stream.cpp:237-289). Both stay reachable through the extern "C" wrappers below, which
-// are the only things read_cluster_data() now calls directly.
+// begin_fill() mirrors read_cluster_data's "resolve where/how much" step (including the
+// sd_address_at lookup); finish_fill() mirrors its post-read "convert + stitch + publish" step.
+// Both are reached only through the extern "C" wrappers below.
 
 namespace deluge::audio::stream {
 
@@ -78,13 +75,13 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 	cluster.convert_data_if_necessary();
 
 #if ALPHA_OR_BETA_VERSION
-	// i040, restored to its pre-split position: a checkpoint after convert_data_if_necessary()
-	// and before the stitch step below. convert_data_if_necessary() cooperatively yields back to
-	// AudioEngine::runRoutine() roughly every 1024 bytes while converting (see convert.h:220-226)
-	// -- the same re-entrancy window loader.cpp's pump() guards against (loader.cpp:78-82). i038
-	// (in read_cluster_data, just after the read) does not cover this window, so this check stays
-	// a distinct, non-redundant safety net rather than a duplicate of i038. All current callers of
-	// read_cluster_data pass min_reasons_after == 0, so this reduces to "still leased".
+	// i040: checkpoint after convert_data_if_necessary() and before the stitch step below.
+	// convert_data_if_necessary() cooperatively yields back to AudioEngine::runRoutine() roughly
+	// every 1024 bytes while converting (see convert.h:220-226) -- the same re-entrancy window
+	// loader.cpp's pump() guards against (loader.cpp:78-82). i038 (in read_cluster_data, just
+	// after the read) does not cover this window, so this check is a distinct, non-redundant
+	// safety net rather than a duplicate of i038. All current callers of read_cluster_data pass
+	// min_reasons_after == 0, so this reduces to "still leased".
 	if (deluge::cluster::lease_count(cluster.resource_slot) < 1) {
 		FREEZE_WITH_ERROR("i040");
 	}
@@ -154,13 +151,13 @@ DelugeResource* deluge_streaming_resource_manager(void) {
 	return GeneralMemoryAllocator::get().resourceManager();
 }
 
-// R2.1: weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust
-// Embassy BSP provides the real definitions (streaming_loader.rs) whenever it links this crate —
+// Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP
+// provides the real definitions (streaming_loader.rs) whenever it links this crate —
 // unconditionally, so `deluge_streaming_async_active()` always resolves there regardless of
 // whether `async_streaming_loader` is enabled (its return value depends on the cargo feature; the
 // symbol's existence does not). Every other BSP/config (legacy/host-cooperative sim, rza1) never
 // links that crate, so these weak definitions are what resolve instead: "no async backing, never
-// signalled" — i.e. today's synchronous-fiber-pump behaviour, unchanged.
+// signalled" — i.e. today's synchronous-fiber-pump behaviour.
 __attribute__((weak)) bool deluge_streaming_async_active(void) {
 	return false;
 }

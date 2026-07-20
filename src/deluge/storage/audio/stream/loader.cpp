@@ -77,10 +77,12 @@ bool reconstruct_one(StreamedChunk* cluster) {
 } // namespace
 
 void pump(int32_t max_num, bool may_process_user_actions) {
-	// R2.1: when the Rust async streaming-fill task owns the loader queue (see
+	// When the Rust async streaming-fill task owns the loader queue (see
 	// deluge_streaming_async_active()'s doc), the fiber's own drain must step aside entirely —
 	// the loader queue is streaming-only (recorder/preview dispatch through
 	// deluge::storage::Owner::run, not this queue), so nothing else needs to keep running here.
+	// deluge_streaming_async_active() is false while the feature is disabled, so this gate is a
+	// no-op then and behaviour stays byte-identical to before this gate existed.
 	if (deluge_streaming_async_active()) {
 		return;
 	}
@@ -165,8 +167,8 @@ void loader_fill(void*) {
 } // namespace
 
 void request_pump(int32_t max_num, bool may_process_user_actions) {
-	// R2.1: same gate as pump() above — when the async task owns the loader queue, don't even
-	// dispatch onto the fiber for what would be a no-op pump().
+	// Same gate as pump() above — when the async task owns the loader queue, don't even dispatch
+	// onto the fiber for what would be a no-op pump().
 	if (deluge_streaming_async_active()) {
 		return;
 	}

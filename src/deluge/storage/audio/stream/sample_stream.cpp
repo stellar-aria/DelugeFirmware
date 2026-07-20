@@ -150,9 +150,9 @@ std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after) {
 	int32_t clusterIndex = cluster.cluster_index;
 
-	// Phase 1: resolve the fill (destination buffer, physical sector, sector count). Pure
-	// lookup + arithmetic (the last-cluster short-read sector-count calc lives here) — no SD
-	// access, no FatFS. See storage/audio/stream/async_fill.{h,cpp}.
+	// Resolve the fill (destination buffer, physical sector, sector count): pure lookup +
+	// arithmetic (the last-cluster short-read sector-count calc lives here), no SD access, no
+	// FatFS. See storage/audio/stream/async_fill.{h,cpp}.
 	StreamingFillDescriptor fill = deluge_streaming_begin_fill(&cluster);
 	if (!fill.ok) {
 		return false;
@@ -214,12 +214,12 @@ bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] in
 	}
 #endif
 
-	// i040 (the post-convert/pre-stitch checkpoint) now lives inside deluge_streaming_finish_fill
+	// i040 (the post-convert/pre-stitch lease-count check) lives inside deluge_streaming_finish_fill
 	// (async_fill.cpp), immediately after convert_data_if_necessary() -- see the comment there for
 	// why it must stay distinct from i038/i039 rather than collapse into them.
 
-	// Phase 2: convert + stitch the just-read payload and publish readiness (a no-op that
-	// returns false when the read above failed).
+	// Convert + stitch the just-read payload and publish readiness; deluge_streaming_finish_fill
+	// is a no-op that returns false when the read above failed.
 	return deluge_streaming_finish_fill(&cluster, status == DELUGE_OK);
 }
 
@@ -276,8 +276,8 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 		table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
 		if (!table_[index].cluster->loaded) {
 			deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot, priority_rating);
-			// R2.1: wake the async streaming-fill task (no-op unless it's the active backing —
-			// see deluge_streaming_async_active()'s doc).
+			// Wake the async streaming-fill task; a no-op unless it's the active backing — see
+			// deluge_streaming_async_active()'s doc.
 			deluge_streaming_signal_fill();
 		}
 		return table_[index].cluster;
@@ -301,8 +301,8 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 			if (load_instruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
 				deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot,
 				                               priority_rating); // fall back to async
-				// R2.1: same wakeup as the CLUSTER_ENQUEUE path above — this enqueue is also a
-				// streaming CLUSTER_ENQUEUE fallback (see deluge_streaming_signal_fill()'s doc).
+				// Same wakeup as the CLUSTER_ENQUEUE path above — this fallback is also an async
+				// enqueue, so it needs the same signal (see deluge_streaming_signal_fill()'s doc).
 				deluge_streaming_signal_fill();
 			}
 			else {

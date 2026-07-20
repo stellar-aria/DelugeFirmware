@@ -6,14 +6,8 @@ publish = false
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# SP0 FINDING (see task-1-report.md): crates.io's `embedded-fatfs` is a reserved
-# placeholder (the sole published version is 0.0.0, zero deps/features, published
-# 2023-07-16) — it is NOT MabezDev's async fork. The real fork's Cargo.toml (repo
-# github.com/MabezDev/embedded-fatfs, embedded-fatfs/Cargo.toml on `master`)
-# declares itself as version 0.1.0 but that version has never been published to
-# crates.io. Pinned here at the intended "0.1" per the task brief so the failure
-# is the honest, reproducible one (unresolvable version), not a typo'd guess.
-embedded-fatfs = { version = "0.1", default-features = false, features = ["lfn", "alloc"] }
+# embedded-fatfs is never published to crates.io; git-pinned to a rev.
+embedded-fatfs = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112", default-features = false, features = ["lfn", "alloc"] }
 embedded-io-async = "0.7"
 block-device-adapters = "0.2"   # buffering/streaming adapters over a block device (same repo)
 

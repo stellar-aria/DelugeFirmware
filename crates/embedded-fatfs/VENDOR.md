@@ -36,6 +36,10 @@ hardening commits in this owned copy.
   1980-01-01 date/time instead of decoding an all-zero (invalid) date. Applied to `src/boot_sector.rs`,
   `src/fs.rs`, `src/time.rs` (the `tests/write.rs` hunk in the upstream PR was not applied — `tests/`
   is not vendored).
+- **PR #55** — `FileSystem::new` now actually seeks the storage to offset 0 (`SeekFrom::Start(0)`)
+  instead of only asserting the position is already 0 via `SeekFrom::Current(0)`. Release builds
+  (where `debug_assert!` is compiled out) previously silently misparsed a remount from a
+  non-zero/stale cursor. Applied to `src/fs.rs`.
 
 ## Deferred (SP1 — block-device-adapters path, not vendored yet)
 

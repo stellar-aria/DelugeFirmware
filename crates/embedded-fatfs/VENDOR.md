@@ -40,6 +40,13 @@ hardening commits in this owned copy.
   instead of only asserting the position is already 0 via `SeekFrom::Current(0)`. Release builds
   (where `debug_assert!` is compiled out) previously silently misparsed a remount from a
   non-zero/stale cursor. Applied to `src/fs.rs`.
+- **PR #59** — validates a resumed `FileContext` against the actual on-disk directory-entry bytes
+  before trusting it (`File::new_from_context` now re-reads the on-disk entry and compares it to the
+  context's cached entry, returning `Error::InvalidInput` on mismatch), rather than only comparing the
+  in-memory `DirEntryEditor`. Adds `DirFileEntryData::to_bytes()` and `DirEntryEditor::pos()` helpers.
+  `to_file_with_context`/`try_to_file_with_context` become `async` to perform the disk check. Applied
+  to `src/dir_entry.rs`, `src/file.rs` (the `tests/read.rs` hunk in the upstream PR was not applied —
+  `tests/` is not vendored). Supersedes PR #46, which is not applied.
 
 ## Deferred (SP1 — block-device-adapters path, not vendored yet)
 

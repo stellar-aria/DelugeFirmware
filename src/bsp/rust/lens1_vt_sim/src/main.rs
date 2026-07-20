@@ -124,6 +124,15 @@ mod sd;
 mod sd_image;
 #[path = "../../src/services.rs"]
 mod services;
+/// R3.2b: mirrors `../../src/main.rs`'s `mod streaming_loader` — the R1/R2.1
+/// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
+/// symbols (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
+/// are always compiled so `loader.cpp`'s call sites link regardless of the
+/// `async_streaming_loader` feature (see that file's module doc); the actual
+/// drain machinery + [`streaming_loader::streaming_fill_task`] stay gated on
+/// the feature and are only spawned (below, in `main`) when it's enabled.
+#[path = "../../src/streaming_loader.rs"]
+mod streaming_loader;
 
 unsafe extern "C" {
     fn deluge_app_init(board: *const sys::DelugeBoard);
@@ -376,6 +385,14 @@ fn main() {
     spawner.spawn(display::oled_render().unwrap());
     spawner.spawn(sd::sim_latency::pump().unwrap());
     spawner.spawn(boot_task().unwrap());
+    // R3.2b: the async cluster-fill task, on the SAME executor `boot_task`'s
+    // worker-fiber pump loop and the C++ enqueue path run on (this binary has
+    // only the one executor — see the module doc's "Executor + clock").
+    // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the
+    // loader queue only once `deluge_streaming_async_active()` reports true
+    // (i.e. only under this feature); inert otherwise.
+    #[cfg(feature = "async_streaming_loader")]
+    spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
 
     let song_path_static: &'static str = Box::leak(song_path.into_boxed_str());
     let cfg = scenario::ScenarioConfig {

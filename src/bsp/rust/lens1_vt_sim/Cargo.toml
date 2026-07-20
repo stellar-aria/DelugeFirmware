@@ -83,6 +83,13 @@ sim_latency = []
 # unrelated to this package's own concerns).
 storage-owner-audit = []
 rtt = []
+# R3.2b: mirrors `../Cargo.toml`'s `async_streaming_loader` feature exactly (same
+# spelling, so `streaming_loader.rs`'s `#[cfg(feature = "async_streaming_loader")]`
+# conditionals need zero edits when `#[path]`-included here). Off by default —
+# same fiber-pump backing as every other Lens-1 run unless explicitly opted in,
+# so a plain `sweep.sh` invocation is unchanged. See `main.rs`'s `mod
+# streaming_loader` doc comment for how this package spawns the task.
+async_streaming_loader = []
 
 [build-dependencies]
 bindgen = "0.70"

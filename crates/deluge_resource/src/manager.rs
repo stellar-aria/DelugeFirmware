@@ -16,7 +16,7 @@
 //! `unsafe` is at the edges: the FFI entry points, the one-time table setup over the
 //! heap bytes, the `materialize`/`on_evict` fn-pointer calls, and the alloc/free calls.
 
-use crate::sync::{m_get, m_rmw, m_set};
+use crate::sync::{m_get, m_rmw, m_set, Masked};
 use crate::value::evict_rank;
 use core::cell::Cell;
 use core::ffi::c_void;
@@ -223,16 +223,34 @@ impl Manager {
     }
 
     fn find_resident(&self, asset: u32, index: u32) -> Option<usize> {
-        self.chunks.iter().position(|c| {
-            let s = c.get();
+        (0..self.chunks.len()).find(|&i| {
+            let s = m_get(&self.chunks[i]);
             !s.backing.is_null() && s.asset == asset && s.index == index
         })
     }
     fn find_by_ptr(&self, p: *mut u8) -> Option<usize> {
-        self.chunks.iter().position(|c| c.get().backing == p)
+        (0..self.chunks.len()).find(|&i| m_get(&self.chunks[i]).backing == p)
     }
     fn find_free_chunk(&self) -> Option<usize> {
-        self.chunks.iter().position(|c| c.get().backing.is_null())
+        (0..self.chunks.len()).find(|&i| m_get(&self.chunks[i]).backing.is_null())
+    }
+
+    /// Fiber-safe pointer-keyed RMW: locate the slot whose `backing == p` (heuristic
+    /// scan, mask released between slots), then under ONE masked window re-validate
+    /// `backing == p` (audio may have evicted+reused the slot since the scan) and apply
+    /// `f`. Returns true if it mutated. No-op (false) if `p` isn't resident / changed.
+    fn rmw_by_ptr(&self, p: *mut u8, f: impl FnOnce(&mut ChunkSlot)) -> bool {
+        let Some(i) = self.find_by_ptr(p) else {
+            return false;
+        };
+        let _m = Masked::enter();
+        let mut s = self.chunks[i].get();
+        if s.backing != p {
+            return false; // slot changed under us — bail
+        }
+        f(&mut s);
+        self.chunks[i].set(s);
+        true
     }
 
     /// The chunk-table slot index backing `p`, or `NO_SLOT` if `p` isn't resident. O(n); the C++ side
@@ -548,12 +566,11 @@ impl Manager {
     /// that already hold the chunk and just want to pin it harder (C++ `Cluster::addReason`).
     /// No-op if the pointer isn't a resident chunk.
     fn add_lease(&self, p: *mut u8) {
-        if let Some(c) = self.find_by_ptr(p) {
-            let mut s = self.chunks[c].get();
+        let r = self.bump();
+        self.rmw_by_ptr(p, |s| {
             s.leases += 1;
-            s.recency = self.bump();
-            self.chunks[c].set(s);
-        }
+            s.recency = r;
+        });
     }
 
     /// Reserve + construct (but do NOT load) chunk `index` of `asset` under a hard
@@ -654,21 +671,27 @@ impl Manager {
     /// a SampleCache truncating its tail — so it manages its own pointer/state). No-op if
     /// `p` isn't resident. Distinct from `release` (which only drops a lease).
     fn evict_chunk(&self, p: *mut u8) {
-        if let Some(c) = self.find_by_ptr(p) {
+        let Some(c) = self.find_by_ptr(p) else {
+            return;
+        };
+        let s = {
+            let _m = Masked::enter();
             let s = self.chunks[c].get();
+            if s.backing != p {
+                return; // changed under us
+            }
             self.chunks[c].set(ChunkSlot::EMPTY);
-            self.free_backing(s.backing, s.asset);
-        }
+            s
+        };
+        self.free_backing(s.backing, s.asset); // unmasked (no mask across free)
     }
 
     fn release(&self, p: *mut u8) {
-        if let Some(c) = self.find_by_ptr(p) {
-            let mut s = self.chunks[c].get();
+        self.rmw_by_ptr(p, |s| {
             if s.leases > 0 {
                 s.leases -= 1;
-                self.chunks[c].set(s);
             }
-        }
+        });
     }
 
     /// Adopt an externally-allocated heap block `ptr` as a resident, **unleased** chunk the
@@ -715,29 +738,18 @@ impl Manager {
     }
 
     fn touch(&self, p: *mut u8) {
-        if let Some(c) = self.find_by_ptr(p) {
-            let mut s = self.chunks[c].get();
-            s.recency = self.bump();
-            self.chunks[c].set(s);
-        }
+        let r = self.bump();
+        self.rmw_by_ptr(p, |s| s.recency = r);
     }
 
     fn set_dirty(&self, p: *mut u8, dirty: bool) {
-        if let Some(c) = self.find_by_ptr(p) {
-            let mut s = self.chunks[c].get();
-            s.dirty = dirty;
-            self.chunks[c].set(s);
-        }
+        self.rmw_by_ptr(p, |s| s.dirty = dirty);
     }
 
     /// Mark a `request`ed (Loading) chunk ready — the loader / embassy storage task signals the read
     /// completed. No-op if `p` isn't a resident chunk.
     fn mark_ready(&self, p: *mut u8) {
-        if let Some(c) = self.find_by_ptr(p) {
-            let mut s = self.chunks[c].get();
-            s.ready = true;
-            self.chunks[c].set(s);
-        }
+        self.rmw_by_ptr(p, |s| s.ready = true);
     }
 
     /// RT-safe acquire: take a hard lease + return the backing only if the chunk is resident **and**

@@ -1024,4 +1024,81 @@ mod tests {
         // assert the manager is still functional (no leak/corruption).
         let _ = again;
     }
+
+    #[test]
+    fn concurrent_lease_churn_holds_invariants() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Manager handle is !Sync (Cell); the C++ side shares it across threads, so
+        // model that with a Send wrapper. Backing memory + tables outlive both threads.
+        #[derive(Clone, Copy)]
+        struct H(*mut crate::DelugeResource);
+        // SAFETY: the manager's shared state is now guarded by the masked helpers,
+        // which is exactly what this test exercises.
+        unsafe impl Send for H {}
+
+        let mut buf = std::vec![0u128; (512 * 1024usize).div_ceil(16)];
+        let heap = unsafe { deluge_heap_create(buf.as_mut_ptr() as *mut u8, buf.len() * 16) };
+        let m = unsafe { deluge_resource_create(heap, 2, 16) };
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                None,
+                core::ptr::null_mut(),
+                crate::COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let handle = H(m);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_a = Arc::clone(&stop);
+        let a = std::thread::spawn(move || {
+            // Force whole-struct capture: RFC 2229 disjoint closure capture would
+            // otherwise capture just the raw-pointer field, bypassing `H`'s Send.
+            let handle = handle;
+            let H(m) = handle;
+            for _ in 0..20_000 {
+                let p = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+                if !p.is_null() {
+                    unsafe { deluge_resource_add_lease(m, p) };
+                    unsafe { deluge_resource_touch(m, p) };
+                    unsafe { deluge_resource_release(m, p) };
+                    unsafe { deluge_resource_release(m, p) };
+                }
+                if stop_a.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+        let b = std::thread::spawn(move || {
+            let handle = handle; // see note in thread `a` above.
+            let H(m) = handle;
+            for i in 0..20_000u32 {
+                let p = unsafe { deluge_resource_acquire(m, asset, i % 4, 4096) };
+                if !p.is_null() {
+                    unsafe { deluge_resource_mark_dirty(m, p, true) };
+                    unsafe { deluge_resource_mark_dirty(m, p, false) };
+                    unsafe { deluge_resource_release(m, p) };
+                }
+            }
+        });
+        a.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        b.join().unwrap();
+        // Liveness + no panic/deadlock is the assertion; lease counts never went
+        // negative (release guards leases>0) and no still-leased chunk was evicted.
+
+        // Post-condition: after all leases are dropped, the chunk cache is intact —
+        // re-acquiring a chunk returns its materialize pattern (no torn/lost state from
+        // the concurrent churn), and its lease is accountable.
+        let p = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+        assert!(!p.is_null(), "acquire after churn must succeed");
+        check_pattern(p, owner(1), 0, 4096);
+        unsafe { deluge_resource_release(m, p) };
+        let _ = buf; // keep the arena alive to here
+    }
 }

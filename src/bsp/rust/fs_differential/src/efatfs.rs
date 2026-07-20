@@ -128,8 +128,19 @@ impl EFatFs {
             let mut v = Vec::new();
             while let Some(r) = iter.next().await {
                 let e = r.expect("dir entry");
+                let name = e.file_name();
+                // HARNESS NORMALIZATION: embedded-fatfs's directory iterator
+                // yields `.` and `..` pseudo-entries for non-root
+                // directories; C FatFS's f_readdir never does (it suppresses
+                // them internally). This is an API-convention difference
+                // between the two libraries, not a data/metadata bug in
+                // either -- filter them out here so both backends present
+                // the same logical directory view to the differential.
+                if name == "." || name == ".." {
+                    continue;
+                }
                 v.push(Entry {
-                    name: e.file_name(),
+                    name,
                     size: e.len(),
                     is_dir: e.is_dir(),
                 });

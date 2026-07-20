@@ -1,5 +1,5 @@
 //! SP0 differential harness integration tests.
-use fs_differential::{efatfs::EFatFs, fatfs_c::CFatFs, ram_disk::RamDisk};
+use fs_differential::{diff::compare_read, efatfs::EFatFs, fatfs_c::CFatFs, ram_disk::RamDisk};
 use std::sync::Mutex;
 
 /// `DISK` (`ram_disk.rs`) and the C FatFS single volume (`FF_VOLUMES=1`,
@@ -37,4 +37,26 @@ fn efatfs_reads_known_file_fat32() {
     let _disk = RamDisk::load(&img);
     let fs = EFatFs::mount();
     assert_eq!(fs.read_file("/SAMPLES/hello.txt"), b"DELUGE-SP0\n");
+}
+
+/// Walks the WHOLE fixture tree through both backends and asserts they agree
+/// on every directory listing and every file's bytes -- SP0's core
+/// instrument, run against the FAT32 image.
+fn run_read_diff(env: &str) {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = std::env::var(env)
+        .unwrap_or_else(|_| panic!("run mk_fixture.sh; set {env}=/tmp/<variant>.img"));
+    let _disk = RamDisk::load(&img);
+    let (c, e) = (CFatFs::mount(), EFatFs::mount());
+    compare_read(&c, &e).expect("read/enumerate differential");
+}
+
+#[test]
+fn read_diff_fat32() {
+    run_read_diff("SP0_FAT32");
+}
+
+#[test]
+fn read_diff_fat16() {
+    run_read_diff("SP0_FAT16");
 }

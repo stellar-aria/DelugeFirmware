@@ -68,6 +68,18 @@ bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok);
 ///         GeneralMemoryAllocator's resourceManager().
 DelugeResource* deluge_streaming_resource_manager(void);
 
+/// @brief Whether a queued chunk has been marked unloadable since it was enqueued.
+///
+/// Mirrors pump()'s safety-net skip right after deluge_resource_loader_next() (loader.cpp):
+/// markAsUnloadable already de-queued it and loader_next cleared its queued flag, so skipping
+/// here can't loop, and an unloadable chunk doesn't count against the fill budget. Only ever
+/// called from the Rust async task's fill_once — the fiber pump() performs the equivalent check
+/// inline, so it has no need of this getter.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+/// @return true if the chunk is currently marked unloadable.
+bool deluge_streaming_chunk_unloadable(void* chunk_backing);
+
 /// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
 ///        `async_streaming_loader`) owns the loader queue on this build/BSP.
 ///

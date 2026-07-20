@@ -127,6 +127,12 @@ pub trait FillOps {
     /// Pop the most-urgent queued+still-leased chunk, or a null pointer if the
     /// queue is empty (`deluge_resource_loader_next`).
     fn next(&self) -> *mut c_void;
+    /// Whether `chunk` has been marked unloadable since it was enqueued
+    /// (`deluge_streaming_chunk_unloadable`) — mirrors `pump()`'s safety-net
+    /// skip right after `next()` (`loader.cpp`'s "Safety net" comment): already
+    /// dequeued, so skipping can't loop, and it doesn't count against the fill
+    /// budget.
+    fn is_unloadable(&self, chunk: *mut c_void) -> bool;
     /// Resolve `chunk`'s destination buffer + physical sector range
     /// (`deluge_streaming_begin_fill`). `ok == false` means skip this chunk
     /// entirely (unloadable / geometry error) — no read, no `finish`.
@@ -134,24 +140,48 @@ pub trait FillOps {
     /// Await the sector read into `buf`. Returns whether it succeeded.
     async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool;
     /// Run the post-read convert/stitch/publish tail
-    /// (`deluge_streaming_finish_fill`). Returns true on success; false exactly
-    /// when `read_ok` was false.
+    /// (`deluge_streaming_finish_fill`). Only called after a *successful* read
+    /// — mirrors `reconstruct_one`'s success arm (`loader.cpp`), which likewise
+    /// never reaches its convert/stitch/publish tail on a failed read.
     fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool;
+    /// `chunk`'s current hard-lease count (`deluge_resource_slot_of` +
+    /// `deluge_resource_lease_count_by_slot`), consulted only after a failed
+    /// read to decide drop-vs-requeue (see `fill_once`).
+    fn lease_count(&self, chunk: *mut c_void) -> u32;
     /// Re-enqueue `chunk` at [`LOWEST_PRIORITY`] (`deluge_resource_loader_enqueue`)
     /// — the read failed while the chunk was still wanted.
     fn enqueue_lowest(&self, chunk: *mut c_void);
 }
 
 /// Drain the loader queue: for each queued cluster, resolve → await the read →
-/// convert/stitch/mark-ready. Mirrors `loader.cpp`'s `pump()` exactly (same
-/// skip-on-`!ok`, same re-enqueue-and-stop-on-read-failure shape at
-/// `loader.cpp:122-127`), just with the read awaited instead of run inline.
+/// convert/stitch/mark-ready. Mirrors `loader.cpp`'s `pump()`/`reconstruct_one`
+/// exactly, just with the read awaited instead of run inline:
+/// - the post-`next()` unloadable safety-net skip (`loader.cpp`'s "Safety net"
+///   comment) — drop, keep draining, don't count it;
+/// - the post-`begin()` `!ok` skip (unloadable / geometry error) — drop, keep
+///   draining;
+/// - on a **successful** read: run the convert/stitch/publish `finish` tail,
+///   then keep draining (`reconstruct_one`'s `true` arm);
+/// - on a **failed** read: `finish` is never called (it's the success-only
+///   tail — see `reconstruct_one`, which never reaches its convert/stitch/
+///   publish body on a failed read either). Instead check the lease count: if
+///   it dropped to 0 while loading, the chunk is already unwanted — drop it
+///   and keep draining (`reconstruct_one`'s `lease_count(...) == 0` arm).
+///   Otherwise a caller still wants it — re-enqueue at lowest priority and
+///   stop, else we'd keep re-popping the same cluster until the card is back
+///   (`reconstruct_one`'s `false` arm / `loader.cpp:122-127`).
 #[cfg(feature = "async_streaming_loader")]
 pub async fn fill_once<O: FillOps>(ops: &O) {
     loop {
         let chunk = ops.next();
         if chunk.is_null() {
             return;
+        }
+
+        if ops.is_unloadable(chunk) {
+            // Safety net: already de-queued by `next()`, so skipping can't
+            // loop. Doesn't count against the fill budget.
+            continue;
         }
 
         let d = ops.begin(chunk);
@@ -168,14 +198,22 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         let buf =
             unsafe { core::slice::from_raw_parts_mut(d.dest, (d.num_sectors as usize) * 512) };
         let read_ok = ops.read(d.sector, d.num_sectors, buf).await;
-        let done = ops.finish(chunk, read_ok);
-        if !done {
-            // Read failed while still wanted — re-queue at lowest priority and
-            // stop, else we'd keep re-popping the same cluster until the card is
-            // back (same rationale as loader.cpp's pump()).
-            ops.enqueue_lowest(chunk);
-            return;
+
+        if read_ok {
+            // Success tail: convert/stitch/publish, then keep draining.
+            ops.finish(chunk, true);
+            continue;
         }
+
+        // Read failed. If the cluster already dropped to 0 leases while
+        // loading, it's already unwanted — drop it and keep draining.
+        // Otherwise a caller still wants it: re-queue at lowest priority and
+        // stop.
+        if ops.lease_count(chunk) == 0 {
+            continue;
+        }
+        ops.enqueue_lowest(chunk);
+        return;
     }
 }
 
@@ -198,11 +236,13 @@ mod prod {
 
     unsafe extern "C" {
         fn deluge_streaming_resource_manager() -> *mut c_void;
+        fn deluge_streaming_chunk_unloadable(chunk_backing: *mut c_void) -> bool;
         fn deluge_streaming_begin_fill(chunk: *mut c_void) -> StreamingFillDescriptor;
         fn deluge_streaming_finish_fill(chunk: *mut c_void, read_ok: bool) -> bool;
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
+        fn deluge_resource_lease_count_by_slot(mgr: *mut c_void, slot: u32) -> u32;
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
@@ -233,6 +273,11 @@ mod prod {
             unsafe { deluge_resource_loader_next(self.mgr) }
         }
 
+        fn is_unloadable(&self, chunk: *mut c_void) -> bool {
+            // SAFETY: `chunk` was just returned by `next()`.
+            unsafe { deluge_streaming_chunk_unloadable(chunk) }
+        }
+
         fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {
             // SAFETY: `chunk` was just returned by `next()` (a queued, still-
             // leased `StreamedChunk*`).
@@ -248,6 +293,13 @@ mod prod {
         fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool {
             // SAFETY: `chunk` is the same pointer `begin` was just called with.
             unsafe { deluge_streaming_finish_fill(chunk, read_ok) }
+        }
+
+        fn lease_count(&self, chunk: *mut c_void) -> u32 {
+            // SAFETY: `mgr`/`chunk` are both still valid (the chunk hasn't been
+            // freed — it's still leased, just its read failed).
+            let slot = unsafe { deluge_resource_slot_of(self.mgr, chunk) };
+            unsafe { deluge_resource_lease_count_by_slot(self.mgr, slot) }
         }
 
         fn enqueue_lowest(&self, chunk: *mut c_void) {

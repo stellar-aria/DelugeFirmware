@@ -169,6 +169,10 @@ DelugeResource* deluge_streaming_resource_manager(void) {
 	return GeneralMemoryAllocator::get().resourceManager();
 }
 
+bool deluge_streaming_chunk_unloadable(void* chunk_backing) {
+	return reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable;
+}
+
 // Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP
 // provides the real definitions (streaming_loader.rs) whenever it links this crate —
 // unconditionally, so `deluge_streaming_async_active()` always resolves there regardless of

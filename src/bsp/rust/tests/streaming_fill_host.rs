@@ -28,9 +28,11 @@ use streaming_loader::{FillOps, StreamingFillDescriptor, fill_once};
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Call {
     Next,
+    IsUnloadable(usize),
     Begin(usize),
     Read { lba: u32, count: u32 },
     Finish { chunk: usize, read_ok: bool },
+    LeaseCount(usize),
     EnqueueLowest(usize),
 }
 
@@ -43,6 +45,11 @@ struct FakeChunk {
     sector: u32,
     num_sectors: u32,
     begin_ok: bool,
+    /// What `is_unloadable` reports for this chunk.
+    unloadable: bool,
+    /// What `lease_count` reports for this chunk (only consulted by
+    /// `fill_once` after a failed read).
+    lease_count: u32,
     buf: RefCell<Vec<u8>>,
 }
 
@@ -104,6 +111,14 @@ impl FillOps for FakeOps {
         (self.chunk_by_id(id) as *const FakeChunk) as *mut c_void
     }
 
+    fn is_unloadable(&self, chunk: *mut c_void) -> bool {
+        // SAFETY: only ever called with a pointer this test double's `next()`
+        // just returned.
+        let fc = unsafe { Self::chunk_from_ptr(chunk) };
+        self.calls.borrow_mut().push(Call::IsUnloadable(fc.id));
+        fc.unloadable
+    }
+
     fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {
         // SAFETY: only ever called with a pointer this test double's `next()`
         // just returned.
@@ -145,6 +160,13 @@ impl FillOps for FakeOps {
         read_ok
     }
 
+    fn lease_count(&self, chunk: *mut c_void) -> u32 {
+        // SAFETY: same pointer `begin`/`read` were just called with.
+        let fc = unsafe { Self::chunk_from_ptr(chunk) };
+        self.calls.borrow_mut().push(Call::LeaseCount(fc.id));
+        fc.lease_count
+    }
+
     fn enqueue_lowest(&self, chunk: *mut c_void) {
         // SAFETY: same pointer `begin`/`finish` were just called with.
         let fc = unsafe { Self::chunk_from_ptr(chunk) };
@@ -160,6 +182,8 @@ fn one_chunk(id: usize, begin_ok: bool) -> FakeChunk {
         sector: 100 + id as u32,
         num_sectors,
         begin_ok,
+        unloadable: false,
+        lease_count: 1, // still wanted by default; the read-failure-drop test overrides this
         buf: RefCell::new(vec![0u8; (num_sectors as usize) * 512]),
     }
 }
@@ -178,6 +202,7 @@ fn fill_once_happy_path_drains_one_cluster() {
         *ops.calls.borrow(),
         vec![
             Call::Next,
+            Call::IsUnloadable(0),
             Call::Begin(0),
             Call::Read { lba: 100, count: 2 },
             Call::Finish {
@@ -192,13 +217,17 @@ fn fill_once_happy_path_drains_one_cluster() {
     assert!(ops.pending.borrow().is_empty());
 }
 
-/// Read failure: `read` returns false → `finish(chunk, false)` returns false →
-/// the cluster is re-enqueued at `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop
-/// stops immediately (mirrors `pump()`'s behaviour at `loader.cpp:123-126`) —
-/// no second `next()` call in the same `fill_once`.
+/// Read failure while still leased: `read` returns false → `finish` is NOT
+/// called (it's the success-only convert/stitch/publish tail) → the lease
+/// count is checked and found still > 0 → the cluster is re-enqueued at
+/// `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop stops immediately (mirrors
+/// `reconstruct_one`'s `false` arm / `pump()`'s behaviour at
+/// `loader.cpp:123-126`) — no second `next()` call in the same `fill_once`.
 #[test]
 fn fill_once_read_failure_reenqueues_lowest_and_stops() {
-    let ops = FakeOps::new(vec![one_chunk(0, true)], /* read_result = */ false);
+    let mut chunk = one_chunk(0, true);
+    chunk.lease_count = 1; // still wanted
+    let ops = FakeOps::new(vec![chunk], /* read_result = */ false);
     ops.enqueue(0, 10);
 
     embassy_futures::block_on(fill_once(&ops));
@@ -207,16 +236,55 @@ fn fill_once_read_failure_reenqueues_lowest_and_stops() {
         *ops.calls.borrow(),
         vec![
             Call::Next,
+            Call::IsUnloadable(0),
             Call::Begin(0),
             Call::Read { lba: 100, count: 2 },
-            Call::Finish {
-                chunk: 0,
-                read_ok: false
-            },
+            Call::LeaseCount(0),
             Call::EnqueueLowest(0),
         ]
     );
     assert_eq!(*ops.pending.borrow(), vec![(0, u32::MAX)]);
+}
+
+/// Read failure while UNLEASED: `read` returns false, and by the time it's
+/// checked the cluster has already dropped to 0 leases (already unwanted) →
+/// no `finish`, no `enqueue_lowest` — the cluster is just dropped and the loop
+/// keeps draining the next queued cluster (mirrors `reconstruct_one`'s
+/// `lease_count(...) == 0` arm / `pump()` continuing to drain rather than
+/// stopping). Both queued clusters are unleased-and-failing here so the whole
+/// queue drains to empty rather than stopping after the first — the
+/// "continues" half of the behaviour, complementing the single-chunk case in
+/// `fill_once_read_failure_reenqueues_lowest_and_stops`.
+#[test]
+fn fill_once_read_failure_unleased_drops_and_continues() {
+    let mut first = one_chunk(0, true);
+    first.lease_count = 0; // dropped to 0 reasons while loading
+    let mut second = one_chunk(1, true);
+    second.lease_count = 0;
+    let ops = FakeOps::new(vec![first, second], /* read_result = */ false);
+    ops.enqueue(0, 10); // most urgent — popped (and dropped) first
+    ops.enqueue(1, 20);
+
+    embassy_futures::block_on(fill_once(&ops));
+
+    assert_eq!(
+        *ops.calls.borrow(),
+        vec![
+            Call::Next,
+            Call::IsUnloadable(0),
+            Call::Begin(0),
+            Call::Read { lba: 100, count: 2 },
+            Call::LeaseCount(0),
+            Call::Next,
+            Call::IsUnloadable(1),
+            Call::Begin(1),
+            Call::Read { lba: 101, count: 2 },
+            Call::LeaseCount(1),
+            Call::Next,
+        ]
+    );
+    // Nothing was re-enqueued for either chunk — both were dropped, not requeued.
+    assert!(ops.pending.borrow().is_empty());
 }
 
 /// `begin` reports `ok = false` (unloadable / geometry error) → that chunk is
@@ -237,8 +305,45 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
         *ops.calls.borrow(),
         vec![
             Call::Next,
+            Call::IsUnloadable(0),
             Call::Begin(0),
             Call::Next,
+            Call::IsUnloadable(1),
+            Call::Begin(1),
+            Call::Read { lba: 101, count: 2 },
+            Call::Finish {
+                chunk: 1,
+                read_ok: true
+            },
+            Call::Next,
+        ]
+    );
+}
+
+/// A chunk marked unloadable (`is_unloadable` reports true) is skipped right
+/// after `next()` — no `begin`, no `read`, no `finish` — while a following
+/// loadable chunk still drains normally (mirrors `pump()`'s "Safety net" skip
+/// at `loader.cpp`, just before `reconstruct_one` would otherwise run).
+#[test]
+fn fill_once_skips_unloadable_chunk() {
+    let mut unloadable = one_chunk(0, true);
+    unloadable.unloadable = true;
+    let ops = FakeOps::new(
+        vec![unloadable, one_chunk(1, true)],
+        /* read_result = */ true,
+    );
+    ops.enqueue(0, 10); // most urgent — popped (and skipped) first
+    ops.enqueue(1, 20);
+
+    embassy_futures::block_on(fill_once(&ops));
+
+    assert_eq!(
+        *ops.calls.borrow(),
+        vec![
+            Call::Next,
+            Call::IsUnloadable(0),
+            Call::Next,
+            Call::IsUnloadable(1),
             Call::Begin(1),
             Call::Read { lba: 101, count: 2 },
             Call::Finish {

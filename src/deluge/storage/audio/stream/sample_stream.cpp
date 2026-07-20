@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "deluge_resource.h"                 // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "libdeluge/streaming_fill.h"        // deluge_streaming_signal_fill
 #include "storage/audio/stream/async_fill.h" // deluge_streaming_begin_fill/finish_fill (StreamingFillDescriptor)
 
 namespace deluge::audio::stream {
@@ -275,6 +276,9 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 		table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
 		if (!table_[index].cluster->loaded) {
 			deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot, priority_rating);
+			// R2.1: wake the async streaming-fill task (no-op unless it's the active backing —
+			// see deluge_streaming_async_active()'s doc).
+			deluge_streaming_signal_fill();
 		}
 		return table_[index].cluster;
 	}
@@ -297,6 +301,9 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 			if (load_instruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
 				deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot,
 				                               priority_rating); // fall back to async
+				// R2.1: same wakeup as the CLUSTER_ENQUEUE path above — this enqueue is also a
+				// streaming CLUSTER_ENQUEUE fallback (see deluge_streaming_signal_fill()'s doc).
+				deluge_streaming_signal_fill();
 			}
 			else {
 				if (error != nullptr) {

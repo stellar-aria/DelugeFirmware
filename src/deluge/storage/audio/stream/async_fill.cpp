@@ -154,4 +154,19 @@ DelugeResource* deluge_streaming_resource_manager(void) {
 	return GeneralMemoryAllocator::get().resourceManager();
 }
 
+// R2.1: weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust
+// Embassy BSP provides the real definitions (streaming_loader.rs) whenever it links this crate —
+// unconditionally, so `deluge_streaming_async_active()` always resolves there regardless of
+// whether `async_streaming_loader` is enabled (its return value depends on the cargo feature; the
+// symbol's existence does not). Every other BSP/config (legacy/host-cooperative sim, rza1) never
+// links that crate, so these weak definitions are what resolve instead: "no async backing, never
+// signalled" — i.e. today's synchronous-fiber-pump behaviour, unchanged.
+__attribute__((weak)) bool deluge_streaming_async_active(void) {
+	return false;
+}
+
+__attribute__((weak)) void deluge_streaming_signal_fill(void) {
+	// No async task to wake on this BSP/config.
+}
+
 } // extern "C"

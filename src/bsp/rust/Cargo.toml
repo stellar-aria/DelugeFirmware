@@ -150,13 +150,18 @@ storage-owner-audit = []
 ## exactly the code that existed before this feature — device/normal-host/
 ## golden builds are byte-unchanged.
 sim_latency = []
-## Off by default. Builds the R1 async cluster-fill task (`streaming_loader.rs`):
-## drains the resource manager's loader queue on this executor, awaiting the SD
-## read instead of running it inline in the C++ fiber pump. Purely additive and
-## inert while off — no other module references `streaming_loader`, and nothing
-## spawns its task yet (a later rung does both). See streaming_loader.rs's module
-## doc for the dependency-injection split that makes its drain loop host-testable
-## without a real C++ resource manager.
+## Off by default. Builds + spawns the R1/R2.1 async cluster-fill task
+## (`streaming_loader.rs`): drains the resource manager's loader queue on this
+## executor, awaiting the SD read instead of running it inline in the C++ fiber
+## pump. The task's existence is gated by this feature, but the selector/wakeup
+## C ABI it exposes (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
+## is always compiled on the Embassy BSP (device, or host under `host_app`) so the
+## C++ side always has a real symbol to call — `async_active()`'s *return value*
+## is what actually depends on this feature (false when off, so `loader.cpp`'s
+## fiber pump behaves exactly as before: golden-bit-exact, this feature's whole
+## reason for defaulting off). See streaming_loader.rs's module doc ("Two
+## compilation tiers") for the split and the dependency-injection design that
+## makes the drain loop host-testable without a real C++ resource manager.
 async_streaming_loader = []
 
 [build-dependencies]

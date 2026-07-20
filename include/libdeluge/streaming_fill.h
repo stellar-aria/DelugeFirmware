@@ -56,6 +56,26 @@ bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok);
 /// The single resource-manager instance the loader queue lives on (== GeneralMemoryAllocator resourceManager()).
 DelugeResource* deluge_streaming_resource_manager(void);
 
+/// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
+///        `async_streaming_loader`) owns the loader queue on this build/BSP.
+///
+/// A runtime getter rather than a compile-time `#define`: the C++ `deluge_app` is built once by
+/// CMake and linked into whichever BSP, so a Rust cargo feature can't reach a C++ preprocessor
+/// define. True only on the Rust/Embassy BSP with `async_streaming_loader` enabled (the real
+/// implementation lives in `streaming_loader.rs`); every other BSP/config links the
+/// `__attribute__((weak))` fallback in `async_fill.cpp`, which always returns false. When true,
+/// `deluge::audio::stream::loader::pump()`/`request_pump()` no-op — the task drains the (streaming-
+/// only) loader queue instead.
+bool deluge_streaming_async_active(void);
+
+/// @brief Wake the async streaming-fill task out of its idle wait.
+///
+/// Called unconditionally at every streaming CLUSTER_ENQUEUE site (`sample_stream.cpp`), after
+/// `deluge_resource_loader_enqueue()`. Harmless when the async backing isn't active: on the
+/// Embassy BSP with the feature off it signals a `Signal` nobody awaits; on every other BSP it
+/// hits the weak no-op fallback in `async_fill.cpp`.
+void deluge_streaming_signal_fill(void);
+
 #ifdef __cplusplus
 }
 #endif

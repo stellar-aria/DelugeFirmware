@@ -29,8 +29,9 @@ fn cfatfs_reads_known_file_fat32() {
 
 /// Same known file, same image, driven through the vendored `embedded-fatfs`
 /// (the Rust half of the differential) instead of the C FatFS FFI bridge.
-/// Mounts over the SAME shared `DISK` image via `efatfs::MemIo`, so this is
-/// the read-path proof that both stacks agree from one on-disk image.
+/// Mounts over the SAME shared `DISK` image via `block_dev::FileBlockDevice` →
+/// `BufStream`, so this is the read-path proof that both stacks agree from one
+/// on-disk image.
 #[test]
 fn efatfs_reads_known_file_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -188,7 +189,8 @@ fn mb_per_sec(bytes: usize, secs: f64) -> f64 {
 ///
 /// This times both backends doing a contiguous multi-MB write followed by a
 /// full sequential read-back, against the SAME shared in-RAM image
-/// (`ram_disk.rs`, `disk_read`/`disk_write`/`MemIo`). There is no SDHI
+/// (`ram_disk.rs`, via `disk_read`/`disk_write` and `block_dev::FileBlockDevice`
+/// → `BufStream`). There is no SDHI
 /// controller, no DMA, no real block-device command/response latency, no
 /// multi-block row-thrashing, and no card erase-block/wear-leveling
 /// behavior anywhere in this path -- RAM reads/writes are ~1000x faster and

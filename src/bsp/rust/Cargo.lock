@@ -202,6 +202,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
+name = "block-device-adapters"
+version = "0.2.0"
+dependencies = [
+ "aligned",
+ "block-device-driver",
+ "embedded-io-async 0.7.0",
+]
+
+[[package]]
+name = "block-device-driver"
+version = "0.2.0"
+dependencies = [
+ "aligned",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -384,7 +400,6 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "embassy-usb-driver",
- "embassy-usb-host",
  "embedded-sdmmc",
  "heapless 0.9.3",
  "log",
@@ -395,12 +410,16 @@ dependencies = [
 name = "deluge-bsp-rust"
 version = "0.1.0"
 dependencies = [
+ "aligned",
  "bindgen",
+ "block-device-adapters",
+ "block-device-driver",
  "corosensei",
  "cortex-ar",
  "critical-section",
  "deluge-alloc",
  "deluge-bsp",
+ "deluge_alloc",
  "deluge_resource",
  "embassy-executor",
  "embassy-futures",
@@ -408,6 +427,8 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "embassy-usb-driver",
+ "embedded-fatfs",
+ "embedded-io-async 0.7.0",
  "env_logger",
  "log",
  "rtt-target",
@@ -571,20 +592,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "embassy-usb-host"
+name = "embedded-fatfs"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5872af06c161c65b43baf1bfad20723d502809d4528ad4f6d1c19b9c486713f4"
 dependencies = [
- "aligned",
- "bitflags 2.13.0",
- "embassy-sync",
- "embassy-time",
- "embassy-usb",
- "embassy-usb-driver",
+ "bitflags 1.3.2",
  "embedded-io-async 0.7.0",
- "heapless 0.9.3",
- "zerocopy",
 ]
 
 [[package]]

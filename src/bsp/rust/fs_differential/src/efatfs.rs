@@ -44,70 +44,37 @@
 //!
 //! `IO: ReadWriteSeek` is a blanket impl over any `T: embedded_io_async::{Read,
 //! Write, Seek}` (fs.rs:130-132), and `IntoStorage<T> for T` is blanket too
-//! (fs.rs:343), so `MemIo` below needs only those three trait impls -- no
+//! (fs.rs:343), so the storage below needs only those three trait impls -- no
 //! bespoke `IntoStorage`.
+//!
+//! SP1 Task 2 re-points that storage from the byte-granular `MemIo` shortcut
+//! SP0 used onto the real device bridge: `block_dev::FileBlockDevice`
+//! (`block_device_driver::BlockDevice<512>` over the shared `DISK`) wrapped
+//! in `block_device_adapters::BufStream`, which supplies the
+//! `embedded_io_async::{Read,Write,Seek}` `embedded-fatfs` needs. This is
+//! the exact adapter stack (plus `#68`/`#62`, vendored in
+//! `crates/block-device-adapters`) SP1 drives on-device, so the whole SP0
+//! differential corpus now validates it on host too.
 
+use crate::block_dev::FileBlockDevice;
 use crate::ops::Entry;
-use crate::ram_disk::RamDisk;
+use block_device_adapters::BufStream;
 use embassy_futures::block_on;
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
-use embedded_io_async::{ErrorType, Read, Seek, SeekFrom, Write};
-
-/// An `embedded_io_async` storage device over the shared `DISK` image (see
-/// `ram_disk.rs`) -- the same bytes the C FatFS FFI bridge's `disk_*`
-/// callbacks read/write, just addressed byte-granular instead of
-/// sector-granular.
-pub struct MemIo {
-    pos: u64,
-}
-
-impl ErrorType for MemIo {
-    type Error = core::convert::Infallible;
-}
-
-impl Read for MemIo {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let n = RamDisk::read_at(self.pos, buf);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for MemIo {
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        RamDisk::write_at(self.pos, buf);
-        self.pos += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl Seek for MemIo {
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
-        self.pos = match pos {
-            SeekFrom::Start(o) => o,
-            SeekFrom::End(o) => (RamDisk::len() as i64 + o) as u64,
-            SeekFrom::Current(o) => (self.pos as i64 + o) as u64,
-        };
-        Ok(self.pos)
-    }
-}
+use embedded_io_async::{Read, Seek, SeekFrom, Write};
 
 /// A mounted `embedded-fatfs` volume, read + write path. Same public
 /// surface as `fatfs_c::CFatFs` (`mount`/`read_file`/`read_dir`/write ops)
 /// so `ops::FsOps`/`ops::FsOpsMut` can wrap both identically.
 pub struct EFatFs {
-    fs: FileSystem<MemIo, DefaultTimeProvider, LossyOemCpConverter>,
+    fs: FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter>,
 }
 
 impl EFatFs {
     /// Mount the volume currently installed via `ram_disk::RamDisk::load`.
     pub fn mount() -> Self {
-        let fs =
-            block_on(FileSystem::new(MemIo { pos: 0 }, FsOptions::new())).expect("FileSystem::new");
+        let storage = BufStream::<FileBlockDevice, 512>::new(FileBlockDevice);
+        let fs = block_on(FileSystem::new(storage, FsOptions::new())).expect("FileSystem::new");
         EFatFs { fs }
     }
 

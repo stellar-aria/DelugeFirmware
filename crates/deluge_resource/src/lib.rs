@@ -1026,6 +1026,44 @@ mod tests {
     }
 
     #[test]
+    fn eviction_revalidate_never_frees_leased() {
+        reset_evicts();
+        let mut buf = std::vec![0u128; (256 * 1024usize).div_ceil(16)];
+        let heap = unsafe { deluge_heap_create(buf.as_mut_ptr() as *mut u8, buf.len() * 16) };
+        let m = unsafe { deluge_resource_create(heap, 2, 2) }; // 2 chunk slots
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                crate::COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        // Fill both slots; keep a hard lease on the first.
+        let p0 = unsafe { deluge_resource_acquire(m, asset, 0, 4096) };
+        let p1 = unsafe { deluge_resource_acquire(m, asset, 1, 4096) };
+        assert!(!p0.is_null() && !p1.is_null());
+        unsafe { deluge_resource_release(m, p1) }; // slot 1 now evictable, slot 0 leased
+                                                   // Force an eviction: acquire a third distinct chunk (table full ⇒ evict lowest).
+        let p2 = unsafe { deluge_resource_acquire(m, asset, 2, 4096) };
+        assert!(
+            !p2.is_null(),
+            "should have evicted the unleased slot and succeeded"
+        );
+        // The leased chunk (index 0) must still be resident + un-corrupted.
+        assert_eq!(
+            unsafe { *p0 },
+            pattern(owner(1), 0),
+            "leased chunk was wrongly evicted"
+        );
+        assert_eq!(evicts(), 1, "exactly the one unleased chunk was evicted");
+        let _ = buf;
+    }
+
+    #[test]
     fn concurrent_lease_churn_holds_invariants() {
         use core::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;

@@ -181,26 +181,42 @@ pub async fn boot_init() {
 /// executor mid-DMA and could otherwise let both drive the single SDHI
 /// controller concurrently.
 ///
-/// R3.2 CARRY-FORWARD: in `sim_latency` host builds this calls the raw
-/// (instant) `sd::read_sectors`, not `sim_latency::modeled_read` — so the
-/// streaming task's reads currently bypass the modeled-latency path that the
-/// fiber's `deluge_block_read` (`sim_latency` variant, below) already uses.
-/// That's fine for R3.1 (mutex correctness), but R3.2's Lens-1 margin
-/// measurement needs this seam to dispatch to `modeled_read` under
-/// `sim_latency` builds, or the measured fill margin is meaningless (task
-/// reads complete instantly instead of at the modeled SD throughput). Not
-/// implemented here — flagged as the R3.2 prerequisite.
+/// R3.2b: in `sim_latency` host builds this dispatches to
+/// [`sim_latency::modeled_read`] instead of the raw (instant)
+/// `sd::read_sectors`, so the streaming task's reads pend on the same modeled
+/// SD latency the fiber's `deluge_block_read` (`sim_latency` variant, below)
+/// already uses — otherwise Lens-1's fill-margin measurement would be
+/// meaningless (task reads completing instantly instead of at the modeled SD
+/// throughput). `modeled_read` does NOT itself touch [`SD_BUS`] (it only
+/// awaits [`sim_latency::delay`] then calls the raw `sd::read_sectors`), so
+/// this stays a single `SD_BUS` acquisition — no nested/double lock. This is
+/// also a distinct code path from the `sim_latency` `deluge_block_read`
+/// below, which has its own bespoke inline lock+`modeled_read` call and does
+/// NOT route through this function — so no double-modeling either.
 pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
-    sd::read_sectors(lba, count, buf).await
+    #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+    {
+        sim_latency::modeled_read(lba, count, buf).await
+    }
+    #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
+    {
+        sd::read_sectors(lba, count, buf).await
+    }
 }
 
 /// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
-/// same R3.2 carry-forward note (a future `sim_latency` write path would need
-/// the analogous `modeled_write` dispatch).
+/// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]).
 pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
-    sd::write_sectors(lba, count, buf).await
+    #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+    {
+        sim_latency::modeled_write(lba, count, buf).await
+    }
+    #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
+    {
+        sd::write_sectors(lba, count, buf).await
+    }
 }
 
 /// FatFS DSTATUS bits for the current card state. Device-only (see [`sd`]).

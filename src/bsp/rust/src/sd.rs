@@ -45,6 +45,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use deluge_bsp::sd;
 use embassy_futures::block_on;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+
+/// Serializes SDHI peripheral access between the fiber's FatFS transfers and the
+/// R1 streaming task's raw-sector reads: `block_on_fiber` yields to the executor
+/// mid-DMA, so without this both could drive one SDHI controller concurrently.
+static SD_BUS: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 #[cfg(target_os = "none")]
 use crate::fiber::block_on_fiber;
@@ -167,11 +174,33 @@ pub async fn boot_init() {
 
 /// Thin async wrapper around `deluge_bsp::sd::read_sectors` for the R1 streaming
 /// fill task (`streaming_loader.rs`). Same dual-target shape as the rest of this
-/// file — no `#[cfg]` needed at the call site. R3: wrap in SD_BUS mutex (the real
-/// cross-owner exclusion against the recorder / other SD callers lands there);
-/// for now this just forwards.
+/// file — no `#[cfg]` needed at the call site. Serializes on [`SD_BUS`] against
+/// the fiber's FatFS transfers (`deluge_block_read`/`deluge_block_write` below,
+/// which route through this same function) — the one genuinely-new hardware
+/// contention this async task introduces, since `block_on_fiber` yields to the
+/// executor mid-DMA and could otherwise let both drive the single SDHI
+/// controller concurrently.
+///
+/// R3.2 CARRY-FORWARD: in `sim_latency` host builds this calls the raw
+/// (instant) `sd::read_sectors`, not `sim_latency::modeled_read` — so the
+/// streaming task's reads currently bypass the modeled-latency path that the
+/// fiber's `deluge_block_read` (`sim_latency` variant, below) already uses.
+/// That's fine for R3.1 (mutex correctness), but R3.2's Lens-1 margin
+/// measurement needs this seam to dispatch to `modeled_read` under
+/// `sim_latency` builds, or the measured fill margin is meaningless (task
+/// reads complete instantly instead of at the modeled SD throughput). Not
+/// implemented here — flagged as the R3.2 prerequisite.
 pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
+    let _guard = SD_BUS.lock().await;
     sd::read_sectors(lba, count, buf).await
+}
+
+/// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
+/// same R3.2 carry-forward note (a future `sim_latency` write path would need
+/// the analogous `modeled_write` dispatch).
+pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
+    let _guard = SD_BUS.lock().await;
+    sd::write_sectors(lba, count, buf).await
 }
 
 /// FatFS DSTATUS bits for the current card state. Device-only (see [`sd`]).
@@ -349,7 +378,7 @@ pub extern "C" fn deluge_block_read(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    let fut = sd::read_sectors(sector, count, out);
+    let fut = locked_read_sectors(sector, count, out);
     match if crate::fiber::on_fiber() {
         block_on_fiber(fut)
     } else {
@@ -392,7 +421,7 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    let fut = sd::write_sectors(sector, count, data);
+    let fut = locked_write_sectors(sector, count, data);
     match if crate::fiber::on_fiber() {
         block_on_fiber(fut)
     } else {
@@ -491,7 +520,7 @@ pub extern "C" fn deluge_block_read(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    match block_on(sd::read_sectors(sector, count, out)) {
+    match block_on(locked_read_sectors(sector, count, out)) {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_read(host) err {e:?} (sector={sector} count={count})");
@@ -541,7 +570,7 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    match block_on(sd::write_sectors(sector, count, data)) {
+    match block_on(locked_write_sectors(sector, count, data)) {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_write(host) err {e:?} (sector={sector} count={count})");
@@ -590,13 +619,29 @@ pub extern "C" fn deluge_block_read(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
+    // SD_BUS is locked inside each transfer future (not via `locked_read_sectors`
+    // — this path calls `sim_latency::modeled_read`, not `sd::read_sectors`, so it
+    // can't reuse that helper). Locked once per branch, at the same single level
+    // as every other entry point — never nested.
     let result = if on_fiber {
-        block_on_fiber(sim_latency::modeled_read(sector, count, out))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_read(sector, count, out).await
+        };
+        block_on_fiber(fut)
     } else if sim_latency::off_fiber_instant() {
         // See `sim_latency::off_fiber_instant`'s doc comment.
-        block_on(sd::read_sectors(sector, count, out))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sd::read_sectors(sector, count, out).await
+        };
+        block_on(fut)
     } else {
-        block_on(sim_latency::modeled_read(sector, count, out))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_read(sector, count, out).await
+        };
+        block_on(fut)
     };
     match result {
         Ok(()) => DELUGE_OK,
@@ -636,13 +681,28 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
+    // See the read sibling's identical comment above: SD_BUS locked inline per
+    // branch (this path calls `sim_latency::modeled_write`, not
+    // `sd::write_sectors`, so it can't reuse `locked_write_sectors`).
     let result = if on_fiber {
-        block_on_fiber(sim_latency::modeled_write(sector, count, data))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_write(sector, count, data).await
+        };
+        block_on_fiber(fut)
     } else if sim_latency::off_fiber_instant() {
         // See `sim_latency::off_fiber_instant`'s doc comment.
-        block_on(sd::write_sectors(sector, count, data))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sd::write_sectors(sector, count, data).await
+        };
+        block_on(fut)
     } else {
-        block_on(sim_latency::modeled_write(sector, count, data))
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_write(sector, count, data).await
+        };
+        block_on(fut)
     };
     match result {
         Ok(()) => DELUGE_OK,

@@ -41,6 +41,71 @@ fn efatfs_reads_known_file_fat32() {
     assert_eq!(fs.read_file("/SAMPLES/hello.txt"), b"DELUGE-SP0\n");
 }
 
+/// SP1a Task 3 host analog: proves the `embedded-fatfs` detach/reattach
+/// (`File::close` → [`FileContext`](embedded_fatfs::FileContext) →
+/// `File::new_from_context`) round-trip the device handle table
+/// (`src/efatfs_fs.rs`) relies on reads back correct bytes — including when
+/// two reconstructed handles' reads are interleaved round-robin (the on-host
+/// analog of the device mutex serializing concurrent streamed reads).
+///
+/// DIVERGENCE: host is single-threaded `block_on`, so this validates the
+/// embedded-fatfs API round-trip + interleave correctness ONLY, NOT the device
+/// `static`/embassy-`Mutex` serialization — that is the on-device Task 8 gate.
+#[test]
+fn efatfs_context_roundtrip_and_interleave_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = std::env::var("SP0_FAT32").expect("run mk_fixture.sh; set SP0_FAT32=/tmp/fat32.img");
+    let _disk = RamDisk::load(&img);
+    let fs = EFatFs::mount();
+
+    // (a) single-file detach → reattach → seek(0) → fill round-trip.
+    let hello = fs.open_context("/SAMPLES/hello.txt");
+    let mut buf = [0u8; 11]; // == len(b"DELUGE-SP0\n")
+    let (hello, ok) = fs.read_at_context(&hello, 0, &mut buf);
+    assert!(ok, "hello.txt fill was short");
+    assert_eq!(&buf, b"DELUGE-SP0\n", "detach/reattach round-trip corrupted hello.txt");
+
+    // (b) two handles; reads interleaved round-robin across both reconstructed
+    //     contexts. Each file's bytes, reassembled from its chunks, must match
+    //     the whole-file oracle — proving detach/reattach doesn't corrupt one
+    //     handle's stream when another's reads are interleaved with it.
+    let kick_path = "/SAMPLES/Kicks/Deep House Kick (loud).wav";
+    let expected_hello = fs.read_file("/SAMPLES/hello.txt");
+    let expected_kick = fs.read_file(kick_path);
+
+    let mut h_hello = hello; // reuse the already-advanced context
+    let mut h_kick = fs.open_context(kick_path);
+    let (mut got_hello, mut got_kick) = (Vec::new(), Vec::new());
+    let (mut off_hello, mut off_kick) = (0u32, 0u32);
+    const CHUNK: usize = 8; // small, so both short files yield several interleaved reads
+
+    loop {
+        let mut progressed = false;
+        for (path_ctx, off, expected, got) in [
+            (&mut h_hello, &mut off_hello, &expected_hello, &mut got_hello),
+            (&mut h_kick, &mut off_kick, &expected_kick, &mut got_kick),
+        ] {
+            let remaining = expected.len() - *off as usize;
+            if remaining == 0 {
+                continue;
+            }
+            let want = CHUNK.min(remaining);
+            let mut chunk = vec![0u8; want];
+            let (advanced, ok) = fs.read_at_context(path_ctx, *off, &mut chunk);
+            assert!(ok, "interleaved chunk at offset {off} was short");
+            *path_ctx = advanced;
+            got.extend_from_slice(&chunk);
+            *off += want as u32;
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    assert_eq!(got_hello, expected_hello, "interleaved reads corrupted hello.txt");
+    assert_eq!(got_kick, expected_kick, "interleaved reads corrupted the Kicks wav");
+}
+
 /// Walks the WHOLE fixture tree through both backends and asserts they agree
 /// on every directory listing and every file's bytes -- SP0's core
 /// instrument, run against the FAT32 image.

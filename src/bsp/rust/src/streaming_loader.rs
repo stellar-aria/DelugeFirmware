@@ -70,6 +70,17 @@ pub extern "C" fn deluge_streaming_async_active() -> bool {
     cfg!(feature = "async_streaming_loader")
 }
 
+/// Whether the embedded-fatfs streaming READ path owns the read on this build.
+/// Like [`deluge_streaming_async_active`], the return value is the only thing
+/// that depends on the cargo feature — the symbol itself must always exist so
+/// the C++ call site (`streaming_fill.h`) links regardless of config. See that
+/// header's `deluge_streaming_efatfs_active` doc for the C-side contract; the
+/// real `deluge_efatfs_open`/`_close` bridge lives in `efatfs_fs.rs`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_streaming_efatfs_active() -> bool {
+    cfg!(feature = "efatfs_streaming")
+}
+
 /// Wake [`streaming_fill_task`] out of its idle wait. Safe to call whether or
 /// not the task exists yet — [`Signal::signal`] just records "latest value
 /// pending"; a `Signal` nobody is waiting on drops the previous pending value
@@ -90,12 +101,17 @@ pub struct StreamingFillDescriptor {
     pub sector: u32,
     pub num_sectors: u32,
     pub ok: bool,
+    pub handle: u32,
+    pub byte_offset: u32,
 }
 
 /// FFI layout guard (M4), mirroring the `static_assert`s in `async_fill.cpp` — see that file's
 /// comment for the byte-offset derivation. `core::mem::offset_of!` + `size_of` are both `const`,
 /// so this is a compile-time check with no runtime cost; a field-order/type drift on either side
-/// fails the build instead of silently corrupting the read across the boundary.
+/// fails the build instead of silently corrupting the read across the boundary. After `ok` (1 byte
+/// at ptr+8) come 3 pad bytes, then `handle` at ptr+12 and `byte_offset` at ptr+16, and the struct
+/// pads up to the pointer's alignment → 2*ptr+16 (24 on the 4-byte-ptr device, 32 on the 8-byte-ptr
+/// host).
 #[cfg(feature = "async_streaming_loader")]
 const _: () = {
     assert!(core::mem::offset_of!(StreamingFillDescriptor, dest) == 0);
@@ -104,7 +120,11 @@ const _: () = {
         core::mem::offset_of!(StreamingFillDescriptor, num_sectors) == size_of::<*mut u8>() + 4
     );
     assert!(core::mem::offset_of!(StreamingFillDescriptor, ok) == size_of::<*mut u8>() + 8);
-    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 8);
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, handle) == size_of::<*mut u8>() + 12);
+    assert!(
+        core::mem::offset_of!(StreamingFillDescriptor, byte_offset) == size_of::<*mut u8>() + 16
+    );
+    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 16);
 };
 
 /// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
@@ -137,8 +157,10 @@ pub trait FillOps {
     /// (`deluge_streaming_begin_fill`). `ok == false` means skip this chunk
     /// entirely (unloadable / geometry error) — no read, no `finish`.
     fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor;
-    /// Await the sector read into `buf`. Returns whether it succeeded.
-    async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool;
+    /// Await the read for descriptor `d` into `buf`. Returns whether it
+    /// succeeded — routes to the efatfs handle when `d.handle != 0` under the
+    /// `efatfs_streaming` feature, else the raw-sector path.
+    async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool;
     /// Run the post-read convert/stitch/publish tail
     /// (`deluge_streaming_finish_fill`). Only called after a *successful* read
     /// — mirrors `reconstruct_one`'s success arm (`loader.cpp`), which likewise
@@ -197,7 +219,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         // double's `begin` hands back its own owned backing storage).
         let buf =
             unsafe { core::slice::from_raw_parts_mut(d.dest, (d.num_sectors as usize) * 512) };
-        let read_ok = ops.read(d.sector, d.num_sectors, buf).await;
+        let read_ok = ops.read(&d, buf).await;
 
         if read_ok {
             // Success tail: convert/stitch/publish, then keep draining.
@@ -284,8 +306,12 @@ mod prod {
             unsafe { deluge_streaming_begin_fill(chunk) }
         }
 
-        async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool {
-            crate::sd::locked_read_sectors(lba, count, buf)
+        async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
+            #[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+            if d.handle != 0 {
+                return crate::efatfs_fs::read_at(d.handle, d.byte_offset, buf).await;
+            }
+            crate::sd::locked_read_sectors(d.sector, d.num_sectors, buf)
                 .await
                 .is_ok()
         }

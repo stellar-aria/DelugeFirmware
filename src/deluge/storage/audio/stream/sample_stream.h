@@ -180,6 +180,11 @@ public:
 	/// @return The physical sector address recorded for cluster @p index.
 	[[nodiscard]] uint32_t sd_address_at(uint32_t index) const;
 
+	/// @return This stream's embedded-fatfs file handle, or 0 if none is open (the flag-off C-FatFS
+	///         path, or a stream not yet opened via the efatfs read path). Set by open_read_stream()
+	///         under the `efatfs_streaming` build; consulted by begin_fill() to route the read.
+	[[nodiscard]] uint32_t efatfs_handle() const { return efatfs_handle_; }
+
 	/// @return The number of entries in the residency table.
 	[[nodiscard]] size_t num_clusters() const;
 
@@ -236,6 +241,11 @@ private:
 	/// readable stream (e.g. one still being recorded), which is what steers make_read_source() to a
 	/// `BlockReadSource`.
 	std::optional<deluge::io::Stream> read_stream_;
+
+	/// This stream's embedded-fatfs file handle (0 = none open). Defaults to 0 so the flag-off
+	/// C-FatFS sector path is unaffected; the `efatfs_streaming` read path (Task 6) sets it in
+	/// open_read_stream() via deluge_efatfs_open() and clears it on close.
+	uint32_t efatfs_handle_ = 0;
 
 	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
 	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth

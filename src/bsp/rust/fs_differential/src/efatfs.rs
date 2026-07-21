@@ -60,7 +60,7 @@ use crate::block_dev::FileBlockDevice;
 use crate::ops::Entry;
 use block_device_adapters::BufStream;
 use embassy_futures::block_on;
-use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
+use embedded_fatfs::{DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter};
 use embedded_io_async::{Read, Seek, SeekFrom, Write};
 
 /// A mounted `embedded-fatfs` volume, read + write path. Same public
@@ -78,6 +78,12 @@ impl EFatFs {
         EFatFs { fs }
     }
 
+    /// The raw mounted `FileSystem`, for tests that drive the shared
+    /// `efatfs_core` handle-table logic (SP1a Task 7a) directly over it.
+    pub fn raw(&self) -> &FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter> {
+        &self.fs
+    }
+
     /// Read a whole file's contents.
     pub fn read_file(&self, path: &str) -> Vec<u8> {
         block_on(async {
@@ -93,6 +99,42 @@ impl EFatFs {
                 out.extend_from_slice(&buf[..n]);
             }
             out
+        })
+    }
+
+    /// SP1a Task 3 host analog: open `path`, then DETACH it to an opaque
+    /// [`FileContext`] via `File::close()` — the exact handoff the device
+    /// handle table (`efatfs_fs.rs`) stores per open sample. The context is
+    /// opaque here (its fields are `pub(crate)`); the caller stores/clones the
+    /// whole struct.
+    pub fn open_context(&self, path: &str) -> FileContext {
+        block_on(async {
+            let f = self.fs.root_dir().open_file(path).await.expect("open_file");
+            f.close().await.expect("close")
+        })
+    }
+
+    /// Re-attach `ctx` to a fresh [`File`] (`File::new_from_context`), seek to
+    /// ABSOLUTE `offset`, fill `dst` completely by looping the `Read` impl,
+    /// then detach again — returning the advanced context and whether the whole
+    /// buffer was filled (`false` on a short read / EOF). Mirrors the device
+    /// `read_at`'s clone-out → reattach → seek → fill → write-back, minus the
+    /// `HANDLES`/FS mutexes (host is single-threaded `block_on`).
+    pub fn read_at_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, bool) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            let mut filled = 0;
+            while filled < dst.len() {
+                match f.read(&mut dst[filled..]).await.expect("read") {
+                    0 => break, // short read / EOF
+                    n => filled += n,
+                }
+            }
+            let newctx = f.close().await.expect("close");
+            (newctx, filled == dst.len())
         })
     }
 

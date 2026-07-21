@@ -51,6 +51,13 @@ struct FakeChunk {
     /// `fill_once` after a failed read).
     lease_count: u32,
     buf: RefCell<Vec<u8>>,
+    /// Non-zero selects the efatfs-handle read path in `begin`'s descriptor —
+    /// see `fill_once_efatfs_handle_plumbs_descriptor_into_read`. Zero (the
+    /// default via `one_chunk`) keeps every other test on the raw-sector path.
+    handle: u32,
+    /// File-relative byte offset `begin`'s descriptor reports alongside
+    /// `handle`; only meaningful when `handle != 0`.
+    byte_offset: u32,
 }
 
 /// The `FillOps` test double: an in-memory priority queue (lower number = more
@@ -64,6 +71,10 @@ struct FakeOps {
     calls: RefCell<Vec<Call>>,
     /// What the next `read()` call returns.
     read_result: RefCell<bool>,
+    /// In-memory stand-in for the file `efatfs_fs::read_at` would read from on
+    /// device. Only populated by the efatfs-handle plumbing test; every other
+    /// test leaves it empty and never takes the `handle != 0` branch.
+    efatfs_file: Vec<u8>,
 }
 
 impl FakeOps {
@@ -74,6 +85,7 @@ impl FakeOps {
             pending: RefCell::new(Vec::new()),
             calls: RefCell::new(Vec::new()),
             read_result: RefCell::new(read_result),
+            efatfs_file: Vec::new(),
         }
     }
 
@@ -130,6 +142,8 @@ impl FillOps for FakeOps {
                 sector: 0,
                 num_sectors: 0,
                 ok: false,
+                handle: 0,
+                byte_offset: 0,
             };
         }
         StreamingFillDescriptor {
@@ -137,11 +151,26 @@ impl FillOps for FakeOps {
             sector: fc.sector,
             num_sectors: fc.num_sectors,
             ok: true,
+            handle: fc.handle,
+            byte_offset: fc.byte_offset,
         }
     }
 
-    async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool {
-        self.calls.borrow_mut().push(Call::Read { lba, count });
+    async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
+        self.calls.borrow_mut().push(Call::Read {
+            lba: d.sector,
+            count: d.num_sectors,
+        });
+        if d.handle != 0 {
+            // Fake stand-in for the device-only `efatfs_fs::read_at`: copy
+            // straight out of the in-memory "file" at the descriptor's byte
+            // offset, proving `fill_once` threads `handle`/`byte_offset`
+            // through to `read` untouched. See the module doc atop this file
+            // and `fill_once_efatfs_handle_plumbs_descriptor_into_read` below.
+            let start = d.byte_offset as usize;
+            buf.copy_from_slice(&self.efatfs_file[start..start + buf.len()]);
+            return true;
+        }
         // Prove the descriptor's byte range really is the one `fill_once` reads
         // into: stamp a recognizable pattern rather than leaving it untouched.
         buf.fill(0xAB);
@@ -185,6 +214,8 @@ fn one_chunk(id: usize, begin_ok: bool) -> FakeChunk {
         unloadable: false,
         lease_count: 1, // still wanted by default; the read-failure-drop test overrides this
         buf: RefCell::new(vec![0u8; (num_sectors as usize) * 512]),
+        handle: 0,
+        byte_offset: 0,
     }
 }
 
@@ -313,6 +344,56 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
             Call::Read { lba: 101, count: 2 },
             Call::Finish {
                 chunk: 1,
+                read_ok: true
+            },
+            Call::Next,
+        ]
+    );
+}
+
+/// Proves the descriptor→read plumbing for the efatfs path: when `begin()`
+/// yields a descriptor with `handle != 0` and a `byte_offset`, `fill_once`
+/// threads that descriptor into `read()` untouched, and a fake file-backed
+/// `read` (copying out of an in-memory `Vec<u8>` "file" at `d.byte_offset`)
+/// fills the chunk's buffer with the right bytes.
+///
+/// Divergence from production: this proves the descriptor plumbing
+/// (`handle`/`byte_offset` → `read` → `buf`) only — the REAL
+/// `efatfs_fs::read_at` is device-only (`target_os = "none"`) and cannot be
+/// called from a host test. It's covered on host by `fs_differential`'s
+/// round-trip test (Task 3) and on-device by Task 8.
+#[test]
+fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
+    let num_sectors = 2u32;
+    let byte_offset = 4096u32;
+    let read_len = (num_sectors as usize) * 512;
+    let file: Vec<u8> = (0..byte_offset as usize + read_len)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let expected = file[byte_offset as usize..byte_offset as usize + read_len].to_vec();
+
+    let mut chunk = one_chunk(0, true);
+    chunk.handle = 7;
+    chunk.byte_offset = byte_offset;
+    chunk.num_sectors = num_sectors;
+    chunk.buf = RefCell::new(vec![0u8; read_len]);
+
+    let mut ops = FakeOps::new(vec![chunk], /* read_result = */ true);
+    ops.efatfs_file = file;
+    ops.enqueue(0, 10);
+
+    embassy_futures::block_on(fill_once(&ops));
+
+    assert_eq!(*ops.chunk_by_id(0).buf.borrow(), expected);
+    assert_eq!(
+        *ops.calls.borrow(),
+        vec![
+            Call::Next,
+            Call::IsUnloadable(0),
+            Call::Begin(0),
+            Call::Read { lba: 100, count: 2 },
+            Call::Finish {
+                chunk: 0,
                 read_ok: true
             },
             Call::Next,

@@ -117,15 +117,46 @@ where
 // result back. Acquisition is therefore never nested — no lock-order rule to
 // remember and no deadlock. `read_at` clones (not `take`s) so a failed read
 // leaves the slot valid.
+//
+// Slot-identity guard: `read_at`'s clone-out/write-back window is NOT atomic
+// w.r.t. `open`/`close` — the FS work in between is `.await`ed with `HANDLES`
+// released. If `close(handle)` runs during that window and `open` then reuses
+// the same (lowest-free) index for a *different* file, a write-back guarded
+// only by "slot is occupied" would silently splice the old file's advanced
+// `current_cluster`/context onto the new file's slot; `File::new_from_context`
+// can't catch this because the old file's directory entry is still valid on
+// disk. (The absolute `seek` every call only makes `current_cluster` a perf
+// optimization, not a correctness fallback — `first_cluster`/`entry` are file
+// *identity*, and those are exactly what would get overwritten.) Each slot
+// therefore carries a `generation` counter, bumped on every `open` (claim) and
+// `close` (free). `read_at` captures `generation` alongside the cloned context and
+// only writes back if `generation` is unchanged when it re-locks — otherwise the
+// slot has been recycled underneath it and the write-back is dropped.
 
 /// Max concurrent streamed files. Small fixed cap — the live streaming engine
 /// holds only a handful of sample readers open at once.
 const MAX_HANDLES: usize = 16;
 
+/// One handle-table slot: an optional detached [`FileContext`] plus a
+/// generation counter bumped on every `open`/`close` of that index, so
+/// `read_at`'s deferred write-back can detect the slot having been recycled
+/// for a different file while its FS work was in flight (see module docs
+/// above).
+struct Slot {
+    generation: u32,
+    ctx: Option<FileContext>,
+}
+
 /// `FileContext` is plain data (`DirEntryEditor` is `data`/`pos`/`dirty`, no
 /// `Rc`/`RefCell`), so it is `Send` and this static compiles.
-static HANDLES: Mutex<CriticalSectionRawMutex, [Option<FileContext>; MAX_HANDLES]> =
-    Mutex::new([const { None }; MAX_HANDLES]);
+static HANDLES: Mutex<CriticalSectionRawMutex, [Slot; MAX_HANDLES]> = Mutex::new(
+    [const {
+        Slot {
+            generation: 0,
+            ctx: None,
+        }
+    }; MAX_HANDLES],
+);
 
 /// Fill `dst` completely from `f`'s current position. Returns `true` if the
 /// whole buffer was filled, `false` on a short read (EOF before `dst` is full).
@@ -158,8 +189,9 @@ pub async fn open(path: &str) -> Option<u32> {
 
     let mut table = HANDLES.lock().await;
     for (i, slot) in table.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(ctx);
+        if slot.ctx.is_none() {
+            slot.ctx = Some(ctx);
+            slot.generation = slot.generation.wrapping_add(1);
             return Some(i as u32);
         }
     }
@@ -170,14 +202,21 @@ pub async fn open(path: &str) -> Option<u32> {
 
 /// Read `dst.len()` bytes from absolute `byte_offset` of the file behind
 /// `handle`. Returns `true` iff the full buffer was filled. Seeks absolutely
-/// every call, so correctness does not depend on the write-back below (that is
-/// only a forward-seek optimization).
+/// every call, so `current_cluster` correctness does not depend on the
+/// write-back below (that's only a forward-seek optimization) — but the
+/// write-back is still gated on a generation check to guard file *identity*
+/// (`first_cluster`/`entry`) against a `close`+`open` slot recycle racing the
+/// in-flight FS work; see the module-level comment above [`HANDLES`].
 pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
-    // Clone the context out, then release HANDLES before taking the FS mutex.
-    let ctx = {
+    // Clone the context (and its generation) out, then release HANDLES before
+    // taking the FS mutex.
+    let (ctx, captured_generation) = {
         let table = HANDLES.lock().await;
-        match table.get(handle as usize).and_then(|s| s.clone()) {
-            Some(ctx) => ctx,
+        match table.get(handle as usize) {
+            Some(slot) => match slot.ctx.clone() {
+                Some(ctx) => (ctx, slot.generation),
+                None => return false,
+            },
             None => return false,
         }
     };
@@ -194,12 +233,18 @@ pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
     match result {
         Some(Some((newctx, filled))) => {
             // Write the advanced context back (preserves current_cluster for
-            // cheap forward seeks). Slot may have been closed concurrently —
-            // only write back if it's still occupied for this handle.
+            // cheap forward seeks) — but ONLY if this slot's generation still
+            // matches what we captured. A mismatch means `close` (and
+            // possibly a subsequent `open` reusing this index for a
+            // different file) ran while the FS work above was in flight;
+            // writing back in that case would splice this file's advanced
+            // context onto an unrelated file's slot. `is_some()` is kept as
+            // a belt-and-suspenders check, but `generation` equality is what
+            // actually prevents the identity confusion.
             let mut table = HANDLES.lock().await;
             if let Some(slot) = table.get_mut(handle as usize) {
-                if slot.is_some() {
-                    *slot = Some(newctx);
+                if slot.generation == captured_generation && slot.ctx.is_some() {
+                    slot.ctx = Some(newctx);
                 }
             }
             filled
@@ -209,10 +254,14 @@ pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
     }
 }
 
-/// Close `handle`, freeing its slot. No-op for an out-of-range handle.
+/// Close `handle`, freeing its slot. No-op for an out-of-range handle. Bumps
+/// the slot's generation so any `read_at` write-back already in flight for
+/// this handle (captured before this `close`) is detected as stale even if no
+/// subsequent `open` reuses the index.
 pub async fn close(handle: u32) {
     let mut table = HANDLES.lock().await;
     if let Some(slot) = table.get_mut(handle as usize) {
-        *slot = None;
+        slot.ctx = None;
+        slot.generation = slot.generation.wrapping_add(1);
     }
 }

@@ -101,6 +101,11 @@ hardening commits in this owned copy.
   *parent* resolution; PR #66 is about updating the *moved directory's own* `..` entry after the move
   completes). Not applied — candidate for a future hardening commit once a differential exercises a
   directory rename/move.
+- **SP1b-1 (local, upstreamable): forward-continue in `Seek for File`.** `src/file.rs`.
+  Upstream re-walks the cluster chain from `first_cluster` on every cross-cluster
+  seek — only a same-cluster fast path exists. This continues from
+  `current_cluster` when the target is ahead, turning an O(n) walk into O(delta).
+  Pure optimization; no API change.
 
 ## Skipped (rejected, not deferred)
 

@@ -498,9 +498,25 @@ impl<IO: ReadWriteSeek, TP, OCC> Seek for File<'_, IO, TP, OCC> {
             // Note: new_offset_in_clusters cannot be 0 here because new_offset is not 0
             debug_assert!(new_offset_in_clusters > 0);
             let clusters_to_skip = new_offset_in_clusters - 1;
-            let mut cluster = first_cluster;
-            let mut iter = self.fs.cluster_iter(first_cluster);
-            for i in 0..clusters_to_skip {
+
+            // LOCAL ADDITION (SP1b): continue forward from `current_cluster` when the
+            // target is ahead of the current position, instead of restarting at
+            // `first_cluster`. Upstream has only the same-cluster fast path above, so
+            // every cross-cluster seek — including a one-cluster step forward — was an
+            // O(n) re-walk from the head of the chain.
+            //
+            // `old_offset_in_clusters` rounds up just like `new_offset_in_clusters`, so
+            // `current_cluster` is chain index `old_offset_in_clusters - 1`, matching
+            // the same "previous cluster at a boundary" convention. Only valid when the
+            // old offset is non-zero (else `current_cluster` is None).
+            let (mut cluster, already_skipped) = match self.context.current_cluster {
+                Some(c) if old_offset_in_clusters > 0 && clusters_to_skip >= old_offset_in_clusters - 1 => {
+                    (c, old_offset_in_clusters - 1)
+                }
+                _ => (first_cluster, 0),
+            };
+            let mut iter = self.fs.cluster_iter(cluster);
+            for i in already_skipped..clusters_to_skip {
                 cluster = if let Some(r) = iter.next().await {
                     r?
                 } else {

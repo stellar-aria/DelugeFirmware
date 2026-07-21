@@ -445,3 +445,81 @@ fn efatfs_core_adversarial_seek_transfer_overhead() {
     }
 }
 
+/// Forward-continue regression proof for `seek()` (file.rs's `impl Seek for
+/// File`). The adversarial test above establishes the cost model: a chain
+/// re-walk to cluster `k` touches `ceil(k/128)` FAT sectors (FAT32 packs 128
+/// 4-byte entries per 512-byte FAT sector), so a 32-cluster file (the old
+/// `big_multicluster.bin` fixture) fits in ONE FAT sector regardless of
+/// whether `seek()` restarts from `first_cluster` or continues from
+/// `current_cluster` — that fixture cannot discriminate the fix from its
+/// absence. `/SAMPLES/huge.bin` (64 MiB = 2048 clusters) can: this hops
+/// forward 256 clusters at a time from cluster 0 to 1792, landing at k =
+/// 256, 512, 768, 1024, 1280, 1536, 1792 (mean k = 1024).
+///
+/// Without the fix, each hop restarts at `first_cluster`, so cost is
+/// `ceil(k/128)` FAT sectors per hop; averaged over the seven hops that is
+/// `ceil(1024/128)` = 8 FAT sectors against 64 data sectors/cluster, predicting
+/// ~1.125x — **measured 1.154x** (517 blocks / 448 data sectors). With the fix,
+/// each hop only walks the 256-cluster delta from `current_cluster`, costing
+/// `ceil(256/128)` = 2 FAT sectors, predicting ~1.03x — **measured 1.060x**
+/// (475/448). The idealized model undercounts both sides by the same constant:
+/// `read_context` reattaches a fresh `File` on every read via
+/// `File::new_from_context` (file.rs:76-91, the PR #59 stale-context guard),
+/// which reads+compares the on-disk 32-byte directory entry every time —
+/// one more block read per read call, independent of the chain walk, present
+/// whether or not this fix applies. The 1.10x bound sits well below the
+/// measured broken number (1.154x) and with clear margin above the measured
+/// fixed number (1.060x), so a regression back to the `first_cluster` restart
+/// still trips it.
+#[test]
+fn efatfs_forward_seek_does_not_restart_chain_walk() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+
+    const CLUSTER_SECTORS: u64 = 64; // mk_fixture.sh formats FAT32 with -c 64 (32 KiB)
+    let path = "/SAMPLES/huge.bin"; // 64 MiB = 2048 clusters
+    let cluster_bytes = (CLUSTER_SECTORS * 512) as usize;
+
+    let storage = BufStream::<CountingBlockDevice, 512>::new(CountingBlockDevice);
+    let fs: FileSystem<_, DefaultTimeProvider, LossyOemCpConverter> =
+        block_on(FileSystem::new(storage, FsOptions::new())).expect("mount counting FS");
+
+    block_on(async {
+        let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
+        let mut table = HandleTable::new();
+        let h = table.insert(ctx).expect("insert");
+        let mut buf = vec![0u8; cluster_bytes];
+
+        // Land at an early cluster first, outside the measured window, so the
+        // measured hops all start from a real `current_cluster`, not `None`.
+        assert!(table.read_at_owned(&fs, h, 0, &mut buf).await, "initial read");
+
+        BLOCKS_READ.store(0, Ordering::Relaxed);
+        let mut reads = 0u64;
+        for c in [256u64, 512, 768, 1024, 1280, 1536, 1792] {
+            let off = (c * cluster_bytes as u64) as u32;
+            assert!(
+                table.read_at_owned(&fs, h, off, &mut buf).await,
+                "read at cluster {c}"
+            );
+            reads += 1;
+        }
+        let blocks = BLOCKS_READ.load(Ordering::Relaxed);
+        let data_sectors = reads * CLUSTER_SECTORS;
+        let overhead = blocks as f64 / data_sectors as f64;
+        println!("forward-seek: reads={reads} blocks={blocks} overhead={overhead:.2}x");
+
+        // Measured 1.154x without the fix (restart from first_cluster) vs
+        // 1.060x with it (continue from current_cluster) — see the doc
+        // comment above for the full derivation, including the constant
+        // per-read directory-entry-validation cost (PR #59) that both
+        // numbers carry. 1.10x sits with real margin below the broken
+        // number and above the fixed one.
+        assert!(
+            overhead < 1.10,
+            "forward seek overhead {overhead:.2}x suggests seek() is still restarting \
+             the chain walk at first_cluster (blocks={blocks}, data_sectors={data_sectors})"
+        );
+    });
+}
+

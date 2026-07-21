@@ -130,6 +130,8 @@ impl FillOps for FakeOps {
                 sector: 0,
                 num_sectors: 0,
                 ok: false,
+                handle: 0,
+                byte_offset: 0,
             };
         }
         StreamingFillDescriptor {
@@ -137,6 +139,8 @@ impl FillOps for FakeOps {
             sector: fc.sector,
             num_sectors: fc.num_sectors,
             ok: true,
+            handle: 0,
+            byte_offset: 0,
         }
     }
 

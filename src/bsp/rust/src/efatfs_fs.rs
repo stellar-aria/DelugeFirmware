@@ -265,3 +265,52 @@ pub async fn close(handle: u32) {
         slot.generation = slot.generation.wrapping_add(1);
     }
 }
+
+// --- FFI bridge (Task 4) ---------------------------------------------------
+//
+// C++ calls these synchronously at sample-load (`open_read_stream`, Task 6), but
+// [`open`]/[`close`] above are async. Bridge via `crate::fiber::block_on_fiber`
+// — the fiber-aware `block_on` that polls the future on the worker fiber and
+// yields the executor (not the whole app) across the SD transfer. Valid ONLY
+// while `crate::fiber::on_fiber()`; off-fiber the bridge can't run, so open
+// fails (caller falls back to the C-FatFS sector path) and close is skipped.
+use core::ffi::{CStr, c_char};
+
+/// C-ABI: open a sample file for streaming; writes the handle to `*out_handle`.
+/// Returns false (caller falls back to the C-FatFS map) if not on the worker
+/// fiber, the path/pointer is null or invalid, the FS is unmounted, or the open
+/// failed. See `include/libdeluge/streaming_fill.h` for the C-side contract.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) -> bool {
+    if !crate::fiber::on_fiber() || path.is_null() || out_handle.is_null() {
+        return false;
+    }
+    // SAFETY: `path` is a NUL-terminated C string supplied by open_read_stream (Task 6),
+    // valid for the duration of this call.
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    match crate::fiber::block_on_fiber(open(path)) {
+        Some(h) => {
+            // SAFETY: `out_handle` is non-null (checked above) and points at a `u32` the C++
+            // caller owns for the duration of this synchronous call.
+            unsafe {
+                *out_handle = h;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: close a streaming file handle. Bridges to the async [`close`] via
+/// `block_on_fiber` only while on the worker fiber.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_close(handle: u32) {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(close(handle));
+    }
+    // An off-fiber close can't bridge to the async table, so the slot leaks until reuse —
+    // acceptable for SP1a (flag-gated, few handles). A deferred-close queue is future work.
+}

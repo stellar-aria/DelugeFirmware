@@ -70,6 +70,17 @@ pub extern "C" fn deluge_streaming_async_active() -> bool {
     cfg!(feature = "async_streaming_loader")
 }
 
+/// Whether the embedded-fatfs streaming READ path owns the read on this build.
+/// Like [`deluge_streaming_async_active`], the return value is the only thing
+/// that depends on the cargo feature — the symbol itself must always exist so
+/// the C++ call site (`streaming_fill.h`) links regardless of config. See that
+/// header's `deluge_streaming_efatfs_active` doc for the C-side contract; the
+/// real `deluge_efatfs_open`/`_close` bridge lives in `efatfs_fs.rs`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_streaming_efatfs_active() -> bool {
+    cfg!(feature = "efatfs_streaming")
+}
+
 /// Wake [`streaming_fill_task`] out of its idle wait. Safe to call whether or
 /// not the task exists yet — [`Signal::signal`] just records "latest value
 /// pending"; a `Signal` nobody is waiting on drops the previous pending value
@@ -90,12 +101,17 @@ pub struct StreamingFillDescriptor {
     pub sector: u32,
     pub num_sectors: u32,
     pub ok: bool,
+    pub handle: u32,
+    pub byte_offset: u32,
 }
 
 /// FFI layout guard (M4), mirroring the `static_assert`s in `async_fill.cpp` — see that file's
 /// comment for the byte-offset derivation. `core::mem::offset_of!` + `size_of` are both `const`,
 /// so this is a compile-time check with no runtime cost; a field-order/type drift on either side
-/// fails the build instead of silently corrupting the read across the boundary.
+/// fails the build instead of silently corrupting the read across the boundary. After `ok` (1 byte
+/// at ptr+8) come 3 pad bytes, then `handle` at ptr+12 and `byte_offset` at ptr+16, and the struct
+/// pads up to the pointer's alignment → 2*ptr+16 (24 on the 4-byte-ptr device, 32 on the 8-byte-ptr
+/// host).
 #[cfg(feature = "async_streaming_loader")]
 const _: () = {
     assert!(core::mem::offset_of!(StreamingFillDescriptor, dest) == 0);
@@ -104,7 +120,11 @@ const _: () = {
         core::mem::offset_of!(StreamingFillDescriptor, num_sectors) == size_of::<*mut u8>() + 4
     );
     assert!(core::mem::offset_of!(StreamingFillDescriptor, ok) == size_of::<*mut u8>() + 8);
-    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 8);
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, handle) == size_of::<*mut u8>() + 12);
+    assert!(
+        core::mem::offset_of!(StreamingFillDescriptor, byte_offset) == size_of::<*mut u8>() + 16
+    );
+    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 16);
 };
 
 /// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose

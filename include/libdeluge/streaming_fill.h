@@ -35,9 +35,11 @@ typedef struct DelugeResource DelugeResource;
 /// @brief Descriptor filled by deluge_streaming_begin_fill: where to DMA, and how much.
 typedef struct StreamingFillDescriptor {
 	uint8_t* dest;        ///< cluster payload base; write exactly num_sectors*512 bytes here
-	uint32_t sector;      ///< physical LBA (from SampleCluster::sdAddress)
+	uint32_t sector;      ///< physical LBA (from SampleCluster::sdAddress) — the flag-off C-FatFS path
 	uint32_t num_sectors; ///< sectors to read (accounts for a short final cluster)
 	bool ok;              ///< false => skip the read (unloadable / geometry error); do not call finish
+	uint32_t handle;      ///< efatfs file handle for this stream (0 = none); the flag-on embedded-fatfs path
+	uint32_t byte_offset; ///< absolute byte offset of this cluster within the file (efatfs read position)
 } StreamingFillDescriptor;
 
 #ifdef __cplusplus
@@ -100,6 +102,36 @@ bool deluge_streaming_async_active(void);
 /// Embassy BSP with the feature off it signals a `Signal` nobody awaits; on every other BSP it
 /// hits the weak no-op fallback in `async_fill.cpp`.
 void deluge_streaming_signal_fill(void);
+
+/// @brief Open a sample file for streaming reads through embedded-fatfs, writing its handle out.
+///
+/// The sync→async bridge for the streaming READ path: C++ calls this synchronously at sample-load,
+/// and the Rust implementation (`efatfs_fs.rs`, cargo feature `efatfs_streaming`) bridges to the
+/// async handle table via the worker fiber's `block_on_fiber`. Valid only while on the worker fiber.
+/// @param path       NUL-terminated absolute file path.
+/// @param out_handle Receives the opaque handle on success; untouched on failure.
+/// @return true if the file was opened and @p out_handle written; false (caller falls back to the
+///         C-FatFS sector path) if not on the worker fiber, the path/pointer is invalid, the FS is
+///         unmounted, or the open failed. Every non-efatfs BSP/config links the weak no-op fallback
+///         in `async_fill.cpp`, which always returns false.
+bool deluge_efatfs_open(const char* path, uint32_t* out_handle);
+
+/// @brief Close a streaming file handle previously returned by deluge_efatfs_open.
+///
+/// @note An off-fiber close cannot bridge to the async table, so the slot leaks until reuse —
+///       acceptable for the flag-gated SP1a path (few handles); a deferred-close is future work.
+/// @param handle The handle to close. A no-op on every non-efatfs BSP/config (weak fallback).
+void deluge_efatfs_close(uint32_t handle);
+
+/// @brief Whether the embedded-fatfs streaming READ path (cargo feature `efatfs_streaming`) owns
+///        the read on this build/BSP.
+///
+/// A runtime getter, mirroring deluge_streaming_async_active: the C++ `deluge_app` is built once by
+/// CMake and linked into whichever BSP, so a Rust cargo feature can't reach a C++ preprocessor
+/// define. True only on the Rust/Embassy BSP with `efatfs_streaming` enabled; every other
+/// BSP/config links the `__attribute__((weak))` fallback in `async_fill.cpp`, which returns false.
+/// @return true if the efatfs streaming read path is active on this build/BSP.
+bool deluge_streaming_efatfs_active(void);
 
 #ifdef __cplusplus
 }

@@ -20,6 +20,7 @@
 #include "extern.h"
 #include "gui/l10n/l10n.h"
 #include "gui/ui/ui.h"
+#include "gui/waveform/waveform_renderer.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
 #include "io/file.hpp"
@@ -252,6 +253,11 @@ clusterSizeChangedButItsOk:
 
 					// Or if we're still here, the file's fine - who knows, maybe it's even fine again after it wasn't
 					// for a while (e.g. if the user temporarily had a different card inserted)
+					if (((Sample*)thisAudioFile)->unloadable) {
+						// It just became loadable again: re-arm the background overview pre-scan so its waveform
+						// overview gets rebuilt (the scan skips unloadable samples and may have gone idle) (#4460).
+						overviewScanAllDone = false;
+					}
 					((Sample*)thisAudioFile)->unloadable = false;
 				}
 			}
@@ -856,6 +862,8 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 	}
 
 	audioFile->finalizeAfterLoad(effectiveFilePointer.objsize);
+	overviewScanAllDone = false; // A newly loaded audio file may need pre-scanning (#4460)
+
 	audioFile->removeReason("E399"); // Setup done; drop the protect-during-setup reason (the caller re-leases).
 	return audioFile;
 }
@@ -909,6 +917,60 @@ void AudioFileManager::slowRoutine() {
 	// see
 	// https://github.com/SynthstromAudible/DelugeFirmware/blob/866a71d0394e259a5b3db9d4fde605511bd1c67d/src/deluge/storage/audio/audio_file_manager.cpp#L1238
 	// for a copy if ever needed
+
+	backgroundWaveformOverviewScan();
+}
+
+// Background "waveform overview" pre-scan (issue #4460). Walks loaded Samples a little at a time, off the
+// render path, caching each cluster's min/max so zoomed-out single-row rendering (song row view) never has
+// to load clusters synchronously while the user scrolls. Heavily throttled and round-robined to stay out of
+// the way of playback streaming.
+void AudioFileManager::backgroundWaveformOverviewScan() {
+
+	// Everything already pre-scanned: stay idle until a load/reset re-arms us, instead of re-walking all
+	// files every tick (#4460).
+	if (overviewScanAllDone) {
+		return;
+	}
+
+	// Can we scan at all right now? (The finer-grained "is card I/O safe this instant?" busy-check lives in
+	// advanceOverviewScan, which guards each individual cluster load - see waveform_renderer.cpp.)
+	if (cardEjected || cardDisabled) {
+		return;
+	}
+
+	int32_t numFiles = static_cast<int32_t>(audioFiles.size());
+	if (numFiles == 0) {
+		return;
+	}
+
+	// One sample's worth of work per call, round-robined so no single sample starves the others.
+	for (int32_t tried = 0; tried < numFiles; tried++) {
+		if (overviewScanFileIndex >= numFiles) {
+			overviewScanFileIndex = 0;
+		}
+		AudioFile* audioFile = audioFiles[overviewScanFileIndex];
+		overviewScanFileIndex++;
+
+		if (!AudioFile::isSample(audioFile)) {
+			continue;
+		}
+
+		// Skip samples whose clusters can never load - re-scanning them would spin forever and prevent us
+		// from ever going idle. They re-arm the scan if they become loadable again (#4460).
+		Sample* sample = (Sample*)audioFile;
+		if (sample->unloadable) {
+			continue;
+		}
+
+		// Advance this sample by a small budget. If there was real work to do, stop here for this call.
+		if (waveformRenderer.advanceOverviewScan(sample, kOverviewScanClustersPerCall)) {
+			return;
+		}
+	}
+
+	// A full pass found nothing left to scan: go idle until something re-arms us.
+	overviewScanAllDone = true;
 }
 
 bool AudioFileManager::cardUnavailableForStreaming() const {

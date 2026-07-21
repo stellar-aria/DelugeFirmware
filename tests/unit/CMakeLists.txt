@@ -64,6 +64,8 @@ file(GLOB_RECURSE deluge_SOURCES
         # For name comparison / default naming tests
         ../../src/deluge/util/name_compare.cpp
         ../../src/deluge/gui/ui/browser/default_name.cpp
+        # For waveform peak math tests
+        ../../src/deluge/gui/waveform/waveform_peak_math.cpp
 )
 
 add_executable(UnitTests
@@ -83,6 +85,7 @@ add_executable(UnitTests
         default_name_tests.cpp
         rgb_tests.cpp
         notes_state_tests.cpp
+        waveform_peak_math_tests.cpp
 )
 add_test(NAME UnitTests
         COMMAND UnitTests)

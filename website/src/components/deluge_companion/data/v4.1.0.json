@@ -15,12 +15,12 @@
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
     ],
-    "views": [20],
+    "views": [19, 20],
     "firmware": [0],
     "paragraphs": [],
     "description": "Hold the Shift button, press the Select (Settings) encoder."
@@ -45,7 +45,7 @@
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -71,7 +71,7 @@
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -130,8 +130,8 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "01-system_controls_edit::system-edit-controls",
-    "subSubCapabilityTitle": "System (Edit Controls)",
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
     "subSubCapabilityOrder": 1,
     "steps": [
       {
@@ -159,8 +159,8 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "01-system_controls_edit::system-edit-controls",
-    "subSubCapabilityTitle": "System (Edit Controls)",
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
     "subSubCapabilityOrder": 1,
     "steps": [
       {
@@ -196,13 +196,13 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "01-system_controls_edit::system-edit-controls",
-    "subSubCapabilityTitle": "System (Edit Controls)",
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
     "subSubCapabilityOrder": 1,
     "steps": [
       {
         "action": 0,
-        "control": 41
+        "control": 51
       }
     ],
     "views": [],
@@ -219,19 +219,122 @@
     "description": "Press the QWERTY keyboard overlay."
   },
   {
+    "name": "Change value in currently selected menu",
+    "capability": "01-system_controls_edit",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "action": 2,
+        "control": 32
+      }
+    ],
+    "views": [19],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Turn the Select (Settings) encoder."
+  },
+  {
+    "name": "Fine tune decimal value in vertical menu",
+    "capability": "01-system_controls_edit",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "action": 2,
+        "control": 30
+      },
+      {
+        "action": 2,
+        "control": 32
+      }
+    ],
+    "views": [19],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "To edit decimal values in the currently selected vertical menu, use the horizontal encoder to select the decimal position and turn select to edit the value at that position."
+          }
+        ]
+      }
+    ],
+    "description": "Turn the Horizontal (Left/Right) encoder. Turn the Select (Settings) encoder."
+  },
+  {
+    "name": "Fine tune decimal value in horizontal menu",
+    "capability": "01-system_controls_edit",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "01-system_controls_edit::system-edit",
+    "subSubCapabilityTitle": "System (Edit)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 0,
+            "control": 32
+          },
+          {
+            "action": 2,
+            "control": 32
+          }
+        ]
+      },
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 2,
+            "control": 32
+          }
+        ]
+      }
+    ],
+    "views": [19, 9, 10, 11, 12],
+    "firmware": [1],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Press and turn select or hold shift and turn select to edit fine edit decimal values in the currently selected horizontal menu."
+          }
+        ]
+      }
+    ],
+    "description": "Press the Select (Settings) encoder, turn the Select (Settings) encoder. Hold the Shift button, turn the Select (Settings) encoder."
+  },
+  {
     "name": "Check current zoom level",
     "capability": "02-system_controls_navigation",
     "capabilityParentId": "SYSTEM",
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 0,
-        "control": 20
+        "control": 30
       }
     ],
     "views": [1, 3, 5, 15],
@@ -246,19 +349,19 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -275,7 +378,7 @@
             "steps": [
               {
                 "action": 2,
-                "control": 20
+                "control": 30
               }
             ]
           },
@@ -293,7 +396,7 @@
             "steps": [
               {
                 "action": 2,
-                "control": 20
+                "control": 30
               }
             ]
           },
@@ -327,13 +430,13 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 2,
-        "control": 20
+        "control": 30
       }
     ],
     "views": [1, 3, 5, 13, 14, 15],
@@ -356,13 +459,13 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 2,
-        "control": 21
+        "control": 31
       }
     ],
     "views": [0, 1, 2, 6, 14, 15],
@@ -385,13 +488,13 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 2,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [19],
@@ -408,14 +511,14 @@
     "description": "Turn the Select (Settings) encoder."
   },
   {
-    "name": "Navigate on Current Horizontal Menu Page - Synth",
+    "name": "Navigate on Current Horizontal Menu Page",
     "capability": "02-system_controls_navigation",
     "capabilityParentId": "SYSTEM",
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
@@ -435,7 +538,7 @@
         "control": 14
       }
     ],
-    "views": [21, 9, 10, 11, 12],
+    "views": [19, 9, 10, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -455,20 +558,20 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 0,
-        "control": 18
+        "control": 28
       },
       {
         "action": 0,
         "control": 15
       }
     ],
-    "views": [21, 9, 10, 11, 12],
+    "views": [19, 9, 10, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -488,8 +591,8 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
@@ -500,7 +603,7 @@
           },
           {
             "action": 0,
-            "control": 18
+            "control": 28
           }
         ]
       },
@@ -517,7 +620,7 @@
         ]
       }
     ],
-    "views": [21, 9, 10, 11, 12],
+    "views": [19, 9, 10, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -544,13 +647,13 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [19],
@@ -573,8 +676,8 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
@@ -602,130 +705,27 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
         "action": 0,
-        "control": 19
+        "control": 29
       }
     ],
-    "views": [1, 2, 19],
+    "views": [19],
     "firmware": [1],
     "paragraphs": [
       {
         "spans": [
           {
-            "text": "Exits a menu and returns to Song or Arranger View."
+            "text": "Exits a menu and returns to Session or Arranger View."
           }
         ]
       }
     ],
     "description": "Press the Song button."
-  },
-  {
-    "name": "Change value in currently selected menu",
-    "capability": "02-system_controls_navigation",
-    "capabilityParentId": "SYSTEM",
-    "capabilityOrder": 1,
-    "subCapabilityTitle": "System (Controls)",
-    "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
-    "subSubCapabilityOrder": 2,
-    "steps": [
-      {
-        "action": 2,
-        "control": 22
-      }
-    ],
-    "views": [19, 9, 10, 11, 12],
-    "firmware": [1],
-    "paragraphs": [],
-    "description": "Turn the Select (Settings) encoder."
-  },
-  {
-    "name": "Fine tune decimal value in vertical menu",
-    "capability": "02-system_controls_navigation",
-    "capabilityParentId": "SYSTEM",
-    "capabilityOrder": 1,
-    "subCapabilityTitle": "System (Controls)",
-    "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
-    "subSubCapabilityOrder": 2,
-    "steps": [
-      {
-        "action": 2,
-        "control": 20
-      },
-      {
-        "action": 2,
-        "control": 22
-      }
-    ],
-    "views": [19],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "To edit decimal values in the currently selected vertical menu, use the horizontal encoder to select the decimal position and turn select to edit the value at that position."
-          }
-        ]
-      }
-    ],
-    "description": "Turn the Horizontal (Left/Right) encoder. Turn the Select (Settings) encoder."
-  },
-  {
-    "name": "Fine tune decimal value in horizontal menu",
-    "capability": "02-system_controls_navigation",
-    "capabilityParentId": "SYSTEM",
-    "capabilityOrder": 1,
-    "subCapabilityTitle": "System (Controls)",
-    "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
-    "subSubCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 0,
-            "control": 22
-          },
-          {
-            "action": 2,
-            "control": 22
-          }
-        ]
-      },
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 2,
-            "control": 22
-          }
-        ]
-      }
-    ],
-    "views": [21, 9, 10, 11, 12],
-    "firmware": [1],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Press and turn select or hold shift and turn select to edit fine edit decimal values in the currently selected horizontal menu."
-          }
-        ]
-      }
-    ],
-    "description": "Press the Select (Settings) encoder, turn the Select (Settings) encoder. Hold the Shift button, turn the Select (Settings) encoder."
   },
   {
     "name": "Layered Shortcuts",
@@ -734,8 +734,8 @@
     "capabilityOrder": 1,
     "subCapabilityTitle": "System (Controls)",
     "subCapabilityOrder": 2,
-    "subSubCapabilityId": "02-system_controls_navigation::system-navigation-controls",
-    "subSubCapabilityTitle": "System (Navigation Controls)",
+    "subSubCapabilityId": "02-system_controls_navigation::system-navigation",
+    "subSubCapabilityTitle": "System (Navigation)",
     "subSubCapabilityOrder": 2,
     "steps": [
       {
@@ -746,12 +746,12 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
     ],
-    "views": [9, 10],
+    "views": [19, 21, 9, 10],
     "firmware": [1],
     "paragraphs": [
       {
@@ -763,6 +763,454 @@
       }
     ],
     "description": "Hold the Shift button, press the Grid pad (lit or unlit)."
+  },
+  {
+    "name": "External controller to play synth or kit",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 37
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [9, 10, 11, 12],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "In Synth, any audition / row pressed assigns all. In Kit, only the pressed instrument / row is learned. Deluge learns incoming MIDI note data and maps it to the clip."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, hold the Audition / Section button for row, trigger the external MIDI controller."
+  },
+  {
+    "name": "External controller to trigger clip (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 37
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Can trigger clip mutes from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, hold the Audition / Section button for row, trigger the external MIDI controller."
+  },
+  {
+    "name": "External controller to trigger play (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 2
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Can trigger Play from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, hold the Play button, trigger the external MIDI controller."
+  },
+  {
+    "name": "External controller to trigger record (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 1
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Can trigger Record from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, hold the Record button, trigger the external MIDI controller."
+  },
+  {
+    "name": "Unlearn external controller to play synth or kit",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 0,
+            "control": 37
+          }
+        ]
+      }
+    ],
+    "views": [9, 10, 11, 12],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Any already learned MIDI functions flash when the Learn/Input button alone is held."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Shift button, hold the Learn / Input button, press the Audition / Section button for row."
+  },
+  {
+    "name": "Unlearn external controller to trigger clip (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 37
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, hold the Learn / Input button, hold the Audition / Section button for row."
+  },
+  {
+    "name": "Unlearn external controller to trigger play (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 2
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, hold the Learn / Input button, hold the Play button."
+  },
+  {
+    "name": "Unlearn external controller to trigger record (from song mode)",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 1
+          }
+        ]
+      }
+    ],
+    "views": [2],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, hold the Learn / Input button, hold the Record button."
+  },
+  {
+    "name": "External control of parameter - first select parameter",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [9, 10],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Learns external control of the selected Deluge parameter."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, trigger the external MIDI controller."
+  },
+  {
+    "name": "Unlearn external control of parameter - first select parameter",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          }
+        ]
+      }
+    ],
+    "views": [9, 10],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, hold the Learn / Input button."
+  },
+  {
+    "name": "Mute by external MIDI for individual kit rows - in kit mode",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 9
+          },
+          {
+            "action": 1,
+            "control": 38
+          },
+          {
+            "action": 0,
+            "control": 46
+          }
+        ]
+      }
+    ],
+    "views": [10],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Learns an external MIDI note to mute individual kit instruments / rows."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Learn / Input button, hold the Mute / Launch button for row, trigger the external MIDI controller."
+  },
+  {
+    "name": "MIDI Follow Unlearn",
+    "capability": "03-system_controls_midi",
+    "capabilityParentId": "SYSTEM",
+    "capabilityOrder": 1,
+    "subCapabilityTitle": "System (Controls)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "03-system_controls_midi::system-midi",
+    "subSubCapabilityTitle": "System (MIDI)",
+    "subSubCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 1,
+            "control": 9
+          }
+        ]
+      }
+    ],
+    "views": [11],
+    "firmware": [1],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Unlearns a MIDI Follow channel or device from the current MIDI Follow submenu."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Shift button, hold the Learn / Input button."
   },
   {
     "name": "New song",
@@ -812,7 +1260,7 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "substeps": [
@@ -858,7 +1306,7 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
@@ -892,11 +1340,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 1,
-        "control": 23
+        "control": 33
       },
       {
         "action": 0,
@@ -937,7 +1385,7 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 1,
@@ -977,7 +1425,7 @@
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -1001,11 +1449,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [],
@@ -1035,15 +1483,15 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 1,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [],
@@ -1069,7 +1517,7 @@
     "steps": [
       {
         "action": 2,
-        "control": 23
+        "control": 33
       }
     ],
     "views": [],
@@ -1098,11 +1546,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 23
+            "control": 33
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -1137,7 +1585,7 @@
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -1167,11 +1615,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 23
+            "control": 33
           },
           {
             "action": 0,
-            "control": 26
+            "control": 36
           }
         ]
       }
@@ -1193,11 +1641,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -1263,7 +1711,7 @@
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -1291,7 +1739,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 17
+        "control": 26
       }
     ],
     "views": [0, 1, 2],
@@ -1305,7 +1753,7 @@
         ]
       }
     ],
-    "description": "Press the Key button (keyboard icon)."
+    "description": "Press the Performance button (keyboard icon)."
   },
   {
     "name": "Enter Performance View (Temporarily)",
@@ -1317,7 +1765,7 @@
     "steps": [
       {
         "action": 1,
-        "control": 17
+        "control": 26
       }
     ],
     "views": [0, 1, 2],
@@ -1331,7 +1779,7 @@
         ]
       }
     ],
-    "description": "Hold the Key button (keyboard icon)."
+    "description": "Hold the Performance button (keyboard icon)."
   },
   {
     "name": "Performance View Editing Mode",
@@ -1349,7 +1797,7 @@
           },
           {
             "action": 0,
-            "control": 17
+            "control": 26
           }
         ]
       }
@@ -1365,7 +1813,7 @@
         ]
       }
     ],
-    "description": "Hold the Shift button, press the Key button (keyboard icon)."
+    "description": "Hold the Shift button, press the Performance button (keyboard icon)."
   },
   {
     "name": "Save Performance View Changes",
@@ -1383,7 +1831,7 @@
           },
           {
             "action": 0,
-            "control": 17
+            "control": 26
           }
         ]
       }
@@ -1399,7 +1847,7 @@
         ]
       }
     ],
-    "description": "Press the Save (Delete) button, press the Key button (keyboard icon)."
+    "description": "Press the Save (Delete) button, press the Performance button (keyboard icon)."
   },
   {
     "name": "Reload Performance View Changes",
@@ -1417,7 +1865,7 @@
           },
           {
             "action": 0,
-            "control": 17
+            "control": 26
           }
         ]
       }
@@ -1433,7 +1881,7 @@
         ]
       }
     ],
-    "description": "Press the Load (New) button, press the Key button (keyboard icon)."
+    "description": "Press the Load (New) button, press the Performance button (keyboard icon)."
   },
   {
     "name": "Clear Performance View Held Values",
@@ -1447,7 +1895,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -1483,7 +1931,7 @@
       },
       {
         "action": 2,
-        "control": 35
+        "control": 45
       }
     ],
     "views": [0, 1, 2],
@@ -1500,6 +1948,36 @@
     "description": "Press the Affect Entire button. Turn the upper parameter encoder."
   },
   {
+    "name": "VU Meter",
+    "capability": "00-fx",
+    "capabilityParentId": "SONG",
+    "capabilityOrder": 2,
+    "subCapabilityTitle": "Song (FX & Performance)",
+    "subCapabilityOrder": 3,
+    "steps": [
+      {
+        "action": 0,
+        "control": 16
+      },
+      {
+        "action": 0,
+        "control": 18
+      }
+    ],
+    "views": [0, 1, 2],
+    "firmware": [1],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Press the LEVEL/PAN BUTTON while it is already selected to show the VU meter."
+          }
+        ]
+      }
+    ],
+    "description": "Press the Affect Entire button. Press the LEVEL/PAN BUTTON."
+  },
+  {
     "name": "Add clip into arranger",
     "capability": "02-playback_arranger",
     "capabilityParentId": "PLAYBACK",
@@ -1509,7 +1987,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 25
+        "control": 35
       }
     ],
     "views": [1],
@@ -1529,11 +2007,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -1561,7 +2039,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 26
+        "control": 36
       }
     ],
     "views": [1],
@@ -1589,7 +2067,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -1615,11 +2093,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -1641,11 +2119,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -1667,11 +2145,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -1699,7 +2177,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 28
+        "control": 38
       }
     ],
     "views": [1],
@@ -1725,7 +2203,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 27
+        "control": 37
       }
     ],
     "views": [1],
@@ -1753,11 +2231,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -1785,7 +2263,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 26
+        "control": 36
       }
     ],
     "views": [1],
@@ -1839,7 +2317,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -1877,7 +2355,7 @@
           },
           {
             "action": 0,
-            "control": 26
+            "control": 36
           }
         ]
       }
@@ -1907,11 +2385,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -1933,17 +2411,17 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 0,
-            "control": 19
+            "control": 29
           }
         ]
       },
       {
         "action": 2,
-        "control": 21
+        "control": 31
       }
     ],
     "views": [1],
@@ -1971,17 +2449,17 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 0,
-            "control": 19
+            "control": 29
           }
         ]
       },
       {
         "action": 2,
-        "control": 20
+        "control": 30
       }
     ],
     "views": [1],
@@ -2013,7 +2491,7 @@
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -2041,7 +2519,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 27
+        "control": 37
       }
     ],
     "views": [1],
@@ -2067,7 +2545,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 28
+        "control": 38
       }
     ],
     "views": [1],
@@ -2095,11 +2573,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -2129,7 +2607,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2155,7 +2633,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2181,7 +2659,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2207,11 +2685,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -2241,7 +2719,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2267,7 +2745,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2293,7 +2771,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2319,7 +2797,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -2353,11 +2831,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 40
+            "control": 50
           }
         ]
       }
@@ -2413,7 +2891,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -2445,7 +2923,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 25
+        "control": 35
       }
     ],
     "views": [3],
@@ -2471,7 +2949,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 24
+        "control": 34
       }
     ],
     "views": [2],
@@ -2497,7 +2975,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 28
+        "control": 38
       }
     ],
     "views": [2],
@@ -2529,7 +3007,7 @@
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -2559,11 +3037,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -2589,7 +3067,7 @@
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       }
@@ -2617,7 +3095,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 27
+        "control": 37
       }
     ],
     "views": [2],
@@ -2634,7 +3112,7 @@
     "description": "Press the Audition / Section button for row."
   },
   {
-    "name": "Section repeat (hold audition for 1 sec)",
+    "name": "Section repeat",
     "capability": "02-playback_session",
     "capabilityParentId": "PLAYBACK",
     "capabilityOrder": 3,
@@ -2643,16 +3121,23 @@
     "steps": [
       {
         "action": 1,
-        "control": 27
+        "control": 37
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [2],
     "firmware": [0],
     "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Hold audition for 1 sec to show repeat popup and then turn select."
+          }
+        ]
+      },
       {
         "spans": [
           {
@@ -2664,7 +3149,7 @@
     "description": "Hold the Audition / Section button for row. Turn the Select (Settings) encoder."
   },
   {
-    "name": "Clone/duplicate clip (hold source, press destination)",
+    "name": "Clone/duplicate clip",
     "capability": "02-playback_session",
     "capabilityParentId": "PLAYBACK",
     "capabilityOrder": 3,
@@ -2675,11 +3160,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -2687,6 +3172,13 @@
     "views": [2],
     "firmware": [0],
     "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Hold source clip and press destination pad."
+          }
+        ]
+      },
       {
         "spans": [
           {
@@ -2709,7 +3201,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
@@ -2743,11 +3235,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -2781,11 +3273,11 @@
           },
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -2815,11 +3307,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -2843,7 +3335,7 @@
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [2],
@@ -2863,11 +3355,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -2889,7 +3381,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
@@ -2923,7 +3415,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
@@ -2957,7 +3449,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
@@ -2991,11 +3483,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3015,7 +3507,7 @@
     "steps": [
       {
         "action": 1,
-        "control": 24
+        "control": 34
       }
     ],
     "views": [2],
@@ -3043,11 +3535,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3069,11 +3561,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 28
+            "control": 38
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3103,7 +3595,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 1,
@@ -3111,7 +3603,7 @@
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -3141,11 +3633,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 19
+            "control": 29
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3164,177 +3656,6 @@
     "description": "Hold the Song button, turn the Select (Settings) encoder."
   },
   {
-    "name": "Create new synth",
-    "capabilityParentId": "INSTRUMENT",
-    "capabilityOrder": 4,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 0,
-            "control": 11
-          }
-        ]
-      }
-    ],
-    "views": [9, 10, 11, 12],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, press the Synth button."
-  },
-  {
-    "name": "Create new kit",
-    "capabilityParentId": "INSTRUMENT",
-    "capabilityOrder": 4,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 0,
-            "control": 12
-          }
-        ]
-      }
-    ],
-    "views": [9, 10, 11, 12],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, press the Kit button."
-  },
-  {
-    "name": "Clone synth preset",
-    "capabilityParentId": "INSTRUMENT",
-    "capabilityOrder": 4,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 3
-          },
-          {
-            "action": 0,
-            "control": 11
-          }
-        ]
-      },
-      {
-        "action": 2,
-        "control": 22
-      },
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 3
-          },
-          {
-            "action": 3,
-            "control": 0
-          }
-        ]
-      },
-      {
-        "action": 0,
-        "control": 22
-      }
-    ],
-    "views": [9],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "A single preset can only appear in one active clip, so clone the original preset for multiple instances in the same song. It is good practice to clone first when tweaking to avoid affecting interdependent songs."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Load (New) button, press the Synth button. Turn the Select (Settings) encoder. Hold the Load (New) button, select an option from the on-screen menu. Press the Select (Settings) encoder."
-  },
-  {
-    "name": "Clone kit preset",
-    "capabilityParentId": "INSTRUMENT",
-    "capabilityOrder": 4,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 3
-          },
-          {
-            "action": 0,
-            "control": 12
-          }
-        ]
-      },
-      {
-        "action": 2,
-        "control": 22
-      },
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 3
-          },
-          {
-            "action": 3,
-            "control": 0
-          }
-        ]
-      },
-      {
-        "action": 0,
-        "control": 22
-      }
-    ],
-    "views": [10],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "A single preset can only appear in one active clip, so clone the original preset for multiple instances in the same song. It is good practice to clone first when tweaking to avoid affecting interdependent songs."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Load (New) button, press the Kit button. Turn the Select (Settings) encoder. Hold the Load (New) button, select an option from the on-screen menu. Press the Select (Settings) encoder."
-  },
-  {
-    "name": "Change clip preset",
-    "capabilityParentId": "INSTRUMENT",
-    "capabilityOrder": 4,
-    "steps": [
-      {
-        "action": 2,
-        "control": 22
-      }
-    ],
-    "views": [9, 10],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Changes the current clip preset."
-          }
-        ]
-      }
-    ],
-    "description": "Turn the Select (Settings) encoder."
-  },
-  {
     "name": "Create new audio clip in session view (press empty pad)",
     "capability": "04-clip_audio",
     "capabilityParentId": "CLIP",
@@ -3346,11 +3667,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 25
+            "control": 35
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3384,17 +3705,17 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [2],
@@ -3421,11 +3742,11 @@
     "steps": [
       {
         "action": 0,
-        "control": 24
+        "control": 34
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [2],
@@ -3454,11 +3775,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3492,17 +3813,17 @@
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [1],
@@ -3522,11 +3843,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -3561,7 +3882,7 @@
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -3589,11 +3910,11 @@
     "steps": [
       {
         "action": 0,
-        "control": 24
+        "control": 34
       },
       {
         "action": 0,
-        "control": 24
+        "control": 34
       }
     ],
     "views": [8],
@@ -3625,7 +3946,7 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -3659,7 +3980,7 @@
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -3689,11 +4010,11 @@
         "substeps": [
           {
             "action": 0,
-            "control": 21
+            "control": 31
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -3728,11 +4049,11 @@
           },
           {
             "action": 0,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -3763,7 +4084,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -3784,6 +4105,35 @@
       }
     ],
     "description": "Hold the Horizontal (Left/Right) encoder, press the Back / Undo (Redo) button."
+  },
+  {
+    "name": "Create new synth",
+    "capability": "04_clip_synth",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Melodic)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "04_clip_synth::clip-synth",
+    "subSubCapabilityTitle": "Clip (Synth)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 0,
+            "control": 11
+          }
+        ]
+      }
+    ],
+    "views": [9],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, press the Synth button."
   },
   {
     "name": "View synth preset browser",
@@ -3815,6 +4165,92 @@
     "description": "Hold the Load (New) button, press the Synth button."
   },
   {
+    "name": "Change synth preset",
+    "capability": "04_clip_synth",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Melodic)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "04_clip_synth::clip-synth",
+    "subSubCapabilityTitle": "Clip (Synth)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "action": 2,
+        "control": 32
+      }
+    ],
+    "views": [9],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Changes the current synth preset."
+          }
+        ]
+      }
+    ],
+    "description": "Turn the Select (Settings) encoder."
+  },
+  {
+    "name": "Clone synth preset",
+    "capability": "04_clip_synth",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Melodic)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "04_clip_synth::clip-synth",
+    "subSubCapabilityTitle": "Clip (Synth)",
+    "subSubCapabilityOrder": 1,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 3
+          },
+          {
+            "action": 0,
+            "control": 11
+          }
+        ]
+      },
+      {
+        "action": 2,
+        "control": 32
+      },
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 3
+          },
+          {
+            "action": 3,
+            "control": 0
+          }
+        ]
+      },
+      {
+        "action": 0,
+        "control": 32
+      }
+    ],
+    "views": [9],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "A single preset can only appear in one active clip, so clone the original preset for multiple instances in the same song. It is good practice to clone first when tweaking to avoid affecting interdependent songs."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Load (New) button, press the Synth button. Turn the Select (Settings) encoder. Hold the Load (New) button, select an option from the on-screen menu. Press the Select (Settings) encoder."
+  },
+  {
     "name": "Save synth preset",
     "capability": "04_clip_synth",
     "capabilityParentId": "CLIP",
@@ -3839,11 +4275,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [9],
@@ -3863,8 +4299,16 @@
     "subSubCapabilityOrder": 1,
     "steps": [
       {
-        "action": 0,
-        "control": 11
+        "substeps": [
+          {
+            "action": 1,
+            "control": 24
+          },
+          {
+            "action": 0,
+            "control": 11
+          }
+        ]
       }
     ],
     "views": [9],
@@ -3873,12 +4317,12 @@
       {
         "spans": [
           {
-            "text": "With the DX7 community feature enabled and CUSTOM 1 active, this creates a new DX7 synth."
+            "text": "With the DX7 community feature enabled, this creates a new DX7 synth."
           }
         ]
       }
     ],
-    "description": "Press the Synth button."
+    "description": "Hold the STUTTER/CUSTOM 1 BUTTON, press the Synth button."
   },
   {
     "name": "Chromatic sample - same sample, different pitches (on new synth)",
@@ -3895,7 +4339,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -3905,15 +4349,15 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [9],
@@ -3951,7 +4395,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -3961,17 +4405,17 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "substeps": [
           {
             "action": 1,
-            "control": 22
+            "control": 32
           },
           {
             "action": 3,
@@ -3981,7 +4425,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [9],
@@ -4012,7 +4456,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -4022,17 +4466,17 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "substeps": [
           {
             "action": 1,
-            "control": 22
+            "control": 32
           },
           {
             "action": 3,
@@ -4042,7 +4486,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [9],
@@ -4073,7 +4517,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -4083,17 +4527,17 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "substeps": [
           {
             "action": 1,
-            "control": 22
+            "control": 32
           },
           {
             "action": 3,
@@ -4103,7 +4547,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [9],
@@ -4138,13 +4582,13 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 3,
@@ -4185,7 +4629,7 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [11],
@@ -4216,17 +4660,17 @@
         "substeps": [
           {
             "action": 1,
-            "control": 33
+            "control": 43
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [11],
@@ -4257,15 +4701,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 33
+            "control": 43
           },
           {
             "action": 1,
-            "control": 22
+            "control": 32
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -4282,6 +4726,80 @@
       }
     ],
     "description": "Hold the parameter encoders, hold the Select (Settings) encoder, turn the Select (Settings) encoder."
+  },
+  {
+    "name": "Load MIDI instrument preset",
+    "capability": "04-clip_midi",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Melodic)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "04-clip_midi::clip-midi",
+    "subSubCapabilityTitle": "Clip (MIDI)",
+    "subSubCapabilityOrder": 2,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 3
+          },
+          {
+            "action": 0,
+            "control": 13
+          }
+        ]
+      }
+    ],
+    "views": [11],
+    "firmware": [1],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Loads a MIDI instrument preset for the current MIDI clip."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Load (New) button, press the MIDI button."
+  },
+  {
+    "name": "Save MIDI instrument preset",
+    "capability": "04-clip_midi",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Melodic)",
+    "subCapabilityOrder": 2,
+    "subSubCapabilityId": "04-clip_midi::clip-midi",
+    "subSubCapabilityTitle": "Clip (MIDI)",
+    "subSubCapabilityOrder": 2,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 6
+          },
+          {
+            "action": 0,
+            "control": 13
+          }
+        ]
+      }
+    ],
+    "views": [11],
+    "firmware": [1],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Saves the current MIDI clip as a MIDI instrument preset."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Save (Delete) button, press the MIDI button."
   },
   {
     "name": "Save MIDI CC Labels to Song",
@@ -4366,7 +4884,7 @@
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [11],
@@ -4399,7 +4917,7 @@
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [11],
@@ -4428,7 +4946,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [11],
@@ -4460,7 +4978,7 @@
           },
           {
             "action": 0,
-            "control": 18
+            "control": 28
           }
         ]
       }
@@ -4482,11 +5000,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 18
+            "control": 28
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       }
@@ -4516,11 +5034,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -4537,6 +5055,32 @@
       }
     ],
     "description": "Hold the Audition / Section button for row, turn the Select (Settings) encoder."
+  },
+  {
+    "name": "Create new kit",
+    "capability": "04-clip_kit",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Kit)",
+    "subCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 4
+          },
+          {
+            "action": 0,
+            "control": 12
+          }
+        ]
+      }
+    ],
+    "views": [10],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Hold the Shift button, press the Kit button."
   },
   {
     "name": "View kit preset browser",
@@ -4565,6 +5109,32 @@
     "description": "Hold the Load (New) button, press the Kit button."
   },
   {
+    "name": "Change kit preset",
+    "capability": "04-clip_kit",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Kit)",
+    "subCapabilityOrder": 3,
+    "steps": [
+      {
+        "action": 2,
+        "control": 32
+      }
+    ],
+    "views": [10],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Changes the current kit preset."
+          }
+        ]
+      }
+    ],
+    "description": "Turn the Select (Settings) encoder."
+  },
+  {
     "name": "Save kit preset",
     "capability": "04-clip_kit",
     "capabilityParentId": "CLIP",
@@ -4586,17 +5156,71 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
     "firmware": [0],
     "paragraphs": [],
     "description": "Hold the Save (Delete) button, press the Kit button. Turn the Select (Settings) encoder. Press the Select (Settings) encoder."
+  },
+  {
+    "name": "Clone kit preset",
+    "capability": "04-clip_kit",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Kit)",
+    "subCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 3
+          },
+          {
+            "action": 0,
+            "control": 12
+          }
+        ]
+      },
+      {
+        "action": 2,
+        "control": 32
+      },
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 3
+          },
+          {
+            "action": 3,
+            "control": 0
+          }
+        ]
+      },
+      {
+        "action": 0,
+        "control": 32
+      }
+    ],
+    "views": [10],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "A single preset can only appear in one active clip, so clone the original preset for multiple instances in the same song. It is good practice to clone first when tweaking to avoid affecting interdependent songs."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Load (New) button, press the Kit button. Turn the Select (Settings) encoder. Hold the Load (New) button, select an option from the on-screen menu. Press the Select (Settings) encoder."
   },
   {
     "name": "Load sample into a kit row",
@@ -4610,7 +5234,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -4620,11 +5244,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -4656,7 +5280,7 @@
           },
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -4666,11 +5290,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -4700,11 +5324,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 1,
-        "control": 22
+        "control": 32
       },
       {
         "action": 3,
@@ -4712,7 +5336,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -4753,11 +5377,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 1,
-        "control": 22
+        "control": 32
       },
       {
         "action": 3,
@@ -4765,7 +5389,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       },
       {
         "action": 3,
@@ -4773,7 +5397,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -4808,17 +5432,17 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 3,
@@ -4826,7 +5450,7 @@
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -4854,11 +5478,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 40
+            "control": 50
           }
         ]
       }
@@ -4867,6 +5491,40 @@
     "firmware": [0],
     "paragraphs": [],
     "description": "Hold the Audition / Section button for row, press the 'Name' grid pad."
+  },
+  {
+    "name": "Delete kit row",
+    "capability": "04-clip_kit",
+    "capabilityParentId": "CLIP",
+    "capabilityOrder": 5,
+    "subCapabilityTitle": "Clip (Kit)",
+    "subCapabilityOrder": 3,
+    "steps": [
+      {
+        "substeps": [
+          {
+            "action": 1,
+            "control": 37
+          },
+          {
+            "action": 0,
+            "control": 6
+          }
+        ]
+      }
+    ],
+    "views": [10],
+    "firmware": [0],
+    "paragraphs": [
+      {
+        "spans": [
+          {
+            "text": "Hold the audition pad for the row you want to delete, then press Save/Delete."
+          }
+        ]
+      }
+    ],
+    "description": "Hold the Audition / Section button for row, press the Save (Delete) button."
   },
   {
     "name": "MIDI note output in a kit clip",
@@ -4880,7 +5538,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -4914,11 +5572,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 34
+            "control": 44
           }
         ]
       }
@@ -4940,11 +5598,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 35
+            "control": 45
           }
         ]
       }
@@ -4970,7 +5628,7 @@
           },
           {
             "action": 0,
-            "control": 38
+            "control": 48
           }
         ]
       }
@@ -5004,11 +5662,11 @@
           },
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 38
+            "control": 48
           }
         ]
       }
@@ -5038,7 +5696,7 @@
           },
           {
             "action": 0,
-            "control": 38
+            "control": 48
           }
         ]
       }
@@ -5088,7 +5746,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 20
+        "control": 30
       }
     ],
     "views": [10],
@@ -5127,7 +5785,7 @@
           },
           {
             "action": 1,
-            "control": 24
+            "control": 34
           }
         ]
       },
@@ -5139,7 +5797,7 @@
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -5173,7 +5831,7 @@
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       }
@@ -5203,7 +5861,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -5233,7 +5891,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5267,7 +5925,7 @@
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5289,11 +5947,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 25
+            "control": 35
           }
         ]
       }
@@ -5321,21 +5979,21 @@
     "steps": [
       {
         "action": 0,
-        "control": 24
+        "control": 34
       },
       {
         "action": 2,
-        "control": 20
+        "control": 30
       },
       {
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 25
+            "control": 35
           }
         ]
       }
@@ -5365,11 +6023,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5399,11 +6057,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -5433,11 +6091,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -5471,7 +6129,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5509,7 +6167,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5565,7 +6223,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -5575,11 +6233,11 @@
       },
       {
         "action": 2,
-        "control": 22
+        "control": 32
       },
       {
         "action": 0,
-        "control": 22
+        "control": 32
       }
     ],
     "views": [10],
@@ -5607,11 +6265,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5641,7 +6299,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -5671,7 +6329,7 @@
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -5697,11 +6355,11 @@
           },
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -5723,15 +6381,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 1,
-            "control": 28
+            "control": 38
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -5753,15 +6411,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5787,7 +6445,7 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -5817,15 +6475,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -5855,11 +6513,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5889,15 +6547,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -5927,11 +6585,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -5961,11 +6619,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 39
+            "control": 49
           }
         ]
       }
@@ -5993,7 +6651,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 27
+        "control": 37
       }
     ],
     "views": [9, 10, 11, 12, 15, 18],
@@ -6019,7 +6677,7 @@
     "steps": [
       {
         "action": 2,
-        "control": 21
+        "control": 31
       }
     ],
     "views": [9, 10, 11, 12, 15, 18],
@@ -6047,11 +6705,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -6081,11 +6739,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -6115,11 +6773,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6149,7 +6807,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -6183,11 +6841,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6217,11 +6875,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -6303,11 +6961,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
@@ -6363,11 +7021,11 @@
         "substeps": [
           {
             "action": 0,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6397,7 +7055,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -6431,11 +7089,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6465,15 +7123,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
-            "control": 23
+            "control": 33
           },
           {
             "action": 2,
-            "control": 23
+            "control": 33
           }
         ]
       }
@@ -6503,11 +7161,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6529,15 +7187,15 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6563,7 +7221,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6597,7 +7255,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6635,7 +7293,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6669,11 +7327,11 @@
           },
           {
             "action": 0,
-            "control": 18
+            "control": 28
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6711,7 +7369,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6749,7 +7407,7 @@
           },
           {
             "action": 0,
-            "control": 20
+            "control": 30
           }
         ]
       }
@@ -6783,7 +7441,7 @@
           },
           {
             "action": 0,
-            "control": 37
+            "control": 47
           }
         ]
       }
@@ -6809,7 +7467,7 @@
           },
           {
             "action": 0,
-            "control": 38
+            "control": 48
           }
         ]
       }
@@ -6835,7 +7493,7 @@
           },
           {
             "action": 0,
-            "control": 39
+            "control": 49
           }
         ]
       }
@@ -6857,11 +7515,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6887,11 +7545,11 @@
           },
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6917,11 +7575,11 @@
           },
           {
             "action": 1,
-            "control": 21
+            "control": 31
           },
           {
             "action": 2,
-            "control": 21
+            "control": 31
           }
         ]
       }
@@ -6970,7 +7628,7 @@
         "control": 10
       }
     ],
-    "views": [21, 17],
+    "views": [19, 17],
     "firmware": [1],
     "paragraphs": [
       {
@@ -7011,7 +7669,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -7045,7 +7703,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
@@ -7109,7 +7767,7 @@
           },
           {
             "action": 0,
-            "control": 26
+            "control": 36
           }
         ]
       }
@@ -7143,7 +7801,7 @@
           },
           {
             "action": 0,
-            "control": 25
+            "control": 35
           }
         ]
       }
@@ -7173,11 +7831,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -7207,11 +7865,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 36
+            "control": 46
           }
         ]
       }
@@ -7239,11 +7897,11 @@
     "steps": [
       {
         "action": 0,
-        "control": 24
+        "control": 34
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [17],
@@ -7429,7 +8087,7 @@
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       }
@@ -7531,7 +8189,7 @@
         "substeps": [
           {
             "action": 1,
-            "control": 27
+            "control": 37
           },
           {
             "action": 0,
@@ -7618,7 +8276,7 @@
       },
       {
         "action": 0,
-        "control": 36
+        "control": 46
       }
     ],
     "views": [9, 10, 11, 12],
@@ -7680,7 +8338,7 @@
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [9, 10],
@@ -7717,7 +8375,7 @@
       },
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [11],
@@ -7748,11 +8406,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -7786,7 +8444,7 @@
           },
           {
             "action": 0,
-            "control": 19
+            "control": 29
           }
         ]
       }
@@ -7821,11 +8479,11 @@
     "steps": [
       {
         "action": 2,
-        "control": 20
+        "control": 30
       },
       {
         "action": 0,
-        "control": 19
+        "control": 29
       },
       {
         "substeps": [
@@ -7835,7 +8493,7 @@
           },
           {
             "action": 0,
-            "control": 19
+            "control": 29
           }
         ]
       }
@@ -7869,7 +8527,7 @@
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -7911,7 +8569,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 28
+        "control": 38
       }
     ],
     "views": [2],
@@ -7931,11 +8589,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 20
+            "control": 30
           },
           {
             "action": 0,
-            "control": 28
+            "control": 38
           }
         ]
       }
@@ -7963,7 +8621,7 @@
       },
       {
         "action": 0,
-        "control": 28
+        "control": 38
       }
     ],
     "views": [2],
@@ -7995,7 +8653,7 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -8029,7 +8687,7 @@
           },
           {
             "action": 0,
-            "control": 27
+            "control": 37
           }
         ]
       }
@@ -8075,7 +8733,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 25
+        "control": 35
       },
       {
         "action": 0,
@@ -8083,7 +8741,7 @@
       },
       {
         "action": 2,
-        "control": 23
+        "control": 33
       }
     ],
     "views": [2],
@@ -8107,7 +8765,7 @@
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       },
@@ -8135,7 +8793,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 27
+        "control": 37
       }
     ],
     "views": [1, 2],
@@ -8152,6 +8810,21 @@
     "description": "Press the Audition / Section button for row."
   },
   {
+    "name": "Enter Sound Editor menu",
+    "capabilityParentId": "ENGINE",
+    "capabilityOrder": 8,
+    "steps": [
+      {
+        "action": 0,
+        "control": 32
+      }
+    ],
+    "views": [19, 21],
+    "firmware": [0],
+    "paragraphs": [],
+    "description": "Press the Select (Settings) encoder."
+  },
+  {
     "name": "Note / Drum keyboard view",
     "capability": "08-controls_keyboard",
     "capabilityParentId": "CONTROLS",
@@ -8161,10 +8834,10 @@
     "steps": [
       {
         "action": 0,
-        "control": 17
+        "control": 27
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [0, 1],
     "paragraphs": [
       {
@@ -8189,22 +8862,22 @@
         "substeps": [
           {
             "action": 1,
-            "control": 17
+            "control": 27
           },
           {
             "action": 2,
-            "control": 22
+            "control": 32
           }
         ]
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
         "spans": [
           {
-            "text": "Cycles through the available keyboard layouts, including the chord layouts when enabled."
+            "text": "Changes keyboard mode between Isomorphic, In-Key, Piano, Chord, Chord Library, and Norns. Note: Chord, Chord Library and Norns need to be enabled in Community Features."
           }
         ]
       }
@@ -8227,12 +8900,12 @@
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -8255,10 +8928,10 @@
     "steps": [
       {
         "action": 2,
-        "control": 20
+        "control": 30
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -8281,10 +8954,10 @@
     "steps": [
       {
         "action": 2,
-        "control": 21
+        "control": 31
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -8309,16 +8982,16 @@
         "substeps": [
           {
             "action": 1,
-            "control": 24
+            "control": 34
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [1],
     "paragraphs": [
       {
@@ -8332,40 +9005,6 @@
     "description": "Hold the Grid pad (lit or unlit), turn the Horizontal (Left/Right) encoder."
   },
   {
-    "name": "Keyboard mode view",
-    "capability": "08-controls_keyboard",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (Keyboard)",
-    "subCapabilityOrder": 1,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 17
-          },
-          {
-            "action": 2,
-            "control": 22
-          }
-        ]
-      }
-    ],
-    "views": [9, 11, 12],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Changes keyboard mode between Isomorphic, In-Key, Piano, Chord, Chord Library, and Norns. Note: Chord, Chord Library and Norns need to be enabled in Community Features."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Key button (keyboard icon), turn the Select (Settings) encoder."
-  },
-  {
     "name": "Keyboard scale / root",
     "capability": "08-controls_keyboard",
     "capabilityParentId": "CONTROLS",
@@ -8377,16 +9016,16 @@
         "substeps": [
           {
             "action": 1,
-            "control": 18
+            "control": 28
           },
           {
             "action": 0,
-            "control": 22
+            "control": 32
           }
         ]
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [0],
     "paragraphs": [
       {
@@ -8415,12 +9054,12 @@
           },
           {
             "action": 2,
-            "control": 20
+            "control": 30
           }
         ]
       }
     ],
-    "views": [9, 11, 12],
+    "views": [14, 9, 11, 12],
     "firmware": [0],
     "paragraphs": [
       {
@@ -8432,418 +9071,6 @@
       }
     ],
     "description": "Hold the Shift button, turn the Horizontal (Left/Right) encoder."
-  },
-  {
-    "name": "External controller to play synth or kit",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 27
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [9, 10, 11, 12],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "In Synth, any audition / row pressed assigns all. In Kit, only the pressed instrument / row is learned. Deluge learns incoming MIDI note data and maps it to the clip."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, hold the Audition / Section button for row, trigger the external MIDI controller."
-  },
-  {
-    "name": "External controller to trigger clip (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 27
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Can trigger clip mutes from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, hold the Audition / Section button for row, trigger the external MIDI controller."
-  },
-  {
-    "name": "External controller to trigger play (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 2
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Can trigger Play from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, hold the Play button, trigger the external MIDI controller."
-  },
-  {
-    "name": "External controller to trigger record (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 1
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Can trigger Record from Song mode via an external MIDI controller. Deluge uses MIDI notes, not CC values, for mapping."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, hold the Record button, trigger the external MIDI controller."
-  },
-  {
-    "name": "Unlearn external controller to play synth or kit",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 0,
-            "control": 27
-          }
-        ]
-      }
-    ],
-    "views": [9, 10, 11, 12],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Any already learned MIDI functions flash when the Learn/Input button alone is held."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Shift button, hold the Learn / Input button, press the Audition / Section button for row."
-  },
-  {
-    "name": "Unlearn external controller to trigger clip (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 27
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, hold the Learn / Input button, hold the Audition / Section button for row."
-  },
-  {
-    "name": "Unlearn external controller to trigger play (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 2
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, hold the Learn / Input button, hold the Play button."
-  },
-  {
-    "name": "Unlearn external controller to trigger record (from song mode)",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 1
-          }
-        ]
-      }
-    ],
-    "views": [2],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, hold the Learn / Input button, hold the Record button."
-  },
-  {
-    "name": "External control of parameter - first select parameter",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [9, 10],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Learns external control of the selected Deluge parameter."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, trigger the external MIDI controller."
-  },
-  {
-    "name": "Unlearn external control of parameter - first select parameter",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          }
-        ]
-      }
-    ],
-    "views": [9, 10],
-    "firmware": [0],
-    "paragraphs": [],
-    "description": "Hold the Shift button, hold the Learn / Input button."
-  },
-  {
-    "name": "Mute by external MIDI for individual kit rows - in kit mode",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 9
-          },
-          {
-            "action": 1,
-            "control": 28
-          },
-          {
-            "action": 0,
-            "control": 36
-          }
-        ]
-      }
-    ],
-    "views": [10],
-    "firmware": [0],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Learns an external MIDI note to mute individual kit instruments / rows."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Learn / Input button, hold the Mute / Launch button for row, trigger the external MIDI controller."
-  },
-  {
-    "name": "MIDI Follow Unlearn",
-    "capability": "08-controls_midi",
-    "capabilityParentId": "CONTROLS",
-    "capabilityOrder": 9,
-    "subCapabilityTitle": "Controls (MIDI)",
-    "subCapabilityOrder": 2,
-    "steps": [
-      {
-        "substeps": [
-          {
-            "action": 1,
-            "control": 4
-          },
-          {
-            "action": 1,
-            "control": 9
-          }
-        ]
-      }
-    ],
-    "views": [11],
-    "firmware": [1],
-    "paragraphs": [
-      {
-        "spans": [
-          {
-            "text": "Unlearns a MIDI Follow channel or device from the current MIDI Follow submenu."
-          }
-        ]
-      }
-    ],
-    "description": "Hold the Shift button, hold the Learn / Input button."
   },
   {
     "name": "Assign gold dial control of parameters - first select parameter",
@@ -8861,7 +9088,7 @@
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -8889,7 +9116,7 @@
     "steps": [
       {
         "action": 2,
-        "control": 33
+        "control": 43
       }
     ],
     "views": [9, 10],
@@ -8920,26 +9147,25 @@
     "capabilityOrder": 9,
     "subCapabilityTitle": "Controls (Parameters)",
     "subCapabilityOrder": 3,
-    "steps": [],
+    "steps": [
+      {
+        "action": 1,
+        "control": 17
+      }
+    ],
     "views": [1, 2, 9, 10],
     "firmware": [1],
     "paragraphs": [
       {
-        "spans": [
-          {
-            "text": "Press Parameter Button"
-          }
-        ]
-      },
-      {
         "type": "community",
         "spans": [
           {
-            "text": "In the community firmware, turning a gold dial will display the name of the parameter it controls in addition to the current value on the OLED display."
+            "text": "In the community firmware, pressing the circular buttons between the gold dials will display the parameters that each gold dial controls."
           }
         ]
       }
-    ]
+    ],
+    "description": "Hold the PARAM BUTTON."
   },
   {
     "name": "Delete automation of recorded parameter",
@@ -8957,7 +9183,7 @@
           },
           {
             "action": 0,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -8991,7 +9217,7 @@
           },
           {
             "action": 0,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -9029,7 +9255,7 @@
           },
           {
             "action": 0,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -9059,11 +9285,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -9093,11 +9319,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 26
+            "control": 36
           },
           {
             "action": 2,
-            "control": 33
+            "control": 43
           }
         ]
       }
@@ -9125,7 +9351,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 35
+        "control": 45
       }
     ],
     "views": [9, 10, 1, 2],
@@ -9151,7 +9377,7 @@
     "steps": [
       {
         "action": 0,
-        "control": 34
+        "control": 44
       }
     ],
     "views": [9, 10, 1, 2],
@@ -9183,7 +9409,7 @@
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -9203,11 +9429,11 @@
     "steps": [
       {
         "action": 0,
-        "control": 29
+        "control": 39
       },
       {
         "action": 0,
-        "control": 24
+        "control": 34
       }
     ],
     "views": [13],
@@ -9233,11 +9459,11 @@
     "steps": [
       {
         "action": 0,
-        "control": 30
+        "control": 40
       },
       {
         "action": 0,
-        "control": 24
+        "control": 34
       }
     ],
     "views": [13],
@@ -9265,11 +9491,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 29
+            "control": 39
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -9299,11 +9525,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 31
+            "control": 41
           },
           {
             "action": 0,
-            "control": 29
+            "control": 39
           }
         ]
       }
@@ -9333,11 +9559,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 30
+            "control": 40
           },
           {
             "action": 0,
-            "control": 24
+            "control": 34
           }
         ]
       }
@@ -9367,11 +9593,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 32
+            "control": 42
           },
           {
             "action": 0,
-            "control": 30
+            "control": 40
           }
         ]
       }
@@ -9401,11 +9627,11 @@
         "substeps": [
           {
             "action": 1,
-            "control": 31
+            "control": 41
           },
           {
             "action": 0,
-            "control": 32
+            "control": 42
           }
         ]
       }

@@ -1007,6 +1007,11 @@ void SampleRecorder::finishCapturing() {
 	// cardRoutine() so the fiber, on seeing this status, also observes our final currentRecordClusterIndex
 	// and payload writes before it takes over as producer in finalizeRecordedFile(). See B3.
 	status.store(RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING, std::memory_order_release);
+
+	// A freshly recorded sample now has a final length and needs its waveform overview pre-scanned. Re-arm
+	// the background scan, which may have gone idle after all previously-loaded samples were scanned (#4460).
+	// (The scan skips clusters the recorder is still writing and retries them once its reasons are released.)
+	audioFileManager.overviewScanAllDone = false;
 	if (getRootUI()) {
 		getRootUI()->sampleNeedsReRendering(sample);
 	}

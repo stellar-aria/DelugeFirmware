@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import type { Shortcut } from "../types/shortcut.js";
   import StepContainerView from "./step/StepContainer.svelte";
   import DelugeUiExternal from "./DelugeUiExternal.svelte";
@@ -17,6 +17,12 @@
     setHardwarePreviewOpen,
     shortcutPreviewResetVersion,
   } from "../stores/preview_store.js";
+  import {
+    shortcutDescriptionVisibilityCommand,
+  } from "../stores/shortcut_description_visibility_store.js";
+  import {
+    shortcutTagVisibilityCommand,
+  } from "../stores/shortcut_tag_visibility_store.js";
 
   // One shortcut card instance plus a stable id used by shared preview state.
   export let shortcut: Shortcut;
@@ -47,23 +53,183 @@
     [Firmwares.COMMUNITY]: "dc-badge-tip",
   };
 
+  type HeaderChip = {
+    key: string;
+    title: string;
+    className: string;
+  };
+
+  let headerChips: HeaderChip[] = [];
+
+  $: headerChips = [
+    ...(capabilityTitle
+      ? [
+          {
+            key: `capability-${capabilityTitle}`,
+            title: capabilityTitle,
+            className: "dc-capability-chip",
+          } satisfies HeaderChip,
+        ]
+      : []),
+    ...views.map(
+      (view): HeaderChip => ({
+        key: `view-${view.id}`,
+        title: view.title,
+        className: `dc-view-chip ${viewClassByColor[view.color] ?? "dc-view-neutral"}`,
+      }),
+    ),
+    ...firmwares.map(
+      (firmware): HeaderChip => ({
+        key: `firmware-${firmware.id}`,
+        title: `${firmware.title} Firmware`,
+        className: `dc-view-chip dc-firmware-chip ${firmwareBadgeClassById[firmware.id] ?? "dc-badge-note"}`,
+      }),
+    ),
+  ];
+
   let showDetails: boolean = false;
   let shortcutCardEl: HTMLDivElement | undefined;
-  let areDescriptionSectionsExpanded: boolean = true;
-  let areCommunitySectionsExpanded: boolean = true;
+  let areDescriptionSectionsExpanded: boolean = false;
+  let areCommunitySectionsExpanded: boolean = false;
   let lastResetVersion = 0;
+  let lastTagVisibilityCommandVersion = 0;
+  let lastDescriptionVisibilityCommandVersion = 0;
+  let previousDescriptionExpandedBeforePreview: boolean | null = null;
+  let previousCommunityExpandedBeforePreview: boolean | null = null;
+  let previousHeaderChipsExpandedBeforePreview: boolean | null = null;
+  let shortcutChipStripEl: HTMLDivElement | undefined;
+  let shortcutChipRowEl: HTMLDivElement | undefined;
+  let shortcutChipToggleEl: HTMLButtonElement | undefined;
+  let shortcutChipResizeObserver: ResizeObserver | undefined;
+  let chipRecalcTimeouts: ReturnType<typeof setTimeout>[] = [];
+  let hasCollapsedHeaderChips = false;
+  let areAllHeaderChipsExpanded = false;
+  let viewportWidth = 0;
+
+  // Recomputes collapsed chip visibility based on current row width.
+  // Returns void.
+  function recalculateVisibleHeaderChips() {
+    if (!shortcutChipRowEl || headerChips.length === 0) {
+      hasCollapsedHeaderChips = false;
+      areAllHeaderChipsExpanded = false;
+      return;
+    }
+
+    // Always measure overflow in compact mode; expanded mode wraps chips and
+    // would otherwise report no overflow, causing immediate re-collapse.
+    const row = shortcutChipRowEl;
+    const wasExpanded = row.classList.contains("shortcut-chip-row-expanded");
+    if (wasExpanded) {
+      row.classList.remove("shortcut-chip-row-expanded");
+    }
+
+    // Ignore toggle footprint while measuring so the toggle itself does not
+    // manufacture overflow on rows that otherwise fit on one line.
+    const toggleWidth = shortcutChipToggleEl?.offsetWidth ?? 0;
+    let toggleGapWidth = 0;
+    if (shortcutChipToggleEl && shortcutChipStripEl) {
+      const parsedGap = Number.parseFloat(
+        window.getComputedStyle(shortcutChipStripEl).columnGap,
+      );
+      if (Number.isFinite(parsedGap)) {
+        toggleGapWidth = parsedGap;
+      }
+    }
+
+    const availableWidthWithoutToggle =
+      row.clientWidth + toggleWidth + toggleGapWidth;
+
+    // scrollWidth/clientWidth are integer-rounded and can miss sub-pixel clipping.
+    // Include child geometry so partially clipped chips still count as overflow.
+    const rowRect = row.getBoundingClientRect();
+    let maxChipRight = 0;
+    for (const chip of row.children) {
+      const chipRect = (chip as HTMLElement).getBoundingClientRect();
+      maxChipRight = Math.max(maxChipRight, chipRect.right - rowRect.left);
+    }
+
+    const measuredOverflowWidth = Math.max(row.scrollWidth, maxChipRight);
+    hasCollapsedHeaderChips = measuredOverflowWidth > availableWidthWithoutToggle + 0.5;
+
+    if (wasExpanded) {
+      row.classList.add("shortcut-chip-row-expanded");
+    }
+
+    // If everything now fits, reset expanded state back to compact mode.
+    if (!hasCollapsedHeaderChips) {
+      areAllHeaderChipsExpanded = false;
+    }
+  }
+
+  // Expands/collapses the full header-chip list.
+  // Returns void.
+  function toggleHeaderChips() {
+    areAllHeaderChipsExpanded = !areAllHeaderChipsExpanded;
+  }
+
+  // Schedules repeated recalculation passes to handle async layout settling.
+  // Returns void.
+  function scheduleHeaderChipRecalculation() {
+    chipRecalcTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+    chipRecalcTimeouts = [0, 80, 220, 480, 900].map((delayMs) =>
+      setTimeout(recalculateVisibleHeaderChips, delayMs),
+    );
+    document.fonts?.ready.then(recalculateVisibleHeaderChips);
+  }
+
+  // React to chip data/layout changes after DOM updates settle.
+  $: if (shortcutChipRowEl) {
+    headerChips;
+    void tick().then(scheduleHeaderChipRecalculation);
+  }
+
+  // Recompute on viewport width changes captured by Svelte window binding.
+  $: if (viewportWidth > 0 && shortcutChipRowEl) {
+    void tick().then(scheduleHeaderChipRecalculation);
+  }
+
+  onMount(() => {
+    if (typeof ResizeObserver !== "undefined") {
+      shortcutChipResizeObserver = new ResizeObserver(() => {
+        scheduleHeaderChipRecalculation();
+      });
+
+      if (shortcutCardEl) {
+        shortcutChipResizeObserver.observe(shortcutCardEl);
+      }
+
+      if (shortcutChipRowEl) {
+        shortcutChipResizeObserver.observe(shortcutChipRowEl);
+      }
+    }
+
+    void tick().then(scheduleHeaderChipRecalculation);
+  });
+
+  onDestroy(() => {
+    chipRecalcTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+    chipRecalcTimeouts = [];
+
+    shortcutChipResizeObserver?.disconnect();
+    shortcutChipResizeObserver = undefined;
+  });
 
   // Computes the occupied top offset from sticky/fixed site chrome so
-  // programmatic scroll positioning does not hide content under the header.
-  // Returns the scroll offset in pixels required to keep content below sticky UI.
-  function getViewportTopOffset() {
+  // programmatic scroll positioning does not hide content under overlapping UI.
+  // Returns the scroll offset in pixels required to keep the given target visible.
+  function getViewportTopOffset(targetElement?: HTMLElement) {
     if (typeof window === "undefined") {
       return 0;
     }
 
     let maxBottom = 0;
+    const targetRect = targetElement?.getBoundingClientRect();
+    const sampleX = targetRect
+      ? targetRect.left + targetRect.width / 2
+      : window.innerWidth / 2;
+
     const candidates = document.querySelectorAll<HTMLElement>(
-      "header, [role='banner'], .sl-header",
+      "header, [role='banner'], .sl-header, .dc-control-panel",
     );
 
     for (const element of candidates) {
@@ -73,27 +239,82 @@
       }
 
       const rect = element.getBoundingClientRect();
-      if (rect.top <= 0 && rect.bottom > maxBottom) {
+      // Count only chrome that actually overlaps this card's column.
+      if (sampleX < rect.left || sampleX > rect.right) {
+        continue;
+      }
+
+      // Include top-attached sticky/fixed chrome that can obscure card headers.
+      if (rect.top < 160 && rect.bottom > 0 && rect.bottom > maxBottom) {
         maxBottom = rect.bottom;
       }
     }
 
-    // Keep a small visual gap below the sticky top navigation.
-    return Math.max(0, Math.ceil(maxBottom)) + 8;
+    // Keep a small visual gap below sticky top UI and avoid sub-pixel clipping.
+    return Math.max(0, Math.ceil(maxBottom)) + 12;
   }
 
   // Card-local state mirrors the shared preview store.
   $: isPreviewOpen = $openHardwarePreviewIds.includes(shortcutPreviewId);
 
+  // Apply global header-tag visibility command exactly once per command version.
+  $: if (
+    $shortcutTagVisibilityCommand.version !==
+    lastTagVisibilityCommandVersion
+  ) {
+    lastTagVisibilityCommandVersion = $shortcutTagVisibilityCommand.version;
+    if (isPreviewOpen) {
+      // If command changes while preview is open, apply after preview closes.
+      previousHeaderChipsExpandedBeforePreview =
+        $shortcutTagVisibilityCommand.visible && hasCollapsedHeaderChips;
+    } else {
+      areAllHeaderChipsExpanded = $shortcutTagVisibilityCommand.visible && hasCollapsedHeaderChips;
+    }
+  }
+
+  // Apply global visibility command exactly once per command version.
+  $: if (
+    $shortcutDescriptionVisibilityCommand.version !==
+    lastDescriptionVisibilityCommandVersion
+  ) {
+    lastDescriptionVisibilityCommandVersion =
+      $shortcutDescriptionVisibilityCommand.version;
+    if (isPreviewOpen) {
+      // If command changes while preview is open, apply after preview closes.
+      previousDescriptionExpandedBeforePreview =
+        $shortcutDescriptionVisibilityCommand.visible;
+      previousCommunityExpandedBeforePreview =
+        $shortcutDescriptionVisibilityCommand.visible;
+    } else {
+      areDescriptionSectionsExpanded =
+        $shortcutDescriptionVisibilityCommand.visible;
+      areCommunitySectionsExpanded =
+        $shortcutDescriptionVisibilityCommand.visible;
+    }
+  }
+
   // Keep card visibility and description expansion synced with shared preview state.
   $: if (showDetails !== isPreviewOpen) {
     showDetails = isPreviewOpen;
     if (showDetails) {
+      previousHeaderChipsExpandedBeforePreview = areAllHeaderChipsExpanded;
+      previousDescriptionExpandedBeforePreview = areDescriptionSectionsExpanded;
+      previousCommunityExpandedBeforePreview = areCommunitySectionsExpanded;
+      areAllHeaderChipsExpanded = false;
       areDescriptionSectionsExpanded = false;
       areCommunitySectionsExpanded = false;
     } else {
-      areDescriptionSectionsExpanded = true;
-      areCommunitySectionsExpanded = true;
+      areAllHeaderChipsExpanded =
+          previousHeaderChipsExpandedBeforePreview ?? false;
+      areDescriptionSectionsExpanded =
+          previousDescriptionExpandedBeforePreview ??
+          $shortcutDescriptionVisibilityCommand.visible;
+      areCommunitySectionsExpanded =
+          previousCommunityExpandedBeforePreview ??
+          $shortcutDescriptionVisibilityCommand.visible;
+      previousHeaderChipsExpandedBeforePreview = null;
+      previousDescriptionExpandedBeforePreview = null;
+      previousCommunityExpandedBeforePreview = null;
     }
   }
 
@@ -101,8 +322,12 @@
   $: if ($shortcutPreviewResetVersion !== lastResetVersion) {
     lastResetVersion = $shortcutPreviewResetVersion;
     // Global filter/search resets should restore the card to collapsed content state.
-    areDescriptionSectionsExpanded = true;
-    areCommunitySectionsExpanded = true;
+    previousHeaderChipsExpandedBeforePreview = null;
+    previousDescriptionExpandedBeforePreview = null;
+    previousCommunityExpandedBeforePreview = null;
+    areAllHeaderChipsExpanded = false;
+    areDescriptionSectionsExpanded = $shortcutDescriptionVisibilityCommand.visible;
+    areCommunitySectionsExpanded = $shortcutDescriptionVisibilityCommand.visible;
     showDetails = false;
   }
 
@@ -124,12 +349,35 @@
       return;
     }
 
-    // Align the opened shortcut card under sticky header to maximize preview visibility.
-    const top =
-      window.scrollY +
-      shortcutCardEl.getBoundingClientRect().top -
-      getViewportTopOffset();
-    window.scrollTo({ top, behavior: "smooth" });
+    const alignCardTop = (behavior: ScrollBehavior) => {
+      if (!shortcutCardEl) {
+        return;
+      }
+
+      const top =
+        window.scrollY +
+        shortcutCardEl.getBoundingClientRect().top -
+        getViewportTopOffset(shortcutCardEl);
+      window.scrollTo({ top, behavior });
+    };
+
+    // Initial smooth alignment, then corrective passes after layout settles.
+    alignCardTop("smooth");
+    window.requestAnimationFrame(() => {
+      if (isPreviewOpen) {
+        alignCardTop("auto");
+      }
+    });
+    window.setTimeout(() => {
+      if (isPreviewOpen) {
+        alignCardTop("auto");
+      }
+    }, 180);
+    window.setTimeout(() => {
+      if (isPreviewOpen) {
+        alignCardTop("auto");
+      }
+    }, 360);
   }
 
   // Keyboard accessibility for the clickable step sequence area.
@@ -158,44 +406,57 @@
 <div bind:this={shortcutCardEl} class="shortcut-card rounded-lg p-4 text-[var(--sl-color-text)]">
   <!-- Header with firmware/capability/view chips and title. -->
   <div class="shortcut-header">
-    <div class="mb-0 flex flex-wrap gap-1 leading-none">
-      {#each firmwares as firmware}
-        <span
-          class={`dc-view-chip dc-firmware-chip ${firmwareBadgeClassById[firmware.id] ?? "dc-badge-note"}`}
+    <div bind:this={shortcutChipStripEl} class="shortcut-chip-strip mb-0 leading-none">
+      <div
+        bind:this={shortcutChipRowEl}
+        class="shortcut-chip-row"
+        class:shortcut-chip-row-expanded={
+          areAllHeaderChipsExpanded && hasCollapsedHeaderChips
+        }
+      >
+        {#each headerChips as chip (chip.key)}
+          <span class={chip.className}>
+            {chip.title}
+          </span>
+        {/each}
+      </div>
+
+      {#if hasCollapsedHeaderChips}
+        <button
+          bind:this={shortcutChipToggleEl}
+          type="button"
+          class="shortcut-chip-toggle"
+          aria-expanded={areAllHeaderChipsExpanded && hasCollapsedHeaderChips}
+          on:click={toggleHeaderChips}
         >
-          {firmware.title} Firmware
-        </span>
-      {/each}
-      {#if capabilityTitle}
-        <span class="dc-capability-chip">{capabilityTitle}</span>
+          {areAllHeaderChipsExpanded && hasCollapsedHeaderChips
+            ? "Show fewer tags"
+            : "Show more tags"}
+        </button>
       {/if}
-      {#each views as view}
-        <span
-          class={`dc-view-chip ${viewClassByColor[view.color] ?? "dc-view-neutral"}`}
-        >
-          {view.title}
-        </span>
-      {/each}
     </div>
+
     <h3 class="shortcut-title">
       <SearchHighlight text={shortcut.name} />
     </h3>
   </div>
   <!-- Step sequence acts as preview toggle (mouse + keyboard accessible). -->
-  <div
-    role="button"
-    tabindex="0"
-    aria-expanded={showDetails}
-    class="shortcut-steps m-0 rounded-md p-1 text-left"
-    on:click={onStepsClicked}
-    on:keydown={onStepsKeydown}
-  >
-    <span class="shortcut-steps-inner">
-      {#each shortcut.steps as step (step)}
-        <StepContainerView bind:step />
-      {/each}
-    </span>
-  </div>
+  {#if shortcut.steps.length > 0}
+    <div
+      role="button"
+      tabindex="0"
+      aria-expanded={showDetails}
+      class="shortcut-steps m-0 rounded-md p-1 text-left"
+      on:click={onStepsClicked}
+      on:keydown={onStepsKeydown}
+    >
+      <span class="shortcut-steps-inner">
+        {#each shortcut.steps as step (step)}
+          <StepContainerView bind:step />
+        {/each}
+      </span>
+    </div>
+  {/if}
   <!-- Primary description section (default docs text). -->
   {#if shortcut.description || descriptionParagraphs.length > 0}
     <aside class="shortcut-aside shortcut-description-aside mt-4 rounded-md px-3 py-1" data-type="tip">
@@ -234,7 +495,7 @@
           on:click={toggleCommunitySection}
         >
           <span class="community-aside-title">
-            Community Firmware Behaviour Change
+            Official Behaviour Change
           </span>
           <span class="aside-toggle-indicator">{areCommunitySectionsExpanded ? "Hide" : "Show"}</span>
         </button>
@@ -251,6 +512,8 @@
     </div>
   {/if}
 </div>
+
+<svelte:window bind:innerWidth={viewportWidth} />
 
 <style>
   .shortcut-card {
@@ -321,6 +584,61 @@
     min-width: 0;
   }
 
+  .shortcut-chip-strip {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 0.25rem;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .shortcut-chip-row {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: 0.25rem;
+    overflow: hidden;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .shortcut-chip-row-expanded {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    overflow: visible;
+  }
+
+  .shortcut-chip-row > :global(*) {
+    flex: 0 0 auto;
+  }
+
+  .shortcut-chip-toggle {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    border-radius: 0.3rem;
+    border: 1px dashed var(--dc-capability-chip-border);
+    padding: 0.2rem 0.52rem;
+    font-size: 0.75rem;
+    line-height: 1.1;
+    letter-spacing: 0.01em;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: color-mix(in srgb, var(--dc-capability-chip-bg) 65%, transparent);
+    color: var(--dc-capability-chip-fg);
+    cursor: pointer;
+    margin: 0;
+    flex: 0 0 auto;
+    align-self: flex-start;
+    justify-self: end;
+    transition: background-color 120ms ease-out;
+  }
+
+  .shortcut-chip-toggle:hover {
+    background: color-mix(in srgb, var(--dc-capability-chip-bg) 78%, transparent);
+  }
+
   .shortcut-card {
     display: flex;
     flex-direction: column;
@@ -328,8 +646,6 @@
     width: 100%;
     min-width: 0;
     max-width: 100%;
-    content-visibility: auto;
-    contain-intrinsic-size: 18rem;
   }
 
   .shortcut-title {
@@ -388,8 +704,20 @@
     margin-top: 0.5rem;
   }
 
+  .shortcut-description-aside {
+    padding-bottom: 0.15rem;
+  }
+
+  .shortcut-description-aside :global(p:last-child) {
+    margin-bottom: 0.2rem;
+  }
+
+  .shortcut-description-aside + .shortcut-aside[data-type="caution"] {
+    margin-top: 0;
+  }
+
   .description-aside-title {
-    margin: 0.35rem 0 0.2rem;
+    margin: 0;
     font-size: 0.76rem;
     line-height: 1.2;
     letter-spacing: 0.01em;
@@ -401,7 +729,7 @@
 
   .aside-title-button {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     justify-content: space-between;
     width: 100%;
     gap: 0.75rem;
@@ -416,7 +744,7 @@
 
   .aside-toggle-indicator {
     font-size: 0.72rem;
-    line-height: 1;
+    line-height: 1.2;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.02em;
@@ -424,7 +752,7 @@
   }
 
   .community-aside-title {
-    margin: 0.35rem 0 0.2rem;
+    margin: 0;
     font-size: 0.76rem;
     line-height: 1.2;
     letter-spacing: 0.01em;

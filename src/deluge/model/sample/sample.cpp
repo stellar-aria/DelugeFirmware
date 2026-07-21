@@ -25,6 +25,7 @@
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "processing/engines/audio_engine.h"
+#include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <cmath>
@@ -198,6 +199,9 @@ void Sample::workOutBitMask() {
 void Sample::markAsUnloadable() {
 	unloadable = true;
 
+	// The on-disk audio may have changed, so the cached waveform overview can no longer be trusted.
+	resetOverviewScan();
+
 	// If any Clusters in the load-queue, remove them from there
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
@@ -207,6 +211,17 @@ void Sample::markAsUnloadable() {
 			deluge_resource_loader_remove(mgr, cluster->resource_slot);
 		}
 	}
+}
+
+void Sample::resetOverviewScan() {
+	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
+		SampleCluster& sampleCluster = stream().entry(c);
+		sampleCluster.investigatedWholeLength = false;
+		sampleCluster.minValue = 127;
+		sampleCluster.maxValue = -128;
+	}
+	overviewScanNextCluster = getFirstClusterIndexWithAudioData();
+	audioFileManager.overviewScanAllDone = false; // This sample now has work to pre-scan again (#4460)
 }
 
 SampleCache* Sample::getOrCreateCache(SampleHolder* sampleHolder, int32_t phaseIncrement, int32_t timeStretchRatio,

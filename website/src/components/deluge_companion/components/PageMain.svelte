@@ -1,12 +1,6 @@
 <script>
   import ShortcutList from "./ShortcutList.svelte";
-  import ViewFilter from "./ViewFilter.svelte";
-  import { isShortcutDataLoading, searchQuery } from "../stores/search_store.js";
-  import { filteredShortcuts } from "../stores/shortcut_store.js";
-
-  // Hide filters when an active search has no matches.
-  $: hasNoSearchMatches =
-    $searchQuery.trim().length > 0 && $filteredShortcuts.length === 0;
+  import { isShortcutDataLoading } from "../stores/search_store.js";
 </script>
 
 <main class="mb-8 flex flex-col gap-4">
@@ -22,10 +16,6 @@
       </div>
     </div>
   {:else}
-    <!-- Ready state: hide filters when a search has no matches. -->
-    {#if !hasNoSearchMatches}
-      <ViewFilter />
-    {/if}
     <ShortcutList />
   {/if}
 </main>

@@ -109,8 +109,9 @@ fill task needs a plain `u32`, not a C++ object pointer.
 
 ### 3.1 Backends
 
-- **Device — embedded-fatfs.** `efatfs_fs.rs`, exists. The async fill task awaits `read_at` directly; the
-  synchronous path bridges via `block_on_fiber` (**see §6 — this is the open risk**).
+- **Device — embedded-fatfs.** `efatfs_fs.rs`, exists. The async fill task awaits `read_at` directly. The
+  synchronous path bridges via `block_on_fiber`, which is **only valid on the fiber** — see §6, which is
+  why converting the synchronous UI callers is a prerequisite rather than a detail.
 - **Host sim — passthrough.** ~100 lines of C in `src/bsp/host/`, opening real files under a root
   directory. No Rust, no FAT, no block device, no MBR windowing. This is the end-state shape, not
   scaffolding.

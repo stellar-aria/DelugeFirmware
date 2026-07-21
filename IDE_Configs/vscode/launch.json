@@ -7,11 +7,13 @@
       // startup (deluge-sdk's rza1l-hal), so it needs the SDK's J-Link recipe —
       // JLinkScript + cp15 (MMU/cache off via SCTLR=0x00C50078, VBAR=0x20000000)
       // + SVC/IRQ-FIQ-masked CPSR=0x1DF — NOT the C++ image's plain reset/load.
-      // Build first:  (cd src/bsp/rust && cargo build)
+      // Build is the preLaunchTask ("Build Rust BSP (device, debug)"), which
+      // itself rebuilds the C++ app objects first — cargo can't see .cpp edits.
       // The JLinkScript comes from the sibling deluge-sdk clone (~/GitHub/deluge-sdk).
       "name": "deluge-rust (Rust BSP, debug)",
       "type": "cortex-debug",
       "request": "launch",
+      "preLaunchTask": "Build Rust BSP (device, debug)",
       "cwd": "${workspaceRoot}",
       "executable": "${workspaceRoot}/src/bsp/rust/target/armv7a-none-eabihf/debug/deluge-rust",
       "windows": {

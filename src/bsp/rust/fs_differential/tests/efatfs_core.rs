@@ -18,9 +18,14 @@
 #[path = "../../src/efatfs_core.rs"]
 mod efatfs_core;
 
+use aligned::{Aligned, A4};
+use block_device_adapters::BufStream;
+use block_device_driver::BlockDevice;
 use efatfs_core::HandleTable;
 use embassy_futures::block_on;
+use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 use fs_differential::{efatfs::EFatFs, ram_disk::RamDisk};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // Shared with tests/differential.rs's rationale: the RAM `DISK` + C FatFS
@@ -53,7 +58,10 @@ fn efatfs_core_open_read_and_interleave_fat32() {
             table.read_at_owned(fs, h, 0, &mut buf).await,
             "hello.txt fill was short"
         );
-        assert_eq!(&buf, b"DELUGE-SP0\n", "core detach/reattach corrupted hello.txt");
+        assert_eq!(
+            &buf, b"DELUGE-SP0\n",
+            "core detach/reattach corrupted hello.txt"
+        );
 
         // (b) two handles, reads interleaved round-robin, reassembled bytes must
         //     match the whole-file oracle for each.
@@ -94,7 +102,10 @@ fn efatfs_core_open_read_and_interleave_fat32() {
             }
         }
         assert_eq!(got_hello, expected_hello, "interleave corrupted hello.txt");
-        assert_eq!(got_kick, expected_kick, "interleave corrupted the Kicks wav");
+        assert_eq!(
+            got_kick, expected_kick,
+            "interleave corrupted the Kicks wav"
+        );
     });
 }
 
@@ -149,4 +160,120 @@ fn efatfs_core_generation_guard_rejects_stale_commit() {
             "stale commit corrupted the recycled slot's file identity"
         );
     });
+}
+
+// --- Lens-1 margin proxy: SD-transfer overhead of an efatfs cluster read -----
+//
+// The Lens-1 concern is that embedded-fatfs's per-read cost (FAT-chain walk +
+// single-block `BufStream`) is heavier than the raw cluster→sector-map read the
+// C-FatFS path does (one contiguous DMA of the cluster's data sectors). The
+// fully-integrated modeled-latency margin (the real C++ streaming scenario in
+// `lens1_vt_sim`) is deferred; this is the lightweight direct proxy: count the
+// 512-byte block reads embedded-fatfs issues to sequentially read a multi-
+// cluster file, and compare against the ideal (one data read per data sector,
+// no FAT-walk/re-read overhead). A pathological O(n) chain re-walk on every
+// read — the spec's stated risk — would blow this number up.
+
+/// Total 512-byte blocks read since the last reset (process-wide; serialized by
+/// `TEST_LOCK`).
+static BLOCKS_READ: AtomicU64 = AtomicU64::new(0);
+
+/// `BlockDevice<512>` that counts blocks read, delegating to the shared `DISK`
+/// exactly as `FileBlockDevice` does.
+struct CountingBlockDevice;
+
+impl BlockDevice<512> for CountingBlockDevice {
+    type Align = A4;
+    type Error = core::convert::Infallible;
+
+    async fn read(
+        &mut self,
+        block_address: u32,
+        data: &mut [Aligned<A4, [u8; 512]>],
+    ) -> Result<(), Self::Error> {
+        BLOCKS_READ.fetch_add(data.len() as u64, Ordering::Relaxed);
+        for (i, blk) in data.iter_mut().enumerate() {
+            let off = (block_address as u64 + i as u64) * 512;
+            RamDisk::read_at(off, &mut blk[..]);
+        }
+        Ok(())
+    }
+
+    async fn write(
+        &mut self,
+        block_address: u32,
+        data: &[Aligned<A4, [u8; 512]>],
+    ) -> Result<(), Self::Error> {
+        for (i, blk) in data.iter().enumerate() {
+            let off = (block_address as u64 + i as u64) * 512;
+            RamDisk::write_at(off, &blk[..]);
+        }
+        Ok(())
+    }
+
+    async fn size(&mut self) -> Result<u64, Self::Error> {
+        Ok(RamDisk::len())
+    }
+}
+
+#[test]
+fn efatfs_core_sequential_read_transfer_overhead() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+
+    // The mk_fixture.sh FAT32 image is formatted `-c 64` → 64 sectors (32 KiB)
+    // per cluster; that's the raw-map path's contiguous read size.
+    const CLUSTER_SECTORS: u64 = 64;
+    let kick_path = "/SAMPLES/big_multicluster.bin"; // 1 MiB = 32 clusters
+
+    // Whole-file size via the ordinary EFatFs oracle (uncounted).
+    let file_len = EFatFs::mount().read_file(kick_path).len() as u64;
+    let data_sectors = file_len.div_ceil(512); // ideal: one read per data sector
+    let clusters = file_len.div_ceil(CLUSTER_SECTORS * 512);
+
+    // Mount a fresh FS over the counting device and read the file sequentially,
+    // one cluster (32 KiB) at a time, through the real efatfs_core.
+    let storage = BufStream::<CountingBlockDevice, 512>::new(CountingBlockDevice);
+    let fs: FileSystem<_, DefaultTimeProvider, LossyOemCpConverter> =
+        block_on(FileSystem::new(storage, FsOptions::new())).expect("mount counting FS");
+
+    block_on(async {
+        let ctx = efatfs_core::open_context(&fs, kick_path)
+            .await
+            .expect("open kick");
+        let mut table = HandleTable::new();
+        let h = table.insert(ctx).expect("insert");
+
+        BLOCKS_READ.store(0, Ordering::Relaxed); // count only the streamed reads
+        let cluster_bytes = (CLUSTER_SECTORS * 512) as usize;
+        let mut off: u32 = 0;
+        while (off as u64) < file_len {
+            let want = cluster_bytes.min((file_len - off as u64) as usize);
+            let mut buf = vec![0u8; want];
+            assert!(
+                table.read_at_owned(&fs, h, off, &mut buf).await,
+                "cluster read at {off} was short"
+            );
+            off += want as u32;
+        }
+    });
+
+    let blocks = BLOCKS_READ.load(Ordering::Relaxed);
+    let overhead = blocks as f64 / data_sectors as f64;
+    println!(
+        "lens1-proxy: file={file_len}B clusters={clusters} data_sectors={data_sectors} \
+         efatfs_block_reads={blocks} overhead={overhead:.2}x (ideal 1.00x = raw-map data-only)"
+    );
+
+    // Sequential reads should stay near the ideal — a few extra reads per
+    // cluster for the FAT-chain walk, NOT an O(n) re-walk of the whole chain on
+    // every cluster (which would scale the overhead with `clusters`). Guard
+    // generously (3x) so this catches a pathological regression, not tuning
+    // noise.
+    assert!(
+        overhead < 3.0,
+        "efatfs sequential-read transfer overhead {overhead:.2}x too high \
+         (blocks={blocks}, data_sectors={data_sectors}, clusters={clusters}) — \
+         possible O(n) FAT-chain re-walk regression"
+    );
 }

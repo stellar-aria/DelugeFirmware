@@ -17,7 +17,9 @@
 
 #include "gui/waveform/waveform_renderer.h"
 #include "definitions_cxx.hpp"
+#include "extern.h" // currentlyAccessingCard
 #include "gui/colour/colour.h"
+#include "gui/waveform/waveform_peak_math.h"
 #include "gui/waveform/waveform_render_data.h"
 #include "io/debug/log.h"
 #include "model/sample/sample.h"
@@ -27,6 +29,9 @@
 #include "scheduler_api.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
+#include <algorithm>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <string.h>
 
@@ -37,7 +42,42 @@ WaveformRenderer waveformRenderer{};
 WaveformRenderer::WaveformRenderer() {
 }
 
-#define SAMPLES_TO_READ_PER_COL_MAGNITUDE 9
+namespace {
+
+// Slides the cached per-column peak data when the waveform scrolls horizontally by a whole number of
+// columns (fix A, issue #4460). After the shift, new column `i` holds what old column `i + shift` held,
+// so only the columns scrolled freshly into view need re-investigating (marked un-investigated here).
+void shiftRenderCache(WaveformRenderData& data, int32_t shift) {
+	if (shift == 0) {
+		return;
+	}
+	if (std::abs(shift) >= kDisplayWidth) {
+		std::ranges::fill(data.colStatus, COL_STATUS_NOT_INVESTIGATED);
+		return;
+	}
+
+	auto slide = [shift](auto& array) {
+		if (shift > 0) {
+			std::shift_left(std::begin(array), std::end(array), shift);
+		}
+		else {
+			std::shift_right(std::begin(array), std::end(array), -shift);
+		}
+	};
+	slide(data.colStatus);
+	slide(data.minPerCol);
+	slide(data.maxPerCol);
+
+	// Mark the freshly-exposed columns (left behind by the shift) as needing investigation.
+	if (shift > 0) {
+		std::fill_n(std::end(data.colStatus) - shift, shift, uint8_t{COL_STATUS_NOT_INVESTIGATED});
+	}
+	else {
+		std::fill_n(std::begin(data.colStatus), -shift, uint8_t{COL_STATUS_NOT_INVESTIGATED});
+	}
+}
+
+} // namespace
 
 // Returns false if had trouble loading some (will often not be all) Clusters, e.g. cos we're in the card routine
 bool WaveformRenderer::renderFullScreen(Sample* sample, uint64_t xScroll, uint64_t xZoom,
@@ -224,13 +264,6 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
                                        WaveformRenderData* data, SampleRecorder* recorder, int32_t xStart,
                                        int32_t xEnd) {
 
-	if (xScrollSamples != data->xScroll || xZoomSamples != data->xZoom) {
-		memset(data->colStatus, 0, sizeof(data->colStatus));
-	}
-
-	data->xScroll = xScrollSamples;
-	data->xZoom = xZoomSamples;
-
 	uint64_t numValidSamples;
 	int32_t endClusters;
 	if (recorder) {
@@ -243,6 +276,39 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 	}
 
 	uint64_t numValidBytes = numValidSamples * sample->byteDepth * sample->numChannels;
+
+	bool lengthChanged = static_cast<int64_t>(numValidSamples) != data->validLengthSamples;
+	if (recorder != nullptr) {
+		// During recording the waveform grows every frame. A monotonic append leaves already-investigated
+		// columns valid (the growing edge is re-checked below because only COL_STATUS_INVESTIGATED columns are
+		// skipped), so don't nuke the whole cache each frame just because the length ticked up (#4460).
+		lengthChanged = false;
+	}
+	if (xZoomSamples != data->xZoom || lengthChanged) {
+		// Zoom changed, or (off the record path) the waveform length changed (e.g. sample replaced/shrunk):
+		// nothing is reusable.
+		std::ranges::fill(data->colStatus, COL_STATUS_NOT_INVESTIGATED);
+	}
+	else if (xScrollSamples != data->xScroll) {
+		// Scroll changed but zoom and length didn't. If we moved by a whole number of columns that fits the
+		// display width, the overlapping columns' peaks are still valid - slide them across so only the
+		// newly-exposed columns get re-investigated (fix A, issue #4460). Otherwise fall back to a full
+		// invalidate (this also covers a scroll delta so large the column count wouldn't fit in int32).
+		int64_t deltaSamples = xScrollSamples - data->xScroll;
+		int64_t shiftCols = (deltaSamples % static_cast<int64_t>(xZoomSamples) == 0)
+		                        ? deltaSamples / static_cast<int64_t>(xZoomSamples)
+		                        : 0;
+		if (shiftCols != 0 && shiftCols >= -kDisplayWidth && shiftCols <= kDisplayWidth) {
+			shiftRenderCache(*data, static_cast<int32_t>(shiftCols));
+		}
+		else {
+			std::ranges::fill(data->colStatus, COL_STATUS_NOT_INVESTIGATED);
+		}
+	}
+
+	data->xScroll = xScrollSamples;
+	data->xZoom = xZoomSamples;
+	data->validLengthSamples = static_cast<int64_t>(numValidSamples);
 
 	bool hadAnyTroubleLoading = false;
 
@@ -281,12 +347,14 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 			continue;
 		}
 
-		int32_t colStartByte =
-		    colStartSample * sample->numChannels * sample->byteDepth + sample->audioDataStartPosBytes;
-		int32_t colEndByte = colEndSample * sample->numChannels * sample->byteDepth + sample->audioDataStartPosBytes;
+		// 64-bit so samples past 2 GB (colStartSample * frameSize) don't overflow (#4460).
+		int64_t colStartByte = static_cast<int64_t>(colStartSample) * sample->numChannels * sample->byteDepth
+		                       + sample->audioDataStartPosBytes;
+		int64_t colEndByte = static_cast<int64_t>(colEndSample) * sample->numChannels * sample->byteDepth
+		                     + sample->audioDataStartPosBytes;
 
-		int32_t colStartCluster = colStartByte >> Cluster::size_magnitude;
-		int32_t colEndCluster = colEndByte >> Cluster::size_magnitude;
+		int32_t colStartCluster = static_cast<int32_t>(colStartByte >> Cluster::size_magnitude);
+		int32_t colEndCluster = static_cast<int32_t>(colEndByte >> Cluster::size_magnitude);
 
 		int32_t clusterIndexToDo;
 		int32_t startByteWithinCluster;
@@ -299,14 +367,14 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 		// If both same cluster...
 		if (numClustersSpan == 0) {
 			clusterIndexToDo = colStartCluster;
-			startByteWithinCluster = colStartByte & (Cluster::size - 1);
-			endByteWithinCluster = colEndByte & (Cluster::size - 1);
+			startByteWithinCluster = static_cast<int32_t>(colStartByte & (Cluster::size - 1));
+			endByteWithinCluster = static_cast<int32_t>(colEndByte & (Cluster::size - 1));
 		}
 
 		// Special case to make sure we get initial transient (we know there's more than 1 cluster)
 		else if (colStartSample == 0 && colStartByte < (Cluster::size >> 1)) {
 			clusterIndexToDo = colStartCluster;
-			startByteWithinCluster = colStartByte & (Cluster::size - 1);
+			startByteWithinCluster = static_cast<int32_t>(colStartByte & (Cluster::size - 1));
 			endByteWithinCluster = Cluster::size;
 			investigatingAWholeCluster = true;
 		}
@@ -315,16 +383,9 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 		else if (numClustersSpan >= 2) {
 			clusterIndexToDo = colStartCluster + 1;
 
-			int32_t startByteWithinFirstCluster = colStartByte & (Cluster::size - 1);
-
-			int32_t unusedBytesAtEndOfPrevCluster =
-			    (Cluster::size - startByteWithinFirstCluster) % (sample->numChannels * sample->byteDepth);
-			if (unusedBytesAtEndOfPrevCluster == 0) {
-				startByteWithinCluster = 0;
-			}
-			else {
-				startByteWithinCluster = (sample->numChannels * sample->byteDepth) - unusedBytesAtEndOfPrevCluster;
-			}
+			startByteWithinCluster =
+			    firstFrameStartWithinCluster(clusterStartByte(clusterIndexToDo, Cluster::size_magnitude),
+			                                 sample->audioDataStartPosBytes, sample->numChannels * sample->byteDepth);
 
 			endByteWithinCluster = Cluster::size;
 			investigatingAWholeCluster = true;
@@ -333,10 +394,10 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 		// If 2 cluster..
 		else if (numClustersSpan == 1) {
 
-			int32_t startByteWithinFirstCluster = colStartByte & (Cluster::size - 1);
+			int32_t startByteWithinFirstCluster = static_cast<int32_t>(colStartByte & (Cluster::size - 1));
 			int32_t bytesInFirstCluster = Cluster::size - startByteWithinFirstCluster;
 
-			int32_t bytesInSecondCluster = colEndByte & (Cluster::size - 1);
+			int32_t bytesInSecondCluster = static_cast<int32_t>(colEndByte & (Cluster::size - 1));
 
 			// If more in first cluster...
 			if (bytesInFirstCluster >= bytesInSecondCluster) {
@@ -349,14 +410,9 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 			else {
 				clusterIndexToDo = colEndCluster;
 
-				int32_t unusedBytesAtEndOfPrevCluster =
-				    (Cluster::size - startByteWithinFirstCluster) % (sample->numChannels * sample->byteDepth);
-				if (unusedBytesAtEndOfPrevCluster == 0) {
-					startByteWithinCluster = 0;
-				}
-				else {
-					startByteWithinCluster = (sample->numChannels * sample->byteDepth) - unusedBytesAtEndOfPrevCluster;
-				}
+				startByteWithinCluster = firstFrameStartWithinCluster(
+				    clusterStartByte(clusterIndexToDo, Cluster::size_magnitude), sample->audioDataStartPosBytes,
+				    sample->numChannels * sample->byteDepth);
 
 				endByteWithinCluster = bytesInSecondCluster;
 			}
@@ -369,7 +425,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 
 		else if (clusterIndexToDo == endClusters - 1) {
 
-			int32_t limit = (numValidBytes + sample->audioDataStartPosBytes) & (Cluster::size - 1);
+			int32_t limit = lastAudioClusterEndByte(numValidBytes, sample->audioDataStartPosBytes, Cluster::size);
 
 			if (endByteWithinCluster > limit) {
 				endByteWithinCluster = limit;
@@ -444,49 +500,25 @@ cantReadData:
 
 			numBytesToRead = endByteWithinCluster - startByteWithinCluster;
 
+			// If, after all boundary handling, there are still no whole frames to read (e.g. audio ends very
+			// early in the final cluster, so the next-cluster fallback above doesn't apply), this column has no
+			// valid data. Mark it as having nothing to draw rather than scanning an empty window and caching an
+			// inverted sentinel (min > max), which would render as a spurious bright column (#4460).
+			if (endByteWithinCluster <= startByteWithinCluster) {
+				data->colStatus[col] = COL_STATUS_INVESTIGATED_BUT_BEYOND_WAVEFORM;
+				deluge::cluster::remove_reason(*cluster, "4460");
+				if (nextCluster != nullptr) {
+					deluge::cluster::remove_reason(*nextCluster, "4460");
+				}
+				continue;
+			}
+
 			// NOTE: from here on, we read *both* channels (if there are two), counting each one as a "sample"
-
-			int32_t numSamplesToRead = numBytesToRead / sample->byteDepth;
-			int32_t byteIncrement = sample->byteDepth;
-
-			// We don't want to read endless samples. If we were gonna read lost, skip some.
-			int32_t timesTooManySamples = ((numSamplesToRead - 1) >> SAMPLES_TO_READ_PER_COL_MAGNITUDE) + 1;
-			if (timesTooManySamples > 1) {
-
-				// If stereo sample, force an odd number here so we alternate between reading both channels
-				if (sample->numChannels == 2) {
-					if (!(timesTooManySamples & 1)) {
-						timesTooManySamples++;
-					}
-				}
-
-				byteIncrement *= timesTooManySamples;
-			}
-
-			// Misalign, to align with non-32-bit data
-			startByteWithinCluster += sample->byteDepth - 4;
-			endByteWithinCluster += sample->byteDepth - 4;
-
-			int32_t bytePos = startByteWithinCluster;
-
-			int32_t minThisCol = 2147483647;
-			int32_t maxThisCol = -2147483648;
-
-			// Go through the actual waveform of this cluster
-			while (bytePos < endByteWithinCluster) {
-
-				int32_t individualSampleValue = *(
-				    int32_t*)(cluster->payload().data() + bytePos); // & sample->bitMask; // bitMask hardly matters here
-
-				if (individualSampleValue > maxThisCol) {
-					maxThisCol = individualSampleValue;
-				}
-				if (individualSampleValue < minThisCol) {
-					minThisCol = individualSampleValue;
-				}
-
-				bytePos += byteIncrement;
-			}
+			WaveformPeak peak =
+			    scanClusterPeak(reinterpret_cast<const char*>(cluster->payload().data()), startByteWithinCluster,
+			                    endByteWithinCluster, sample->byteDepth, sample->numChannels);
+			int32_t minThisCol = peak.min;
+			int32_t maxThisCol = peak.max;
 
 			// If we just looked at the length of one entire cluster...
 			if (investigatingAWholeCluster) {
@@ -503,18 +535,9 @@ cantReadData:
 					maxThisCol = prevMax;
 				}
 
-				// And mark the SampleCluster as fully investigated
-				sampleCluster->minValue = minThisCol >> 24;
-				sampleCluster->maxValue = maxThisCol >> 24;
-
-				// Make rounding be towards 0
-				if (sampleCluster->minValue < 0) {
-					sampleCluster->minValue++;
-				}
-				if (sampleCluster->maxValue < 0) {
-					sampleCluster->maxValue++;
-				}
-
+				// And mark the SampleCluster as fully investigated (rounding toward 0)
+				sampleCluster->minValue = toCoarsePeak(minThisCol);
+				sampleCluster->maxValue = toCoarsePeak(maxThisCol);
 				sampleCluster->investigatedWholeLength = true;
 			}
 
@@ -522,16 +545,8 @@ cantReadData:
 			else {
 
 				// Then just contribute to the running record of max and min found
-				int8_t smallMin = minThisCol >> 24;
-				int8_t smallMax = maxThisCol >> 24;
-
-				// Make rounding be towards 0
-				if (smallMin < 0) {
-					smallMin++;
-				}
-				if (smallMax < 0) {
-					smallMax++;
-				}
+				int8_t smallMin = toCoarsePeak(minThisCol);
+				int8_t smallMax = toCoarsePeak(maxThisCol);
 
 				if (smallMin < sampleCluster->minValue) {
 					sampleCluster->minValue = smallMin;
@@ -572,6 +587,123 @@ cantReadData:
 	}
 
 	return !hadAnyTroubleLoading;
+}
+
+// Background "waveform overview" pre-scan (issue #4460). Investigates one whole cluster the same way
+// findPeaksPerCol's whole-cluster branch does, but self-contained so it can run off the render path.
+// Caches the result in the SampleCluster (int8 min/max + investigatedWholeLength) so later zoomed-out
+// renders get a cache hit and never load this cluster synchronously while the user is scrolling.
+bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIndex) {
+
+	const int32_t endClusters = sample->getFirstClusterIndexWithNoAudioData();
+	if (clusterIndex < 0 || clusterIndex >= endClusters) {
+		return true; // Nothing to do
+	}
+
+	SampleCluster* sampleCluster = &sample->stream().entry(clusterIndex);
+	if (sampleCluster->investigatedWholeLength) {
+		return true; // Already cached (perhaps by a previous render)
+	}
+
+	// Don't cache a cluster a recorder is still writing into - its data isn't final yet. We leave the
+	// scan cursor parked here; once recording moves on / finishes, the reason is released and we proceed.
+	if (sampleCluster->cluster != nullptr && sampleCluster->cluster->num_reasons_held_by_sample_recorder > 0) {
+		return false;
+	}
+
+	const int32_t frameSize = sample->numChannels * sample->byteDepth;
+	const uint64_t numValidBytes = sample->lengthInSamples * sample->byteDepth * sample->numChannels;
+
+	// Work out the first frame-aligned byte of audio data within this cluster. 64-bit so multi-GB samples
+	// (cluster index << size_magnitude) don't overflow (#4460).
+	const int64_t clusterStartByteAbs = clusterStartByte(clusterIndex, Cluster::size_magnitude);
+	const int32_t startByteWithinCluster =
+	    firstFrameStartWithinCluster(clusterStartByteAbs, sample->audioDataStartPosBytes, frameSize);
+
+	int32_t endByteWithinCluster = Cluster::size;
+	if (clusterIndex == endClusters - 1) {
+		endByteWithinCluster =
+		    std::min(endByteWithinCluster,
+		             lastAudioClusterEndByte(numValidBytes, sample->audioDataStartPosBytes, Cluster::size));
+	}
+
+	// Trim the end back to a whole frame so we never read past the cluster boundary.
+	endByteWithinCluster -= (endByteWithinCluster - startByteWithinCluster) % frameSize;
+
+	if (endByteWithinCluster <= startByteWithinCluster) {
+		// No whole frames to scan here (e.g. a sub-frame tail). Leave it un-investigated rather than
+		// stamping an inverted sentinel; advanceOverviewScan advances the cursor past it regardless.
+		return true;
+	}
+
+	StreamedChunk* cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY);
+	if (cluster == nullptr) {
+		return false; // Card busy / couldn't read - caller will retry later
+	}
+
+	WaveformPeak peak =
+	    scanClusterPeak(reinterpret_cast<const char*>(cluster->payload().data()), startByteWithinCluster,
+	                    endByteWithinCluster, sample->byteDepth, sample->numChannels);
+
+	// Fold in anything previously captured for this cluster (same as findPeaksPerCol's whole-cluster path).
+	peak.min = std::min(peak.min, static_cast<int32_t>(sampleCluster->minValue) << 24);
+	peak.max = std::max(peak.max, static_cast<int32_t>(sampleCluster->maxValue) << 24);
+
+	// Store the coarse (int8) overview, rounding towards 0.
+	sampleCluster->minValue = toCoarsePeak(peak.min);
+	sampleCluster->maxValue = toCoarsePeak(peak.max);
+	sampleCluster->investigatedWholeLength = true;
+
+	// Keep the sample's running peak up to date too, so brightness normalisation is pre-warmed.
+	sample->maxValueFound = std::max(sample->maxValueFound, peak.max);
+	sample->minValueFound = std::min(sample->minValueFound, peak.min);
+
+	deluge::cluster::remove_reason(*cluster, "4460");
+	AudioEngine::routineWithClusterLoading();
+
+	return true;
+}
+
+// Advances the sample's background overview pre-scan by up to maxClusters previously-uninvestigated
+// clusters. Cheaply skips clusters already investigated (e.g. by a render). Returns true while work
+// remains, so the idle driver knows to come back.
+bool WaveformRenderer::advanceOverviewScan(Sample* sample, int32_t maxClusters) {
+
+	const int32_t endClusters = sample->getFirstClusterIndexWithNoAudioData();
+
+	// Never scan header-only clusters: start at the first cluster that actually holds audio.
+	sample->overviewScanNextCluster =
+	    std::max(sample->overviewScanNextCluster, sample->getFirstClusterIndexWithAudioData());
+
+	// If the valid range shrank (e.g. after invalidation), clamp the cursor back into range.
+	sample->overviewScanNextCluster = std::min(sample->overviewScanNextCluster, endClusters);
+
+	for (int32_t budget = maxClusters; budget > 0 && sample->overviewScanNextCluster < endClusters;) {
+		const int32_t clusterIndex = sample->overviewScanNextCluster;
+
+		if (sample->stream().entry(clusterIndex).investigatedWholeLength) {
+			sample->overviewScanNextCluster++; // Free; don't spend budget on cache hits
+			continue;
+		}
+
+		// Authoritative "is card I/O safe right now?" guard: each investigateWholeCluster can issue a
+		// synchronous load, so bail before every one rather than compete with the card or audio routine
+		// (#4460). This mirrors the loader pump's own gate (currentlyAccessingCard / audioRoutineLocked),
+		// so it also scales safely if maxClusters ever grows past 1. `currentlyAccessingCard` is the extern
+		// from extern.h included at the top of this file.
+		if (currentlyAccessingCard || AudioEngine::audioRoutineLocked) {
+			return true;
+		}
+
+		if (!investigateWholeCluster(sample, clusterIndex)) {
+			return true; // Card busy or still recording - retry this cluster next time without advancing
+		}
+
+		sample->overviewScanNextCluster++;
+		budget--;
+	}
+
+	return sample->overviewScanNextCluster < endClusters;
 }
 
 void WaveformRenderer::getColBarPositions(int32_t xDisplay, WaveformRenderData* data, int32_t* min24, int32_t* max24,

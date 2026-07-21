@@ -137,12 +137,9 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
 - **Status:** live **only when `efatfs_streaming` is enabled** (not a default feature,
   `src/bsp/rust/Cargo.toml:117`). It was recorded as an SP1 carry-forward ("SdBlockDevice must go through
   SD_BUS arbitration (currently bypasses)") and never actioned.
-- **⚠️ BLOCKS the SP-stream-read flag flip.** `efatfs_streaming` must not become a default feature until
-  this is fixed — the flip is precisely what makes this reachable in shipped builds.
-- **Fix:** route `SdBlockDevice` through `crate::sd::locked_*`, or otherwise ensure the efatfs transfer
-  path takes `SD_BUS` for the same window the C-FatFS path does. Verify the lock is not held across a
-  point that would invert against the efatfs `FS` mutex ordering (`open` takes FS→HANDLES; `read_at`
-  takes HANDLES→FS).
+- **⚠️ BLOCKED the SP-stream-read flag flip** — now unblocked by the fix above. `efatfs_streaming` must
+  not have become a default feature until this was fixed, because the flip is precisely what makes it
+  reachable in shipped builds.
 - **Found by:** source analysis while verifying whether efatfs self-serialization removes the need for
   fiber dispatch (it does not — see B6 and
   `docs/dev/rustfs_sp_stream_read_completion_design.md` §6). Inferred from source; not observed on

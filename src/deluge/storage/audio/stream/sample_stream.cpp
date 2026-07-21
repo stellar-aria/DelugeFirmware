@@ -26,6 +26,7 @@
 #include <memory>
 #include <new>
 #include <span>
+#include <string>
 #include <utility>
 
 #include "deluge_resource.h"                 // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
@@ -116,6 +117,13 @@ void SampleStream::release_asset() {
 		}
 		resource_asset_id_ = DELUGE_RESOURCE_NO_ASSET;
 	}
+	// Close the embedded-fatfs read handle (if the `efatfs_streaming` path opened one). The `!= 0`
+	// guard makes this idempotent, so `~SampleStream`'s backstop call after `~Sample`'s explicit one
+	// is a no-op. `deluge_efatfs_close` is a weak no-op on every non-efatfs BSP/config.
+	if (efatfs_handle_ != 0) {
+		deluge_efatfs_close(efatfs_handle_);
+		efatfs_handle_ = 0;
+	}
 }
 
 bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters) {
@@ -131,6 +139,28 @@ bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode
 			sector = *sectorResult;
 		}
 		table_[i].sdAddress = sector;
+	}
+
+	// Under the `efatfs_streaming` build, also open an embedded-fatfs file handle for this sample so
+	// the streaming READ can route through the Rust FS (begin_fill() emits this handle; ProdOps reads
+	// via it). The `sdAddress` seeding above stays as-is: it is still the C-FatFS fallback AND is
+	// consumed by BlockReadSource. `deluge_streaming_efatfs_active()` is false on every other
+	// build/BSP, so this whole block is inert (leaves efatfs_handle_ == 0 → the sector path).
+	if (deluge_streaming_efatfs_active()) {
+		// `path` is a std::string_view (not NUL-terminated); deluge_efatfs_open needs a C string.
+		// Sample-load is not the realtime path, so a bounded owning copy for the NUL terminator is
+		// fine (paths are std::string throughout the storage layer anyway — no fixed max-path
+		// constant to key a stack buffer off of).
+		std::string cpath{path};
+		uint32_t handle = 0;
+		if (deluge_efatfs_open(cpath.c_str(), &handle)) {
+			efatfs_handle_ = handle;
+		}
+		else {
+			// Leave efatfs_handle_ == 0 → begin_fill() emits handle 0 → ProdOps uses the sector
+			// path. Don't abort the stream: the C-FatFS residency table seeded above still works.
+			D_PRINTLN("efatfs open failed; streaming falls back to C FatFS");
+		}
 	}
 	return true;
 }

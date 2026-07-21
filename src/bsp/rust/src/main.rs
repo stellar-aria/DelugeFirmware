@@ -437,6 +437,57 @@ async fn app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
+    // SP1a Task 6 (`efatfs_streaming` feature, off by default): give the FS
+    // allocator a real backing arena, then mount the single-owner
+    // embedded-fatfs `FileSystem` — BEFORE `deluge_app_init` so the FS is ready
+    // for the first C++ sample-load. A failed mount must NOT brick boot: it just
+    // leaves `deluge_efatfs_open` returning false later, so C++ falls back to
+    // the C-FatFS sector path. The SD block driver is already up (boot_init
+    // above) and nothing has touched the card yet.
+    //
+    // CAVEAT: this and `bench_fs` (Task 4) BOTH init `crate::FS_ALLOCATOR` over
+    // their own arena — enabling both features at once would double-init it.
+    // Don't: `bench_fs` is a throwaway benchmark feature, `efatfs_streaming` is
+    // the real read path.
+    #[cfg(feature = "efatfs_streaming")]
+    {
+        // Backing arena for `crate::FS_ALLOCATOR` (see its doc): embedded-fatfs's
+        // `alloc` feature needs a live heap before its first allocation (LFN
+        // directory-scan scratch, handle-table strings). 96 KiB matches the size
+        // `bench_fs` proved on-device — plain `.bss`, well within the RZ/A1L's
+        // on-chip SRAM.
+        const EFATFS_ARENA_SIZE: usize = 96 * 1024;
+        static mut EFATFS_ARENA: [u8; EFATFS_ARENA_SIZE] = [0; EFATFS_ARENA_SIZE];
+
+        // SAFETY: `EFATFS_ARENA` is a function-local static this block alone ever
+        // touches; this runs at most once (app_task runs once). `addr_of_mut!` +
+        // `size_of_val(&*p)` (not `&mut EFATFS_ARENA` directly) mirrors the exact
+        // idiom `bench_fs::init_allocator` / `RUST_SRAM_POOL` use, avoiding a
+        // `static_mut_refs` reference to the static itself.
+        let (base, size) = unsafe {
+            let p = core::ptr::addr_of_mut!(EFATFS_ARENA);
+            (p.cast::<u8>(), core::mem::size_of_val(&*p))
+        };
+        // SAFETY: `base`/`size` describe that same live, exclusively-owned
+        // 'static arena; `deluge_heap_create` only ever writes within
+        // `[base, base+size)`.
+        let handle = unsafe { fs_alloc::deluge_heap_create(base, size) };
+        assert!(
+            !handle.is_null(),
+            "efatfs: {EFATFS_ARENA_SIZE}-byte arena too small for a DelugeHeap control block"
+        );
+        crate::FS_ALLOCATOR.init(handle);
+        log::info!(
+            "efatfs: FS_ALLOCATOR initialised over a {} KiB arena",
+            EFATFS_ARENA_SIZE / 1024
+        );
+
+        match crate::efatfs_fs::mount().await {
+            Ok(()) => log::info!("efatfs: mounted"),
+            Err(()) => log::warn!("efatfs: mount failed — streaming falls back to C FatFS"),
+        }
+    }
+
     // SP1 Task 4 (`bench_fs` feature, off by default): run the on-device
     // embedded-fatfs-vs-C-FatFS read-throughput benchmark right here — the SD
     // block driver is up but nothing has touched the card yet, so its two

@@ -115,6 +115,46 @@ touching the card). But this **will** race real audio-driven SD access once some
 concurrent exists. **SP2 must route `SdBlockDevice` through the same `SD_BUS`
 arbitration the C diskio layer uses** before it runs alongside the audio path.
 
+## Significant finding (hardware): real cards are MBR-partitioned — `embedded-fatfs` needs the offset
+
+The single most important thing the on-device run caught, invisible to every host test:
+**a real Deluge SD card is MBR-partitioned.** Sector 0 is the partition table (`0xAA55`
+signature, jump bytes `00 00 00` — *not* a FAT `EB`/`E9` boot-sector jump), and the FAT
+volume's boot sector lives at the partition's start LBA (2048 on the test card). Mounting
+`embedded-fatfs` directly over the whole `SdBlockDevice` made it read the MBR as a FAT VBR
+and fail with `CorruptedFileSystem`. **C FatFS handles this transparently** (its `f_mount`
+auto-detects MBR vs VBR and follows the partition); embedded-fatfs does not — the caller
+must give it the offset.
+
+This was never exercised on host because the `fs_differential` mtools fixtures are
+partitionless **superfloppies** (`mformat` writes the FAT VBR at sector 0). It's a
+textbook fixture-vs-real-card blind spot — precisely the class SP0's report warned SP1/SP2
+not to assume the host harness covered.
+
+- **Fix (prototyped in `bench_fs`, confirmed on hardware):** read sector 0, and if it's an
+  MBR, mount over a `block_device_adapters::StreamSlice` of the first partition
+  (`start_lba·512 .. (start_lba+nsec)·512`); fall back to whole-device for a superfloppy.
+  With that, embedded-fatfs mounts the real card and reads it at parity (see Throughput).
+- **SP2 requirement:** the device FS mount must go through MBR/partition resolution —
+  `StreamSlice` as above, or `embedded-partitions` (in the same vendored workspace) for
+  general MBR parsing — before `FileSystem::new`. **SP2's host differential must also gain
+  a partitioned (MBR) fixture**, not just superfloppies, so this can't regress unseen.
+- The card itself was verified healthy (`fsck.fat`: 42 files, clusters consistent) — the
+  `CorruptedFileSystem` error was embedded-fatfs mis-reading the MBR, not real damage.
+
+## Significant finding (hardware): `log::` is release-stripped; benchmark output uses `rprintln!`
+
+`rza1l-hal` and `deluge-bsp` both declare `log = { features = ["release_max_level_off"] }`.
+Cargo's feature unification makes that **additive across the whole graph**, so in any
+`--release` build **every `log::` macro (down to `error!`) is compiled to nothing** —
+confirmed empirically (the release ELF contains none of the log strings; the debug ELF
+does). This is deliberate (strip logging from release firmware), and `log`→RTT works
+normally in *debug* builds. But the benchmark **must** run in release for a fair number (a
+debug build would make Rust `embedded-fatfs` artificially slow versus always-optimized C
+FatFS), so `bench_fs`'s own diagnostics use `rtt_target::rprintln!` — which is not a `log`
+macro and survives release. (Note: this rtt-target's `rprintln!` does *not* support inline
+capture `{x}`; the benchmark uses explicit positional args.)
+
 ## Throughput
 
 Task 4 built the on-device benchmark structure (`src/bsp/rust/src/bench_fs.rs`, gated
@@ -149,9 +189,26 @@ Cross-compiles clean for `armv7a-none-eabihf`, both with `--features bench_fs` a
 default features (i.e., the feature gate genuinely keeps this out of normal builds);
 `crates/Cargo.lock` untouched.
 
-**What SP1 does NOT have: a real on-device number.** `bench_fs` is
-build-and-link-proven, not run-proven — the actual `SP1_BENCH` MB/s line is Kate's
-hardware gate to run and read.
+**On-device result (measured 2026-07-20, real Deluge over J-Link):**
+
+```
+bench_fs: scanned 13 dirs / 29 files; largest = APPS/community (65,447,824 bytes)
+SP1_BENCH efatfs read=3.83 MB/s ; cfatfs read=3.84 MB/s
+```
+
+Reading a **62 MB** file off the real SD/SDHI/DMA path: **embedded-fatfs 3.83 MB/s vs
+C FatFS 3.84 MB/s — 99.7%, indistinguishable. The throughput-parity gate PASSES.** The
+single-block-`BufStream` overhead the host proxy inflated to ~38% (below) is **negligible
+on real hardware**: the SD transfer latency dominates and swamps the per-op CPU
+difference — exactly the "not SD-representative" caveat the proxy carried. No SP2
+cache-enlargement is needed for read parity; keeping the cluster→sector map is now an
+optional optimization, not a fix.
+
+Getting that number required three fixes on top of the Task-4 build (all landed in
+`bench_fs.rs`, and each is itself a hardware finding — see below): output via
+`rtt_target::rprintln!` (not `log::`, which release-strips), a partition-aware
+`StreamSlice` mount, and a recursive file finder (this card's samples are nested, not in
+`SAMPLES/` top level).
 
 **Methodology caveats for reading that run:**
 
@@ -181,7 +238,9 @@ streaming-fill integration) is the natural lever.
 
 ## Conclusion
 
-**Device bridge PROVEN in software; throughput-parity is the remaining hardware gate.**
+**Device bridge PROVEN in software AND on hardware; throughput at parity.** (On-device run
+2026-07-20 closed the one gate SP1 had deferred — embedded-fatfs reads the real card at
+3.83 MB/s vs C FatFS 3.84 MB/s, after the MBR-partition fix below.)
 
 - **Correctness:** the full SP0 differential (8 tests, both FAT variants, read+write,
   the FAT32 `..`-cluster probe) now runs green through the *real*

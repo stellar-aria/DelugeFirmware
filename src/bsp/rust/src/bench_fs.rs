@@ -44,14 +44,18 @@ extern crate alloc;
 
 use alloc::{ffi::CString, string::String};
 
-use block_device_adapters::BufStream;
+use block_device_adapters::{BufStream, StreamSlice};
 use embassy_time::{Duration, Instant};
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 use embedded_io_async::Read as _;
 
 use crate::fat_block_device::SdBlockDevice;
 
-type Efatfs = FileSystem<BufStream<SdBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter>;
+type Efatfs = FileSystem<
+    StreamSlice<BufStream<SdBlockDevice, 512>>,
+    DefaultTimeProvider,
+    LossyOemCpConverter,
+>;
 
 /// Backing arena for `crate::FS_ALLOCATOR` (see `main.rs`'s doc comment on
 /// that static). `embedded-fatfs`'s `alloc` feature needs a live heap before
@@ -182,31 +186,66 @@ fn mb_per_s(bytes: u64, elapsed: Duration) -> f64 {
 /// convention — see e.g. `audio_file_manager.h`'s `"SAMPLES/CLIPS"`) and
 /// size.
 async fn find_largest_file(fs: &Efatfs) -> Option<(String, u64)> {
-    let root = fs.root_dir();
-    let (dir, prefix) = match root.open_dir("SAMPLES").await {
-        Ok(d) => (d, "SAMPLES/"),
-        Err(_) => (root, ""),
-    };
-    let mut iter = dir.iter();
+    use alloc::vec::Vec;
+    // Iterative DFS over a worklist of directory paths (empty = root), so no async
+    // recursion and bounded stack use. Deluge cards keep samples in nested folders
+    // (SAMPLES/<pack>/…), so a single-level scan of SAMPLES/ or / finds nothing —
+    // we walk the whole tree and pick the largest regular file anywhere.
     let mut best: Option<(String, u64)> = None;
-    while let Some(entry) = iter.next().await {
-        let Ok(entry) = entry else { continue };
-        if entry.is_dir() {
-            continue;
+    let (mut files, mut dirs) = (0u32, 0u32);
+    let mut budget = 20_000u32; // cap total entries visited (time + arena bound)
+    let mut work: Vec<String> = Vec::new();
+    work.push(String::new());
+    while let Some(path) = work.pop() {
+        let dir = if path.is_empty() {
+            fs.root_dir()
+        } else {
+            match fs.root_dir().open_dir(&path).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            }
+        };
+        let mut iter = dir.iter();
+        while let Some(entry) = iter.next().await {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let child = if path.is_empty() {
+                name.clone()
+            } else {
+                let mut c = path.clone();
+                c.push('/');
+                c.push_str(&name);
+                c
+            };
+            if entry.is_dir() {
+                dirs += 1;
+                work.push(child);
+            } else {
+                files += 1;
+                let size = entry.len();
+                if best.as_ref().map_or(true, |(_, b)| size > *b) {
+                    best = Some((child, size));
+                }
+            }
         }
-        let size = entry.len();
-        let bigger = best
-            .as_ref()
-            .map_or(true, |(_, best_size)| size > *best_size);
-        if bigger {
-            best = Some((entry.file_name(), size));
+        if budget == 0 {
+            break;
         }
     }
-    best.map(|(name, size)| {
-        let mut full = String::from(prefix);
-        full.push_str(&name);
-        (full, size)
-    })
+    rtt_target::rprintln!(
+        "bench_fs: scanned {} dirs / {} files; largest = {:?}",
+        dirs,
+        files,
+        best
+    );
+    best
 }
 
 /// Read `path` sequentially through `embedded-fatfs`, timing the whole
@@ -327,23 +366,85 @@ fn cfatfs_bench_read(path: &str) -> Option<(u64, f64)> {
 /// to the normal boot instead of panicking, so this feature never bricks the
 /// image it's built into.
 pub async fn run() {
-    log::info!("bench_fs: SP1 Task 4 -- embedded-fatfs vs C FatFS read throughput");
+    rtt_target::rprintln!("bench_fs: SP1 Task 4 -- embedded-fatfs vs C FatFS read throughput");
     init_allocator();
 
-    let storage = BufStream::<SdBlockDevice, 512>::new(SdBlockDevice);
+    // Real SD cards are MBR-partitioned: sector 0 is the partition table and the
+    // FAT boot sector (VBR) lives at the partition's start_lba — NOT sector 0. Our
+    // host mtools fixtures were partitionless "superfloppies" (VBR at sector 0),
+    // so this was never exercised there, and mounting embedded-fatfs directly over
+    // the whole device fails on a real card (it reads the MBR as a VBR). Detect the
+    // layout and mount over the right byte window: a FAT VBR begins with an EB/E9
+    // jump; an MBR has boot-signature 0xAA55 and a partition entry at offset 446
+    // (type @ +4, start_lba @ +8, sector-count @ +12). C FatFS handles this
+    // internally at f_mount; embedded-fatfs needs the offset given explicitly here.
+    let (part_start, part_end) = {
+        use aligned::{A4, Aligned};
+        use block_device_driver::BlockDevice;
+        let mut s0: [Aligned<A4, [u8; 512]>; 1] = [Aligned([0u8; 512])];
+        if let Err(e) = SdBlockDevice.read(0, &mut s0).await {
+            rtt_target::rprintln!(
+                "bench_fs: sector0 read failed: {:?} -- benchmark skipped",
+                e
+            );
+            return;
+        }
+        let s = &s0[0][..];
+        let sig = u16::from_le_bytes([s[510], s[511]]);
+        let is_fat_vbr = s[0] == 0xEB || s[0] == 0xE9;
+        let ptype = s[446 + 4];
+        let plba = u32::from_le_bytes([s[454], s[455], s[456], s[457]]);
+        let nsec = u32::from_le_bytes([s[458], s[459], s[460], s[461]]);
+        rtt_target::rprintln!(
+            "bench_fs: sector0 sig=0x{:04x} jump=[{:02x} {:02x} {:02x}] | MBR part0 type=0x{:02x} start_lba={} nsec={}",
+            sig,
+            s[0],
+            s[1],
+            s[2],
+            ptype,
+            plba,
+            nsec
+        );
+        if !is_fat_vbr && sig == 0xAA55 && plba != 0 {
+            let start = plba as u64 * 512;
+            (start, start + nsec as u64 * 512)
+        } else {
+            (0u64, SdBlockDevice.size().await.unwrap_or(u64::MAX))
+        }
+    };
+
+    let storage = match StreamSlice::new(
+        BufStream::<SdBlockDevice, 512>::new(SdBlockDevice),
+        part_start,
+        part_end,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            rtt_target::rprintln!(
+                "bench_fs: StreamSlice::new failed: {:?} -- benchmark skipped",
+                e
+            );
+            return;
+        }
+    };
     let fs = match FileSystem::new(storage, FsOptions::new()).await {
         Ok(fs) => fs,
         Err(e) => {
-            log::error!("bench_fs: embedded-fatfs mount failed: {e:?} -- benchmark skipped");
+            rtt_target::rprintln!(
+                "bench_fs: embedded-fatfs mount failed: {:?} -- benchmark skipped",
+                e
+            );
             return;
         }
     };
 
     let Some((path, size)) = find_largest_file(&fs).await else {
-        log::error!("bench_fs: no file found under SAMPLES/ or / -- benchmark skipped");
+        rtt_target::rprintln!("bench_fs: no file found under SAMPLES/ or / -- benchmark skipped");
         return;
     };
-    log::info!("bench_fs: target file \"{path}\" ({size} bytes)");
+    rtt_target::rprintln!("bench_fs: target file \"{}\" ({} bytes)", path, size);
 
     let Some((efatfs_bytes, efatfs_mbps)) = efatfs_bench_read(&fs, &path).await else {
         return;
@@ -367,5 +468,9 @@ pub async fn run() {
         );
     }
 
-    log::info!("SP1_BENCH efatfs read={efatfs_mbps:.2} MB/s ; cfatfs read={cfatfs_mbps:.2} MB/s");
+    rtt_target::rprintln!(
+        "SP1_BENCH efatfs read={:.2} MB/s ; cfatfs read={:.2} MB/s",
+        efatfs_mbps,
+        cfatfs_mbps
+    );
 }

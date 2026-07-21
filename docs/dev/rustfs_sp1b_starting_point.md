@@ -1,4 +1,25 @@
-# SP1b — retire the C-FatFS streaming map — STARTING POINT (not yet brainstormed)
+# SP1b — retire the C-FatFS streaming map — STARTING POINT (SUPERSEDED)
+
+> ## ⚠️ SUPERSEDED — READ `docs/dev/rustfs_sp_stream_read_completion_design.md` INSTEAD
+>
+> This document is kept for history. **Three of its load-bearing claims are wrong**, each disproved by
+> work on `feat/rustfs-sp1b-cached-chain`:
+>
+> 1. **The cached FAT chain (its central proposal) was DROPPED.** Its premise — an O(n) chain re-walk on
+>    backward seeks — does not survive measurement. A re-walk costs `ceil(k/128)` FAT *sector* reads, not
+>    `k` reads, so real looping playback measures **1.03x** and typical samples ~1.6% even under constant
+>    seeking. Do not rebuild it. See the superseding doc §1.1 for the measured model and two measurement
+>    traps that were hit and caught.
+> 2. **"Backward seeks re-walk" understates it** — upstream `seek()` re-walked on *any* cross-cluster
+>    seek, including one cluster forward. Fixed in commit `20af6c863` (`VENDOR.md` SP1b-1).
+> 3. **"Move the sync-fiber read path" aims at dead code.** `loader::pump` is unreachable whenever
+>    `async_streaming_loader` is on, and it is a default feature. The live C-FatFS read path is
+>    `read_cluster_data` → `StreamReadSource` via `CLUSTER_LOAD_IMMEDIATELY`, which is unconditional on
+>    every build — and it receives `fill.handle` but never consults it.
+>
+> The work is now framed as completing **SP-stream-read**, whose exit criterion is that nothing above the
+> storage port knows what a sector or a cluster is.
+
 
 **Status:** teed up for a fresh session. **Not an approved spec** — start with `superpowers:brainstorming`
 to refine scope/approach, then `writing-plans`. This doc exists so that session doesn't have to re-derive

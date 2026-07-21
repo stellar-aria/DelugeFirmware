@@ -160,24 +160,42 @@ change"** — the gate passing for the wrong reason. Post-rung, failure is loud.
 
 ---
 
-## 6. The open risk — fiber context of `read_cluster_data`'s callers
+## 6. Prerequisite — make `CLUSTER_LOAD_IMMEDIATELY` fiber-dispatching
 
-**This must be settled before any code is written.**
+**Investigated 2026-07-21. Verdict was RED, and the resolution is a prerequisite step, not a redesign.**
 
-On device, `deluge_stream_source_read_at` wraps `efatfs_fs::read_at` via `block_on_fiber`, which is valid
-only while `crate::fiber::on_fiber()`. But `read_cluster_data` is reached from `CLUSTER_LOAD_IMMEDIATELY`
-sites including the waveform renderer, `wave_table.cpp`, `sample.cpp`, `cluster_byte_source.cpp`,
-`audio_engine.cpp`, and the recorder. **If any of those run off-fiber, the read cannot bridge — and with
-the map deleted there is no fallback.** That is a hard blocker, not a graceful degradation.
+On device, `deluge_stream_source_read_at` wraps `efatfs_fs::read_at` via `block_on_fiber`, valid only
+while `crate::fiber::on_fiber()`. The investigation found that `CLUSTER_LOAD_IMMEDIATELY` bypasses every
+piece of fiber-dispatch machinery: `get_cluster` → `deluge_resource_acquire` → `cluster_materialize` →
+`read_cluster_data` runs synchronously in the caller's context, and several callers are plain UI handlers
+with no `Owner::run` wrap — waveform redraw, marker drag, clip shift, bulk import, file-selection commit.
+`wave_table.cpp` and `cluster_byte_source.cpp` are reached from **both** contexts.
 
-The implementation plan's **first task is an investigation with a stop-and-report gate**: enumerate every
-`read_cluster_data` caller and establish its fiber context. If all are on-fiber, this design stands as
-written. If not, the design is revisited before code — possibly needing a blocking-capable context, a
-synchronous efatfs entry that does not require the fiber, or relocating those callers.
+**This is a pre-existing defect, not one this rung introduces** — it is recorded as **B6** in
+`docs/dev/known-concurrency-bugs.md` with the full caller trace. Those paths already perform synchronous
+card transfers off the storage owner; `sd.rs:398` silently absorbs it with a parking `block_on`, and the
+assert that would catch it (`sd.rs:386-390`) is behind the non-default `storage-owner-audit` feature.
 
-Independently worth examining: `audio_engine.cpp` performing a synchronous cluster load at all. If that
-sits on the audio path it is a latency hazard predating this work, and should be reported rather than
-silently inherited.
+**Two findings that narrow the problem:**
+- The **RT audio path is safe by construction** — `sample_low_level_reader`, `voice_sample` and
+  `time_stretcher` use `CLUSTER_ENQUEUE` only, never a synchronous read.
+- **`audio_engine.cpp:1391` is fine** — `previewSample`'s only caller is `sample_browser.cpp:596`,
+  dispatched via `Owner::run` at `:551/564`. It is not on the RT render path.
+
+**The fix:** give `get_cluster`'s synchronous-acquire path the same on-fiber dispatch `request_pump`
+already has (`loader.cpp:169-192`) — if not already `deluge_storage_on_owner()`, dispatch via
+`Coalescer`/`Owner::run_priority`; if already on it, run inline.
+
+Chosen over wrapping each of the ~7 UI call sites in `Owner::run` because it is **one location**,
+**structural** (the property holds for callers that do not know about it, including future ones), and
+**already proven** — it is the exact machinery `request_pump` uses.
+
+**This step is independently correct and must land first.** It fixes B6 whether or not the efatfs routing
+ever happens, and this rung *requires* it: once the map is deleted there is no non-fiber fallback left.
+
+**Acceptance gate:** build with `storage-owner-audit` enabled, exercise the waveform renderer, marker
+editor, clip shift and bulk sample import, and require the `sd.rs` single-owner assert to stay silent.
+That test fails today — which is what makes it a real gate rather than a formality.
 
 ---
 

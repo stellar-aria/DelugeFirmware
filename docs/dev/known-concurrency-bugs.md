@@ -1,6 +1,6 @@
 # Known Concurrency Bugs — preemptive-audio storage/streaming path
 
-**Status:** PARTIALLY FIXED — **B1 + B2 + B3 FIXED** (2026-07-19; B1 = the `Manager` chunk-table `Cell<ChunkSlot>` race, synchronized via asymmetric fiber-side critical sections; B2/B3 = the recorder hand-off races. See each below.). **B4 and B5 (new) remain OPEN**, as do additional pre-existing **streaming-path** races the harness surfaces nondeterministically (see "Additional surfaced races"). A run's `UNCATALOGUED=0` is therefore not guaranteed; the specific, reproducible guarantee is that the recorder B2/B3 races are gone and the B1 `Cell<ChunkSlot>`/`mem::replace`/`loader_next` signatures are synchronized at the source.
+**Status:** PARTIALLY FIXED — **B1 + B2 + B3 FIXED** (2026-07-19; B1 = the `Manager` chunk-table `Cell<ChunkSlot>` race, synchronized via asymmetric fiber-side critical sections; B2/B3 = the recorder hand-off races. See each below.). **B4, B5 and B6 (new) remain OPEN**, as do additional pre-existing **streaming-path** races the harness surfaces nondeterministically (see "Additional surfaced races"). A run's `UNCATALOGUED=0` is therefore not guaranteed; the specific, reproducible guarantee is that the recorder B2/B3 races are gone and the B1 `Cell<ChunkSlot>`/`mem::replace`/`loader_next` signatures are synchronized at the source.
 **Found by:** the host streaming-underrun harness (`src/bsp/rust/preemptive_race_tsan/` — ThreadSanitizer over the real `deluge_app` with a preemptive audio thread) and its deterministic timing lens (`src/bsp/rust/lens1_vt_sim/`). All found on host, **without hardware**.
 
 ## Scope / when these bite
@@ -72,3 +72,47 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
 ---
 
 *This record was produced from the streaming-underrun harness's findings. The fuller per-finding writeups + both racing stacks live in the harness's `open_findings_races.txt` (committed) and the (local) task reports. **B2 + B3 are fixed** (2026-07-19, recorder hand-off: stable-address `SegmentedVector` + release/acquire atomics); **B1, B4, B5 remain open** and are the prerequisites still owed before shipping preemptive audio with SD record-while-stream.*
+
+## B6 — `CLUSTER_LOAD_IMMEDIATELY` performs card transfers off the storage owner — HIGH — **OPEN (new, 2026-07-21)**
+
+- **Where:** `SampleStream::get_cluster` (`src/deluge/storage/audio/stream/sample_stream.cpp:316-346`) →
+  `deluge_resource_acquire` → `cluster_materialize` (`:42-58`) → `read_cluster_data` (`:180-254`) →
+  `StreamReadSource` → `deluge_stream_read_at` → `deluge_block_read`. **This whole chain runs
+  synchronously in whatever context called `get_cluster`, with no fiber dispatch anywhere in it.**
+- **Contrast with the path that gets it right:** `loader::request_pump` (`loader.cpp:169-192`) is
+  fiber-aware by construction — if not already `deluge_storage_on_owner()` it dispatches via
+  `Coalescer`/`Owner::run_priority`, otherwise it runs inline. `CLUSTER_LOAD_IMMEDIATELY` bypasses that
+  machinery entirely.
+- **Off-fiber callers found** (traced 2026-07-21; none wrapped in `deluge::storage::Owner::run`):
+  `waveform_renderer.cpp:404,433` (UI waveform redraw — slicer, marker editor, audio-clip view, browser,
+  instrument-clip view); `sample.cpp:1395,1420` via `sample_browser.cpp:1369,1578,1589`
+  (`loadAllSamplesInFolder`, bulk import); `sample_holder_for_voice.cpp:139` via
+  `sample_browser.cpp:1025,1799` (`claimCurrentFile`); `sample_marker_editor.cpp:200` (marker drag);
+  `audio_clip.cpp:1396` (`shiftHorizontally`).
+  **Reached from BOTH contexts** (the dangerous case): `wave_table.cpp:422` and
+  `cluster_byte_source.cpp:51`, both inside the general `AudioFile::load` /`buildAudioFileFromCard`
+  pipeline, which is entered on-fiber for song load/preview and off-fiber for the UI paths above.
+- **Confirmed NOT affected:** the RT audio render path never loads synchronously —
+  `sample_low_level_reader.cpp:310,400`, `voice_sample.cpp:207,868`, `time_stretcher.cpp:1141` all use
+  `CLUSTER_ENQUEUE`. `audio_engine.cpp:1391` (`previewSample`) *is* on-fiber: its only caller is
+  `sample_browser.cpp:596`, dispatched via `Owner::run` at `:551/564`.
+- **Why it goes unnoticed:** `src/bsp/rust/src/sd.rs:386-390` carries exactly the assert that would catch
+  this — `debug_assert!(on_fiber() || !worker_started())`, "FatFS card transfer off the storage owner
+  after the owner started — single-owner discipline violated at runtime" — but it is
+  `#[cfg(feature = "storage-owner-audit")]`, and that feature is **not** in `default`
+  (`src/bsp/rust/Cargo.toml:117` = `["rtt", "async_streaming_loader"]`). Meanwhile the transfer still
+  *works*: `sd.rs:398` falls back to a parking `block_on` when off-fiber. That fallback is documented as
+  being for the **boot mount**, valid only "before the owner is up".
+- **Impact:** C FatFS is **not re-entrant**, which is the entire reason the single-owner discipline
+  exists. A UI-thread synchronous card transfer concurrent with a fiber-side FatFS op is the corruption
+  case the ladder was built to prevent. Also a latency hazard: these parks block the UI thread for a
+  full SD transfer.
+- **Reachability caveat (do not overstate):** the off-fiber call sites are *proven*; an actual concurrent
+  FatFS entry has **not** been demonstrated. The bug is that the discipline is unenforced on this path,
+  not that a specific corruption has been observed. A first repro step is to enable
+  `storage-owner-audit` and exercise the waveform renderer or marker editor.
+- **Fix (designed, not implemented):** give `get_cluster`'s synchronous-acquire path the same on-fiber
+  dispatch `request_pump` already has — one location, structural, so the property holds for callers that
+  do not know about it. Tracked as the prerequisite step of SP-stream-read
+  (`docs/dev/rustfs_sp_stream_read_completion_design.md` §6); that rung **requires** it, because once the
+  cluster→sector map is deleted there is no non-fiber fallback left.

@@ -1,6 +1,6 @@
 # Known Concurrency Bugs — preemptive-audio storage/streaming path
 
-**Status:** PARTIALLY FIXED — **B1 + B2 + B3 FIXED** (2026-07-19; B1 = the `Manager` chunk-table `Cell<ChunkSlot>` race, synchronized via asymmetric fiber-side critical sections; B2/B3 = the recorder hand-off races. See each below.). **B4, B5, B6 and B7 (new) remain OPEN**, as do additional pre-existing **streaming-path** races the harness surfaces nondeterministically (see "Additional surfaced races"). A run's `UNCATALOGUED=0` is therefore not guaranteed; the specific, reproducible guarantee is that the recorder B2/B3 races are gone and the B1 `Cell<ChunkSlot>`/`mem::replace`/`loader_next` signatures are synchronized at the source.
+**Status:** PARTIALLY FIXED — **B1 + B2 + B3 + B7 FIXED** (B1/B2/B3 2026-07-19; B1 = the `Manager` chunk-table `Cell<ChunkSlot>` race, synchronized via asymmetric fiber-side critical sections; B2/B3 = the recorder hand-off races. B7 2026-07-21 = the efatfs block device's `SD_BUS` bypass. See each below.). **B4, B5 and B6 remain OPEN**, as do additional pre-existing **streaming-path** races the harness surfaces nondeterministically (see "Additional surfaced races"). A run's `UNCATALOGUED=0` is therefore not guaranteed; the specific, reproducible guarantee is that the recorder B2/B3 races are gone and the B1 `Cell<ChunkSlot>`/`mem::replace`/`loader_next` signatures are synchronized at the source.
 **Found by:** the host streaming-underrun harness (`src/bsp/rust/preemptive_race_tsan/` — ThreadSanitizer over the real `deluge_app` with a preemptive audio thread) and its deterministic timing lens (`src/bsp/rust/lens1_vt_sim/`). All found on host, **without hardware**.
 
 ## Scope / when these bite
@@ -117,8 +117,14 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
   (`docs/dev/rustfs_sp_stream_read_completion_design.md` §6); that rung **requires** it, because once the
   cluster→sector map is deleted there is no non-fiber fallback left.
 
-## B7 — efatfs block device bypasses `SD_BUS` arbitration — HIGH — **OPEN (new, 2026-07-21)**
+## B7 — efatfs block device bypasses `SD_BUS` arbitration — HIGH — **FIXED (2026-07-21)**
 
+- **Fix:** `SdBlockDevice::read`/`write` now call `crate::sd::locked_read_sectors`/`locked_write_sectors`,
+  taking `SD_BUS` for the whole transfer exactly as the C-FatFS path does. Lock order is FS → SD_BUS
+  (this impl runs under the efatfs FS mutex); nothing takes SD_BUS then FS, so no inversion. A comment
+  guard above the `impl` records why the raw driver calls must never come back.
+  **Still NEEDS-HARDWARE:** the interleaving was inferred from source, and the fix is verified by build +
+  inspection only — there is no host test, since `fat_block_device.rs` is `cfg(target_os = "none")`.
 - **Where:** `src/bsp/rust/src/fat_block_device.rs:64,78` — `SdBlockDevice::read`/`write` call
   `deluge_bsp::sd::read_sectors`/`write_sectors` **directly**, not `crate::sd::locked_read_sectors`
   /`locked_write_sectors`. The efatfs path therefore **never acquires `SD_BUS`**.

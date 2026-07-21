@@ -103,6 +103,21 @@
 			}
 		},
 		{
+			"type": "shell",
+			"label": "Build Rust BSP (bench_fs)",
+			"command": "cargo build --release --target armv7a-none-eabihf -Zbuild-std=core,alloc --features bench_fs",
+			"options": {
+				"cwd": "${workspaceFolder}/src/bsp/rust"
+			},
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			}
+		},
+		{
 			"type": "process",
 			"label": "Run JLink GDB Server",
 			"problemMatcher": [],

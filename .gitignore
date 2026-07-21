@@ -45,3 +45,8 @@ __pycache__
 # Superpowers process artifacts (specs, plans, ledger) — local, not shared
 .superpowers/
 docs/superpowers/
+/rtt-rust.log
+/rtt-bench.log
+/rtt.log
+tools/__pycache__/
+__pycache__/

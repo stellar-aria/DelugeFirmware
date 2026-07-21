@@ -160,7 +160,7 @@ change"** — the gate passing for the wrong reason. Post-rung, failure is loud.
 
 ---
 
-## 6. Prerequisite — make `CLUSTER_LOAD_IMMEDIATELY` fiber-dispatching
+## 6. Prerequisite — the synchronous UI callers must stop blocking the executor
 
 **Investigated 2026-07-21. Verdict was RED, and the resolution is a prerequisite step, not a redesign.**
 
@@ -182,20 +182,61 @@ assert that would catch it (`sd.rs:386-390`) is behind the non-default `storage-
 - **`audio_engine.cpp:1391` is fine** — `previewSample`'s only caller is `sample_browser.cpp:596`,
   dispatched via `Owner::run` at `:551/564`. It is not on the RT render path.
 
-**The fix:** give `get_cluster`'s synchronous-acquire path the same on-fiber dispatch `request_pump`
-already has (`loader.cpp:169-192`) — if not already `deluge_storage_on_owner()`, dispatch via
-`Coalescer`/`Owner::run_priority`; if already on it, run inline.
+### 6.1 Two resolutions were investigated and rejected
 
-Chosen over wrapping each of the ~7 UI call sites in `Owner::run` because it is **one location**,
-**structural** (the property holds for callers that do not know about it, including future ones), and
-**already proven** — it is the exact machinery `request_pump` uses.
+**Rejected — "dispatch the read onto the owner."** `Owner::run` is fire-and-forget; `owner.h` states it
+explicitly and adds *"`await` (a blocking, result-returning variant) is a later rung; this seam is
+`run`-only."* A synchronous cluster load needs the **bytes back**, so `run` cannot serve it. `request_pump`
+gets away with `run` only because draining a queue is fire-and-forget.
 
-**This step is independently correct and must land first.** It fixes B6 whether or not the efatfs routing
-ever happens, and this rung *requires* it: once the map is deleted there is no non-fiber fallback left.
+**Rejected — "efatfs self-serializes, so off-fiber callers become safe."** Verified UNSAFE (analysis
+2026-07-21). efatfs's own `Mutex` does make off-fiber callers *memory*-safe — no FS-state race, no
+`RefCell` panic — but it converts a corruption hazard into a **liveness** hazard:
+
+> `embassy_futures::block_on` is a tight `loop { fut.poll() }` with a **no-op waker**. If
+> `streaming_fill_task` suspends holding the `FS` guard, and a UI task on the same thread-mode executor
+> enters `block_on` on an efatfs read, that future's `FS.lock()` returns `Pending`, registers the no-op
+> waker, and the busy loop spins forever. The SDHI IRQ marks the fill task ready, but the CPU never
+> returns to `Executor::run` — it *is* the spinning stack. **Permanent deadlock**, and if the caller sits
+> on the audio `InterruptExecutor`, thread mode can never resume and audio dies with it.
+
+**This also kills `Owner::await` generally.** The hazard is structural, not specific to `block_on`: you
+cannot block a cooperative task on a single-core executor while waiting for another task *on that
+executor* to progress. `block_on_fiber` works only because the fiber is a **separate stack** that can
+genuinely suspend and hand control back (`fiber.rs:755-774` → `switch_to_main`).
+
+### 6.2 Decision — convert the synchronous UI callers
+
+The synchronous loads must stop being synchronous-on-the-executor. Each site becomes either
+**fiber-resident** (the whole operation dispatched via `Owner::run`, completing with a redraw/refresh) or
+**enqueue-and-redraw** (request the cluster, return, repaint on arrival — the pattern the RT path already
+uses via `CLUSTER_ENQUEUE`).
+
+Sites to convert (full trace in B6): `waveform_renderer.cpp:404,433`; `sample.cpp:1395,1420` via
+`loadAllSamplesInFolder`; `sample_holder_for_voice.cpp:139` via `claimCurrentFile`;
+`sample_marker_editor.cpp:200`; `audio_clip.cpp:1396`. Plus the two **dual-context** paths —
+`wave_table.cpp:422` and `cluster_byte_source.cpp:51` — which need care precisely because they are
+already reached correctly from song-load/preview and incorrectly from the UI.
+
+This is **UI-behaviour work with its own risk profile**, distinct from the storage work around it: an
+operation that used to block until data arrived now completes later. Each site needs its own answer to
+"what does the user see in between?" — and that is a design question per site, not a mechanical
+transform.
+
+**It is independently correct.** It fixes B6 — a defect in shipped firmware — whether or not the efatfs
+routing ever happens. It must land and be verified before the map deletion, because once the map is gone
+there is no non-fiber fallback left.
 
 **Acceptance gate:** build with `storage-owner-audit` enabled, exercise the waveform renderer, marker
-editor, clip shift and bulk sample import, and require the `sd.rs` single-owner assert to stay silent.
-That test fails today — which is what makes it a real gate rather than a formality.
+editor, clip shift and bulk sample import, and require the `sd.rs` single-owner assert
+(`sd.rs:386-390`) to stay silent. That test fails today, which is what makes it a real gate.
+
+### 6.3 B7 blocks the flag flip
+
+`SdBlockDevice` bypasses `SD_BUS` (`fat_block_device.rs:64,78`), so an efatfs transfer can interleave with
+a fiber-side C-FatFS transfer on the one SDHI controller. Recorded as **B7**. It is reachable only while
+`efatfs_streaming` is enabled — so **the flip in §5 must not land until B7 is fixed.** Fixing it is
+cheap and unblocked; it should land early rather than as part of the flip.
 
 ---
 

@@ -277,3 +277,171 @@ fn efatfs_core_sequential_read_transfer_overhead() {
          possible O(n) FAT-chain re-walk regression"
     );
 }
+
+/// Looping-playback proxy: models a sample looping over its back half — one
+/// BACKWARD seek at the loop point, then ~1024 clusters read forward
+/// SEQUENTIALLY before the next wrap. `seek()` has no "continue from
+/// current_cluster" branch (file.rs:489-516), so the one seek per wrap does
+/// re-walk the chain from `first_cluster`, but that cost is amortized over
+/// the ~1024 sequential reads that follow it — each of those hits `seek()`'s
+/// "already at this offset" early return (file.rs:485) and costs nothing
+/// extra. Four wraps here spend one re-walk each against 4096 total reads.
+///
+/// IMPORTANT: this measures the cost real looping playback actually pays —
+/// it does NOT measure seek cost in isolation, and its low overhead is NOT
+/// evidence that seeking is cheap in general. An amortized workload like
+/// this can't show what a seek-dense workload costs; that's what
+/// `efatfs_core_adversarial_seek_transfer_overhead` (below) is for, where
+/// every single read is a long-distance backward seek with nothing to
+/// amortize it against.
+#[test]
+fn efatfs_core_looping_playback_transfer_overhead() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+
+    const CLUSTER_SECTORS: u64 = 64; // mk_fixture.sh formats FAT32 with -c 64 (32 KiB)
+    let path = "/SAMPLES/huge.bin"; // 64 MiB = 2048 clusters
+    let file_len = EFatFs::mount().read_file(path).len() as u64;
+    let cluster_bytes = (CLUSTER_SECTORS * 512) as usize;
+    let clusters = file_len.div_ceil(cluster_bytes as u64);
+
+    // Loop over the back half: clusters [clusters/2, clusters), repeated. Each
+    // wrap is a backward seek across many clusters.
+    let loop_start = clusters / 2;
+    const PASSES: u64 = 4;
+    let reads = PASSES * (clusters - loop_start);
+    let data_sectors = reads * CLUSTER_SECTORS; // ideal: data sectors only
+
+    let storage = BufStream::<CountingBlockDevice, 512>::new(CountingBlockDevice);
+    let fs: FileSystem<_, DefaultTimeProvider, LossyOemCpConverter> =
+        block_on(FileSystem::new(storage, FsOptions::new())).expect("mount counting FS");
+
+    block_on(async {
+        let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
+        let mut table = HandleTable::new();
+        let h = table.insert(ctx).expect("insert");
+
+        BLOCKS_READ.store(0, Ordering::Relaxed);
+        let mut buf = vec![0u8; cluster_bytes];
+        for _ in 0..PASSES {
+            for c in loop_start..clusters {
+                let off = (c * cluster_bytes as u64) as u32;
+                assert!(
+                    table.read_at_owned(&fs, h, off, &mut buf).await,
+                    "loop read at cluster {c} was short"
+                );
+            }
+        }
+    });
+
+    let blocks = BLOCKS_READ.load(Ordering::Relaxed);
+    let overhead = blocks as f64 / data_sectors as f64;
+    println!(
+        "lens1-loop-proxy: clusters={clusters} loop_start={loop_start} passes={PASSES} \
+         reads={reads} data_sectors={data_sectors} efatfs_block_reads={blocks} \
+         overhead={overhead:.2}x (ideal 1.00x = raw-map data-only)"
+    );
+
+    // Measured 1.03x (looping playback amortizes its one backward seek per
+    // wrap over ~1024 sequential reads) — this is the evidence SP1b's planned
+    // cached FAT cluster chain was dropped for; see
+    // `efatfs_core_adversarial_seek_transfer_overhead` for the isolated
+    // seek-cost measurement and .superpowers/sdd/task-1-report.md for the
+    // full derivation. A regression here means looping-sample playback
+    // itself got slower, not merely that seeking got more expensive.
+    assert!(
+        overhead < 1.10,
+        "looping-playback transfer overhead {overhead:.2}x regressed \
+         (blocks={blocks}, data_sectors={data_sectors}, clusters={clusters})"
+    );
+}
+
+// --- Adversarial seek-cost isolation ----------------------------------------
+//
+// The looping-playback proxy above amortizes its one backward seek per wrap
+// over ~1024 sequential reads, so it cannot show what seeking itself costs.
+// This test isolates that: every single read is a long-distance backward
+// seek, with nothing sequential to absorb the FAT-chain re-walk cost into.
+//
+// Cost model (confirmed by the numbers below): a re-walk to cluster `k`
+// touches `ceil(k/128)` FAT sectors, NOT `k` reads — FAT32 packs 128 4-byte
+// entries per 512-byte FAT sector, so the re-walk is O(n/128) sector reads,
+// not O(n). Against 64 data sectors per 32 KiB cluster, constant
+// long-distance seeking costs about `1 + n/16384` for an n-cluster file.
+// Measured at n=2048 (64 MB, `/SAMPLES/huge.bin`): **1.15x**, ~9.8 extra
+// block reads per read vs a predicted 8.
+//
+// Consequence: typical Deluge samples (single-digit MB) cost on the order of
+// 1.6% even under CONSTANT adversarial seeking, and real looping playback
+// (above) costs 1.03x. That is why SP1b's cached FAT cluster chain was
+// dropped — the re-walk it would have eliminated is already cheap at
+// realistic sizes. See .superpowers/sdd/task-1-report.md for the full
+// measurement record.
+
+/// Two seek-dense access patterns over the same 2048-cluster file, neither of
+/// which ever reads two consecutive clusters in file order: reverse
+/// (`(0..clusters).rev()`) and ping-pong (alternating ends, walking inward).
+/// Each pattern gets a fresh mount so `BufStream`'s single-block cache starts
+/// cold and one pattern's tail can't warm the other's head.
+#[test]
+fn efatfs_core_adversarial_seek_transfer_overhead() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+
+    const CLUSTER_SECTORS: u64 = 64; // mk_fixture.sh formats FAT32 with -c 64 (32 KiB)
+    let path = "/SAMPLES/huge.bin"; // 64 MiB = 2048 clusters; see mk_fixture.sh for why
+    let file_len = EFatFs::mount().read_file(path).len() as u64;
+    let cluster_bytes = (CLUSTER_SECTORS * 512) as usize;
+    let clusters = file_len.div_ceil(cluster_bytes as u64) as usize;
+    let data_sectors = clusters as u64 * CLUSTER_SECTORS; // ideal: one read per data sector
+
+    for (name, reverse) in [("reverse", true), ("pingpong", false)] {
+        let cluster_at = |i: usize| -> usize {
+            if reverse {
+                clusters - 1 - i
+            } else if i % 2 == 0 {
+                i / 2
+            } else {
+                clusters - 1 - i / 2
+            }
+        };
+
+        let storage = BufStream::<CountingBlockDevice, 512>::new(CountingBlockDevice);
+        let fs: FileSystem<_, DefaultTimeProvider, LossyOemCpConverter> =
+            block_on(FileSystem::new(storage, FsOptions::new())).expect("mount counting FS");
+
+        block_on(async {
+            let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
+            let mut table = HandleTable::new();
+            let h = table.insert(ctx).expect("insert");
+
+            BLOCKS_READ.store(0, Ordering::Relaxed);
+            let mut buf = vec![0u8; cluster_bytes];
+            for i in 0..clusters {
+                let c = cluster_at(i);
+                let off = (c as u64 * cluster_bytes as u64) as u32;
+                assert!(
+                    table.read_at_owned(&fs, h, off, &mut buf).await,
+                    "{name} read at cluster {c} (i={i}) was short"
+                );
+            }
+        });
+
+        let blocks = BLOCKS_READ.load(Ordering::Relaxed);
+        let reads = clusters as u64;
+        let overhead = blocks as f64 / data_sectors as f64;
+        println!(
+            "lens1-adversarial-seek-proxy[{name}]: clusters={clusters} reads={reads} \
+             data_sectors={data_sectors} efatfs_block_reads={blocks} overhead={overhead:.2}x \
+             (ideal 1.00x = raw-map data-only)"
+        );
+
+        assert!(
+            overhead < 1.30,
+            "{name} adversarial-seek transfer overhead {overhead:.2}x too high \
+             (blocks={blocks}, data_sectors={data_sectors}, clusters={clusters}) — \
+             possible FAT-chain re-walk regression"
+        );
+    }
+}
+

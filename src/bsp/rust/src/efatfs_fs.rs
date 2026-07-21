@@ -25,7 +25,13 @@ use aligned::{A4, Aligned};
 use block_device_adapters::{BufStream, StreamSlice};
 use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
+use embedded_fatfs::{
+    DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter,
+};
+// embedded-fatfs keeps its own `io` traits `pub(crate)`; `File`'s `Read`/`Seek`
+// impls are the public `embedded_io_async` ones, so bring those into scope to
+// drive the fill loop / absolute seek below (same trait+version `bench_fs` uses).
+use embedded_io_async::{Read as _, Seek as _, SeekFrom};
 
 use crate::fat_block_device::SdBlockDevice;
 
@@ -82,14 +88,131 @@ pub async fn mount() -> Result<(), ()> {
 
 /// Run `f` with exclusive access to the mounted FS (the ONLY entry point).
 /// Returns `None` if [`mount`] hasn't run (or failed) yet.
-pub async fn with_fs<R, F, Fut>(f: F) -> Option<R>
+///
+/// `f` is an `AsyncFnOnce` (not `FnOnce(&Fs) -> impl Future`): only the async-
+/// closure form ties the returned future's lifetime to the borrowed `&Fs`, so
+/// the body may `.await` while holding that borrow.
+pub async fn with_fs<R, F>(f: F) -> Option<R>
 where
-    F: FnOnce(&Fs) -> Fut,
-    Fut: core::future::Future<Output = R>,
+    F: AsyncFnOnce(&Fs) -> R,
 {
     let g = FS.lock().await;
     match g.as_ref() {
         Some(fs) => Some(f(fs).await),
         None => None,
+    }
+}
+
+// --- File-handle table (Task 3) -------------------------------------------
+//
+// A fixed-capacity table of detached [`FileContext`]s keyed by a `u32` handle.
+// The streaming read path opens each sample once, then re-attaches a fresh
+// [`File`] from its stored context on every `read_at` — `FileContext` is cheap
+// to `Clone` and carries `current_cluster`, so forward reads skip re-walking
+// the cluster chain from the start. No per-op heap allocation.
+//
+// Lock discipline: [`HANDLES`] is NEVER held across a [`with_fs`] (FS-mutex)
+// await. Every op clones the context OUT of the table, drops the `HANDLES`
+// lock, does its FS work under `with_fs`, then re-locks `HANDLES` to write the
+// result back. Acquisition is therefore never nested — no lock-order rule to
+// remember and no deadlock. `read_at` clones (not `take`s) so a failed read
+// leaves the slot valid.
+
+/// Max concurrent streamed files. Small fixed cap — the live streaming engine
+/// holds only a handful of sample readers open at once.
+const MAX_HANDLES: usize = 16;
+
+/// `FileContext` is plain data (`DirEntryEditor` is `data`/`pos`/`dirty`, no
+/// `Rc`/`RefCell`), so it is `Send` and this static compiles.
+static HANDLES: Mutex<CriticalSectionRawMutex, [Option<FileContext>; MAX_HANDLES]> =
+    Mutex::new([const { None }; MAX_HANDLES]);
+
+/// Fill `dst` completely from `f`'s current position. Returns `true` if the
+/// whole buffer was filled, `false` on a short read (EOF before `dst` is full).
+/// embedded-fatfs has no `read_exact`, so loop the `Read` impl by hand.
+async fn fill<'a>(
+    f: &mut File<'a, Storage, DefaultTimeProvider, LossyOemCpConverter>,
+    dst: &mut [u8],
+) -> bool {
+    let mut filled = 0;
+    while filled < dst.len() {
+        match f.read(&mut dst[filled..]).await {
+            Ok(0) => return false, // short read / EOF
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Open `path`, detach it to a [`FileContext`], and stash it in a free slot.
+/// Returns the slot index as the handle, or `None` if the open failed or the
+/// table is full.
+pub async fn open(path: &str) -> Option<u32> {
+    // Open + detach under the FS mutex only; never touch HANDLES here.
+    let ctx = with_fs(async |fs| {
+        let f = fs.root_dir().open_file(path).await.ok()?;
+        f.close().await.ok()
+    })
+    .await??;
+
+    let mut table = HANDLES.lock().await;
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(ctx);
+            return Some(i as u32);
+        }
+    }
+    // Table full — drop the context (no on-disk state to clean up; the File
+    // was already flushed+closed by `close`).
+    None
+}
+
+/// Read `dst.len()` bytes from absolute `byte_offset` of the file behind
+/// `handle`. Returns `true` iff the full buffer was filled. Seeks absolutely
+/// every call, so correctness does not depend on the write-back below (that is
+/// only a forward-seek optimization).
+pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
+    // Clone the context out, then release HANDLES before taking the FS mutex.
+    let ctx = {
+        let table = HANDLES.lock().await;
+        match table.get(handle as usize).and_then(|s| s.clone()) {
+            Some(ctx) => ctx,
+            None => return false,
+        }
+    };
+
+    let result = with_fs(async |fs| {
+        let mut f = File::new_from_context(ctx, fs).await.ok()?;
+        f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
+        let filled = fill(&mut f, dst).await;
+        let newctx = f.close().await.ok()?;
+        Some((newctx, filled))
+    })
+    .await;
+
+    match result {
+        Some(Some((newctx, filled))) => {
+            // Write the advanced context back (preserves current_cluster for
+            // cheap forward seeks). Slot may have been closed concurrently —
+            // only write back if it's still occupied for this handle.
+            let mut table = HANDLES.lock().await;
+            if let Some(slot) = table.get_mut(handle as usize) {
+                if slot.is_some() {
+                    *slot = Some(newctx);
+                }
+            }
+            filled
+        }
+        // FS not mounted, or reattach/seek/read failed — slot left untouched.
+        _ => false,
+    }
+}
+
+/// Close `handle`, freeing its slot. No-op for an out-of-range handle.
+pub async fn close(handle: u32) {
+    let mut table = HANDLES.lock().await;
+    if let Some(slot) = table.get_mut(handle as usize) {
+        *slot = None;
     }
 }

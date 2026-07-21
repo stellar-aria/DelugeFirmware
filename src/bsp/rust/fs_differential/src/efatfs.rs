@@ -78,6 +78,12 @@ impl EFatFs {
         EFatFs { fs }
     }
 
+    /// The raw mounted `FileSystem`, for tests that drive the shared
+    /// `efatfs_core` handle-table logic (SP1a Task 7a) directly over it.
+    pub fn raw(&self) -> &FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter> {
+        &self.fs
+    }
+
     /// Read a whole file's contents.
     pub fn read_file(&self, path: &str) -> Vec<u8> {
         block_on(async {

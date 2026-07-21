@@ -102,6 +102,12 @@ mod control;
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
+/// SP1a Task 7a: storage-generic, host-testable core of the efatfs read path
+/// (`HandleTable` + `FileContext` detach/reattach + generation guard + fill
+/// loop). `efatfs_fs` wraps it with the device statics/mutexes/FFI; host tests
+/// and `lens1_vt_sim` drive it directly.
+#[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+mod efatfs_core;
 /// SP1a: the single-owner `embedded-fatfs` mount — one `FileSystem` behind an
 /// async `Mutex`, the only way live code touches the vendored FS. Non-default:
 /// `efatfs_streaming` feature. Nothing calls `mount()`/`with_fs()` yet (later

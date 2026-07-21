@@ -25,14 +25,9 @@ use aligned::{A4, Aligned};
 use block_device_adapters::{BufStream, StreamSlice};
 use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embedded_fatfs::{
-    DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter,
-};
-// embedded-fatfs keeps its own `io` traits `pub(crate)`; `File`'s `Read`/`Seek`
-// impls are the public `embedded_io_async` ones, so bring those into scope to
-// drive the fill loop / absolute seek below (same trait+version `bench_fs` uses).
-use embedded_io_async::{Read as _, Seek as _, SeekFrom};
+use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 
+use crate::efatfs_core::{self, HandleTable};
 use crate::fat_block_device::SdBlockDevice;
 
 type Storage = StreamSlice<BufStream<SdBlockDevice, 512>>;
@@ -103,150 +98,53 @@ where
     }
 }
 
-// --- File-handle table (Task 3) -------------------------------------------
+// --- File-handle table (Task 3; logic extracted to `efatfs_core` in Task 7a) --
 //
-// A fixed-capacity table of detached [`FileContext`]s keyed by a `u32` handle.
-// The streaming read path opens each sample once, then re-attaches a fresh
-// [`File`] from its stored context on every `read_at` — `FileContext` is cheap
-// to `Clone` and carries `current_cluster`, so forward reads skip re-walking
-// the cluster chain from the start. No per-op heap allocation.
+// The table type, the generation guard, the `FileContext` detach/reattach, and
+// the fill loop all live in the storage-generic, host-testable [`efatfs_core`]
+// module. This device layer owns one [`HandleTable`] behind an async `Mutex`
+// and composes the core's split primitives under the lock discipline below.
 //
 // Lock discipline: [`HANDLES`] is NEVER held across a [`with_fs`] (FS-mutex)
-// await. Every op clones the context OUT of the table, drops the `HANDLES`
-// lock, does its FS work under `with_fs`, then re-locks `HANDLES` to write the
-// result back. Acquisition is therefore never nested — no lock-order rule to
-// remember and no deadlock. `read_at` clones (not `take`s) so a failed read
-// leaves the slot valid.
-//
-// Slot-identity guard: `read_at`'s clone-out/write-back window is NOT atomic
-// w.r.t. `open`/`close` — the FS work in between is `.await`ed with `HANDLES`
-// released. If `close(handle)` runs during that window and `open` then reuses
-// the same (lowest-free) index for a *different* file, a write-back guarded
-// only by "slot is occupied" would silently splice the old file's advanced
-// `current_cluster`/context onto the new file's slot; `File::new_from_context`
-// can't catch this because the old file's directory entry is still valid on
-// disk. (The absolute `seek` every call only makes `current_cluster` a perf
-// optimization, not a correctness fallback — `first_cluster`/`entry` are file
-// *identity*, and those are exactly what would get overwritten.) Each slot
-// therefore carries a `generation` counter, bumped on every `open` (claim) and
-// `close` (free). `read_at` captures `generation` alongside the cloned context and
-// only writes back if `generation` is unchanged when it re-locks — otherwise the
-// slot has been recycled underneath it and the write-back is dropped.
-
-/// Max concurrent streamed files. Small fixed cap — the live streaming engine
-/// holds only a handful of sample readers open at once.
-const MAX_HANDLES: usize = 16;
-
-/// One handle-table slot: an optional detached [`FileContext`] plus a
-/// generation counter bumped on every `open`/`close` of that index, so
-/// `read_at`'s deferred write-back can detect the slot having been recycled
-/// for a different file while its FS work was in flight (see module docs
-/// above).
-struct Slot {
-    generation: u32,
-    ctx: Option<FileContext>,
-}
+// await. `read_at` `checkout`s the context OUT of the table, drops the
+// `HANDLES` lock, does its FS work under `with_fs`, then re-locks `HANDLES` to
+// `commit` the result back (gated on the slot's generation, so a `close`+`open`
+// recycle racing the in-flight read can't splice a stale context onto a
+// different file). Acquisition is therefore never nested — `open` takes
+// FS→HANDLES, `read_at` takes HANDLES→FS-then-HANDLES with the FS work OUTSIDE
+// the HANDLES lock, so the two never hold both at once and can't deadlock.
+// (This is why the device path must not use `HandleTable::read_at_owned`, which
+// holds the table across the FS await — see its doc.)
 
 /// `FileContext` is plain data (`DirEntryEditor` is `data`/`pos`/`dirty`, no
-/// `Rc`/`RefCell`), so it is `Send` and this static compiles.
-static HANDLES: Mutex<CriticalSectionRawMutex, [Slot; MAX_HANDLES]> = Mutex::new(
-    [const {
-        Slot {
-            generation: 0,
-            ctx: None,
-        }
-    }; MAX_HANDLES],
-);
-
-/// Fill `dst` completely from `f`'s current position. Returns `true` if the
-/// whole buffer was filled, `false` on a short read (EOF before `dst` is full).
-/// embedded-fatfs has no `read_exact`, so loop the `Read` impl by hand.
-async fn fill<'a>(
-    f: &mut File<'a, Storage, DefaultTimeProvider, LossyOemCpConverter>,
-    dst: &mut [u8],
-) -> bool {
-    let mut filled = 0;
-    while filled < dst.len() {
-        match f.read(&mut dst[filled..]).await {
-            Ok(0) => return false, // short read / EOF
-            Ok(n) => filled += n,
-            Err(_) => return false,
-        }
-    }
-    true
-}
+/// `Rc`/`RefCell`), so [`HandleTable`] is `Send` and this static compiles.
+static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable> = Mutex::new(HandleTable::new());
 
 /// Open `path`, detach it to a [`FileContext`], and stash it in a free slot.
-/// Returns the slot index as the handle, or `None` if the open failed or the
-/// table is full.
+/// Returns the slot index as the handle, or `None` if the FS is unmounted, the
+/// open failed, or the table is full.
 pub async fn open(path: &str) -> Option<u32> {
-    // Open + detach under the FS mutex only; never touch HANDLES here.
-    let ctx = with_fs(async |fs| {
-        let f = fs.root_dir().open_file(path).await.ok()?;
-        f.close().await.ok()
-    })
-    .await??;
-
-    let mut table = HANDLES.lock().await;
-    for (i, slot) in table.iter_mut().enumerate() {
-        if slot.ctx.is_none() {
-            slot.ctx = Some(ctx);
-            slot.generation = slot.generation.wrapping_add(1);
-            return Some(i as u32);
-        }
-    }
-    // Table full — drop the context (no on-disk state to clean up; the File
-    // was already flushed+closed by `close`).
-    None
+    // Open + detach under the FS mutex only; never touch HANDLES here (keeps the
+    // FS→HANDLES order that pairs deadlock-free with read_at's HANDLES→FS).
+    let ctx = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await??;
+    HANDLES.lock().await.insert(ctx)
 }
 
 /// Read `dst.len()` bytes from absolute `byte_offset` of the file behind
-/// `handle`. Returns `true` iff the full buffer was filled. Seeks absolutely
-/// every call, so `current_cluster` correctness does not depend on the
-/// write-back below (that's only a forward-seek optimization) — but the
-/// write-back is still gated on a generation check to guard file *identity*
-/// (`first_cluster`/`entry`) against a `close`+`open` slot recycle racing the
-/// in-flight FS work; see the module-level comment above [`HANDLES`].
+/// `handle`. Returns `true` iff the full buffer was filled. Composes the core's
+/// split primitives under the lock discipline: `checkout` (release HANDLES) →
+/// `read_context` under `with_fs` → `commit` (re-lock HANDLES, generation-gated).
 pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
-    // Clone the context (and its generation) out, then release HANDLES before
-    // taking the FS mutex.
-    let (ctx, captured_generation) = {
-        let table = HANDLES.lock().await;
-        match table.get(handle as usize) {
-            Some(slot) => match slot.ctx.clone() {
-                Some(ctx) => (ctx, slot.generation),
-                None => return false,
-            },
-            None => return false,
-        }
+    let Some((generation, ctx)) = HANDLES.lock().await.checkout(handle) else {
+        return false;
     };
 
-    let result = with_fs(async |fs| {
-        let mut f = File::new_from_context(ctx, fs).await.ok()?;
-        f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
-        let filled = fill(&mut f, dst).await;
-        let newctx = f.close().await.ok()?;
-        Some((newctx, filled))
-    })
-    .await;
+    let result =
+        with_fs(async |fs| efatfs_core::read_context(fs, ctx, byte_offset, dst).await).await;
 
     match result {
         Some(Some((newctx, filled))) => {
-            // Write the advanced context back (preserves current_cluster for
-            // cheap forward seeks) — but ONLY if this slot's generation still
-            // matches what we captured. A mismatch means `close` (and
-            // possibly a subsequent `open` reusing this index for a
-            // different file) ran while the FS work above was in flight;
-            // writing back in that case would splice this file's advanced
-            // context onto an unrelated file's slot. `is_some()` is kept as
-            // a belt-and-suspenders check, but `generation` equality is what
-            // actually prevents the identity confusion.
-            let mut table = HANDLES.lock().await;
-            if let Some(slot) = table.get_mut(handle as usize) {
-                if slot.generation == captured_generation && slot.ctx.is_some() {
-                    slot.ctx = Some(newctx);
-                }
-            }
+            HANDLES.lock().await.commit(handle, generation, newctx);
             filled
         }
         // FS not mounted, or reattach/seek/read failed — slot left untouched.
@@ -259,11 +157,7 @@ pub async fn read_at(handle: u32, byte_offset: u32, dst: &mut [u8]) -> bool {
 /// this handle (captured before this `close`) is detected as stale even if no
 /// subsequent `open` reuses the index.
 pub async fn close(handle: u32) {
-    let mut table = HANDLES.lock().await;
-    if let Some(slot) = table.get_mut(handle as usize) {
-        slot.ctx = None;
-        slot.generation = slot.generation.wrapping_add(1);
-    }
+    HANDLES.lock().await.remove(handle);
 }
 
 // --- FFI bridge (Task 4) ---------------------------------------------------

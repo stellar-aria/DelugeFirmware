@@ -102,6 +102,12 @@ mod control;
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
+/// SP1a: the single-owner `embedded-fatfs` mount — one `FileSystem` behind an
+/// async `Mutex`, the only way live code touches the vendored FS. Non-default:
+/// `efatfs_streaming` feature. Nothing calls `mount()`/`with_fs()` yet (later
+/// tasks wire the file-handle table, FFI, and the read swap onto this).
+#[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+mod efatfs_fs;
 /// SP1: `block_device_driver::BlockDevice<512>` over the real SD driver
 /// (`deluge_bsp::sd`), feeding the `BufStream`/`embedded-fatfs` stack —
 /// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.

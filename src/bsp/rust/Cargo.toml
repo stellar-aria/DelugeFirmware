@@ -142,6 +142,12 @@ storage-owner-audit = []
 ## build never links or runs it.
 bench_fs = []
 
+## SP1a: build the single-owner `embedded-fatfs` mount (`efatfs_fs.rs`) — one
+## `FileSystem` behind an async `Mutex`. Off by default; nothing calls
+## `mount()`/`with_fs()` yet (later SP1a tasks wire the file-handle table,
+## FFI, and the read swap onto this — see .superpowers/sdd/task-2-brief.md).
+efatfs_streaming = []
+
 ## Host-harness only: give host SD reads/writes a modeled per-transfer latency so
 ## a transfer on the storage-owner fiber genuinely suspends (yields the executor)
 ## instead of the host's never-suspend `block_on`. Data is unchanged — only timing

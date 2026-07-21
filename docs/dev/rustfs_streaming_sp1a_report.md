@@ -64,16 +64,26 @@ re-walk risk) are not covered by this proxy and are exactly what SP1b's cached F
 
 **Device builds.** Flag-off links. **Flag-on RELEASE links.** **Flag-on DEBUG does not link** — see below.
 
-## Known limitation: flag-on debug image doesn't link (investigated)
+## SRAM layout: flag-on debug link overflow — investigated and FIXED
 
-Making the mount live retains the whole `embedded-fatfs` code; at debug `opt-level=1` the image's `.ARM.exidx`
-(exception-unwind index) grows ~19.5 KB and spills ~10 KB past the fixed `.rtt_cached_reserve` SRAM region.
-**`.ARM.exidx` cannot be safely discarded:** the C++ app *actively uses exceptions* (`throw
-deluge::exception::BAD_ALLOC` in the allocators; `catch` in browser/midi/recorder; the build sets `-fno-rtti`
-but **not** `-fno-exceptions`), so the exidx is required for C++ unwinding and discarding it risks breaking that
-in a way only testable on hardware. **Release links fine and is the correct vehicle** for the on-device flag-on
-exercise (audio-timing/underrun testing doesn't need a debug image). FS-crate-only opt bumps reclaim only
-~400 B. No safe unilateral linker fix; not attempted.
+Making the mount live retains the whole `embedded-fatfs` code. At debug `opt-level=1` its un-inlined
+monomorphizations (a deep generic storage tower, fully instantiated) inflate `.text` **and** `.ARM.exidx`
+(one 8-byte exception-index entry per surviving function — ~19.5 KB of them; in *release* the tower inlines
+away and exidx doesn't grow at all). That pushed the debug image ~10 KB past the RTT SRAM reservation.
+
+`.ARM.exidx` cannot simply be discarded — the C++ app *actively uses exceptions* (`throw
+deluge::exception::BAD_ALLOC` in the allocators; `catch` in browser/midi/recorder; `-fno-rtti` but **not**
+`-fno-exceptions`), so it's required for C++ unwinding.
+
+**Root fix (commit `897a271c6`):** the RTT reservation sat mid-SRAM at `0x202B0000` and capped the app heap
+there, stranding ~192 KB of unused SRAM between it and the stacks at `0x202F0000`. Raising `RTT_RAM` /
+`NCACHE_RTT_RAM` to `0x202E0000` (just below the stacks) reclaims that gap into the image + `__sram_heap`.
+Result: **flag-on debug now links with 128 KB heap headroom** (was a ~10 KB overflow); flag-off debug heap
+192 KB → 384 KB. RTT addresses are auto-discovered from the ELF's `_SEGGER_RTT` symbol, so no tooling change
+was needed (`_SEGGER_RTT` moves `0x602B4000` → `0x602E4000` on its own). **Needs an on-device RTT-capture
+re-verify** (the one owed gate for this change). Release always fit; this makes debug fit too. The 96 KB
+`EFATFS_ARENA` is a bench-sized placeholder (BSS, unrelated to the link overflow) and is independently
+shrinkable.
 
 ## What's deferred / owed
 

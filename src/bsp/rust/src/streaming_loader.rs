@@ -157,8 +157,10 @@ pub trait FillOps {
     /// (`deluge_streaming_begin_fill`). `ok == false` means skip this chunk
     /// entirely (unloadable / geometry error) — no read, no `finish`.
     fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor;
-    /// Await the sector read into `buf`. Returns whether it succeeded.
-    async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool;
+    /// Await the read for descriptor `d` into `buf`. Returns whether it
+    /// succeeded — routes to the efatfs handle when `d.handle != 0` under the
+    /// `efatfs_streaming` feature, else the raw-sector path.
+    async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool;
     /// Run the post-read convert/stitch/publish tail
     /// (`deluge_streaming_finish_fill`). Only called after a *successful* read
     /// — mirrors `reconstruct_one`'s success arm (`loader.cpp`), which likewise
@@ -217,7 +219,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         // double's `begin` hands back its own owned backing storage).
         let buf =
             unsafe { core::slice::from_raw_parts_mut(d.dest, (d.num_sectors as usize) * 512) };
-        let read_ok = ops.read(d.sector, d.num_sectors, buf).await;
+        let read_ok = ops.read(&d, buf).await;
 
         if read_ok {
             // Success tail: convert/stitch/publish, then keep draining.
@@ -304,8 +306,12 @@ mod prod {
             unsafe { deluge_streaming_begin_fill(chunk) }
         }
 
-        async fn read(&self, lba: u32, count: u32, buf: &mut [u8]) -> bool {
-            crate::sd::locked_read_sectors(lba, count, buf)
+        async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
+            #[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+            if d.handle != 0 {
+                return crate::efatfs_fs::read_at(d.handle, d.byte_offset, buf).await;
+            }
+            crate::sd::locked_read_sectors(d.sector, d.num_sectors, buf)
                 .await
                 .is_ok()
         }

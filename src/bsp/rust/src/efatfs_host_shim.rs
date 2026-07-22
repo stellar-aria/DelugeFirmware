@@ -6,19 +6,36 @@
 //! §4.1 (the shim) and Appendix A (the mount-strategy spike this file's block
 //! device follows exactly).
 //!
-//! ## The block device: route through `deluge_block_read`/`deluge_block_write`, not `RamDisk`
+//! ## The block device: AWAIT `crate::sd::locked_*_sectors`, exactly like the device
 //!
-//! [`HostSdBlockDevice`] calls the existing `deluge_block_read`/
-//! `deluge_block_write` C-ABI functions (`crate::sd`) directly — the SAME
-//! dispatch FatFS's diskio uses — instead of reimplementing SD access (e.g.
-//! calling `deluge_bsp::sd::read_sectors` or `sim_latency::modeled_read`
-//! itself). Per Appendix A's spike: this is what lets the efatfs mount inherit
-//! the already-global, boot-time `sd::sim_latency::set_off_fiber_instant` flag
-//! (set once in `main.rs`, ahead of `boot_task`/`deluge_app_init`) through the
-//! shared `on_fiber()`/`off_fiber_instant()`/else three-way dispatch
-//! `deluge_block_read` already implements — [`mount`] below needs no
-//! wrap/restore of its own; it just works on the lens/host_app boot path
-//! because the flag is already set there by the time `mount()` runs.
+//! [`HostSdBlockDevice`] `.await`s the SD_BUS-guarded async helpers
+//! `crate::sd::locked_read_sectors`/`locked_write_sectors` — a byte-for-byte
+//! mirror of the device `fat_block_device::SdBlockDevice`. It does NOT call the
+//! synchronous `deluge_block_read`/`deluge_block_write` C-ABI (an earlier
+//! version did, to inherit the boot-time `set_off_fiber_instant` flag — see the
+//! history below).
+//!
+//! ### Why the sync `deluge_block_read` path was WRONG (the Lens 1 deadlock)
+//!
+//! `deluge_block_read`/`_write` are *synchronous* C-ABI functions: internally
+//! they drive the transfer with `block_on_fiber` (on the worker fiber) or
+//! `embassy_futures::block_on` (off it). The streaming READ path runs on the
+//! async fill task (`streaming_loader::streaming_fill_task`), which is OFF the
+//! worker fiber — so a shim read reached that way took the off-fiber
+//! `block_on` branch: a NON-yielding busy spin. When a recorder card-write on
+//! the fiber had suspended mid-transfer holding `SD_BUS` (`block_on_fiber`
+//! yields the fiber but keeps the guard), the fill task's `block_on(SD_BUS
+//! .lock())` could never acquire it AND never returned control to the executor
+//! — so the write's fiber could never resume to release `SD_BUS`. On Lens 1's
+//! single-threaded discrete-event driver that is a hard deadlock inside
+//! `executor.poll()` (100% CPU, virtual clock frozen); Lens 2 dodged it only by
+//! having a second OS thread. The device `SdBlockDevice` never had the bug
+//! because it `.await`s (yields) instead of nesting a `block_on`. This shim now
+//! does the same: on the fill task the read genuinely suspends, letting the
+//! executor advance the clock, fire the `sim_latency` pump `Timer`, resume the
+//! fiber, finish the write, and release `SD_BUS`. Modeled latency now applies
+//! to efatfs streaming reads exactly as it does to the C-FatFS path, so Lens 1
+//! measures a real margin for this read path.
 //!
 //! ## Host vs. device differences from `efatfs_fs.rs`
 //!
@@ -35,10 +52,15 @@
 //!   single-threaded (one `block_on`/one executor thread), so contention never
 //!   actually happens — the `Mutex` is here for shape-fidelity, not for a real
 //!   concurrency need.
-//! - No `crate::fiber::on_fiber()`/`block_on_fiber` guard on the FFI bridge:
-//!   there is no worker fiber on host. [`deluge_efatfs_open`]/
-//!   [`deluge_efatfs_close`] just `embassy_futures::block_on` the async work
-//!   directly.
+//! - The FFI bridge ([`deluge_efatfs_open`]/[`deluge_efatfs_close`]) uses the
+//!   same `on_fiber()`-gated `block_on_fiber`/`block_on` dispatch as the device
+//!   bridge. On host there IS a worker fiber (the C++ app's), and
+//!   `SampleStream::open_read_stream` calls these from it — so the on-fiber
+//!   `block_on_fiber` (a coroutine yield) is the live path, letting an
+//!   open-path SD read pend without livelocking the single-threaded harness.
+//!   (An earlier revision assumed no host fiber and always used
+//!   `embassy_futures::block_on`; that non-yielding spin is unsafe once the
+//!   block device awaits modeled latency — see the block-device section above.)
 //!
 //! Test infrastructure only (host_app-gated) — no device path touched.
 #![cfg(feature = "host_app")]
@@ -75,15 +97,24 @@ impl BlockDevice<512> for HostSdBlockDevice {
         data: &mut [Aligned<A4, [u8; 512]>],
     ) -> Result<(), Self::Error> {
         let count = data.len() as u32;
-        // Same dispatch FatFS's diskio uses (see module doc); NOT
-        // `deluge_bsp::sd::read_sectors` directly.
-        let status =
-            crate::sd::deluge_block_read(0, data.as_mut_ptr().cast::<u8>(), block_address, count);
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(HostBlockError(status))
-        }
+        // AWAIT the SD_BUS-guarded async helper, exactly like the device
+        // `fat_block_device::SdBlockDevice::read` — NOT the synchronous
+        // `deluge_block_read` C-ABI. See this module's doc for why the sync
+        // path deadlocks Lens 1's single-threaded virtual clock.
+        //
+        // SAFETY: `Aligned<A4, [u8; 512]>` is `#[repr(C)]` over the inner
+        // `[u8; 512]` plus a zero-sized alignment marker, so a
+        // `[Aligned<A4, [u8; 512]>]` slice is a contiguous run of 512-byte
+        // blocks with no inter-element padding; reinterpreting it as
+        // `data.len() * 512` flat bytes is sound, and the resulting `&mut [u8]`
+        // is validly derived from `data` and does not outlive it. Identical
+        // reinterpret to the device `SdBlockDevice`.
+        let flat = unsafe {
+            core::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), data.len() * 512)
+        };
+        crate::sd::locked_read_sectors(block_address, count, flat)
+            .await
+            .map_err(|_| HostBlockError(-5))
     }
 
     async fn write(
@@ -92,13 +123,14 @@ impl BlockDevice<512> for HostSdBlockDevice {
         data: &[Aligned<A4, [u8; 512]>],
     ) -> Result<(), Self::Error> {
         let count = data.len() as u32;
-        let status =
-            crate::sd::deluge_block_write(0, data.as_ptr().cast::<u8>(), block_address, count);
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(HostBlockError(status))
-        }
+        // See `read` above — AWAIT the SD_BUS-guarded async helper, mirroring
+        // the device `SdBlockDevice::write`, not the sync `deluge_block_write`.
+        // SAFETY: same layout argument as `read`, read-only direction.
+        let flat =
+            unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 512) };
+        crate::sd::locked_write_sectors(block_address, count, flat)
+            .await
+            .map_err(|_| HostBlockError(-5))
     }
 
     async fn size(&mut self) -> Result<u64, Self::Error> {
@@ -115,11 +147,11 @@ pub type Fs = FileSystem<Storage, DefaultTimeProvider, LossyOemCpConverter>;
 static FS: Mutex<CriticalSectionRawMutex, Option<Fs>> = Mutex::new(None);
 
 /// Mount the FS once, storing it in [`FS`]. No partition-window detection (see
-/// module doc) — the harness image is always a single raw FAT volume. Per
-/// Appendix A, no `sim_latency::set_off_fiber_instant` wrap is needed here:
-/// the caller (the host_app/lens boot path) already sets that flag globally
-/// before this runs, and [`HostSdBlockDevice`] inherits it automatically
-/// through the shared `deluge_block_read` dispatch.
+/// module doc) — the harness image is always a single raw FAT volume. Called
+/// (`.await`ed) from the host_app/lens boot task, a genuine async context: the
+/// mount's block reads go through [`HostSdBlockDevice`], which now `.await`s
+/// `crate::sd::locked_*_sectors`, so they suspend and resume normally on the
+/// executor — no `set_off_fiber_instant` wrap or special-casing needed here.
 pub async fn mount() -> Result<(), ()> {
     let storage = BufStream::<HostSdBlockDevice, 512>::new(HostSdBlockDevice);
     let fs = FileSystem::new(storage, FsOptions::new())
@@ -209,7 +241,22 @@ pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) 
         Ok(p) => p,
         Err(_) => return false,
     };
-    match embassy_futures::block_on(open(path)) {
+    // Drive the async open the SAME way the device bridge (`efatfs_fs.rs`) does:
+    // when this C-ABI is called from the worker fiber (the real case — C++'s
+    // `SampleStream::open_read_stream` runs on the fiber), use `block_on_fiber`,
+    // a coroutine YIELD that lets the executor keep running while an SD read
+    // pends. A plain `embassy_futures::block_on` here is a non-yielding busy
+    // spin: on a single-threaded harness (Lens 1) it would livelock the moment
+    // an open-path read needs the executor to advance (pump `Timer` / release
+    // `SD_BUS`), exactly the deadlock this module's `read` fix addresses. Off
+    // fiber (no coroutine to yield — only pre-fiber/boot contexts), fall back to
+    // `embassy_futures::block_on`; there the reads have nothing to contend with.
+    let opened = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(open(path))
+    } else {
+        embassy_futures::block_on(open(path))
+    };
+    match opened {
         Some(h) => {
             // SAFETY: `out_handle` is non-null (checked above) and points at a
             // `u32` the caller owns for the duration of this synchronous call.
@@ -222,8 +269,15 @@ pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) 
     }
 }
 
-/// C-ABI: close a streaming file handle.
+/// C-ABI: close a streaming file handle. Uses the same `on_fiber`-gated
+/// `block_on_fiber`/`block_on` dispatch as [`deluge_efatfs_open`] — though
+/// `close` issues no SD reads (it only frees a [`HANDLES`] slot), so neither
+/// driver can pend here.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_efatfs_close(handle: u32) {
-    embassy_futures::block_on(close(handle));
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(close(handle));
+    } else {
+        embassy_futures::block_on(close(handle));
+    }
 }

@@ -44,6 +44,7 @@
 #include "processing/sound/sound_drum.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h"
 #include "util/functions.h"
 #include <algorithm>
 #include <cstring>
@@ -394,7 +395,44 @@ void Slicer::stopAnyPreviewing() {
 	}
 }
 void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, int32_t on) {
-	if (on) {
+	// Snapshot the request (plain values — no pointers into manualSlicePoints[] or any
+	// other live UI state survive past this call) and coalesce latest-wins onto one
+	// owner op: while one preview (load + audition-note) is running, a newer request
+	// is queued and dispatched on completion, so a burst of pad taps converges on
+	// whichever slice/on-off state the user's finger is actually on, and the op's
+	// "is the sliced sample already resident?" check + the load it may trigger + the
+	// audition note it sends always run together, atomically, on the worker — never
+	// split across a yield the way a bare wrap of just loadFile() would be.
+	PreviewTarget target{
+	    .startPoint = startPoint,
+	    .endPoint = endPoint,
+	    .transpose = transpose,
+	    .on = on,
+	};
+
+	if (previewCoalescer_.request(target)) {
+		if (!deluge::storage::Owner::run(&Slicer::runPreviewOp, this)) {
+			// Owner queue full → the op won't run, so release the guard or the
+			// coalescer would wedge single-flight forever. The next preview() call
+			// re-requests.
+			previewCoalescer_.reset();
+		}
+	}
+}
+
+void Slicer::runPreviewOp(void* self) {
+	auto* s = static_cast<Slicer*>(self);
+	s->previewForTarget(s->previewCoalescer_.current());
+	// If a newer target arrived while this ran, dispatch it (latest-wins).
+	if (auto next = s->previewCoalescer_.complete(); next.has_value()) {
+		if (!deluge::storage::Owner::run(&Slicer::runPreviewOp, self)) {
+			s->previewCoalescer_.reset(); // re-dispatch dropped — release (see preview())
+		}
+	}
+}
+
+void Slicer::previewForTarget(const PreviewTarget& target) {
+	if (target.on) {
 		Kit* kit = getCurrentKit();
 		SoundDrum* drum = (SoundDrum*)kit->firstDrum;
 
@@ -410,10 +448,10 @@ void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, in
 			range->sampleHolder.filePath = waveformBasicNavigator.sample->filePath.c_str();
 			range->sampleHolder.loadFile(false, true, true);
 		}
-		range->sampleHolder.startPos = startPoint;
-		if (endPoint != -1)
-			range->sampleHolder.endPos = endPoint;
-		range->sampleHolder.transpose = transpose;
+		range->sampleHolder.startPos = target.startPoint;
+		if (target.endPoint != -1)
+			range->sampleHolder.endPos = target.endPoint;
+		range->sampleHolder.transpose = target.transpose;
 
 		ParamCollectionSummary* summary = modelStack->paramManager->getPatchedParamSetSummary();
 		ModelStackWithParamId* modelStackWithParamId =
@@ -428,7 +466,7 @@ void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, in
 		modelStackWithAutoParam->autoParam->setCurrentValueWithNoReversionOrRecording(
 		    modelStackWithAutoParam, getParamFromUserValue(params::LOCAL_ENV_0_ATTACK, 1));
 	}
-	instrumentClipView.sendAuditionNote(on, 0, 64, 0);
+	instrumentClipView.sendAuditionNote(target.on, 0, 64, 0);
 }
 
 ActionResult Slicer::padAction(int32_t x, int32_t y, int32_t on) {

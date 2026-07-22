@@ -19,6 +19,7 @@
 
 #include "gui/ui/ui.h"
 #include "hid/button.h"
+#include "storage/latest_wins.h"
 
 #define SLICER_MODE_REGION 0
 #define SLICER_MODE_MANUAL 1
@@ -46,6 +47,10 @@ public:
 	ActionResult verticalEncoderAction(int32_t offset, bool inCardRoutine) override;
 
 	void stopAnyPreviewing();
+	/// Trigger: snapshot the slice/on-off request and dispatch it (coalesced
+	/// latest-wins) onto the storage owner — the load (when the underlying
+	/// sample isn't already resident) and the audition note both happen inside
+	/// the dispatched op, never here.
 	void preview(int64_t startPoint, int64_t endPoint, int32_t transpose, int32_t on);
 
 	int32_t numManualSlice{};
@@ -65,6 +70,27 @@ private:
 	void redraw();
 
 	void doSlice();
+
+	/// A pad-hold/tap audition request, snapshotted at trigger time. All fields
+	/// are plain values (no pointers into live UI state) — `startPoint`/`endPoint`/
+	/// `transpose` are already read out of `manualSlicePoints[]` by `padAction`
+	/// before this is built, and `on` is the press/release flag for this event.
+	struct PreviewTarget {
+		int64_t startPoint;
+		int64_t endPoint;
+		int32_t transpose;
+		int32_t on;
+	};
+
+	/// The dispatched op: loads the sliced sample if it isn't already resident
+	/// and sounds/silences the audition note for the coalescer's current target,
+	/// then re-dispatches if a newer target arrived while it ran. Runs on the
+	/// storage owner (inline on legacy/host). `self` is the Slicer.
+	static void runPreviewOp(void* self);
+	/// The load-then-audition body (previously inline in `preview()`).
+	void previewForTarget(const PreviewTarget& target);
+
+	deluge::storage::LatestWins<PreviewTarget> previewCoalescer_{};
 };
 
 extern Slicer slicer;

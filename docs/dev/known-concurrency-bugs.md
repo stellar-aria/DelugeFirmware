@@ -168,7 +168,7 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
 - **Fix (designed, not implemented):** give `get_cluster`'s synchronous-acquire path the same on-fiber
   dispatch `request_pump` already has — one location, structural, so the property holds for callers that
   do not know about it. Tracked as the prerequisite step of SP-stream-read
-  (`docs/dev/rustfs_sp_stream_read_completion_design.md` §6); that rung **requires** it, because once the
+  (`docs/superpowers/specs/2026-07-21-sp-stream-read-completion-design.md (local — docs/superpowers is gitignored)` §6); that rung **requires** it, because once the
   cluster→sector map is deleted there is no non-fiber fallback left.
 
 ## B7 — efatfs block device bypasses `SD_BUS` arbitration — HIGH — **FIXED (2026-07-21)**
@@ -196,7 +196,7 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
   reachable in shipped builds.
 - **Found by:** source analysis while verifying whether efatfs self-serialization removes the need for
   fiber dispatch (it does not — see B6 and
-  `docs/dev/rustfs_sp_stream_read_completion_design.md` §6). Inferred from source; not observed on
+  `docs/superpowers/specs/2026-07-21-sp-stream-read-completion-design.md (local — docs/superpowers is gitignored)` §6). Inferred from source; not observed on
   hardware.
 
 ## B8 — concurrent clip-delete frees the AudioClip an in-flight audio-clip-sample revert is mid-load on — HIGH — **OPEN (pre-existing, found 2026-07-22)**

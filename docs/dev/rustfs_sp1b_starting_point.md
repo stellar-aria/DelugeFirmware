@@ -1,6 +1,6 @@
 # SP1b — retire the C-FatFS streaming map — STARTING POINT (SUPERSEDED)
 
-> ## ⚠️ SUPERSEDED — READ `docs/dev/rustfs_sp_stream_read_completion_design.md` INSTEAD
+> ## ⚠️ SUPERSEDED — READ `docs/superpowers/specs/2026-07-21-sp-stream-read-completion-design.md (local — docs/superpowers is gitignored)` INSTEAD
 >
 > This document is kept for history. **Three of its load-bearing claims are wrong**, each disproved by
 > work on `feat/rustfs-sp1b-cached-chain`:

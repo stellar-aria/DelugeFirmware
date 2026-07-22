@@ -244,9 +244,19 @@ clusterSizeChangedButItsOk:
 					auto firstSector = sampleStream->sector_of(0);
 					// sampleStream's destructor closes the handle once it goes out of scope below.
 
-					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
-					// enough the file hasn't changed
-					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->stream().sd_address_at(0)) {
+					// If we couldn't resolve cluster 0's sector at all, the file is gone/unreadable on the
+					// reinserted card.
+					if (!firstSector) {
+						((Sample*)thisAudioFile)->markAsUnloadable();
+						continue;
+					}
+					// Only assert the sector address is unchanged when a C-FatFS sdAddress baseline was
+					// recorded (recorder-written samples). Streamed samples read via efatfs and no longer seed
+					// a baseline (R1: the sdAddress seeding loop was removed), so sd_address_at(0) == 0 means
+					// "no baseline" — a successful open + resolvable sector 0 is sufficient validation. Sector 0
+					// is the boot sector, never a valid data cluster, so 0 is a safe "unseeded" sentinel.
+					uint32_t baseline = ((Sample*)thisAudioFile)->stream().sd_address_at(0);
+					if (baseline != 0 && *firstSector != baseline) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}

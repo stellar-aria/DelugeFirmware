@@ -69,7 +69,11 @@ private:
 	// 7SEG Only
 	void redraw();
 
-	void doSlice();
+	/// @param sliceCount how many slices/drums to create — `numClips` (REGION) or
+	/// `numManualSlice` (MANUAL) at commit time, passed explicitly (not read off `this->numClips`)
+	/// so a concurrent encoder turn during the dispatched op's SD-yield can't desync the slice
+	/// math from `commitSlice`'s paint loop. See `SliceCommitTarget`.
+	void doSlice(int32_t sliceCount);
 
 	/// A pad-hold/tap audition request, snapshotted at trigger time. All fields
 	/// are plain values (no pointers into live UI state) — `startPoint`/`endPoint`/
@@ -91,6 +95,36 @@ private:
 	void previewForTarget(const PreviewTarget& target);
 
 	deluge::storage::LatestWins<PreviewTarget> previewCoalescer_{};
+
+	/// Snapshot of the SELECT_ENC "commit slice" gesture, captured in `buttonAction()` at
+	/// dispatch time — before the dispatched op's storage-owner yield inside `doSlice()`'s
+	/// `loadFile()` calls. `sliceCount` is `numClips` (REGION mode) or `numManualSlice` (MANUAL
+	/// mode) at press time; `isManual`/`manualPoints` are what the MANUAL-mode per-drum
+	/// start/end/transpose paint loop (previously synchronous code in `buttonAction()` right
+	/// after `doSlice()` returned) needs. All plain data — no pointers into
+	/// `manualSlicePoints[]`/`numManualSlice`/`numClips` survive past dispatch, so a concurrent
+	/// encoder turn or pad press during the op's yield can't desync what gets sliced from what
+	/// gets painted onto the drums `doSlice()` creates.
+	struct SliceCommitTarget {
+		bool isManual;
+		int32_t sliceCount;
+		SliceItem manualPoints[MAX_MANUAL_SLICES];
+	};
+
+	/// The dispatched op for `buttonAction()`'s SELECT_ENC "commit slice" gesture: runs
+	/// `doSlice()` (which loads the sliced sample(s) if not already resident — the SD-yield this
+	/// rung moves off the executor) and, for MANUAL mode, the per-drum paint loop that used to run
+	/// in `buttonAction()` immediately after `doSlice()` returned. Moved in together because the
+	/// loop indexes drums `doSlice()` creates, so it must run after `doSlice()` completes, and
+	/// `doSlice()`'s own load can yield partway through. `self` is the Slicer; reads only
+	/// `self->pendingSliceTarget_` (the dispatch-time snapshot), never live UI members.
+	static void runDoSliceOp(void* self);
+	/// The commit body (previously inline in `buttonAction()`'s SELECT_ENC case). Resets
+	/// `currentUIMode` back to `UI_MODE_NONE` on every exit path (success or `doSlice()`'s
+	/// internal load-failure branch) to release the gate `buttonAction()` closes before dispatch.
+	void commitSlice(const SliceCommitTarget& target);
+
+	SliceCommitTarget pendingSliceTarget_{};
 };
 
 extern Slicer slicer;

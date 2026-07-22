@@ -196,8 +196,11 @@ __attribute__((weak)) void deluge_streaming_signal_fill(void) {
 // Weak fallbacks for the embedded-fatfs streaming READ symbols. The Rust Embassy BSP provides the
 // real definitions (efatfs_fs.rs / streaming_loader.rs) whenever it links this crate with the
 // `efatfs_streaming` feature; every other BSP/config resolves these instead: "no efatfs backing" —
-// open always fails (caller falls back to the C-FatFS sector path), close is a no-op, and the
-// selector is false.
+// open/read_at always fail, close is a no-op, and the selector is false. NOTE (R1): the streaming
+// read is now efatfs-only — there is NO C-FatFS read fallback anymore. On a non-efatfs BSP (the
+// legacy C/C++ RZA1 BSP, committed for retirement in favour of the Rust BSP) open_read_stream()
+// therefore fails and streamed samples do not load; that BSP's streaming read is retired, not
+// silently falling back.
 __attribute__((weak)) bool deluge_efatfs_open(const char* /*path*/, uint32_t* /*out_handle*/) {
 	return false;
 }

@@ -454,13 +454,14 @@ async fn app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
-    // SP1a Task 6 (`efatfs_streaming` feature, off by default): give the FS
-    // allocator a real backing arena, then mount the single-owner
+    // SP1a Task 6 / R1 (`efatfs_streaming` feature, default-on as of R1): give the
+    // FS allocator a real backing arena, then mount the single-owner
     // embedded-fatfs `FileSystem` — BEFORE `deluge_app_init` so the FS is ready
-    // for the first C++ sample-load. A failed mount must NOT brick boot: it just
-    // leaves `deluge_efatfs_open` returning false later, so C++ falls back to
-    // the C-FatFS sector path. The SD block driver is already up (boot_init
-    // above) and nothing has touched the card yet.
+    // for the first C++ sample-load. A failed mount must NOT brick boot — but note
+    // (R1) the streaming read is now efatfs-only with NO C-FatFS fallback, so a
+    // failed mount means streamed samples won't load (open_read_stream fails), not
+    // that C++ silently reverts to C-FatFS. The SD block driver is already up
+    // (boot_init above) and nothing has touched the card yet.
     //
     // CAVEAT: this and `bench_fs` (Task 4) BOTH init `crate::FS_ALLOCATOR` over
     // their own arena — enabling both features at once would double-init it.
@@ -581,9 +582,9 @@ async fn host_app_task() {
     // the app's first sample-load can open an efatfs handle. No FS_ALLOCATOR
     // arena needed here (unlike the device): `efatfs_host_shim.rs`'s module doc
     // notes embedded-fatfs's `alloc` feature just uses the host's implicit std
-    // allocator. A failed mount must NOT abort boot — it just leaves
-    // `deluge_efatfs_open` returning false, so C++ falls back to the C-FatFS
-    // sector path, exactly like the device. No `sim_latency::set_off_fiber_instant`
+    // allocator. A failed mount must NOT abort boot — but (R1) the streaming read
+    // is efatfs-only now, so a failed mount means streamed samples won't load
+    // rather than reverting to C-FatFS, exactly like the device. No `sim_latency::set_off_fiber_instant`
     // dance is needed on this path either: `deluge_block_read`'s off-fiber
     // dispatch (which this mount's block device goes through — see the shim's
     // module doc) only needs that workaround when the SAME OS thread also owns

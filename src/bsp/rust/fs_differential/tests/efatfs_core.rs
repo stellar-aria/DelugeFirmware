@@ -597,3 +597,30 @@ fn efatfs_streaming_pattern_nonvacuous() {
     );
 }
 
+/// Task 1: byte-offset read-exactness at a non-cluster-aligned offset — the operation
+/// `deluge_efatfs_read_at` performs (arbitrary byte_offset, arbitrary length), proven byte-exact
+/// against the C-FatFS oracle. (The FFI's block_on bridge is thin glue over exactly this call; its
+/// integration is exercised by Lens 2 in Task 5.)
+#[test]
+fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = fat32();
+    let _disk = RamDisk::load(&img);
+    let e = EFatFs::mount();
+
+    let path = "/SAMPLES/huge.bin";
+    let oracle = CFatFs::mount().read_file(path);
+
+    // Offsets deliberately NOT on cluster boundaries, spanning cluster edges.
+    let ctx = e.open_context(path);
+    let mut ctx = ctx;
+    for &(off, len) in &[(0usize, 100usize), (33_000, 40_000), (1_000_003, 12_345)] {
+        let end = (off + len).min(oracle.len());
+        let mut buf = vec![0u8; end - off];
+        let (newctx, filled) = e.read_at_context(&ctx, off as u32, &mut buf);
+        ctx = newctx;
+        assert!(filled, "efatfs short read at off {off}");
+        assert_eq!(&buf[..], &oracle[off..end], "efatfs read diverged at off {off}");
+    }
+}
+

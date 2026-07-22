@@ -208,3 +208,32 @@ pub extern "C" fn deluge_efatfs_close(handle: u32) {
     // An off-fiber close can't bridge to the async table, so the slot leaks until reuse —
     // acceptable for SP1a (flag-gated, few handles). A deferred-close queue is future work.
 }
+
+/// C-ABI: synchronously read `count` bytes at `byte_offset` of the file behind `handle`, bridging
+/// the async [`read_at`] through `block_on_fiber` — valid only on the worker fiber. Writes
+/// `*out_read = count` and returns true iff the full buffer was filled. See
+/// `include/libdeluge/streaming_fill.h` for the contract.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_read_at(
+    handle: u32,
+    byte_offset: u32,
+    dst: *mut u8,
+    count: u32,
+    out_read: *mut u32,
+) -> bool {
+    if !crate::fiber::on_fiber() || dst.is_null() || out_read.is_null() {
+        return false;
+    }
+    // SAFETY: `dst` points at `count` writable bytes owned by the C++ caller for the duration of
+    // this synchronous call (the cluster payload buffer in read_cluster_data).
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
+    if crate::fiber::block_on_fiber(read_at(handle, byte_offset, buf)) {
+        // SAFETY: `out_read` is non-null (checked above), a `u32` the caller owns.
+        unsafe {
+            *out_read = count;
+        }
+        true
+    } else {
+        false
+    }
+}

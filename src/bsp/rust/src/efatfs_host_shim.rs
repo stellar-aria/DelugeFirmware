@@ -281,3 +281,35 @@ pub extern "C" fn deluge_efatfs_close(handle: u32) {
         embassy_futures::block_on(close(handle));
     }
 }
+
+/// C-ABI: host sibling of `efatfs_fs::deluge_efatfs_read_at`. Uses the same `on_fiber`-gated
+/// `block_on_fiber`/`block_on` dispatch as [`deluge_efatfs_open`] — on-fiber it yields so an SD read
+/// can pend without livelocking the single-threaded harness (see this module's `read` doc).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_read_at(
+    handle: u32,
+    byte_offset: u32,
+    dst: *mut u8,
+    count: u32,
+    out_read: *mut u32,
+) -> bool {
+    if dst.is_null() || out_read.is_null() {
+        return false;
+    }
+    // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
+    let filled = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(read_at(handle, byte_offset, buf))
+    } else {
+        embassy_futures::block_on(read_at(handle, byte_offset, buf))
+    };
+    if filled {
+        // SAFETY: `out_read` is non-null (checked above), a `u32` the caller owns.
+        unsafe {
+            *out_read = count;
+        }
+        true
+    } else {
+        false
+    }
+}

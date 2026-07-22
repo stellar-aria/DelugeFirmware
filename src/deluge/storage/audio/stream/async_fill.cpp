@@ -208,6 +208,11 @@ __attribute__((weak)) void deluge_efatfs_close(uint32_t /*handle*/) {
 	// No efatfs handle table on this BSP/config.
 }
 
+__attribute__((weak)) bool deluge_efatfs_read_at(uint32_t /*handle*/, uint32_t /*byte_offset*/, void* /*dst*/,
+                                                 uint32_t /*count*/, uint32_t* /*out_read*/) {
+	return false; // No efatfs handle table on this BSP/config.
+}
+
 __attribute__((weak)) bool deluge_streaming_efatfs_active(void) {
 	return false;
 }

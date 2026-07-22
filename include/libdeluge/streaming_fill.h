@@ -123,6 +123,22 @@ bool deluge_efatfs_open(const char* path, uint32_t* out_handle);
 /// @param handle The handle to close. A no-op on every non-efatfs BSP/config (weak fallback).
 void deluge_efatfs_close(uint32_t handle);
 
+/// @brief Synchronously read @p count bytes at absolute @p byte_offset of the file behind @p handle.
+///
+/// The sync-path counterpart of the async `ProdOps::read` efatfs branch: the C++ synchronous cluster
+/// loader (`SampleStream::read_cluster_data`) reads through this. The Rust implementation
+/// (`efatfs_fs.rs` / `efatfs_host_shim.rs`, cargo feature `efatfs_streaming`) bridges to the async
+/// handle table via the worker fiber's `block_on_fiber` — valid only while on the worker fiber.
+/// @param handle     A handle previously returned by deluge_efatfs_open.
+/// @param byte_offset Absolute byte offset within the file to read from.
+/// @param dst        Destination buffer; exactly @p count bytes are written on success.
+/// @param count      Number of bytes to read.
+/// @param out_read   Receives the bytes read on success (== @p count); untouched on failure.
+/// @return true iff the full @p count bytes were read. false (off-fiber, unmounted, bad handle, or a
+///         short/failed read) leaves @p dst partially written and @p out_read untouched — the caller
+///         must treat it as a read error. Every non-efatfs BSP/config links the weak no-op fallback.
+bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uint32_t count, uint32_t* out_read);
+
 /// @brief Whether the embedded-fatfs streaming READ path (cargo feature `efatfs_streaming`) owns
 ///        the read on this build/BSP.
 ///

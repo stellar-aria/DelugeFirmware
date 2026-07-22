@@ -56,3 +56,44 @@ src/lib/printf\.c
 # broad `storage/audio/stream/` pattern (that would also swallow the genuinely-new recorder/
 # cluster findings in open_findings_patterns.txt), so this one line gets its own entry.
 src/deluge/storage/audio/stream/loader\.cpp:82:32 in deluge::audio::stream::loader::pump
+
+# --- Surfaced during R1 (efatfs read migration) Lens 2, 2026-07-22 ---
+# Full-stack-attributed to PRE-EXISTING classes; 0/18 touch R1's efatfs read
+# surface (no efatfs/read_cluster_data/EfatfsReadSource/block_on_fiber-from-read
+# /ProdOps::read/sector_of-FAT-walk frame in either racing stack). Classes are
+# documented in docs/dev/known-concurrency-bugs.md (TLSF allocator; playback/
+# song-transport tick-vs-restart; AudioEngine global flags). Cataloged per
+# decision 2026-07-22 — recorded, not suppressed.
+#
+# Specificity trade-off: unlike this file's broad file-level patterns above
+# (audio_engine.cpp, reverb/, etc.), these entries pin file+line+function (the
+# loader.cpp:82 style, not a bare wildcard) — deliberately, per the R1 review
+# instruction not to risk masking a genuinely-new future race on these same,
+# frequently-touched files (clip.cpp, song.cpp, playback_handler.h). A future
+# race at a DIFFERENT line in these files will still correctly surface as
+# UNCATALOGUED, unlike the broad-file convention used elsewhere in this catalog.
+
+# TLSF allocator (crates/deluge_alloc/src/tlsf.rs): audio-thread voice
+# allocation racing recorder cluster-table growth in the shared heap. Ten
+# specific known sites pinned by line number, plus the two generic
+# core::ptr::read/write<*mut BlockHeader> monomorphizations they lower to.
+crates/deluge_alloc/src/tlsf\.rs:(269|276|277|314|317|348|68|92):[0-9]+ in <deluge_alloc::tlsf::(Tlsf|BlockHeader)>
+core::ptr::(read|write)::<\*mut deluge_alloc::tlsf::BlockHeader>
+
+# Playback/song-transport: audio-thread tick (processCurrentPos / clock-active
+# check) vs. (re)setupPlayback writes on the same Clip/Song/NoteRow/
+# PlaybackHandler state. Same "cooperative-only" class as the broader
+# playback_handler.cpp/arrangement.cpp patterns above, but pinned per-site here
+# (see specificity trade-off note above).
+src/deluge/model/clip/clip\.cpp:223:6 in Clip::processCurrentPos
+src/deluge/model/clip/clip\.cpp:245:6 in Clip::processCurrentPos
+src/deluge/model/clip/instrument_clip\.cpp:704:6 in InstrumentClip::processCurrentPos
+src/deluge/model/note/note_row\.cpp:2137:29 in NoteRow::processCurrentPos
+src/deluge/model/song/song\.cpp:4002:15 in Song::isClipActive
+src/deluge/playback/playback_handler\.h:223:46 in PlaybackHandler::isEitherClockActive
+
+# AudioEngine global flags: audio-thread vs. UI/main-thread reads/writes of
+# module-level bool flags, same class as the audio_engine.cpp pattern above
+# but in two different files (pinned per-site, not file-wide).
+src/deluge/gui/ui/audio_recorder\.cpp:154:29 in AudioRecorder::beginOutputRecording
+src/deluge/gui/waveform/waveform_renderer\.cpp:694:33 in WaveformRenderer::advanceOverviewScan

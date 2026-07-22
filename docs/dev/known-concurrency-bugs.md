@@ -199,6 +199,36 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
   `docs/superpowers/specs/2026-07-21-sp-stream-read-completion-design.md (local — docs/superpowers is gitignored)` §6). Inferred from source; not observed on
   hardware.
 
+## Note: R1 (efatfs read-path timing change) Lens 2 run surfaced 18 more pre-existing signatures — cataloged, 0 R1-introduced (2026-07-22)
+
+A `preemptive_race_tsan` sweep run against the R1 migration (the efatfs streaming-read path
+picking up cached-chain seeking) surfaced 18 TSan `SUMMARY` signatures not yet in
+`known_patterns.txt`/`open_findings_races.txt` (17 concentrated in one bursty run, 1 in
+another). Full-stack attribution of all 18 found **zero** connection to R1: none of the
+racing stacks contain an `efatfs`/`read_cluster_data`/`EfatfsReadSource`/
+`block_on_fiber`-from-read/`ProdOps::read`/`sector_of`-FAT-walk frame. They fall into three
+already-understood pre-existing classes:
+
+- **TLSF allocator** (`crates/deluge_alloc/src/tlsf.rs:269,276,277,314,317,348,68,92` plus the
+  generic `core::ptr::read`/`write::<*mut BlockHeader>` monomorphizations) — audio-thread voice
+  allocation racing recorder cluster-table growth in the shared heap. Same single-threaded-by-
+  assumption class as B1/B5, one level lower (the allocator underneath the resource manager).
+- **Playback/song-transport** (`clip.cpp:223,245`, `instrument_clip.cpp:704`,
+  `note_row.cpp:2137`, `song.cpp:4002`, `playback_handler.h:223`) — audio-thread tick
+  (`processCurrentPos` / clock-active check) vs. (re)`setupPlayback` writes. Same class as the
+  existing `playback_handler.cpp`/`arrangement.cpp` entries in `known_patterns.txt`.
+- **AudioEngine global flags** (`audio_recorder.cpp:154` `bypassCulling`,
+  `waveform_renderer.cpp:694` `audioRoutineLocked`) — same class as the `audio_engine.cpp`
+  pattern already in `known_patterns.txt`, in two different files.
+
+Cataloged in `known_patterns.txt` under its own dated header, pinned per-site (file+line+
+function, not a bare file wildcard) rather than folded into the broader existing patterns —
+deliberately, so a genuinely new race at a different line in these frequently-touched files
+still surfaces as `UNCATALOGUED`. Verified deterministically against the saved
+`preemptive_race_tsan/logs/run_{1..5}.log`: 18 uncatalogued → 0 uncatalogued after the catalog
+update, replaying `run.sh`'s own normalize+classify logic. Recorded, not suppressed — see
+`known_patterns.txt`'s header for why patterns over exact-line matching.
+
 ## B8 — concurrent clip-delete frees the AudioClip an in-flight audio-clip-sample revert is mid-load on — HIGH — **OPEN (pre-existing, found 2026-07-22)**
 
 - **Where:** `ConsequenceAudioClipSetSample::revert` (`src/deluge/model/consequence/consequence_audio_clip_set_sample.cpp:54`) loads a sample (`AudioFileHolder::loadFile`) which YIELDS on SD I/O. During that yield a concurrent "delete this clip" gesture can free the `AudioClip` the revert is operating on → use-after-free.

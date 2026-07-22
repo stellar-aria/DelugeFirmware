@@ -388,9 +388,17 @@ void SampleBrowser::enterKeyPress() {
 
 		// Otherwise, load it normally
 		else {
-			claimCurrentFile();
+			// Dispatch onto the storage owner so pitch-detection (Sample::determinePitch, deep
+			// inside claimCurrentFile()) doesn't block the executor on SD reads (bug B6). Fire-
+			// and-forget: the result was already discarded when this ran inline, and
+			// claimCurrentFile() handles its own loading-animation/close-on-success internally.
+			deluge::storage::Owner::run_or_inline(&SampleBrowser::runClaimCurrentFileOp, nullptr);
 		}
 	}
+}
+
+void SampleBrowser::runClaimCurrentFileOp(void*) {
+	sampleBrowser.claimCurrentFile();
 }
 
 ActionResult SampleBrowser::backButtonAction() {

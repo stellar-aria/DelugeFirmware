@@ -109,6 +109,11 @@ private:
 
 	deluge::storage::LatestWins<PreviewTarget> previewCoalescer_{};
 
+	/// The dispatched op for the direct pad-tap load (enterKeyPress): runs claimCurrentFile()
+	/// with its default args on the storage owner. Result discarded (as it always was inline) —
+	/// claimCurrentFile() already handles its own loading-animation/close-on-success internally.
+	static void runClaimCurrentFileOp(void*);
+
 	void audioFileIsNowSet();
 	bool canImportWholeKit();
 	bool loadAllSamplesInFolder(bool detectPitch, int32_t* getNumSamples, Sample*** getSortArea,

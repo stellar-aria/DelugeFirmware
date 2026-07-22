@@ -24,10 +24,44 @@
 #include "processing/sound/sound.h"
 #include "processing/source.h"
 #include "storage/file_item.h"
+#include "storage/owner.h"
 #include "util/functions.h"
+#include <cstdint>
 
 namespace deluge::gui::context_menu::sample_browser {
 Synth synth{};
+
+namespace {
+/// The dispatched op for Synth::acceptCurrentOption: runs the browser load fn for `option` (the
+/// currentOption snapshotted at dispatch time, NOT re-read from `synth.currentOption` — on
+/// Embassy this runs on the worker fiber after buttonAction() has returned and the menu is still
+/// open, so the user could have turned the encoder and changed currentOption in the meantime).
+/// On failure, closes just the ContextMenu (the browser fn already closes everything, including
+/// this menu, on success via its own close()/exitAndNeverDeleteDrum()).
+void runAcceptOp(void* ctx) {
+	auto option = static_cast<int32_t>(reinterpret_cast<intptr_t>(ctx));
+	bool success = false;
+	switch (option) {
+	case 0: // Multisamples
+		success = sampleBrowser.importFolderAsMultisamples();
+		break;
+	case 1: // Basic
+		success = sampleBrowser.claimCurrentFile(0, 0, 0);
+		break;
+	case 2: // Single-cycle
+		success = sampleBrowser.claimCurrentFile(2, 2, 1);
+		break;
+	case 3:                                                // WaveTable
+		success = sampleBrowser.claimCurrentFile(1, 1, 2); // Could probably also be 0,0,2
+		break;
+	default:
+		__builtin_unreachable();
+	}
+	if (!success) {
+		synth.close();
+	}
+}
+} // namespace
 
 char const* Synth::getTitle() {
 	using enum l10n::String;
@@ -80,20 +114,15 @@ bool Synth::isCurrentOptionAvailable() {
 }
 
 bool Synth::acceptCurrentOption() {
-
-	switch (currentOption) {
-	case 0: // Multisamples
-		return sampleBrowser.importFolderAsMultisamples();
-	case 1: // Basic
-		return sampleBrowser.claimCurrentFile(0, 0, 0);
-	case 2: // Single-cycle
-		return sampleBrowser.claimCurrentFile(2, 2, 1);
-	case 3:                                             // WaveTable
-		return sampleBrowser.claimCurrentFile(1, 1, 2); // Could probably also be 0,0,2
-	default:
-		__builtin_unreachable();
-		return false;
-	}
+	// Dispatch onto the storage owner so pitch-detection (deep inside claimCurrentFile()/
+	// importFolderAsMultisamples()) doesn't block the executor on SD reads (bug B6). The load is
+	// now fire-and-forget, so this can't honestly report the eventual success/failure back to
+	// ContextMenu::buttonAction() synchronously — always return true (never trigger its
+	// synchronous close()) and do the close-on-failure ourselves inside the op once the real
+	// result is known. Snapshot currentOption now: it must NOT be re-read inside the op (see
+	// runAcceptOp's comment).
+	deluge::storage::Owner::run_or_inline(&runAcceptOp, reinterpret_cast<void*>(static_cast<intptr_t>(currentOption)));
+	return true;
 }
 
 ActionResult Synth::padAction(int32_t x, int32_t y, int32_t on) {

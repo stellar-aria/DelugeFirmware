@@ -105,8 +105,14 @@ mod display;
 /// SP1a Task 7a: storage-generic, host-testable core of the efatfs read path
 /// (`HandleTable` + `FileContext` detach/reattach + generation guard + fill
 /// loop). `efatfs_fs` wraps it with the device statics/mutexes/FFI; host tests
-/// and `lens1_vt_sim` drive it directly.
-#[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+/// and `lens1_vt_sim` drive it directly. R0b: also reachable under `host_app`
+/// (any target, independent of `efatfs_streaming`) so `efatfs_host_shim` — the
+/// host counterpart of `efatfs_fs` — can reuse it unchanged; see that module's
+/// doc.
+#[cfg(any(
+    all(target_os = "none", feature = "efatfs_streaming"),
+    feature = "host_app"
+))]
 mod efatfs_core;
 /// SP1a: the single-owner `embedded-fatfs` mount — one `FileSystem` behind an
 /// async `Mutex`, the only way live code touches the vendored FS. Non-default:
@@ -114,6 +120,11 @@ mod efatfs_core;
 /// tasks wire the file-handle table, FFI, and the read swap onto this).
 #[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
 mod efatfs_fs;
+/// R0b: host counterpart of `efatfs_fs` — mounts `embedded-fatfs` over a
+/// `deluge_block_read`-backed block device so a host harness can measure the
+/// real efatfs read path. Test infrastructure only; no device path touched.
+#[cfg(feature = "host_app")]
+mod efatfs_host_shim;
 /// SP1: `block_device_driver::BlockDevice<512>` over the real SD driver
 /// (`deluge_bsp::sd`), feeding the `BufStream`/`embedded-fatfs` stack —
 /// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.

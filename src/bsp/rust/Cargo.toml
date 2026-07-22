@@ -113,6 +113,22 @@ corosensei = "0.3"
 # pulls it in.
 deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 
+# R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack the
+# device path (above) uses, made available on host too — `efatfs_host_shim.rs`
+# (host_app-only) reuses the storage-generic `efatfs_core` unchanged, which
+# needs these. Optional + gated by `host_app` (see its `dep:` list below), same
+# pattern as `deluge_resource` just above, so a plain host build never pulls
+# them in. No `fs_alloc`/`#[global_allocator]` needed on host: unlike the
+# device's `no_std` target, a std host binary already has an implicit default
+# allocator, so `embedded-fatfs`'s `alloc` feature (`extern crate alloc`) just
+# works. Minimal Task-4 dep-visibility change pulled forward by R0b's Task 3 —
+# see .superpowers/sdd/task-3-report.md.
+block-device-driver = { path = "../../../crates/block-device-driver", optional = true }
+block-device-adapters = { path = "../../../crates/block-device-adapters", optional = true }
+aligned = { version = "0.4", optional = true }
+embedded-fatfs = { path = "../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"], optional = true }
+embedded-io-async = { version = "0.7.0", optional = true }
+
 [features]
 default = ["rtt", "async_streaming_loader"]
 
@@ -128,8 +144,16 @@ sanitize = ["corosensei/sanitizer"]
 
 ## Link the host-built C++ `deluge_app` object and bindgen the libdeluge headers
 ## for the host ABI, so the host binary can reach the C++ app boundary without a
-## device build. Pulls in the host-side `deluge_resource` dep. Off by default.
-host_app = ["dep:deluge_resource"]
+## device build. Pulls in the host-side `deluge_resource` dep, plus (R0b) the
+## storage stack `efatfs_host_shim`/`efatfs_core` need on host. Off by default.
+host_app = [
+    "dep:deluge_resource",
+    "dep:block-device-driver",
+    "dep:block-device-adapters",
+    "dep:aligned",
+    "dep:embedded-fatfs",
+    "dep:embedded-io-async",
+]
 
 ## Diagnostic: make `deluge_block_read`/`deluge_block_write` debug_assert! the
 ## caller is on the storage worker fiber, surfacing card transfers not yet on the

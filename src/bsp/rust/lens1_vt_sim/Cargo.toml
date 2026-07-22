@@ -67,6 +67,25 @@ deluge-bsp = { path = "../../../../../deluge-sdk/crates/deluge-bsp", features = 
 # which carries its own #[panic_handler]).
 deluge_resource = { path = "../../../../crates/deluge_resource" }
 
+# R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
+# `deluge-bsp-rust`'s own `host_app` feature pulls in (see its Cargo.toml
+# comment) — `efatfs_host_shim.rs`/`efatfs_core.rs` (path-included above) need
+# these. Plain (non-optional) deps, not gated behind a Cargo feature: this
+# package always builds with `host_app` semantics (its whole purpose), so
+# there is no "host_app off" configuration to spare the extra deps for, unlike
+# the main crate's plain host BSP smoke-test build. No `fs_alloc`/
+# `#[global_allocator]` needed here either — same reasoning as the main
+# crate's Cargo.toml: host's implicit std allocator already covers
+# embedded-fatfs's `alloc` feature.
+block-device-driver = { path = "../../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../../crates/block-device-adapters" }
+aligned = "0.4"
+embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features = false, features = [
+    "lfn",
+    "alloc",
+] }
+embedded-io-async = "0.7.0"
+
 [features]
 # Both always-on for this package (it exists ONLY to run the real C++ app under
 # `sim_latency`-modeled SD timing) — kept as real Cargo features rather than
@@ -77,6 +96,57 @@ deluge_resource = { path = "../../../../crates/deluge_resource" }
 default = ["host_app", "sim_latency"]
 host_app = []
 sim_latency = []
+# R0b: mount the host efatfs shim in `boot_task` (before `deluge_app_init`) and
+# drive the embedded-fatfs streaming READ path instead of C FatFS — see
+# `../Cargo.toml`'s `efatfs_streaming` feature doc for the device-side
+# equivalent.
+#
+# NOT on by default (unlike a first draft of this task) — Task 5's own
+# verification found a reproducible HANG: with this feature on, a full-length
+# scenario run (this package's actual purpose — `sweep.sh` drives 20000
+# blocks by default) can livelock partway through. Isolated with the `cordae`
+# fixture (`LENS1_SONG` default): deterministic, 100%-reproducible across
+# repeated runs (including against a FRESH, never-reused packed image, ruling
+# out image-state confounds) — the run always wedges right after the audio
+# thread's own "rendered 1500 blocks" milestone (`audio_host.rs`'s log),
+# consistently at the same virtual-clock point (t=3834700us, 40000 clock
+# advances, `on_fiber_reads` stuck at 309), regardless of the `LENS1_BLOCKS`
+# target — i.e. it wedges once the scenario runs long enough to reach that
+# point, not at a fixed `LENS1_BLOCKS` threshold (an earlier, less careful
+# pass at this investigation mis-attributed it to a `LENS1_BLOCKS` value;
+# that framing was wrong — the real trigger is the absolute point in the
+# virtual timeline). `efatfs_host_shim::read_at` genuinely gets hit dozens of
+# times first (real efatfs reads DO happen — the wiring itself is correct),
+# so the hang is downstream, not at mount/open. Lens 2
+# (`../src/main.rs`'s `host_app_task`, the SAME shim/`fill_once`/
+# `ProdOps::read` code, real multi-threaded executor, NOT the virtual-clock
+# driver here) completed the same song cleanly at 500 blocks across 5 TSan
+# runs with efatfs active — so this looks specific to this package's
+# single-threaded, discrete-event "poll to quiescence, jump the virtual clock"
+# driver interacting with something reached partway through this song
+# (plausibly a loop-point backward seek — this branch's own SP1b chain-walk-
+# cost work is directly about that access pattern) rather than a defect in
+# the shim/mount wiring itself. Not root-caused further — out of Task 5's
+# scope (wiring + feature flags), flagged as a follow-up. Opt in explicitly
+# (`--features efatfs_streaming` or `--no-default-features --features
+# host_app,sim_latency,efatfs_streaming`) for short/bounded runs until this is
+# root-caused; do NOT flip this to `default` (that would silently break
+# `sweep.sh`'s normal 20000-block runs).
+#
+# Composes `async_streaming_loader`: NOT optional, structurally required.
+# `ProdOps::read` (`streaming_loader.rs`'s `prod` module) — the only call site
+# that ever consults a `StreamingFillDescriptor.handle` and routes to
+# `efatfs_host_shim::read_at` — only runs inside `fill_once`, which only runs
+# once the Rust `streaming_fill_task` owns the loader queue
+# (`deluge_streaming_async_active() == true`). When that's false, C++'s own
+# `loader.cpp::pump()`/`SampleStream::read_cluster_data` handle every fill
+# instead, and that sync path never looks at `fill.handle` at all — it always
+# goes through `make_read_source()`'s C-FatFS-backed `deluge::io::Stream`.
+# So `efatfs_streaming` alone (without `async_streaming_loader`) would mount
+# the shim and leave it completely unexercised — confirmed by running the
+# scenario with only `efatfs_streaming` on: the mount succeeded but
+# `efatfs_host_shim::read_at` was never hit.
+efatfs_streaming = ["async_streaming_loader"]
 # Not enabled — exists only so the shared `#[cfg(feature = "storage-owner-audit")]`/
 # `#[cfg(feature = "rtt")]` conditionals in `sd.rs`/`services.rs` don't trip
 # rustc's unknown-cfg lint in this package (they're real features over there,

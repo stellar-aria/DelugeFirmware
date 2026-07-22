@@ -104,6 +104,19 @@ mod board;
 mod control;
 #[path = "../../src/display.rs"]
 mod display;
+/// R0b: storage-generic core of the efatfs read path — see
+/// `../../src/main.rs`'s `mod efatfs_core` doc. Gated on `host_app` (always on
+/// for this package) to mirror that file's cfg exactly, even though this
+/// package's own `#[cfg(feature = "efatfs_streaming")]` is what actually
+/// drives `mount()` (below, in `boot_task`).
+#[cfg(feature = "host_app")]
+#[path = "../../src/efatfs_core.rs"]
+mod efatfs_core;
+/// R0b: host counterpart of the device `efatfs_fs.rs` — see
+/// `../../src/main.rs`'s `mod efatfs_host_shim` doc.
+#[cfg(feature = "host_app")]
+#[path = "../../src/efatfs_host_shim.rs"]
+mod efatfs_host_shim;
 #[path = "../../src/ffi.rs"]
 mod ffi;
 #[path = "../../src/ffi_extra.rs"]
@@ -176,6 +189,22 @@ const DEFAULT_AUDIO_BLOCK_PERIOD_US: u64 = 128 * 1_000_000 / 44_100; // 2902 (fl
 async fn boot_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
+
+    // R0b: mirrors `deluge-bsp-rust`'s `host_app_task` efatfs mount (see its
+    // comment). `main`'s `sd::sim_latency::set_off_fiber_instant(true)` (above,
+    // set once before anything is spawned) already covers this mount exactly
+    // like it covers the C-FatFS mount inside `deluge_app_init` below: this
+    // mount's block device goes through the same `deluge_block_read` off-fiber
+    // dispatch (see `efatfs_host_shim.rs`'s module doc), so it inherits the
+    // flag with no extra wrap/restore needed here. A failed mount must NOT
+    // abort boot — see the device/host_app_task comments this mirrors.
+    #[cfg(feature = "efatfs_streaming")]
+    match crate::efatfs_host_shim::mount().await {
+        Ok(()) => log::info!("lens1-vt-sim: efatfs mounted"),
+        Err(()) => {
+            log::warn!("lens1-vt-sim: efatfs mount failed — streaming falls back to C FatFS");
+        }
+    }
 
     log::info!("lens1-vt-sim: deluge_app_init() (registers + spawns task runners)");
     // SAFETY: called once, after `scheduler::set_spawner` (main, below) and

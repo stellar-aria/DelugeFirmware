@@ -71,7 +71,7 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
     rm -rf target/x86_64-unknown-linux-gnu-tsan
     DELUGE_HOSTAPP_BUILD_DIR="$TSAN_BUILD_DIR" \
     RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0" \
-    cargo +nightly build --features host_app,async_streaming_loader \
+    cargo +nightly build --features host_app,async_streaming_loader,efatfs_streaming \
         -Zbuild-std=core,alloc,std,panic_abort \
         -Zjson-target-spec \
         --target sanitizer/x86_64-unknown-linux-gnu-tsan.json

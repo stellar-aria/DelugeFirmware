@@ -576,6 +576,27 @@ async fn host_app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
+    // R0b: host counterpart of `app_task`'s efatfs mount (see its comment) —
+    // mount the shim's embedded-fatfs `FileSystem` BEFORE `deluge_app_init` so
+    // the app's first sample-load can open an efatfs handle. No FS_ALLOCATOR
+    // arena needed here (unlike the device): `efatfs_host_shim.rs`'s module doc
+    // notes embedded-fatfs's `alloc` feature just uses the host's implicit std
+    // allocator. A failed mount must NOT abort boot — it just leaves
+    // `deluge_efatfs_open` returning false, so C++ falls back to the C-FatFS
+    // sector path, exactly like the device. No `sim_latency::set_off_fiber_instant`
+    // dance is needed on this path either: `deluge_block_read`'s off-fiber
+    // dispatch (which this mount's block device goes through — see the shim's
+    // module doc) only needs that workaround when the SAME OS thread also owns
+    // `sim_latency::pump`'s executor, which isn't the case here — `pump` runs on
+    // the dedicated audio OS thread (spawned above in `main`, before this task),
+    // so this task's `block_on` busy-spin never starves it (see Appendix A of
+    // the R0 design doc for why Lens 1's single-threaded shape is different).
+    #[cfg(feature = "efatfs_streaming")]
+    match crate::efatfs_host_shim::mount().await {
+        Ok(()) => log::info!("efatfs: mounted (host)"),
+        Err(()) => log::warn!("efatfs: host mount failed — streaming falls back to C FatFS"),
+    }
+
     log::info!("deluge-bsp-rust: host deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this
     // executor via scheduler::set_spawner's stashed spawner. They begin running
@@ -643,13 +664,35 @@ fn main() {
     // assertion) stays covered under `sim_latency` by
     // `tests/sim_latency_host.rs`'s exercise, which brings up a real executor
     // with `sim_latency::pump` running before issuing any transfer.
-    #[cfg(feature = "sim_latency")]
+    //
+    // R0b: also SKIPPED whenever `host_app` is on. This write is destructive
+    // (it clobbers sector 1 of WHATEVER image `DELUGE_SD_IMAGE` names) and, on
+    // a `host_app` build, that can be a real, externally-supplied FAT image —
+    // e.g. `preemptive_race_tsan/run.sh`'s own documented, recommended
+    // `DELUGE_SD_IMAGE=<cached image>` workflow (its header comment: reusing an
+    // already-packed image is "100% reliable", vs. packing fresh in-process).
+    // Found by R0b's Task 5 verification: this self-test's synthetic byte
+    // pattern lands on FAT32's FSInfo sector, which C-FatFS's `f_mount`
+    // tolerates (it just re-derives the free-cluster count) but
+    // `embedded-fatfs`'s stricter mount validation rejects outright
+    // (`CorruptedFileSystem`) — so enabling `efatfs_streaming` on this path
+    // surfaced a pre-existing landmine that C-FatFS-only builds never
+    // triggered. Under `host_app`, the real app's own boot (FatFS/efatfs mount
+    // + whatever scenario runs) already exercises the same
+    // `deluge_block_write`/`deluge_block_read` ABI end-to-end with real data,
+    // making this synthetic smoke test both redundant and unsafe there.
+    #[cfg(any(feature = "sim_latency", feature = "host_app"))]
     log::info!(
-        "deluge-bsp-rust: sd round-trip SKIPPED (sim_latency has no executor/pump \
-         yet at this bootstrap point — see tests/sim_latency_host.rs for the \
-         covered equivalent)"
+        "deluge-bsp-rust: sd round-trip SKIPPED ({})",
+        if cfg!(feature = "host_app") {
+            "host_app is on — this write is destructive and DELUGE_SD_IMAGE may name a \
+             real caller-supplied FAT image; the app's own boot exercises the same ABI"
+        } else {
+            "sim_latency has no executor/pump yet at this bootstrap point — see \
+             tests/sim_latency_host.rs for the covered equivalent"
+        }
     );
-    #[cfg(not(feature = "sim_latency"))]
+    #[cfg(not(any(feature = "sim_latency", feature = "host_app")))]
     {
         const TEST_SECTOR: u32 = 1;
         let mut pattern = [0u8; 512];

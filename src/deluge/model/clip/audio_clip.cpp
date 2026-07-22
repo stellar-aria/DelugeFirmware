@@ -1393,7 +1393,9 @@ bool AudioClip::shiftHorizontally(ModelStackWithTimelineCounter* modelStack, int
 		sampleHolder.startPos = newStartPos;
 		sampleHolder.endPos = newStartPos + length;
 
-		sampleHolder.claimClusterReasons(sampleControls.isCurrentlyReversed(), CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
+		// B6: clip-shift prefetch must never block the UI on a card read — enqueue and let the
+		// loader fill it. Playback tolerates a not-yet-loaded cluster (same as the realtime path).
+		sampleHolder.claimClusterReasons(sampleControls.isCurrentlyReversed(), CLUSTER_ENQUEUE);
 
 		if (active) {
 			expectEvent();

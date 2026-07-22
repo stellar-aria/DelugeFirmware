@@ -120,6 +120,13 @@ bool deluge_worker_higher_priority_waiting(void) {
 	return false;
 }
 
+// Cooperative/host default: run is inline, so the caller is never "on a separate
+// worker" — always false. The Embassy BSP supplies its own definition (fiber.rs)
+// that reports whether we are on the worker fiber; that wins at link time.
+bool deluge_worker_on_worker(void) {
+	return false;
+}
+
 // libdeluge/storage_owner.h — cooperative/host default: FatFS runs inline on the
 // caller, so the caller is always the owner. Embassy overrides (fiber-only).
 bool deluge_storage_on_owner(void) {

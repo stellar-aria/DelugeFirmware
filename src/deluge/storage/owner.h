@@ -55,6 +55,17 @@ struct Owner {
 	/// (indistinguishable from run() there, since there's no queue to jump ahead of).
 	/// @return as run(): true if it ran/queued, false if the dispatch was dropped.
 	static bool run_priority(void (*fn)(void*), void* ctx);
+
+	/// True iff the current context is the storage worker (the worker fiber on
+	/// Embassy; always false on cooperative/host, where run() is inline). Use to
+	/// avoid re-dispatching a dual-context op that is already on the worker.
+	static bool on_owner();
+
+	/// Run `fn(ctx)` on the worker, but inline if already on_owner() (or on a
+	/// cooperative/host BSP). For dual-context callers: the leaf work runs on the
+	/// worker exactly once, whether reached from a UI handler (dispatched) or from
+	/// inside another worker op (inline). Returns true if it ran/queued.
+	static bool run_or_inline(void (*fn)(void*), void* ctx);
 };
 
 /// @brief Single-flight coalesced dispatch onto the storage `Owner`.

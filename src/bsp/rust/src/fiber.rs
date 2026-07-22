@@ -527,6 +527,15 @@ pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
     higher_priority_waiting()
 }
 
+/// C-ABI: is the current context the worker fiber? Backs `Owner::on_owner()`
+/// (see include/libdeluge/worker.h). `deluge_worker_run` (above) runs ops on
+/// this stackful fiber; [`on_fiber`] is true exactly while executing inside
+/// such an op.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_worker_on_worker() -> bool {
+    on_fiber()
+}
+
 /// Lens-1-only (deterministic virtual-time streaming-underrun harness) starvation guard
 /// for [`dequeue`]'s HIGH-before-NORMAL policy.
 /// 0 (the default) preserves today's UNBOUNDED policy exactly for every

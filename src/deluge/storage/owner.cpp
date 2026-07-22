@@ -34,6 +34,18 @@ bool Owner::run_priority(void (*fn)(void*), void* ctx) {
 	return deluge_worker_run_priority(fn, ctx);
 }
 
+bool Owner::on_owner() {
+	return deluge_worker_on_worker();
+}
+
+bool Owner::run_or_inline(void (*fn)(void*), void* ctx) {
+	if (on_owner()) {
+		fn(ctx);
+		return true;
+	}
+	return run(fn, ctx);
+}
+
 void Coalescer::request(void (*fill)(void*), void* ctx) {
 	if (in_flight_.exchange(true, std::memory_order_acq_rel)) {
 		return; // a dispatch is already in flight — it covers this demand

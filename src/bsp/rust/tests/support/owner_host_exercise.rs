@@ -112,9 +112,19 @@ static SERIALIZATION_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 /// op body only ever runs ON the fiber, so this should never fail).
 static ON_OWNER_INSIDE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+/// Same contract as `ON_OWNER_INSIDE_VIOLATIONS`, but for the new
+/// `deluge_worker_on_worker` C-ABI (`fiber.rs`, backing `Owner::on_owner()` —
+/// see `src/deluge/storage/owner.cpp`). On this Rust host build it wraps the
+/// same `fiber::on_fiber()` as `deluge_storage_on_owner`, so it must agree
+/// with it at every point this exercise already checks the owner-query.
+static ON_WORKER_INSIDE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
 fn fast_op_body(thread_id: usize) {
     if !crate::sd::deluge_storage_on_owner() {
         ON_OWNER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if !crate::fiber::deluge_worker_on_worker() {
+        ON_WORKER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
     }
     if IN_OP.swap(true, Ordering::SeqCst) {
         SERIALIZATION_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -150,6 +160,9 @@ extern "C" fn special_op(_ctx: *mut core::ffi::c_void) {
     if !crate::sd::deluge_storage_on_owner() {
         ON_OWNER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
     }
+    if !crate::fiber::deluge_worker_on_worker() {
+        ON_WORKER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
     if IN_OP.swap(true, Ordering::SeqCst) {
         SERIALIZATION_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
     }
@@ -160,6 +173,9 @@ extern "C" fn special_op(_ctx: *mut core::ffi::c_void) {
     // Resumed: back on the fiber, still the same logical op.
     if !crate::sd::deluge_storage_on_owner() {
         ON_OWNER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if !crate::fiber::deluge_worker_on_worker() {
+        ON_WORKER_INSIDE_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
     }
     IN_OP.store(false, Ordering::SeqCst);
     SPECIAL_DONE.store(true, Ordering::SeqCst);
@@ -682,6 +698,10 @@ pub fn run() {
         !crate::sd::deluge_storage_on_owner(),
         "deluge_storage_on_owner() true before any op ever ran"
     );
+    assert!(
+        !crate::fiber::deluge_worker_on_worker(),
+        "deluge_worker_on_worker() true before any op ever ran"
+    );
 
     // --- submit the suspending op first, so the 4 submitter threads (below)
     // genuinely race to enqueue their fast ops *while* it occupies the fiber
@@ -703,6 +723,11 @@ pub fn run() {
         "deluge_storage_on_owner() true on the driving thread while special_op \
          was suspended off the fiber — the query should only ever be true on \
          the executor thread while genuinely executing an op body"
+    );
+    assert!(
+        !crate::fiber::deluge_worker_on_worker(),
+        "deluge_worker_on_worker() true on the driving thread while special_op \
+         was suspended off the fiber"
     );
 
     // --- several submitter threads racing to enqueue fast ops from
@@ -764,11 +789,21 @@ pub fn run() {
         "deluge_storage_on_owner() was false while an op body was genuinely \
          executing on the fiber (owner-query inside-an-op contract broken)"
     );
+    assert_eq!(
+        ON_WORKER_INSIDE_VIOLATIONS.load(Ordering::SeqCst),
+        0,
+        "deluge_worker_on_worker() was false while an op body was genuinely \
+         executing on the fiber (on_owner()'s inside-an-op contract broken)"
+    );
 
     // --- bookend: everything's done, back to not-on-the-owner ---
     assert!(
         !crate::sd::deluge_storage_on_owner(),
         "deluge_storage_on_owner() true after every op completed"
+    );
+    assert!(
+        !crate::fiber::deluge_worker_on_worker(),
+        "deluge_worker_on_worker() true after every op completed"
     );
 
     // --- SD-routine hold: engaged at enqueue, released at completion ---

@@ -81,6 +81,14 @@ bool deluge_worker_run_priority(void (*fn)(void*), void* ctx);
 /// in the worker ring (queued, not yet dequeued).
 bool deluge_worker_higher_priority_waiting(void);
 
+/// True iff the calling context IS the storage worker (the worker fiber on the
+/// Embassy BSP). Lets a dual-context caller skip re-dispatching when it is
+/// already on the worker — dispatching again would nest a queued op inside the
+/// running one (Embassy) and reorder or deadlock. Cooperative/host: always
+/// false, because `deluge_worker_run` runs inline there, so nesting is harmless
+/// and no caller needs to branch on this.
+bool deluge_worker_on_worker(void);
+
 #ifdef __cplusplus
 }
 #endif

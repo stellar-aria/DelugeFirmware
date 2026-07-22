@@ -319,10 +319,26 @@ void LoadInstrumentPresetUI::folderContentsReady(int32_t entryDirection) {
 // load onto the storage worker instead of running it synchronously (bug B6 - this fires on every
 // non-reload encoder tick while scrolling Load Synth/Kit, and used to block the executor for the
 // whole load). LatestWins collapses a fast scroll onto the settled preset - see runScrollLoadOp().
+//
+// The LoadTarget snapshot is built here, at dispatch time, from live Browser state - the ONLY point
+// where it's safe to read enteredText/currentDir/getCurrentFileItem() directly, because nothing else
+// runs between this tick and the snapshot being taken. Once dispatched, runScrollLoadOp()/performLoad()
+// must never go back to that live state (see LoadTarget's doc for why - it used to, and that was the
+// use-after-free this port fixes).
 void LoadInstrumentPresetUI::currentFileChanged(int32_t movementDirection) {
+	FileItem* currentFileItem = getCurrentFileItem();
 	LoadTarget target{
 	    .loadingSynthToKitRow = loadingSynthToKitRow,
 	    .movementDirection = movementDirection,
+	    .hasFile = currentFileItem != nullptr,
+	    .isFolder = currentFileItem != nullptr && currentFileItem->isFolder,
+	    .maybeExistsOnCard = currentFileItem == nullptr || currentFileItem->maybeExistsOnCard,
+	    .existingInstrument = currentFileItem != nullptr ? currentFileItem->instrument : nullptr,
+	    .path = currentFileItem != nullptr ? getCurrentFilePath() : std::string{},
+	    .name = enteredText,
+	    .dirPath = currentDir,
+	    .filePointer =
+	        currentFileItem != nullptr ? currentFileItem->filePointer : FilePointer{.sclust = 0, .objsize = 0},
 	};
 	if (loadCoalescer_.request(target)) {
 		if (!deluge::storage::Owner::run(&LoadInstrumentPresetUI::runScrollLoadOp, this)) {
@@ -337,7 +353,12 @@ void LoadInstrumentPresetUI::runScrollLoadOp(void* self) {
 	auto* ui = static_cast<LoadInstrumentPresetUI*>(self);
 	const LoadTarget& target = ui->loadCoalescer_.current();
 
-	ui->currentInstrumentLoadError = target.loadingSynthToKitRow ? ui->performLoadSynthToKit() : ui->performLoad();
+	// Pass the snapshot through explicitly - performLoad()/performLoadSynthToKit() must act ONLY on
+	// `target` (and op-local copies derived from it) for anything that crosses their internal SD-yield
+	// points, never on live Browser members, since a scroll on the UI task can run and mutate/free
+	// those while this op is yielded (see LoadTarget's doc).
+	ui->currentInstrumentLoadError =
+	    target.loadingSynthToKitRow ? ui->performLoadSynthToKit(&target) : ui->performLoad(false, &target);
 	if (ui->currentInstrumentLoadError != Error::NONE) {
 		display->displayError(ui->currentInstrumentLoadError);
 	}
@@ -796,19 +817,54 @@ addNumber:
 }
 
 // I thiiink you're supposed to check currentFileExists before calling this?
-Error LoadInstrumentPresetUI::performLoad(bool doClone) {
+//
+// `snapshot`, when non-null, is a LoadTarget recorded at dispatch time (see currentFileChanged()):
+// every read below that would otherwise touch live Browser state (getCurrentFileItem(), enteredText,
+// currentDir) instead comes from op-local copies taken from `snapshot`, so nothing here aliases
+// Browser::fileItems or a live member across loadInstrumentFromFile()'s internal SD-yield points. When
+// `snapshot` is null (the pre-existing live-state call sites: onBrowserOpened()'s changeOutputType()
+// tail, runCommitOp(), and the clone context-menu action), behaviour is unchanged from before this port.
+Error LoadInstrumentPresetUI::performLoad(bool doClone, const LoadTarget* snapshot) {
 
-	FileItem* currentFileItem = getCurrentFileItem();
-	if (currentFileItem == nullptr) {
+	// currentFileItem is only ever touched here, before the yielding load call below - never held
+	// across it (that's the bug this snapshot path fixes; see LoadTarget's doc).
+	FileItem* currentFileItem = snapshot != nullptr ? nullptr : getCurrentFileItem();
+	bool hasFile;
+	bool fileIsFolder;
+	Instrument* fileExistingInstrument;
+	std::string filePath;
+	std::string fileName;
+	std::string fileDirPath;
+
+	if (snapshot != nullptr) {
+		hasFile = snapshot->hasFile;
+		fileIsFolder = snapshot->isFolder;
+		fileExistingInstrument = snapshot->existingInstrument;
+		filePath = snapshot->path;
+		fileName = snapshot->name;
+		fileDirPath = snapshot->dirPath;
+	}
+	else {
+		hasFile = currentFileItem != nullptr;
+		if (hasFile) {
+			fileIsFolder = currentFileItem->isFolder;
+			fileExistingInstrument = currentFileItem->instrument;
+			filePath = getCurrentFilePath();
+		}
+		fileName = enteredText;
+		fileDirPath = currentDir;
+	}
+
+	if (!hasFile) {
 		// Make it say "NONE" on numeric Deluge, for
 		// consistency with old times.
 		return Error::FILE_NOT_FOUND;
 	}
 
-	if (currentFileItem->isFolder) {
+	if (fileIsFolder) {
 		return Error::NONE;
 	}
-	if (currentFileItem->instrument == instrumentToReplace && !doClone) {
+	if (fileExistingInstrument == instrumentToReplace && !doClone) {
 		return Error::NONE; // Happens if navigate over a folder's name (Instrument stays the same),
 	}
 
@@ -831,7 +887,7 @@ Error LoadInstrumentPresetUI::performLoad(bool doClone) {
 	bool needToAddInstrumentToSong;
 	bool loadedFromFile = false;
 
-	Instrument* newInstrument = currentFileItem->instrument;
+	Instrument* newInstrument = fileExistingInstrument;
 
 	bool newInstrumentWasHibernating = false;
 
@@ -866,7 +922,7 @@ giveUsedError:
 		std::string clonedName;
 
 		if (doClone) {
-			bool success = findUnusedSlotVariation(&enteredText, &clonedName);
+			bool success = findUnusedSlotVariation(&fileName, &clonedName);
 			if (!success) {
 				return Error::UNSPECIFIED;
 			}
@@ -875,10 +931,11 @@ giveUsedError:
 		// check if the file pointer matches the current file item
 		// Browser::checkFP();
 
-		// synth or kit
+		// synth or kit - fileName/fileDirPath are op-local copies (see top of function), so the
+		// yielding call below can't have its output params raced by a concurrent scroll mutating
+		// enteredText/currentDir.
 		error = StorageManager::loadInstrumentFromFile(currentSong, instrumentClipToLoadFor, outputTypeToLoad, false,
-		                                               &newInstrument, getCurrentFilePath().c_str(), &enteredText,
-		                                               &currentDir);
+		                                               &newInstrument, filePath.c_str(), &fileName, &fileDirPath);
 
 		if (error != Error::NONE) {
 			return error;
@@ -956,7 +1013,18 @@ giveUsedError:
 		}
 	}
 
-	currentFileItem->instrument = newInstrument;
+	// Cache the loaded Instrument on its FileItem so navigating back to it is a cache hit instead of
+	// a reload. currentFileItem is only non-null on the live (non-snapshot) path, where it was taken
+	// at the very top of this call, before the yielding load above - so this write is exactly as
+	// "stale-listing-safe" as it always was on that path (unchanged from before this port). On the
+	// snapshot path there is deliberately no live FileItem* to write through here (that pointer is
+	// exactly what could have been freed by a scroll-triggered listing rebuild during the yield) -
+	// this is a perf-only cache warm, so skipping it is safe: a future re-list re-associates this
+	// Instrument with its FileItem via the normal Song-instrument scan, and the commit op
+	// (runCommitOp) always does its own authoritative load regardless.
+	if (currentFileItem != nullptr) {
+		currentFileItem->instrument = newInstrument;
+	}
 	currentInstrument = newInstrument;
 
 	if (instrumentClipToLoadFor) {
@@ -991,22 +1059,51 @@ giveUsedError:
 	return Error::NONE;
 }
 
-Error LoadInstrumentPresetUI::performLoadSynthToKit() {
-	FileItem* currentFileItem = getCurrentFileItem();
+// `snapshot`, when non-null, is a LoadTarget recorded at dispatch time (see currentFileChanged()) -
+// see performLoad()'s doc comment for why every live-state read below is instead taken from op-local
+// copies derived from it when present.
+Error LoadInstrumentPresetUI::performLoadSynthToKit(const LoadTarget* snapshot) {
 	Kit* kitToLoadFor = static_cast<Kit*>(instrumentToReplace);
-	if (!currentFileItem) {
+	bool hasFile;
+	bool fileIsFolder;
+	bool fileMaybeExistsOnCard;
+	std::string filePath;
+	std::string fileName;
+	std::string fileDirPath;
+
+	if (snapshot != nullptr) {
+		hasFile = snapshot->hasFile;
+		fileIsFolder = snapshot->isFolder;
+		fileMaybeExistsOnCard = snapshot->maybeExistsOnCard;
+		filePath = snapshot->path;
+		fileName = snapshot->name;
+		fileDirPath = snapshot->dirPath;
+	}
+	else {
+		FileItem* currentFileItem = getCurrentFileItem();
+		hasFile = currentFileItem != nullptr;
+		if (hasFile) {
+			fileIsFolder = currentFileItem->isFolder;
+			fileMaybeExistsOnCard = currentFileItem->maybeExistsOnCard;
+			filePath = getCurrentFilePath();
+		}
+		fileName = enteredText;
+		fileDirPath = currentDir;
+	}
+
+	if (!hasFile) {
 		// Make it say "NONE" on numeric Deluge, for consistency with old times.
 		return Error::FILE_NOT_FOUND;
 	}
 
-	if (currentFileItem->isFolder) {
+	if (fileIsFolder) {
 		return Error::NONE;
 	}
 
 	// An unsaved (in-memory only) synth preset cannot be loaded into a kit row because
 	// loadSynthToDrum() reads XML from disk to create a SoundDrum. If the preset hasn't
 	// been saved yet, there is no file on the SD card to read from.
-	if (!currentFileItem->maybeExistsOnCard) {
+	if (!fileMaybeExistsOnCard) {
 		return Error::FILE_NOT_SAVED;
 	}
 
@@ -1019,9 +1116,12 @@ Error LoadInstrumentPresetUI::performLoadSynthToKit() {
 	kitToLoadFor->drumsWithRenderingActive.erase(soundDrumToReplace);
 	kitToLoadFor->removeDrum(soundDrumToReplace);
 
-	// swaps out the drum pointed to by soundDrumToReplace
+	// swaps out the drum pointed to by soundDrumToReplace. fileName/fileDirPath are op-local copies
+	// (see above) - loadSynthToDrum() doesn't actually read them (they're dead params below the SD
+	// yield in there today), but pass the snapshot copies regardless so this call never aliases a
+	// live Browser member across the yield, matching performLoad().
 	Error error = StorageManager::loadSynthToDrum(currentSong, instrumentClipToLoadFor, false, &soundDrumToReplace,
-	                                              getCurrentFilePath().c_str(), &enteredText, &currentDir);
+	                                              filePath.c_str(), &fileName, &fileDirPath);
 	if (error != Error::NONE) {
 		return error;
 	}
@@ -1029,9 +1129,11 @@ Error LoadInstrumentPresetUI::performLoadSynthToKit() {
 	display->displayLoadingAnimationText("Loading", false, true);
 	soundDrumToReplace->loadAllSamples(true);
 
-	// enteredText is the real on-card name now (display-agnostic), so it needs no reassembling.
-	soundDrumToReplace->drumName = enteredText;
-	soundDrumToReplace->path = currentDir.c_str();
+	// fileName is the real on-card name now (display-agnostic), so it needs no reassembling. Taken
+	// from the snapshot when running as the scroll-load op, so this can't pick up whatever the user
+	// has since scrolled onto.
+	soundDrumToReplace->drumName = fileName;
+	soundDrumToReplace->path = fileDirPath.c_str();
 	ParamManager* paramManager =
 	    currentSong->getBackedUpParamManagerPreferablyWithClip(soundDrumToReplace, instrumentClipToLoadFor);
 	if (paramManager) {

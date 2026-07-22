@@ -31,6 +31,37 @@ class InstrumentClip;
 class Output;
 
 class LoadInstrumentPresetUI final : public LoadUI {
+private:
+	/// Snapshot of the file identity to load, recorded at dispatch time by currentFileChanged()
+	/// (mirrors SampleBrowser::PreviewTarget - see sample_browser.h/.cpp). performLoad()/
+	/// performLoadSynthToKit() take this BY VALUE COPY (never a pointer into Browser::fileItems or
+	/// a live Browser member) so that once the op starts running, a scroll on the UI task during the
+	/// op's own SD-yield points (loadInstrumentFromFile() calls block_on_fiber internally) cannot
+	/// mutate or free anything the op is still reading - see runScrollLoadOp()'s doc for why that
+	/// matters (this used to alias `enteredText`/`currentDir`/`getCurrentFileItem()` directly, which
+	/// was a use-after-free: a scroll during the yield could rebuild Browser::fileItems and free the
+	/// FileItem the op still held a raw pointer to).
+	struct LoadTarget {
+		bool loadingSynthToKitRow = false;
+		int32_t movementDirection = 1; // Scroll-animation hint; currently unused by performLoad() (was
+		                               // already an unused parameter of currentFileChanged() pre-port).
+
+		/// Whether there was a current file selection at dispatch time (getCurrentFileItem() != nullptr).
+		bool hasFile = false;
+		bool isFolder = false;
+		bool maybeExistsOnCard = true;
+
+		/// FileItem::instrument at dispatch time: an already-loaded (possibly hibernating) Instrument
+		/// for this file, if any. This is a Song-owned pointer, NOT a pointer into Browser::fileItems,
+		/// so - unlike a FileItem* - it stays valid even if the file listing is rebuilt mid-op.
+		Instrument* existingInstrument = nullptr;
+
+		std::string path;    // getCurrentFilePath() at dispatch.
+		std::string name;    // enteredText at dispatch - candidate name for the loaded Instrument/Drum.
+		std::string dirPath; // currentDir at dispatch.
+		FilePointer filePointer{.sclust = 0, .objsize = 0};
+	};
+
 public:
 	LoadInstrumentPresetUI() = default;
 	bool opened() override;
@@ -39,8 +70,8 @@ public:
 	ActionResult padAction(int32_t x, int32_t y, int32_t velocity) override;
 	ActionResult verticalEncoderAction(int32_t offset, bool inCardRoutine) override;
 	void instrumentEdited(Instrument* instrument);
-	Error performLoad(bool doClone = false);
-	Error performLoadSynthToKit();
+	Error performLoad(bool doClone = false, const LoadTarget* snapshot = nullptr);
+	Error performLoadSynthToKit(const LoadTarget* snapshot = nullptr);
 	ActionResult timerCallback() override;
 	bool getGreyoutColsAndRows(uint32_t* cols, uint32_t* rows) override;
 	bool renderMainPads(uint32_t whichRows, RGB image[][kDisplayWidth + kSideBarWidth] = nullptr,
@@ -98,22 +129,6 @@ private:
 	bool isInstrumentInList(Instrument* searchInstrument, Output* list);
 	bool findUnusedSlotVariation(std::string* oldName, std::string* newName);
 
-	/// Trigger data for a coalesced scroll-load, recorded at dispatch time by currentFileChanged().
-	///
-	/// Unlike SampleBrowser's PreviewTarget, this does NOT snapshot file identity: performLoad()/
-	/// performLoadSynthToKit() read the current selection straight off live Browser state
-	/// (getCurrentFileItem() / currentDir / enteredText / outputTypeToLoad), and that stays
-	/// unchanged here (out of scope for this port). That's safe at the point each dispatched op
-	/// actually *starts* running (nothing else executes between a scroll tick's
-	/// finishSelectEncoderAction() and the op's entry, so live state matches the tick that
-	/// triggered it) - see Task 1's Step-1 report for the residual, accepted race window during
-	/// the op's own SD-yield points, and why the commit op's own authoritative performLoad() call
-	/// makes the final (post-commit) result correct regardless.
-	struct LoadTarget {
-		bool loadingSynthToKitRow = false;
-		int32_t movementDirection = 1; // Scroll-animation hint; currently unused by performLoad() (was
-		                               // already an unused parameter of currentFileChanged() pre-port).
-	};
 	/// The dispatched scroll-load op: loads loadCoalescer_.current() (performLoad()/
 	/// performLoadSynthToKit()), surfaces a failure, then re-dispatches the latest-wins target if a
 	/// newer scroll arrived while it ran. Runs on the storage owner (inline on legacy/host). `self`

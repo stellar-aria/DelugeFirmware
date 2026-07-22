@@ -1,6 +1,5 @@
 #pragma once
 
-#include "io/stream.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -18,9 +17,9 @@ namespace deluge::audio::stream {
 /// @brief The audio-stream module's read seam (design spec §6/§7).
 ///
 /// A ReadSource pulls one FAT-cluster-sized block of a sample's on-card bytes into a caller buffer.
-/// Two impls, both first-class: StreamReadSource (normal playback, over deluge::io::Stream) and
-/// BlockReadSource (recorder read-back of a mid-write file, by physical sector address). The
-/// reconstruction core reads through this and stays pure.
+/// Two impls, both first-class: EfatfsReadSource (streaming read via the embedded-fatfs handle, the
+/// R1 read path) and BlockReadSource (recorder read-back of a mid-write file, by physical sector
+/// address). The reconstruction core reads through this and stays pure.
 class ReadSource {
 public:
 	virtual ~ReadSource() = default;
@@ -32,20 +31,6 @@ public:
 	/// @param dst           Destination buffer; exactly dst.size() bytes are read on success.
 	/// @return Bytes read on success, or a DelugeStatus error.
 	virtual std::expected<uint32_t, DelugeStatus> read(uint32_t cluster_index, std::span<std::byte> dst) = 0;
-};
-
-/// @brief Normal playback/load path: reads via deluge::io::Stream::read_at at a cluster-aligned byte offset.
-class StreamReadSource final : public ReadSource {
-public:
-	StreamReadSource(deluge::io::Stream& stream, uint8_t cluster_size_magnitude)
-	    : stream_{stream}, cluster_size_magnitude_{cluster_size_magnitude} {}
-
-	/// @copydoc ReadSource::read
-	std::expected<uint32_t, DelugeStatus> read(uint32_t cluster_index, std::span<std::byte> dst) override;
-
-private:
-	deluge::io::Stream& stream_;
-	uint8_t cluster_size_magnitude_;
 };
 
 /// @brief Recorder read-back path: the sample has no open read stream (it's still being written), so this

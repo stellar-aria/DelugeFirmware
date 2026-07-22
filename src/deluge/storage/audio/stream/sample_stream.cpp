@@ -126,55 +126,26 @@ void SampleStream::release_asset() {
 	}
 }
 
-bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters) {
-	auto openedStream = deluge::io::Stream::open(path, mode);
-	if (!openedStream) {
+bool SampleStream::open_read_stream(std::string_view path) {
+	// R1: efatfs IS the streaming read path — no C-FatFS fallback. Open the efatfs file handle; a
+	// failure to open is a stream-open failure propagated to the caller (the sample won't load).
+	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone; the recorder
+	// keeps its own sdAddress (sample_recorder.cpp) — that's R3.
+	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
+	uint32_t handle = 0;
+	if (!deluge_efatfs_open(cpath.c_str(), &handle)) {
 		return false;
 	}
-	read_stream_ = std::move(openedStream.value());
-	for (uint32_t i = 0; i < num_clusters; i++) {
-		uint32_t sector = 0;
-		auto sectorResult = read_stream_->sector_of(i); // best-effort; only meaningful on FatFS-family backends
-		if (sectorResult) {
-			sector = *sectorResult;
-		}
-		table_[i].sdAddress = sector;
-	}
-
-	// Under the `efatfs_streaming` build, also open an embedded-fatfs file handle for this sample so
-	// the streaming READ can route through the Rust FS (begin_fill() emits this handle; ProdOps reads
-	// via it). The `sdAddress` seeding above stays as-is: it is still the C-FatFS fallback AND is
-	// consumed by BlockReadSource. `deluge_streaming_efatfs_active()` is false on every other
-	// build/BSP, so this whole block is inert (leaves efatfs_handle_ == 0 → the sector path).
-	if (deluge_streaming_efatfs_active()) {
-		// `path` is a std::string_view (not NUL-terminated); deluge_efatfs_open needs a C string.
-		// Sample-load is not the realtime path, so a bounded owning copy for the NUL terminator is
-		// fine (paths are std::string throughout the storage layer anyway — no fixed max-path
-		// constant to key a stack buffer off of).
-		std::string cpath{path};
-		uint32_t handle = 0;
-		if (deluge_efatfs_open(cpath.c_str(), &handle)) {
-			efatfs_handle_ = handle;
-		}
-		else {
-			// Leave efatfs_handle_ == 0 → begin_fill() emits handle 0 → ProdOps uses the sector
-			// path. Don't abort the stream: the C-FatFS residency table seeded above still works.
-			D_PRINTLN("efatfs open failed; streaming falls back to C FatFS");
-		}
-	}
+	efatfs_handle_ = handle;
 	return true;
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
-	// R1: an open efatfs handle IS the streaming read path (played-back card sample). It supersedes
-	// the C-FatFS StreamReadSource, which Task 4 deletes along with read_stream_.
+	// R1: efatfs handle = the streaming read path; else BlockReadSource (recorder read-back, R3).
 	if (efatfs_handle_ != 0) {
 		return std::make_unique<EfatfsReadSource>(efatfs_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
 	}
-	if (read_stream_.has_value()) {
-		return std::make_unique<StreamReadSource>(read_stream_.value(), static_cast<uint8_t>(Cluster::size_magnitude));
-	}
-	return std::make_unique<BlockReadSource>(sample_); // recorder read-back (R3)
+	return std::make_unique<BlockReadSource>(sample_);
 }
 
 #define REPORT_LOAD_TIME 0

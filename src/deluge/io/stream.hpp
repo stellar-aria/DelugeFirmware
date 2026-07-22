@@ -32,7 +32,6 @@ public:
 	}
 
 	[[nodiscard]] static std::expected<Stream, Status> open(std::string_view path, DelugeStreamMode mode);
-	std::expected<std::span<std::byte>, Status> read_at(uint32_t byte_offset, std::span<std::byte> buffer);
 	std::expected<uint32_t, Status> write_at(uint32_t byte_offset, std::span<const std::byte> buffer);
 	std::expected<void, Status> truncate(uint32_t new_size);
 	std::expected<uint32_t, Status> size();

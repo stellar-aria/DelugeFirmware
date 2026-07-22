@@ -11,16 +11,6 @@ std::expected<Stream, Status> Stream::open(std::string_view path, DelugeStreamMo
 	return Stream(handle);
 }
 
-std::expected<std::span<std::byte>, Status> Stream::read_at(uint32_t byte_offset, std::span<std::byte> buffer) {
-	uint32_t out_read = 0;
-	DelugeStatus status =
-	    deluge_stream_read_at(handle_, byte_offset, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_read);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
-	}
-	return buffer.subspan(0, out_read);
-}
-
 std::expected<uint32_t, Status> Stream::write_at(uint32_t byte_offset, std::span<const std::byte> buffer) {
 	uint32_t out_written = 0;
 	DelugeStatus status =

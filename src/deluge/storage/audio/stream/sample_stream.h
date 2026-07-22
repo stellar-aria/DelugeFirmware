@@ -17,9 +17,7 @@
 
 #pragma once
 
-#include "definitions_cxx.hpp" // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
-#include "io/stream.hpp"
-#include "libdeluge/stream_io.h"         // DelugeStreamMode
+#include "definitions_cxx.hpp"           // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "memory/fast_allocator.h"       // deluge::memory::fast_allocator
 #include "model/sample/sample_cluster.h" // SampleCluster, the residency table's element type
 #include "storage/audio/stream/read_source.h"
@@ -27,7 +25,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string_view>
 
 class Sample;
@@ -43,7 +40,8 @@ namespace deluge::audio::stream {
 ///   - the **residency table** (`table_`): one `SampleCluster` entry per cluster of the file, each
 ///     holding the resident `StreamedChunk*` (null when the chunk is not in RAM) plus the entry's
 ///     physical sector address and waveform min/max cache;
-///   - the open **read-stream handle** (`deluge::io::Stream`) used to pull cluster bytes off the card;
+///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
+///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** and the materialize / construct / evict callbacks the
 ///     manager invokes to reconstruct a cluster on demand or drop one under memory pressure;
 ///   - **read-source selection** — the single place the stream-vs-raw-block decision is made.
@@ -103,23 +101,21 @@ public:
 	/// @name Read stream
 	/// @{
 
-	/// @brief Open the read stream used for every subsequent cluster read, and seed sector addresses.
+	/// @brief Open the efatfs read handle used for every subsequent cluster read.
 	///
 	/// Opens the handle once (typically from `AudioFileManager::buildAudioFileFromCard`) for the rest of
-	/// the sample's life, and fills the first @p num_clusters entries' `sdAddress` from the freshly
-	/// opened stream (best-effort; only meaningful on FatFS-family backends).
-	/// @param path         Path to open.
-	/// @param mode         Open mode (e.g. DELUGE_STREAM_READ).
-	/// @param num_clusters Number of leading table entries whose `sdAddress` to seed.
+	/// the sample's life. R1: efatfs is the streaming read path outright — there is no C-FatFS fallback.
+	/// @param path Path to open.
 	/// @return `true` on success; `false` if the open failed, leaving the stream disengaged (callers map
 	///         this to `Error::FILE_NOT_FOUND`).
-	bool open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters);
+	bool open_read_stream(std::string_view path);
 
 	/// @brief Select the read source from this sample's backing state.
 	///
 	/// This is the single point where the stream-vs-raw-block decision is made; no caller branches on it.
-	/// @return A `StreamReadSource` when a read stream is open (a normal card-loaded sample), otherwise a
-	///         `BlockReadSource` reading physical sectors directly (a sample still being recorded).
+	/// @return An `EfatfsReadSource` when an efatfs read handle is open (a normal card-loaded sample),
+	///         otherwise a `BlockReadSource` reading physical sectors directly (a sample still being
+	///         recorded).
 	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source();
 
 	/// @}
@@ -235,12 +231,6 @@ private:
 	/// literal (rather than including `deluge_resource.h`) because this header is pulled in transitively
 	/// by every includer of `sample.h`.
 	uint32_t resource_asset_id_ = 0xFFFFFFFFu;
-
-	/// The read stream, opened once by open_read_stream() and used for every cluster read thereafter;
-	/// closed by its destructor when this object is destroyed. Disengaged for a sample not backed by a
-	/// readable stream (e.g. one still being recorded), which is what steers make_read_source() to a
-	/// `BlockReadSource`.
-	std::optional<deluge::io::Stream> read_stream_;
 
 	/// This stream's embedded-fatfs file handle (0 = none open). Defaults to 0 so the flag-off
 	/// C-FatFS sector path is unaffected; the `efatfs_streaming` read path (Task 6) sets it in

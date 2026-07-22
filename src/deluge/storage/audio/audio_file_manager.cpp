@@ -811,7 +811,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
-		if (!sampleFile->stream().open_read_stream(pathToOpen, DELUGE_STREAM_READ, numClusters)) {
+		if (!sampleFile->stream().open_read_stream(pathToOpen)) {
 			*error = Error::FILE_NOT_FOUND;
 			destroyAudioFileObject(*audioFile);
 			return nullptr;

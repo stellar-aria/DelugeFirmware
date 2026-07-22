@@ -27,8 +27,9 @@
 /// write -- callers write whole clusters in increasing index order, and `count`
 /// may not exceed one cluster per call (checked; violating this desyncs the
 /// write-side "most recently written cluster" bookkeeping `sector_of` relies on).
-/// `read_at` reads exactly one cluster per call, from a cluster-aligned offset --
-/// not a general arbitrary-byte-range reader.
+/// There is no `read_at` -- the streaming read path goes through embedded-fatfs
+/// (`deluge_efatfs_read_at`); this boundary is write (recording) plus the
+/// cold-path `sector_of` identity check only.
 #ifndef LIBDELUGE_STREAM_IO_H
 #define LIBDELUGE_STREAM_IO_H
 
@@ -42,7 +43,7 @@ extern "C" {
 typedef struct DelugeStream DelugeStream;
 
 typedef enum DelugeStreamMode {
-	DELUGE_STREAM_READ,             ///< open an existing file; resolves full layout at open
+	DELUGE_STREAM_READ,             ///< open an existing file (sector_of()-only; no read_at)
 	DELUGE_STREAM_WRITE_CREATE,     ///< create the file, truncating if it exists
 	DELUGE_STREAM_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists
 	DELUGE_STREAM_WRITE_APPEND,     ///< open an existing file for writing at its current size; no truncation
@@ -51,15 +52,6 @@ typedef enum DelugeStreamMode {
 /// Open `path`. On success, `*out` is a handle the caller must eventually pass to
 /// `deluge_stream_close`. [task]
 DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeStream** out);
-
-/// Read exactly `count` bytes at cluster-aligned `byte_offset` into `dst`.
-/// `*out_read` is the number of bytes actually read. Internally rounds `count` up to a
-/// whole sector (512-byte) boundary for the underlying block read, so `dst` must be sized
-/// to that sector-rounded count, not just `count` bytes -- up to 511 bytes may be written
-/// past `count`. Safe under this codebase's fixed cluster-size-buffer convention (matches
-/// pre-migration behavior). [task]
-DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, void* dst, uint32_t count,
-                                   uint32_t* out_read);
 
 /// Append `count` bytes at `byte_offset` (must equal the stream's current end-of-file --
 /// sequential append only). `count` must not exceed one cluster (`DELUGE_ERR_PARAM` otherwise) --
@@ -79,15 +71,16 @@ DelugeStatus deluge_stream_size(DelugeStream* stream, uint32_t* out_size);
 DelugeStatus deluge_stream_close(DelugeStream* stream);
 
 /// Best-effort: the physical sector address backing cluster `cluster_index` (0-based).
-/// In `DELUGE_STREAM_READ` mode, any already-resolved cluster index. In a write mode,
-/// only the most recently `write_at`-completed cluster (returns `DELUGE_ERR_PARAM` for
-/// any other index -- this boundary never keeps a full write-side layout table). Only
-/// meaningful for sector-addressed backends (FatFS-family); a backend without sector
-/// geometry (e.g. a future Linux/POSIX implementation) returns `DELUGE_ERR_UNSUPPORTED`.
-/// Exists for two FatFS-specific, non-hot-path callers: `AudioFileManager`'s cold-path
-/// "did the card's file change" identity re-validation on the read side, and
-/// `SampleRecorder`'s per-cluster `sdAddress` bookkeeping on the write side -- the
-/// real-time paths use `deluge_stream_read_at`/`write_at` exclusively. [task]
+/// In `DELUGE_STREAM_READ` mode, walks the FAT chain from the file's start cluster on
+/// demand (no cached layout table is kept). In a write mode, only the most recently
+/// `write_at`-completed cluster (returns `DELUGE_ERR_PARAM` for any other index -- this
+/// boundary never keeps a full write-side layout table). Only meaningful for
+/// sector-addressed backends (FatFS-family); a backend without sector geometry (e.g. a
+/// future Linux/POSIX implementation) returns `DELUGE_ERR_UNSUPPORTED`. Exists for two
+/// FatFS-specific, non-hot-path callers: `AudioFileManager`'s cold-path "did the card's
+/// file change" identity re-validation on the read side, and `SampleRecorder`'s
+/// per-cluster `sdAddress` bookkeeping on the write side -- the real-time read path goes
+/// through embedded-fatfs (`deluge_efatfs_read_at`), not this boundary. [task]
 DelugeStatus deluge_stream_sector_of(DelugeStream* stream, uint32_t cluster_index, uint32_t* out_sector);
 
 #ifdef __cplusplus

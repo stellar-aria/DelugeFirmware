@@ -23,6 +23,8 @@
 #include "model/instrument/kit.h"
 #include "model/note/note_row.h"
 #include "processing/sound/sound_drum.h"
+#include "storage/latest_wins.h"
+#include "storage/owner.h"
 
 class Instrument;
 class InstrumentClip;
@@ -96,6 +98,33 @@ private:
 	bool isInstrumentInList(Instrument* searchInstrument, Output* list);
 	bool findUnusedSlotVariation(std::string* oldName, std::string* newName);
 
+	/// Trigger data for a coalesced scroll-load, recorded at dispatch time by currentFileChanged().
+	///
+	/// Unlike SampleBrowser's PreviewTarget, this does NOT snapshot file identity: performLoad()/
+	/// performLoadSynthToKit() read the current selection straight off live Browser state
+	/// (getCurrentFileItem() / currentDir / enteredText / outputTypeToLoad), and that stays
+	/// unchanged here (out of scope for this port). That's safe at the point each dispatched op
+	/// actually *starts* running (nothing else executes between a scroll tick's
+	/// finishSelectEncoderAction() and the op's entry, so live state matches the tick that
+	/// triggered it) - see Task 1's Step-1 report for the residual, accepted race window during
+	/// the op's own SD-yield points, and why the commit op's own authoritative performLoad() call
+	/// makes the final (post-commit) result correct regardless.
+	struct LoadTarget {
+		bool loadingSynthToKitRow = false;
+		int32_t movementDirection = 1; // Scroll-animation hint; currently unused by performLoad() (was
+		                               // already an unused parameter of currentFileChanged() pre-port).
+	};
+	/// The dispatched scroll-load op: loads loadCoalescer_.current() (performLoad()/
+	/// performLoadSynthToKit()), surfaces a failure, then re-dispatches the latest-wins target if a
+	/// newer scroll arrived while it ran. Runs on the storage owner (inline on legacy/host). `self`
+	/// is the LoadInstrumentPresetUI.
+	static void runScrollLoadOp(void* self);
+	/// The dispatched commit op (enterKeyPress): does its OWN authoritative performLoad()/
+	/// performLoadSynthToKit() - a cache hit if a scroll-load already warmed it - handles the error,
+	/// and runs the post-load commit tail (recalculateColours() + close()) that used to live inline
+	/// in enterKeyPress(). `self` is the LoadInstrumentPresetUI.
+	static void runCommitOp(void* self);
+
 	// Tells changeOutputType()'s Open listing apart from opened()'s in the shared onBrowserOpened()/
 	// onListingFailed() hooks (see changeOutputType()'s comment).
 	bool changingOutputType_{};
@@ -110,6 +139,11 @@ private:
 	int32_t noteRowIndex{};
 	NoteRow* noteRow{};
 	Error currentInstrumentLoadError;
+
+	// Coalesces the scroll-triggered load (currentFileChanged(), fires on every non-reload encoder
+	// tick) onto the storage worker: a fast scroll only actually loads the preset the user settles
+	// on. Port of SampleBrowser's previewCoalescer_ (sample_browser.h:110).
+	deluge::storage::LatestWins<LoadTarget> loadCoalescer_{};
 
 	int16_t initialChannel{};
 	int8_t initialChannelSuffix{};

@@ -315,20 +315,39 @@ void LoadInstrumentPresetUI::folderContentsReady(int32_t entryDirection) {
 	currentFileChanged(0);
 }
 
+// Port of SampleBrowser::previewIfPossible() (sample_browser.cpp:531): coalesce the scroll-triggered
+// load onto the storage worker instead of running it synchronously (bug B6 - this fires on every
+// non-reload encoder tick while scrolling Load Synth/Kit, and used to block the executor for the
+// whole load). LatestWins collapses a fast scroll onto the settled preset - see runScrollLoadOp().
 void LoadInstrumentPresetUI::currentFileChanged(int32_t movementDirection) {
-	// FileItem* currentFileItem = getCurrentFileItem();
-
-	// if (currentFileItem->instrument != instrumentToReplace) {
-
-	currentUIMode = UI_MODE_LOADING_BUT_ABORT_IF_SELECT_ENCODER_TURNED;
-	if (loadingSynthToKitRow) {
-		currentInstrumentLoadError = performLoadSynthToKit();
+	LoadTarget target{
+	    .loadingSynthToKitRow = loadingSynthToKitRow,
+	    .movementDirection = movementDirection,
+	};
+	if (loadCoalescer_.request(target)) {
+		if (!deluge::storage::Owner::run(&LoadInstrumentPresetUI::runScrollLoadOp, this)) {
+			// Owner queue was full - the op never ran, so release the guard or the coalescer
+			// would wedge single-flight forever (see LatestWins::reset()'s doc).
+			loadCoalescer_.reset();
+		}
 	}
-	else {
-		currentInstrumentLoadError = performLoad();
+}
+
+void LoadInstrumentPresetUI::runScrollLoadOp(void* self) {
+	auto* ui = static_cast<LoadInstrumentPresetUI*>(self);
+	const LoadTarget& target = ui->loadCoalescer_.current();
+
+	ui->currentInstrumentLoadError = target.loadingSynthToKitRow ? ui->performLoadSynthToKit() : ui->performLoad();
+	if (ui->currentInstrumentLoadError != Error::NONE) {
+		display->displayError(ui->currentInstrumentLoadError);
 	}
-	currentUIMode = UI_MODE_NONE;
-	//}
+
+	// If a newer scroll arrived while this ran, dispatch it (latest-wins).
+	if (auto next = ui->loadCoalescer_.complete(); next.has_value()) {
+		if (!deluge::storage::Owner::run(&LoadInstrumentPresetUI::runScrollLoadOp, self)) {
+			ui->loadCoalescer_.reset(); // re-dispatch dropped - release (see currentFileChanged())
+		}
+	}
 }
 
 void LoadInstrumentPresetUI::enterKeyPress() {
@@ -346,31 +365,30 @@ void LoadInstrumentPresetUI::enterKeyPress() {
 	}
 
 	else {
-
-		if (currentInstrumentLoadError != Error::NONE) {
-			if (loadingSynthToKitRow) {
-				currentInstrumentLoadError = performLoadSynthToKit();
-			}
-			else {
-				currentInstrumentLoadError = performLoad();
-			}
-			if (currentInstrumentLoadError != Error::NONE) {
-				display->displayError(currentInstrumentLoadError);
-				return;
-			}
-		}
-
-		if (currentFileItem
-		        ->instrument) { // When would this not have something? Well ok, maybe now that we have folders.
-		}
-
-		if (outputTypeToLoad == OutputType::KIT && showingAuditionPads()) {
-			// New NoteRows have probably been created, whose colours haven't been grabbed yet.
-			instrumentClipView.recalculateColours();
-		}
-
-		close();
+		// Dispatch the commit onto the storage worker: it does its OWN authoritative
+		// performLoad()/performLoadSynthToKit() rather than trusting currentInstrumentLoadError,
+		// because under coalescing a scroll-load may still be in flight when SELECT_ENC arrives.
+		// (A cache hit - getAudioFileFromFilename - if the scroll already warmed it; a fresh load
+		// otherwise.) See runCommitOp() for the rest of what used to be inline here.
+		deluge::storage::Owner::run_or_inline(&LoadInstrumentPresetUI::runCommitOp, this);
 	}
+}
+
+void LoadInstrumentPresetUI::runCommitOp(void* self) {
+	auto* ui = static_cast<LoadInstrumentPresetUI*>(self);
+
+	ui->currentInstrumentLoadError = ui->loadingSynthToKitRow ? ui->performLoadSynthToKit() : ui->performLoad();
+	if (ui->currentInstrumentLoadError != Error::NONE) {
+		display->displayError(ui->currentInstrumentLoadError);
+		return;
+	}
+
+	if (ui->outputTypeToLoad == OutputType::KIT && ui->showingAuditionPads()) {
+		// New NoteRows have probably been created, whose colours haven't been grabbed yet.
+		instrumentClipView.recalculateColours();
+	}
+
+	ui->close();
 }
 
 ActionResult LoadInstrumentPresetUI::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {

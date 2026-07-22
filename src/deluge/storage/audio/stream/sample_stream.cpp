@@ -166,10 +166,15 @@ bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
+	// R1: an open efatfs handle IS the streaming read path (played-back card sample). It supersedes
+	// the C-FatFS StreamReadSource, which Task 4 deletes along with read_stream_.
+	if (efatfs_handle_ != 0) {
+		return std::make_unique<EfatfsReadSource>(efatfs_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
+	}
 	if (read_stream_.has_value()) {
 		return std::make_unique<StreamReadSource>(read_stream_.value(), static_cast<uint8_t>(Cluster::size_magnitude));
 	}
-	return std::make_unique<BlockReadSource>(sample_);
+	return std::make_unique<BlockReadSource>(sample_); // recorder read-back (R3)
 }
 
 #define REPORT_LOAD_TIME 0

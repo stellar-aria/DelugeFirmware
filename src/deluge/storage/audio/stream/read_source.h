@@ -7,6 +7,7 @@
 #include <span>
 
 extern "C" {
+#include "libdeluge/streaming_fill.h"
 #include "libdeluge/types.h" // DelugeStatus
 }
 
@@ -59,6 +60,21 @@ public:
 
 private:
 	const Sample& sample_;
+};
+
+/// @brief Streaming read path (R1): reads via the embedded-fatfs handle at a cluster-aligned byte
+///        offset (deluge_efatfs_read_at). Selected when the sample has an open efatfs handle.
+class EfatfsReadSource final : public ReadSource {
+public:
+	EfatfsReadSource(uint32_t handle, uint8_t cluster_size_magnitude)
+	    : handle_{handle}, cluster_size_magnitude_{cluster_size_magnitude} {}
+
+	/// @copydoc ReadSource::read
+	std::expected<uint32_t, DelugeStatus> read(uint32_t cluster_index, std::span<std::byte> dst) override;
+
+private:
+	uint32_t handle_;
+	uint8_t cluster_size_magnitude_;
 };
 
 // The block-vs-stream ReadSource selection lives on deluge::audio::stream::SampleStream

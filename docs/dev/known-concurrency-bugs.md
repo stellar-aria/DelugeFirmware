@@ -73,7 +73,61 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
 
 *This record was produced from the streaming-underrun harness's findings. The fuller per-finding writeups + both racing stacks live in the harness's `open_findings_races.txt` (committed) and the (local) task reports. **B2 + B3 are fixed** (2026-07-19, recorder hand-off: stable-address `SegmentedVector` + release/acquire atomics); **B1, B4, B5 remain open** and are the prerequisites still owed before shipping preemptive audio with SD record-while-stream.*
 
-## B6 — `CLUSTER_LOAD_IMMEDIATELY` performs card transfers off the storage owner — HIGH — **OPEN (new, 2026-07-21)**
+## B6 — `CLUSTER_LOAD_IMMEDIATELY` performs card transfers off the storage owner — HIGH — **FIXED in software (SP-stream-read Phase 1 + file-load rung, 2026-07-22); device runtime gate pending**
+
+- **Fix (2026-07-22) — software-complete, four patterns:** All B6 chains now run their cold-cache load on the
+  storage worker (`Owner::run`/`run_or_inline`), never blocking the executor. **Phase 1** (streaming +
+  sample-browser): `on_owner()`/`run_or_inline()` (`f5fb6a6e9`); marker/clip-shift → `CLUSTER_ENQUEUE`
+  (`f213e52d5`); pitch + Synth/Kit context-menu (`0cf05d0ba`). **File-load rung** (the 7 `AudioFileHolder::
+  loadFile` chains): preset browser coalesced+snapshot (`5de611744`+`e419eedce`, UAF fix), Slicer preview
+  (`dca8c364f`), ClearSong (`da9882d6a`), Slicer doSlice (`25122328d`), Drum Randomizer (`36cf330a8`),
+  Undo/Redo (`668490235`). Two reusable safety patterns emerged and were applied per site: **snapshot-isolation**
+  (target carries file identity by value; the op never reads live UI state across the SD-yield — fixes the UAF
+  class) and **mode-gating** (`currentUIMode` LOADING sentinel set before dispatch → `isUIModeWithinRange`
+  no-ops BACK/repeat-input during the window — fixes the concurrent-input crash class). Verified: audit build
+  (`cargo device --features storage-owner-audit`) links; static coverage confirms every chain dispatches; the
+  residual `loadFile` calls all sit inside worker ops. **DEVICE RUNTIME GATE PENDING (Kate):** the `sd.rs:386`
+  single-owner assert is a runtime `debug_assert!` in the Embassy image — exercise the full UI (preset scroll,
+  Slicer preview/slice, undo/redo, clear-song, randomizer) under the audit build and require it silent. Neither
+  the host sim nor the TSan harness drives these UI paths, so runtime silence can only be shown on device.
+- **(historical) Fix status (2026-07-22):** The sample-*streaming* + sample-browser call sites are FIXED on
+  `feat/rustfs-sp1b-cached-chain` (SP-stream-read Phase 1, plan
+  `docs/superpowers/plans/2026-07-21-sp-stream-read-phase1-ui-defer.md`): `Owner::on_owner()`/
+  `run_or_inline()` added (commit `f5fb6a6e9`); marker-drag + clip-shift downgraded to `CLUSTER_ENQUEUE`
+  (`f213e52d5`); pitch-detection + the Synth/Kit context-menu load ops dispatched onto the worker
+  (`0cf05d0ba`, with the always-return-`true`+close-inside-op contract fix). Site 1 (waveform) was
+  handled by 4460's background pre-scan (merged). **The `AudioFileHolder::loadFile` file-load family is
+  NOT yet fixed — see the inventory below.**
+- **⚠️ THE SITE LIST BELOW / in the SP-stream-read design §6 UNDER-COUNTED B6.** Task 4's coverage audit
+  (`.superpowers/sdd/task-4-report.md`) found **seven more off-worker chains** into
+  `AudioFileManager::getAudioFileFromFilename` → `buildAudioFileFromCard` → sites 6/7
+  (`wave_table.cpp:422`, `cluster_byte_source.cpp:51`), all reaching a **cold-cache** FatFS load
+  synchronously from a UI/model handler with no worker dispatch above them (all would trip the
+  `sd.rs:386` audit on a cold hit once the owner is up):
+  1. `slicer.cpp:411` — `Slicer::preview` (pad-hold audition). Clean-ish (same-function load+sound reorder).
+  2. `slicer.cpp:524,646` — `Slicer::doSlice` (SELECT_ENC). Needs post-op-loop restructure.
+  3. `consequence_audio_clip_set_sample.cpp:54` — Undo/Redo of "set sample on Audio Clip", via
+     `PlaybackHandler::slowRoutine`. Clean whole-`undo()/redo()` dispatch.
+  4. `load_instrument_preset_ui.cpp:879,1012` — preset auto-load on `currentFileChanged`. **HIGHEST
+     TRAFFIC — fires on every non-reload encoder tick scrolling Load Synth/Kit.** Reads
+     `currentInstrumentLoadError` synchronously → same fire-and-forget contract problem as Synth/Kit;
+     the right fix likely involves coalesce-on-scroll (cf. `SampleBrowser::previewCoalescer_`), a UX
+     design question.
+  5. `clear_song.cpp:104,91` — `ClearSong::acceptCurrentOption` "Create New Song". Same
+     `ContextMenu::buttonAction` bool-consumption Task 3 solved for Synth/Kit — apply the same pattern
+     to a third subclass.
+  6. `instrument_clip_view.cpp:2141` — Drum Randomizer pad gesture. Low-traffic, feature-gated.
+- **→ These seven are their own rung: the `AudioFileHolder::loadFile` file-load path.** They share one
+  root — a UI/model site triggers a *cold* `getAudioFileFromFilename` synchronously and needs the loaded
+  file back — which is the `ui-storage-decoupling-northstar` leak. There is one choke point
+  (`buildAudioFileFromCard`) but a naive dispatch there can't be fire-and-forget (callers need the
+  result). Worth ONE design pass (choke-point vs call-site; coalesce-on-scroll UX), not seven ad-hoc
+  wraps. Not folded into Phase 1 (decision, Kate, 2026-07-22).
+
+### Original discovery record (2026-07-21) — kept for the trace
+
+**Note:** this section's site list is the sample-streaming subset; the file-load family above was found later.
+
 
 - **Where:** `SampleStream::get_cluster` (`src/deluge/storage/audio/stream/sample_stream.cpp:316-346`) →
   `deluge_resource_acquire` → `cluster_materialize` (`:42-58`) → `read_cluster_data` (`:180-254`) →
@@ -144,3 +198,10 @@ Not a production bug, recorded for context: the harness's own `loaded`-miss unde
   fiber dispatch (it does not — see B6 and
   `docs/dev/rustfs_sp_stream_read_completion_design.md` §6). Inferred from source; not observed on
   hardware.
+
+## B8 — concurrent clip-delete frees the AudioClip an in-flight audio-clip-sample revert is mid-load on — HIGH — **OPEN (pre-existing, found 2026-07-22)**
+
+- **Where:** `ConsequenceAudioClipSetSample::revert` (`src/deluge/model/consequence/consequence_audio_clip_set_sample.cpp:54`) loads a sample (`AudioFileHolder::loadFile`) which YIELDS on SD I/O. During that yield a concurrent "delete this clip" gesture can free the `AudioClip` the revert is operating on → use-after-free.
+- **Pre-existing, NOT introduced by the file-load rung (B6 #6):** `loader::pump()` already calls `playbackHandler.slowRoutine()` on the worker when `may_process_user_actions` is true (`loader.cpp:98-99,116-117`, SP1a/rung-5 infrastructure). So on Embassy the undo/redo revert already runs from the worker with a yielding load, and the clip-free window already exists. The B6 #6 change (commit `668490235`) only makes the *main-tick* path consistent (also on the worker); it does not create this window.
+- **Reachability caveat:** found by source analysis while doing B6 #6; not observed. The `Action`/`Consequence` chain is unlinked from the undo/redo lists during the op (so the *consequence* isn't freed), but the `AudioClip` it references is a separate object that a clip-delete can free.
+- **Fix (future ticket):** protect the target `AudioClip` for the revert-load duration (pin it / gate clip-delete during the op / snapshot-and-revalidate), or move to the model-ownership boundary where the clip's lifetime is owned by the storage domain for the op. Its own concern, not the file-load rung's.

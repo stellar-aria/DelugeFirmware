@@ -73,6 +73,7 @@
 #include "processing/stem_export/stem_export.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/flash_storage.h"
+#include "storage/owner.h" // deluge::storage::Owner::run_or_inline — B6 #6, run undo()/redo() on the worker
 #include "storage/storage_manager.h"
 #include "sync/sd_access.h"
 #include "util/cfunctions.h"
@@ -155,35 +156,67 @@ void PlaybackHandler::routine() {
 	}
 }
 
+namespace {
+/// The dispatched op for `PlaybackHandler::slowRoutine()`'s pending UNDO/REDO handling: runs
+/// `actionLogger.undo()`/`.redo()` on the storage worker so `ConsequenceAudioClipSetSample::revert()`'s
+/// `AudioFileHolder::loadFile()` (bug B6, chain #6) doesn't block the executor. `resumePlayback()`'s
+/// dependency on the loaded sample lives inside `revert()` itself, so it travels with the op
+/// automatically — no post-op work needed here, unlike the context-menu/whole-gesture patterns
+/// elsewhere in this rung.
+///
+/// `command` is the snapshot taken by `slowRoutine()` before dispatch (see its comment) — NOT a
+/// re-read of `pendingGlobalMIDICommand`, which `slowRoutine()` has already reset to NONE by the
+/// time this runs (possibly deferred, on the worker fiber).
+void runUndoRedoOp(void* ctx) {
+	auto command = static_cast<GlobalMIDICommand>(reinterpret_cast<intptr_t>(ctx));
+	switch (command) {
+	case GlobalMIDICommand::UNDO:
+		actionLogger.undo();
+		break;
+
+	case GlobalMIDICommand::REDO:
+		actionLogger.redo();
+		break;
+
+	// we're explicitly only interedted in UNDO and REDO
+	default:;
+	}
+}
+} // namespace
+
 void PlaybackHandler::slowRoutine() {
 	// See if any MIDI commands are pending which couldn't be actioned before (see comments in tryGlobalMIDICommands())
 	if (pendingGlobalMIDICommand != GlobalMIDICommand::NONE && !deluge::sync::sd_busy()) {
 
 		D_PRINTLN("actioning pending command -----------------------------------------");
 
+		// Snapshot which command (UNDO vs REDO) and clear the pending flag now, synchronously,
+		// before the dispatch below. undo()/redo() can load a sample (bug B6, chain #6) and, once
+		// dispatched onto the storage worker, can outlive this call (Embassy fire-and-forget).
+		// slowRoutine() can be re-entered before that op completes — from this same repeating
+		// task's own next tick (deluge.cpp), or from *inside* the worker itself
+		// (loader::pump()'s may_process_user_actions path calls slowRoutine() between cluster
+		// loads while running as a dispatched worker op — see storage/audio/stream/loader.cpp).
+		// Clearing pendingGlobalMIDICommand here means a re-entrant call sees NONE and does
+		// nothing, instead of double-dispatching the same command.
+		GlobalMIDICommand command = pendingGlobalMIDICommand;
+		pendingGlobalMIDICommand = GlobalMIDICommand::NONE;
+
 		if (actionLogger.allowedToDoReversion()) {
-
-			switch (pendingGlobalMIDICommand) {
-			case GlobalMIDICommand::UNDO:
-				actionLogger.undo();
-				break;
-
-			case GlobalMIDICommand::REDO:
-				actionLogger.redo();
-				break;
-
-			// we're explicitly only interedted in UNDO and REDO
-			default:;
-			}
 
 			if (ALPHA_OR_BETA_VERSION && pendingGlobalMIDICommandNumClustersWritten) {
 				char buffer[12];
 				intToString(pendingGlobalMIDICommandNumClustersWritten, buffer);
 				display->displayPopup(buffer);
 			}
-		}
 
-		pendingGlobalMIDICommand = GlobalMIDICommand::NONE;
+			// Run the whole undo()/redo() dispatch on the storage worker (mirrors
+			// LoadSongUI::performLoad's Owner::run idiom). run_or_inline: if slowRoutine() is
+			// itself already running on the worker (the loader::pump() re-entrancy noted above),
+			// run inline rather than re-dispatching onto the fiber it's already on.
+			deluge::storage::Owner::run_or_inline(&runUndoRedoOp,
+			                                      reinterpret_cast<void*>(static_cast<intptr_t>(command)));
+		}
 	}
 }
 

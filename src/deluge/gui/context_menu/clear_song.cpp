@@ -144,7 +144,13 @@ bool ClearSong::acceptCurrentOption() {
 	// ContextMenu::buttonAction() while currentUIMode still permits it. See runAcceptOp()'s
 	// comment for what that would corrupt.
 	currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
-	deluge::storage::Owner::run_or_inline(&runAcceptOp, nullptr);
+	if (!deluge::storage::Owner::run_or_inline(&runAcceptOp, nullptr)) {
+		// Dropped dispatch (Embassy worker ring full): runAcceptOp never runs, and it is the
+		// only thing that resets currentUIMode — leaving the UI permanently gated (reboot to
+		// recover). Release the gate here so the menu stays usable, matching the drop-reset in
+		// Slicer::doSlice / InstrumentClipView's randomize dispatch.
+		currentUIMode = UI_MODE_NONE;
+	}
 	return true;
 }
 } // namespace deluge::gui::context_menu

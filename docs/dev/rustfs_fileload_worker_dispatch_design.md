@@ -1,6 +1,6 @@
 # File-load worker-dispatch rung — design (B6 completion)
 
-**Status:** approved design, ready for an implementation plan. Nothing implemented.
+**Status:** IMPLEMENTED & software-complete (2026-07-22) — see `docs/dev/known-concurrency-bugs.md` B6 for the commit list and verification state. This doc is the design of record.
 **Base:** `feat/rustfs-sp1b-cached-chain` (SP-stream-read Phase 1 landed: `Owner::on_owner()`/
 `run_or_inline()`, sample-streaming + sample-browser B6 fixes).
 **Closes:** the `AudioFileHolder::loadFile` half of **B6** (`docs/dev/known-concurrency-bugs.md`) — the

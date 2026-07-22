@@ -24,7 +24,7 @@ use block_device_driver::BlockDevice;
 use efatfs_core::HandleTable;
 use embassy_futures::block_on;
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
-use fs_differential::{efatfs::EFatFs, ram_disk::RamDisk};
+use fs_differential::{efatfs::EFatFs, fatfs_c::CFatFs, ram_disk::RamDisk};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -521,5 +521,79 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
              the chain walk at first_cluster (blocks={blocks}, data_sectors={data_sectors})"
         );
     });
+}
+
+/// R0a: the AUDIO read access pattern — cluster-aligned reads in playback order,
+/// including loop-point backward seeks — must be byte-identical through efatfs and
+/// C FatFS. Complements the whole-file/interleave differentials with the pattern the
+/// streaming engine actually issues. The C-FatFS whole-file read is the oracle.
+#[test]
+fn efatfs_streaming_pattern_matches_cfatfs_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = fat32();
+    let _disk = RamDisk::load(&img);
+    let e = EFatFs::mount();
+
+    const CLUSTER_SECTORS: usize = 64; // mk_fixture.sh formats FAT32 -c 64 (32 KiB clusters)
+    const CLUSTER_BYTES: usize = CLUSTER_SECTORS * 512;
+    let path = "/SAMPLES/huge.bin"; // 64 MiB = 2048 clusters
+
+    // Oracle: the whole file via C FatFS (a DIFFERENT filesystem from efatfs).
+    let oracle = CFatFs::mount().read_file(path);
+    let clusters = oracle.len().div_ceil(CLUSTER_BYTES);
+    assert!(clusters > 4, "fixture too small to exercise the pattern");
+
+    // Playback-order sequence with loop-point backward seeks: forward through the
+    // file, then loop the back half twice (the case efatfs's seek() re-walk fix and
+    // the streaming path care about).
+    let mut order: Vec<usize> = (0..clusters).collect();
+    let loop_start = clusters / 2;
+    for _ in 0..2 {
+        order.extend(loop_start..clusters);
+    }
+
+    let ctx = e.open_context(path);
+    let mut ctx = ctx;
+    for c in order {
+        let off = (c * CLUSTER_BYTES) as u32;
+        let want = CLUSTER_BYTES.min(oracle.len() - c * CLUSTER_BYTES);
+        let mut buf = vec![0u8; want];
+        let (newctx, filled) = e.read_at_context(&ctx, off, &mut buf);
+        ctx = newctx;
+        assert!(filled, "efatfs short read at cluster {c} (off {off})");
+        assert_eq!(
+            &buf[..],
+            &oracle[c * CLUSTER_BYTES..c * CLUSTER_BYTES + want],
+            "efatfs streaming-pattern read diverged from C FatFS at cluster {c}"
+        );
+    }
+}
+
+/// R0a non-vacuity: reading the WRONG cluster must NOT match the oracle — proves the
+/// streaming differential above can actually detect a divergence (per the project's
+/// real-execution mandate). If this ever passes-as-equal, the differential is blind.
+#[test]
+fn efatfs_streaming_pattern_nonvacuous() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = fat32();
+    let _disk = RamDisk::load(&img);
+    let e = EFatFs::mount();
+
+    const CLUSTER_BYTES: usize = 64 * 512;
+    let path = "/SAMPLES/huge.bin";
+    let oracle = CFatFs::mount().read_file(path);
+
+    // Read cluster 3 but compare against the oracle's cluster 0 slice — a real
+    // multi-cluster file has distinct cluster contents unless the test is blind.
+    let ctx = e.open_context(path);
+    let mut buf = vec![0u8; CLUSTER_BYTES];
+    let (_ctx, filled) = e.read_at_context(&ctx, (3 * CLUSTER_BYTES) as u32, &mut buf);
+    assert!(filled, "short read");
+    assert_ne!(
+        &buf[..],
+        &oracle[0..CLUSTER_BYTES],
+        "cluster 3 matched the oracle's cluster 0 — the fixture's clusters are not \
+         distinguishable, so the streaming differential cannot detect a wrong-offset read"
+    );
 }
 

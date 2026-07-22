@@ -12,9 +12,13 @@ here="$(cd "$(dirname "$0")" && pwd)"; tree="$here/tree"; out="${1:-$here}"
 # (big_multicluster.bin) the whole chain fits in one 512-byte FAT sector and
 # the re-walk cost is under measurement noise. FAT32 image only — the FAT16
 # image is 64 MB total and cannot hold a 64 MB file plus the rest of the tree.
+# Content is per-512-byte-sector-varying (byte = (offset>>9)&0xff), not a
+# constant fill: the R0a streaming-pattern non-vacuity test
+# (efatfs_streaming_pattern_nonvacuous, tests/efatfs_core.rs) needs distinct
+# cluster contents to prove the differential can detect a wrong-offset read.
 big="$(mktemp)"; huge="$(mktemp)"; trap 'rm -f "$big" "$huge"' EXIT
 head -c 1048576 /dev/zero | tr '\0' '\125' > "$big"
-head -c 67108864 /dev/zero | tr '\0' '\170' > "$huge"
+python3 -c "import sys; sys.stdout.buffer.write(bytes((i>>9)&0xff for i in range(67108864)))" > "$huge"
 # FAT32: >= 2.5 GB / 32 KB clusters (matches src/bsp/rust/src/sd_image.rs)
 truncate -s 2560M "$out/fat32.img"
 mformat -F -c 64 -i "$out/fat32.img" ::

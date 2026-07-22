@@ -30,7 +30,7 @@ enum Call {
     Next,
     IsUnloadable(usize),
     Begin(usize),
-    Read { lba: u32, count: u32 },
+    Read { byte_offset: u32, count: u32 },
     Finish { chunk: usize, read_ok: bool },
     LeaseCount(usize),
     EnqueueLowest(usize),
@@ -42,7 +42,6 @@ enum Call {
 /// unsafe slice it builds from the descriptor.
 struct FakeChunk {
     id: usize,
-    sector: u32,
     num_sectors: u32,
     begin_ok: bool,
     /// What `is_unloadable` reports for this chunk.
@@ -139,7 +138,6 @@ impl FillOps for FakeOps {
         if !fc.begin_ok {
             return StreamingFillDescriptor {
                 dest: core::ptr::null_mut(),
-                sector: 0,
                 num_sectors: 0,
                 ok: false,
                 handle: 0,
@@ -148,7 +146,6 @@ impl FillOps for FakeOps {
         }
         StreamingFillDescriptor {
             dest: fc.buf.borrow_mut().as_mut_ptr(),
-            sector: fc.sector,
             num_sectors: fc.num_sectors,
             ok: true,
             handle: fc.handle,
@@ -158,7 +155,7 @@ impl FillOps for FakeOps {
 
     async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
         self.calls.borrow_mut().push(Call::Read {
-            lba: d.sector,
+            byte_offset: d.byte_offset,
             count: d.num_sectors,
         });
         if d.handle != 0 {
@@ -208,14 +205,13 @@ fn one_chunk(id: usize, begin_ok: bool) -> FakeChunk {
     let num_sectors = 2u32;
     FakeChunk {
         id,
-        sector: 100 + id as u32,
         num_sectors,
         begin_ok,
         unloadable: false,
         lease_count: 1, // still wanted by default; the read-failure-drop test overrides this
         buf: RefCell::new(vec![0u8; (num_sectors as usize) * 512]),
         handle: 0,
-        byte_offset: 0,
+        byte_offset: 100 + id as u32,
     }
 }
 
@@ -235,7 +231,10 @@ fn fill_once_happy_path_drains_one_cluster() {
             Call::Next,
             Call::IsUnloadable(0),
             Call::Begin(0),
-            Call::Read { lba: 100, count: 2 },
+            Call::Read {
+                byte_offset: 100,
+                count: 2
+            },
             Call::Finish {
                 chunk: 0,
                 read_ok: true
@@ -269,7 +268,10 @@ fn fill_once_read_failure_reenqueues_lowest_and_stops() {
             Call::Next,
             Call::IsUnloadable(0),
             Call::Begin(0),
-            Call::Read { lba: 100, count: 2 },
+            Call::Read {
+                byte_offset: 100,
+                count: 2
+            },
             Call::LeaseCount(0),
             Call::EnqueueLowest(0),
         ]
@@ -304,12 +306,18 @@ fn fill_once_read_failure_unleased_drops_and_continues() {
             Call::Next,
             Call::IsUnloadable(0),
             Call::Begin(0),
-            Call::Read { lba: 100, count: 2 },
+            Call::Read {
+                byte_offset: 100,
+                count: 2
+            },
             Call::LeaseCount(0),
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
-            Call::Read { lba: 101, count: 2 },
+            Call::Read {
+                byte_offset: 101,
+                count: 2
+            },
             Call::LeaseCount(1),
             Call::Next,
         ]
@@ -341,7 +349,10 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
-            Call::Read { lba: 101, count: 2 },
+            Call::Read {
+                byte_offset: 101,
+                count: 2
+            },
             Call::Finish {
                 chunk: 1,
                 read_ok: true
@@ -391,7 +402,10 @@ fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
             Call::Next,
             Call::IsUnloadable(0),
             Call::Begin(0),
-            Call::Read { lba: 100, count: 2 },
+            Call::Read {
+                byte_offset: 4096,
+                count: 2
+            },
             Call::Finish {
                 chunk: 0,
                 read_ok: true
@@ -426,7 +440,10 @@ fn fill_once_skips_unloadable_chunk() {
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
-            Call::Read { lba: 101, count: 2 },
+            Call::Read {
+                byte_offset: 101,
+                count: 2
+            },
             Call::Finish {
                 chunk: 1,
                 read_ok: true

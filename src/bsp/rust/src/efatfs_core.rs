@@ -167,6 +167,15 @@ impl HandleTable {
 /// fill, treat EOF as "the rest is unused cluster padding" and zero it —
 /// `dst[filled..]` is deterministic and the convert/stitch pipeline never
 /// consumes past the real audio-data length anyway.
+///
+/// CALLER CONTRACT: this makes EOF non-distinguishable from a valid short tail —
+/// a read that begins at/beyond EOF (`filled == 0` on the first `Ok(0)`) also
+/// returns `true` with an all-zero buffer, NOT an error. Callers must therefore
+/// bound the request to within the file (at most ~1 cluster past logical EOF, as
+/// `begin_fill` does via `audioDataLengthBytes` clamped to the real on-disk file
+/// size in `Sample::finalizeAfterLoad`). A caller that lets `byte_offset` land
+/// fully past EOF would silently read zeros as if valid data. Today the only
+/// production caller is the streaming `begin_fill` path, which enforces this.
 async fn fill<IO, TP, OCC>(f: &mut File<'_, IO, TP, OCC>, dst: &mut [u8]) -> bool
 where
     IO: ReadWriteSeek,

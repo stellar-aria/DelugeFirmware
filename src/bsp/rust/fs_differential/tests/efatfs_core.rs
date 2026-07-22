@@ -597,6 +597,67 @@ fn efatfs_streaming_pattern_nonvacuous() {
     );
 }
 
+/// R1 (C2 fix): the sector-rounded LAST-CLUSTER read the streaming loader issues
+/// (`begin_fill` in `async_fill.cpp`) legitimately requests bytes past the file's
+/// logical EOF — `numSectors = ceil((audioDataEnd - clusterStart) / 512)` rounds the
+/// read up to a whole number of 512-byte sectors, and `audioDataEnd` is frequently
+/// NOT sector-aligned (e.g. a WAV whose `data` chunk ends the file). The now-deleted
+/// C-FatFS raw-sector reader tolerated this by design (the last cluster's on-disk
+/// allocation is always >= file_size, padded up to the cluster boundary). This proves
+/// `efatfs_core`'s streaming read now tolerates it too: a read whose requested range
+/// extends a few hundred bytes past logical EOF (but stays within the same cluster)
+/// must succeed (`filled == true`), return the real bytes up to EOF, and zero-pad the
+/// rest — instead of failing outright as it did before the fix (see the git history of
+/// `efatfs_core::fill` for the pre-fix behavior this test caught).
+#[test]
+fn efatfs_core_fill_zero_pads_past_logical_eof_last_cluster() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let img = fat32();
+    let _disk = RamDisk::load(&img);
+    let e = EFatFs::mount();
+    let fs = e.raw();
+
+    const CLUSTER_BYTES: usize = 64 * 512; // mk_fixture.sh formats FAT32 -c 64 (32 KiB clusters)
+    let path = "/SAMPLES/huge.bin"; // 64 MiB, exactly cluster-aligned (2048 * 32 KiB)
+    let oracle = CFatFs::mount().read_file(path);
+    let file_len = oracle.len();
+
+    // Emulate a sector-rounded last-cluster read: start near EOF, request a length
+    // that overruns the logical file size by a few hundred bytes but stays well
+    // under one cluster.
+    let overrun = 300usize;
+    let offset = file_len - 200;
+    let len = 200 + overrun;
+    assert!(len < CLUSTER_BYTES, "test overrun must stay within one cluster");
+    let oracle_remaining = file_len - offset;
+
+    let mut buf = vec![0xAAu8; len]; // non-zero fill so the zero-pad assertion is meaningful
+    let filled = block_on(async {
+        let ctx = efatfs_core::open_context(fs, path)
+            .await
+            .expect("open_context huge.bin");
+        let (_ctx, filled) = efatfs_core::read_context(fs, ctx, offset as u32, &mut buf)
+            .await
+            .expect("read_context returned None (FS error)");
+        filled
+    });
+
+    assert!(
+        filled,
+        "efatfs read past logical EOF (offset={offset}, len={len}, file_len={file_len}) \
+         was NOT tolerated — the last-cluster sector-rounded read must succeed"
+    );
+    assert_eq!(
+        &buf[..oracle_remaining],
+        &oracle[offset..file_len],
+        "bytes up to logical EOF must match the real file contents"
+    );
+    assert!(
+        buf[oracle_remaining..].iter().all(|&b| b == 0),
+        "bytes past logical EOF must be zero-padded, not left as read-buffer garbage"
+    );
+}
+
 /// Task 1: byte-offset read-exactness at a non-cluster-aligned offset — the operation
 /// `deluge_efatfs_read_at` performs (arbitrary byte_offset, arbitrary length), proven byte-exact
 /// against the C-FatFS oracle. (The FFI's block_on bridge is thin glue over exactly this call; its

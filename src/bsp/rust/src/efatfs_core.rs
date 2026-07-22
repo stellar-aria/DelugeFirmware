@@ -150,8 +150,23 @@ impl HandleTable {
 }
 
 /// Fill `dst` completely from `f`'s current position. Returns `true` if the
-/// whole buffer was filled, `false` on a short read (EOF before `dst` is full)
-/// or a read error. embedded-fatfs has no `read_exact`, so loop `Read` by hand.
+/// whole buffer was filled (either by real reads, or by zero-padding a tail
+/// that ran past logical EOF — see below), `false` only on an actual read
+/// error. embedded-fatfs has no `read_exact`, so loop `Read` by hand.
+///
+/// C2 fix: the streaming loader's last-cluster read is sector-rounded
+/// (`begin_fill` in `async_fill.cpp` computes
+/// `numSectors = ceil((audioDataEnd - clusterStart) / 512)`), and
+/// `audioDataEnd` is frequently NOT sector-aligned (e.g. a WAV whose `data`
+/// chunk ends the file). That legitimately asks for up to ~511 bytes past the
+/// file's logical size — but never past the last cluster's on-disk
+/// allocation, which FAT always pads up to the cluster boundary. The retired
+/// raw-sector C-FatFS reader tolerated this by construction (it read whole
+/// allocated sectors, unbounded by file_size); `File::read` is a LOGICAL-file
+/// reader and returns `Ok(0)` at EOF instead. Rather than fail the whole
+/// fill, treat EOF as "the rest is unused cluster padding" and zero it —
+/// `dst[filled..]` is deterministic and the convert/stitch pipeline never
+/// consumes past the real audio-data length anyway.
 async fn fill<IO, TP, OCC>(f: &mut File<'_, IO, TP, OCC>, dst: &mut [u8]) -> bool
 where
     IO: ReadWriteSeek,
@@ -160,7 +175,11 @@ where
     let mut filled = 0;
     while filled < dst.len() {
         match f.read(&mut dst[filled..]).await {
-            Ok(0) => return false, // short read / EOF
+            Ok(0) => {
+                // EOF before dst is full: zero-pad the rest and report success.
+                dst[filled..].fill(0);
+                return true;
+            }
             Ok(n) => filled += n,
             Err(_) => return false,
         }

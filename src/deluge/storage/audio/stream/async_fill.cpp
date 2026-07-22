@@ -33,25 +33,24 @@
 // streaming_fill.h) with a hand-written `#[repr(C)]` mirror in streaming_loader.rs. These
 // static_asserts catch field drift at compile time on whichever side notices first. Expressed
 // pointer-width-relative (not hardcoded byte offsets) so the same assertions hold unchanged on
-// both the 32-bit ARM device and the 64-bit host_app build: `dest` leads at offset 0, `sector`
-// and `num_sectors` follow packed at 4-byte strides, then `ok` (1 byte, +8 past the pointer),
-// then 3 pad bytes, then `handle` at +12 and `byte_offset` at +16 (both u32, 4-byte packed), and
-// the struct's overall size pads up to the pointer's own alignment (its strictest member) —
-// 2*sizeof(ptr)+16 covers that on both widths (24 on 32-bit: dest[4]+sector[4]+num_sectors[4]+
-// ok[1]->pad[3]+handle[4]+byte_offset[4]=24; 32 on 64-bit: dest[8]+sector[4]+num_sectors[4]+
-// ok[1]->pad[3]+handle[4]+byte_offset[4]->pad[4]=32). Verified by compiling both builds, not
-// derived from a naive "trailing pad" guess (which undercounts the 64-bit case, whose 8-byte
-// pointer alignment pads the tail further).
+// both the 32-bit ARM device and the 64-bit host_app build: `dest` leads at offset 0, then
+// `num_sectors` (u32, packed right after the pointer), then `ok` (1 byte, at ptr+4), then 3 pad
+// bytes to realign the next u32, then `handle` at ptr+8 and `byte_offset` at ptr+12, and the
+// struct's overall size pads up to the pointer's own alignment (its strictest member) —
+// sizeof(ptr)+16 covers that on both widths (20 on 32-bit: dest[4]+num_sectors[4]+ok[1]->pad[3]+
+// handle[4]+byte_offset[4]=20; 24 on 64-bit: dest[8]+num_sectors[4]+ok[1]->pad[3]+handle[4]+
+// byte_offset[4]=24, already a multiple of the 8-byte pointer alignment). Verified by compiling
+// both builds, not derived from a naive guess.
 static_assert(offsetof(StreamingFillDescriptor, dest) == 0);
-static_assert(offsetof(StreamingFillDescriptor, sector) == sizeof(uint8_t*));
-static_assert(offsetof(StreamingFillDescriptor, num_sectors) == sizeof(uint8_t*) + 4);
-static_assert(offsetof(StreamingFillDescriptor, ok) == sizeof(uint8_t*) + 8);
-static_assert(offsetof(StreamingFillDescriptor, handle) == sizeof(uint8_t*) + 12);
-static_assert(offsetof(StreamingFillDescriptor, byte_offset) == sizeof(uint8_t*) + 16);
-static_assert(sizeof(StreamingFillDescriptor) == 2 * sizeof(uint8_t*) + 16);
+static_assert(offsetof(StreamingFillDescriptor, num_sectors) == sizeof(uint8_t*));
+static_assert(offsetof(StreamingFillDescriptor, ok) == sizeof(uint8_t*) + 4);
+static_assert(offsetof(StreamingFillDescriptor, handle) == sizeof(uint8_t*) + 8);
+static_assert(offsetof(StreamingFillDescriptor, byte_offset) == sizeof(uint8_t*) + 12);
+static_assert(sizeof(StreamingFillDescriptor) == sizeof(uint8_t*) + 16);
 
-// begin_fill() mirrors read_cluster_data's "resolve where/how much" step (including the
-// sd_address_at lookup); finish_fill() mirrors its post-read "convert + stitch + publish" step.
+// begin_fill() mirrors read_cluster_data's "resolve where/how much" step (the last-cluster
+// short-read sector-count calc and the cluster's byte offset within the file); finish_fill()
+// mirrors its post-read "convert + stitch + publish" step.
 // Both are reached only through the extern "C" wrappers below.
 
 namespace deluge::audio::stream {
@@ -70,7 +69,7 @@ StreamingFillDescriptor begin_fill(StreamedChunk& cluster) {
 		if (bytesToRead <= 0) {
 			D_PRINTLN("fail thing"); // Shouldn't really still happen
 			return StreamingFillDescriptor{
-			    .dest = nullptr, .sector = 0, .num_sectors = 0, .ok = false, .handle = 0, .byte_offset = 0};
+			    .dest = nullptr, .num_sectors = 0, .ok = false, .handle = 0, .byte_offset = 0};
 		}
 		if (bytesToRead < Cluster::size) {
 			numSectors = ((bytesToRead - 1) >> 9) + 1;
@@ -80,7 +79,6 @@ StreamingFillDescriptor begin_fill(StreamedChunk& cluster) {
 
 	return StreamingFillDescriptor{
 	    .dest = reinterpret_cast<uint8_t*>(cluster.payload().data()),
-	    .sector = sample->stream().sd_address_at(static_cast<uint32_t>(clusterIndex)),
 	    .num_sectors = static_cast<uint32_t>(numSectors),
 	    .ok = true,
 	    .handle = sample->stream().efatfs_handle(),

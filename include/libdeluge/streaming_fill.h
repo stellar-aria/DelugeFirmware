@@ -35,10 +35,9 @@ typedef struct DelugeResource DelugeResource;
 /// @brief Descriptor filled by deluge_streaming_begin_fill: where to DMA, and how much.
 typedef struct StreamingFillDescriptor {
 	uint8_t* dest;        ///< cluster payload base; write exactly num_sectors*512 bytes here
-	uint32_t sector;      ///< physical LBA (from SampleCluster::sdAddress) — the flag-off C-FatFS path
-	uint32_t num_sectors; ///< sectors to read (accounts for a short final cluster)
+	uint32_t num_sectors; ///< sectors to read (accounts for a short final cluster) — the read LENGTH
 	bool ok;              ///< false => skip the read (unloadable / geometry error); do not call finish
-	uint32_t handle;      ///< efatfs file handle for this stream (0 = none); the flag-on embedded-fatfs path
+	uint32_t handle;      ///< efatfs file handle for this stream (streaming read is efatfs-only in R1)
 	uint32_t byte_offset; ///< absolute byte offset of this cluster within the file (efatfs read position)
 } StreamingFillDescriptor;
 

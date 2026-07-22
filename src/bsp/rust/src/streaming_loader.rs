@@ -33,7 +33,8 @@
 //! ([`fill_once`]) takes its four operations — `next`/`begin`/`read`/`finish` (plus
 //! the failure-path re-enqueue) — through the [`FillOps`] trait instead of calling
 //! the `extern "C"` functions directly. [`ProdOps`] below wires that trait to the
-//! real C ABI + [`crate::sd::locked_read_sectors`]; the host unit test
+//! real C ABI + the efatfs streaming read (`crate::efatfs_fs`/`crate::efatfs_host_shim`); the
+//! host unit test
 //! (`tests/streaming_fill_host.rs`) wires it to an in-memory fake queue instead.
 //! This is the whole reason [`fill_once`] is independently testable — the real
 //! end-to-end fill (real manager, real chunks) is validated later, in R1.2 (TSan)
@@ -98,7 +99,6 @@ pub extern "C" fn deluge_streaming_signal_fill() {
 #[derive(Clone, Copy)]
 pub struct StreamingFillDescriptor {
     pub dest: *mut u8,
-    pub sector: u32,
     pub num_sectors: u32,
     pub ok: bool,
     pub handle: u32,
@@ -109,22 +109,19 @@ pub struct StreamingFillDescriptor {
 /// comment for the byte-offset derivation. `core::mem::offset_of!` + `size_of` are both `const`,
 /// so this is a compile-time check with no runtime cost; a field-order/type drift on either side
 /// fails the build instead of silently corrupting the read across the boundary. After `ok` (1 byte
-/// at ptr+8) come 3 pad bytes, then `handle` at ptr+12 and `byte_offset` at ptr+16, and the struct
-/// pads up to the pointer's alignment → 2*ptr+16 (24 on the 4-byte-ptr device, 32 on the 8-byte-ptr
+/// at ptr+4) come 3 pad bytes, then `handle` at ptr+8 and `byte_offset` at ptr+12, and the struct
+/// pads up to the pointer's alignment → ptr+16 (20 on the 4-byte-ptr device, 24 on the 8-byte-ptr
 /// host).
 #[cfg(feature = "async_streaming_loader")]
 const _: () = {
     assert!(core::mem::offset_of!(StreamingFillDescriptor, dest) == 0);
-    assert!(core::mem::offset_of!(StreamingFillDescriptor, sector) == size_of::<*mut u8>());
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, num_sectors) == size_of::<*mut u8>());
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, ok) == size_of::<*mut u8>() + 4);
+    assert!(core::mem::offset_of!(StreamingFillDescriptor, handle) == size_of::<*mut u8>() + 8);
     assert!(
-        core::mem::offset_of!(StreamingFillDescriptor, num_sectors) == size_of::<*mut u8>() + 4
+        core::mem::offset_of!(StreamingFillDescriptor, byte_offset) == size_of::<*mut u8>() + 12
     );
-    assert!(core::mem::offset_of!(StreamingFillDescriptor, ok) == size_of::<*mut u8>() + 8);
-    assert!(core::mem::offset_of!(StreamingFillDescriptor, handle) == size_of::<*mut u8>() + 12);
-    assert!(
-        core::mem::offset_of!(StreamingFillDescriptor, byte_offset) == size_of::<*mut u8>() + 16
-    );
-    assert!(size_of::<StreamingFillDescriptor>() == 2 * size_of::<*mut u8>() + 16);
+    assert!(size_of::<StreamingFillDescriptor>() == size_of::<*mut u8>() + 16);
 };
 
 /// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
@@ -158,8 +155,8 @@ pub trait FillOps {
     /// entirely (unloadable / geometry error) — no read, no `finish`.
     fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor;
     /// Await the read for descriptor `d` into `buf`. Returns whether it
-    /// succeeded — routes to the efatfs handle when `d.handle != 0` under the
-    /// `efatfs_streaming` feature, else the raw-sector path.
+    /// succeeded — routes to the efatfs handle at `d.byte_offset`; `read_at`
+    /// handles a bad/zero handle by returning false.
     async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool;
     /// Run the post-read convert/stitch/publish tail
     /// (`deluge_streaming_finish_fill`). Only called after a *successful* read
@@ -268,8 +265,8 @@ mod prod {
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
-    /// `deluge_resource.h`'s loader-queue C ABI and
-    /// [`crate::sd::locked_read_sectors`]. `!Send`/`!Sync` (a raw
+    /// `deluge_resource.h`'s loader-queue C ABI and the efatfs streaming read
+    /// (`crate::efatfs_fs`/`crate::efatfs_host_shim`). `!Send`/`!Sync` (a raw
     /// `DelugeResource*`) by construction — must only ever run on the single
     /// thread-mode executor the C++ enqueue path also runs on.
     pub struct ProdOps {
@@ -308,16 +305,20 @@ mod prod {
 
         async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
             #[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
-            if d.handle != 0 {
+            {
                 return crate::efatfs_fs::read_at(d.handle, d.byte_offset, buf).await;
             }
             #[cfg(all(feature = "host_app", feature = "efatfs_streaming"))]
-            if d.handle != 0 {
+            {
                 return crate::efatfs_host_shim::read_at(d.handle, d.byte_offset, buf).await;
             }
-            crate::sd::locked_read_sectors(d.sector, d.num_sectors, buf)
-                .await
-                .is_ok()
+            // No efatfs backing compiled in (should not occur once efatfs_streaming is default): fail the
+            // read so the loader re-enqueues rather than silently reading nothing.
+            #[cfg(not(feature = "efatfs_streaming"))]
+            {
+                let _ = (d, buf);
+                false
+            }
         }
 
         fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool {

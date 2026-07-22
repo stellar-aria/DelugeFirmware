@@ -26,8 +26,8 @@ namespace deluge::audio::stream {
 /// @brief C++ entry point behind `deluge_streaming_begin_fill`: resolve @p cluster's destination
 ///        buffer and physical sector range.
 ///
-/// Pure lookup + arithmetic (the last-cluster short-read sector-count calc and the
-/// `SampleStream::sd_address_at` lookup) — touches no SD hardware, no FatFS. The extern "C"
+/// Pure lookup + arithmetic (the last-cluster short-read sector-count calc and the cluster's
+/// byte offset within the file) — touches no SD hardware, no FatFS. The extern "C"
 /// `deluge_streaming_begin_fill` in async_fill.cpp is a thin `void*`-casting wrapper over this.
 /// @param cluster The chunk to resolve (already leased/resident, not yet loaded).
 /// @return The fill descriptor; `ok == false` on a geometry error (skip the read; do not call

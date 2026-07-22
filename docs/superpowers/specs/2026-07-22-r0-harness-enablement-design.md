@@ -109,3 +109,85 @@ R0 turns R1's gate into a host harness run:
 - R0 does **not** build FAT-on-host for the *sim* (`deluge_host`, C host BSP) — only for `host_app` (the
   harness vehicle). The sim stays C FatFS, consistent with the SDK-layer/passthrough end-state.
 - The shim is **test infrastructure** — reusable across R1–R3's gating, not a device artifact.
+
+## Appendix A — mount() spike result
+
+**Task 2 (R0, THROWAWAY spike), 2026-07-22.** Empirically resolves §4.3's one load-bearing risk before
+the shim is built.
+
+**(a) Does the host efatfs mount livelock on the lens boot path? YES, confirmed by reproduction.**
+
+`fs_differential`'s `EFatFs::mount()` (`src/bsp/rust/fs_differential/src/efatfs.rs:75-79`) already does
+`block_on(FileSystem::new(...))` successfully on host — but its `FileBlockDevice::read`
+(`src/bsp/rust/fs_differential/src/block_dev.rs:26-34`) calls `RamDisk::read_at` directly: an `async fn`
+with no internal `.await` at all, so it resolves on the very first poll. That is a fundamentally different
+code path from the lens boot mount, which goes through `sim_latency::modeled_read` — a *genuine* pend on
+a separately-spawned `pump()` task's `Timer::after(latency).await`
+(`src/bsp/rust/src/sd.rs:872-879`). `fs_differential`'s mount working on host proves nothing about the
+lens boot path; it only proves `block_on` is safe over a future that never actually suspends.
+
+Reproduced directly (spike code, since reverted — see below): a throwaway block device
+(`SpikeBlockDevice`) was added to `lens1_vt_sim`, routing every `embedded-fatfs` block read through the
+SAME `deluge_block_read` C-ABI dispatch FatFS's diskio uses (`src/bsp/rust/src/sd.rs:614-671`: the
+`on_fiber` / `off_fiber_instant()` / else three-way branch), over a real FAT16 image reached via
+`DELUGE_SD_IMAGE` (i.e. the modeled-latency SD path, not the instant `RamDisk`). Called
+`block_on(FileSystem::new(storage, FsOptions::new()))` from `boot_task`
+(`src/bsp/rust/lens1_vt_sim/src/main.rs`'s `boot_task`), off-fiber, before `deluge_app_init`/the worker
+fiber exists — the exact position and call shape the C-FatFS boot mount uses.
+
+With `sd::sim_latency::set_off_fiber_instant` forced to `false` (negative control — the workaround
+disabled): `cargo run` under `timeout 12`, `RUST_LOG=info`, exits **124** (timeout-killed). The last log
+line is `SPIKE: about to block_on(FileSystem::new(...))`; `SPIKE: mount returned` never prints. This is
+the exact livelock mechanism `lens1_vt_sim/src/main.rs:18-54` documents: `block_on`'s tight busy-spin
+poll loop occupies the one OS thread's stack from inside `executor.poll()`'s call to `boot_task`, so
+`sim_latency::pump()`'s `Timer::after(...).await` (a genuine spawned-task future, needing the executor to
+poll it) can never be polled — nothing can make virtual-clock-independent forward progress. Hangs
+real (wall-clock) forever, confirmed by the `timeout` kill.
+
+**(b) Does `set_off_fiber_instant` fix it? YES.**
+
+Same reproduction, `sd::sim_latency::set_off_fiber_instant(true)` (the existing, already-shipped
+workaround, set once at boot before any task spawns — `lens1_vt_sim/src/main.rs:318`, matching how it's
+already applied for the C-FatFS mount): the mount completes in **55µs**, and a follow-up root-directory
+read (the "one cluster read", driving the block device again post-mount) completes in **23µs**. Full
+`RUST_LOG=info` run, no timeout needed, clean exit 0. The flag routes `deluge_block_read`'s off-fiber
+branch straight to the real synchronous `sd::read_sectors` (`sd.rs:648-654`), skipping
+`sim_latency::modeled_read`/`pump`/`Timer` entirely — there is nothing left for the busy-spin to wait on.
+
+**(c) Mount strategy the shim's `mount()` must use.**
+
+The shim's host block device must NOT be a bespoke reimplementation of the read dispatch (e.g. calling
+`sim_latency::modeled_read` directly, or reading the file unconditionally) — it must go through the SAME
+`on_fiber()` / `off_fiber_instant()` / else three-way dispatch `deluge_block_read`
+(`src/bsp/rust/src/sd.rs:614-671`) already implements, so it inherits the workaround automatically rather
+than needing its own copy of the flag-check logic. Concretely, for R0b:
+
+- **Simplest, and recommended:** the shim's block-device `read`/`write` should call the existing
+  `deluge_block_read`/`deluge_block_write` C-ABI functions directly (they're plain `pub extern "C" fn`s
+  in the same crate, callable as ordinary Rust functions, not just via FFI) instead of reimplementing SD
+  access. This is a **zero-new-risk** reuse: one code path serves both C-FatFS's diskio and efatfs's
+  block device, so there's exactly one place the off-fiber dispatch/workaround lives, and it can never
+  drift between the two mounts.
+  - This also means the shim's boot mount does not need any DEVICE-side change — the dispatch already
+    exists in shared `sd.rs`, unconditionally, for any host build.
+- The boot-path call order stays exactly what §4.2 already specifies: `set_off_fiber_instant(true)` is
+  already set once, globally, before any task spawns (`main.rs:318`, ahead of `boot_task`/`deluge_app_init`)
+  — the efatfs `mount()` call added to `host_app_task`/Lens 1's `boot_task` needs NO additional wrapping,
+  because it inherits the same global flag through the shared dispatch (previous bullet). No "wrap and
+  restore" step is needed at the mount call site itself; the existing boot-time-global flag already covers
+  it, exactly as designed in §4.2/§4.3.
+- One caveat carried forward, not newly discovered: `set_off_fiber_instant` only affects the OFF-fiber
+  branch. Any efatfs access issued from ON the storage-owner fiber (post-boot, e.g. R1's later on-fiber
+  reads) is unaffected and continues to model latency normally via `block_on_fiber` — by design, this is
+  correct and is NOT part of this risk (see `sd.rs:826-830`'s doc comment).
+
+**Verification performed:** `cargo build --bin lens1-vt-sim` (debug) in `src/bsp/rust/lens1_vt_sim`;
+runs via the built binary directly (`./target/debug/lens1-vt-sim`) with `DELUGE_SD_IMAGE` pointed at a
+throwaway 16 MiB FAT16 image (`mkfs.vfat -F16`, created in the session scratchpad, not committed) and
+`SPIKE_EFATFS_MOUNT=1` (+ `SPIKE_OFF_FIBER_INSTANT=0`/`1` for the negative/positive control), each under
+`timeout 12`. All spike code (temporary `spike_efatfs.rs`, the `main.rs`/`Cargo.toml` hooks, and the
+`Cargo.lock` deps it pulled in) has been reverted; only this appendix and the throwaway FAT image (outside
+the repo, in the session scratchpad) remain.
+
+**Status: no DECISION_NEEDED.** The risk is real (reproduced) but the documented workaround extends
+cleanly with no new mechanism — §4.2's plan stands unchanged.

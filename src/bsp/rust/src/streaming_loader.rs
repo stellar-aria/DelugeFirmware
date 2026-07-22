@@ -311,6 +311,10 @@ mod prod {
             if d.handle != 0 {
                 return crate::efatfs_fs::read_at(d.handle, d.byte_offset, buf).await;
             }
+            #[cfg(all(feature = "host_app", feature = "efatfs_streaming"))]
+            if d.handle != 0 {
+                return crate::efatfs_host_shim::read_at(d.handle, d.byte_offset, buf).await;
+            }
             crate::sd::locked_read_sectors(d.sector, d.num_sectors, buf)
                 .await
                 .is_ok()

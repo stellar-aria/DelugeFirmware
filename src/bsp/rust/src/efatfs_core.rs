@@ -27,7 +27,7 @@ use embedded_fatfs::{File, FileContext, FileSystem, OemCpConverter, ReadWriteSee
 // embedded-fatfs keeps its own `io` traits `pub(crate)`; `File`'s `Read`/`Seek`
 // impls are the public `embedded_io_async` ones, so bring those into scope to
 // drive the fill loop / absolute seek below.
-use embedded_io_async::{Read as _, Seek as _, SeekFrom};
+use embedded_io_async::{Read as _, Seek as _, SeekFrom, Write as _};
 
 /// Max concurrent streamed files. Small fixed cap — the live streaming engine
 /// holds only a handful of sample readers open at once.
@@ -232,4 +232,115 @@ where
     let filled = fill(&mut f, dst).await;
     let newctx = f.close().await.ok()?;
     Some((newctx, filled))
+}
+
+/// R2 Task 1: EOF-honest counterpart of [`read_context`]/[`fill`]. Loops
+/// `File::read` the same way, but on the FIRST `Ok(0)` (real EOF, or a
+/// request that started at/beyond it) stops and returns the true accumulated
+/// byte count in `0..=dst.len()` — it does NOT zero-pad the remainder of
+/// `dst` the way `fill` does for the streaming-read path's last-cluster
+/// tolerance. Task-context callers (the write path's read-modify-write users,
+/// size probes, etc.) need to know the real file length, not a padded one.
+/// `None` only on an actual FS error (reattach/seek/read/close), same as
+/// `read_context`.
+pub async fn read_context_exact<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+    byte_offset: u32,
+    dst: &mut [u8],
+) -> Option<(FileContext, usize)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
+    let mut filled = 0;
+    while filled < dst.len() {
+        match f.read(&mut dst[filled..]).await {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    let newctx = f.close().await.ok()?;
+    Some((newctx, filled))
+}
+
+/// Re-attach a `File` from `ctx`, seek to absolute `byte_offset`, write all of
+/// `src` (looping `File::write` `write_all`-style since embedded-fatfs's own
+/// `write_all` returns `()` rather than a byte count), and detach again.
+/// Mirrors `read_context`'s detach/reattach/seek discipline. `close` (via
+/// `File`'s `flush`) is what persists the advanced size/mtime dir-entry edit
+/// to disk — `File::write` alone only updates the in-memory context (see
+/// `file.rs`'s `update_dir_entry_after_write`). `None` on any FS error.
+pub async fn write_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+    byte_offset: u32,
+    src: &[u8],
+) -> Option<(FileContext, usize)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
+    let mut written = 0;
+    while written < src.len() {
+        match f.write(&src[written..]).await {
+            Ok(0) => break,
+            Ok(n) => written += n,
+            Err(_) => return None,
+        }
+    }
+    let newctx = f.close().await.ok()?;
+    Some((newctx, written))
+}
+
+/// File length in bytes, via `Seek(End(0))` — `File::size` is private to
+/// embedded-fatfs's own `file` module, so the portable way to read a file's
+/// length from outside the crate is the same trick any `Seek` consumer uses:
+/// seeking to the end returns the new absolute position, which IS the length.
+/// Leaves the detached context's cursor at EOF; harmless, since every
+/// `read_context`/`write_context`/`read_context_exact` reattach seeks
+/// absolutely before doing anything else. `None` on any FS error.
+pub async fn size_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+) -> Option<(FileContext, u32)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    let size = f.seek(SeekFrom::End(0)).await.ok()?;
+    let newctx = f.close().await.ok()?;
+    Some((newctx, size as u32))
+}
+
+/// Truncate the file to `new_len` bytes. embedded-fatfs's `File::truncate`
+/// truncates AT THE FILE'S CURRENT POSITION (sets size = offset), so seek to
+/// `new_len` first, then truncate. `None` on any FS error (including a
+/// `new_len` past the current size — `Seek` clamps to EOF rather than
+/// growing the file, so this primitive can only shrink, matching every task
+/// context caller today).
+pub async fn truncate_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+    new_len: u32,
+) -> Option<(FileContext, ())>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    f.seek(SeekFrom::Start(u64::from(new_len))).await.ok()?;
+    f.truncate().await.ok()?;
+    let newctx = f.close().await.ok()?;
+    Some((newctx, ()))
 }

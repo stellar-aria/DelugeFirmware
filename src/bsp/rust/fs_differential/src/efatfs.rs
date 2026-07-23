@@ -138,6 +138,91 @@ impl EFatFs {
         })
     }
 
+    /// R2 Task 1 host analog of `efatfs_core::open_context`, but via
+    /// `Dir::create_file` (open-or-create, empty if newly created) instead of
+    /// `open_file` — the `WRITE_CREATE` case the write-path task-context
+    /// primitives need a fixture for.
+    pub fn create_context(&self, path: &str) -> FileContext {
+        block_on(async {
+            let f = self.fs.root_dir().create_file(path).await.expect("create_file");
+            f.close().await.expect("close")
+        })
+    }
+
+    /// Host analog of `efatfs_core::write_context`: reattach, seek to
+    /// absolute `offset`, loop `Write::write` over `src`, detach. Mirrors
+    /// `read_at_context`'s inlined (not `efatfs_core`-delegating) style since
+    /// this library crate doesn't depend on `efatfs_core` — only the test
+    /// binary `#[path]`-includes it.
+    pub fn write_at_context(&self, ctx: &FileContext, offset: u32, src: &[u8]) -> (FileContext, usize) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            let mut written = 0;
+            while written < src.len() {
+                match f.write(&src[written..]).await.expect("write") {
+                    0 => break,
+                    n => written += n,
+                }
+            }
+            let newctx = f.close().await.expect("close");
+            (newctx, written)
+        })
+    }
+
+    /// Host analog of `efatfs_core::read_context_exact`: EOF-honest — returns
+    /// the true accumulated byte count on the first short read, NO
+    /// zero-padding (unlike `read_at_context`/`fill`'s streaming-read
+    /// tolerance).
+    pub fn read_exact_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, usize) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            let mut filled = 0;
+            while filled < dst.len() {
+                match f.read(&mut dst[filled..]).await.expect("read") {
+                    0 => break,
+                    n => filled += n,
+                }
+            }
+            let newctx = f.close().await.expect("close");
+            (newctx, filled)
+        })
+    }
+
+    /// Host analog of `efatfs_core::size_context`: file length via
+    /// `Seek(End(0))` (`File::size` is private to embedded-fatfs's own
+    /// module).
+    pub fn size_context(&self, ctx: &FileContext) -> (FileContext, u32) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            let size = f.seek(SeekFrom::End(0)).await.expect("seek end") as u32;
+            let newctx = f.close().await.expect("close");
+            (newctx, size)
+        })
+    }
+
+    /// Host analog of `efatfs_core::truncate_context`: seek to `new_len`
+    /// (embedded-fatfs's `File::truncate` truncates AT the current position),
+    /// then truncate.
+    pub fn truncate_context(&self, ctx: &FileContext, new_len: u32) -> (FileContext, ()) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(new_len))).await.expect("seek");
+            f.truncate().await.expect("truncate");
+            let newctx = f.close().await.expect("close");
+            (newctx, ())
+        })
+    }
+
     /// List a directory's entries, sorted by name.
     pub fn read_dir(&self, path: &str) -> Vec<Entry> {
         block_on(async {

@@ -685,3 +685,43 @@ fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
     }
 }
 
+/// R2 Task 1: write-then-read round-trip through the new core write/read-exact
+/// primitives, including the EOF-honest read's contract — a request for MORE
+/// bytes than the file holds must return the true short count, NOT a
+/// zero-padded full buffer (that's `read_context`/`fill`'s streaming-read
+/// behavior, deliberately NOT this one's).
+#[test]
+fn efatfs_write_then_read_roundtrip_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    // Create + write a known pattern, then read it back byte-exact.
+    let path = "/R2WRITE.BIN";
+    let payload: Vec<u8> = (0..5000u32).map(|i| (i * 7) as u8).collect();
+    let ctx = e.create_context(path); // WRITE_CREATE
+    let (ctx, w) = e.write_at_context(&ctx, 0, &payload);
+    assert_eq!(w, payload.len());
+    let (ctx, sz) = e.size_context(&ctx);
+    assert_eq!(sz, payload.len() as u32);
+    // EOF-honest read: request MORE than the file holds, get the true short count (not zero-padded).
+    let mut buf = vec![0u8; payload.len() + 512];
+    let (_ctx, n) = e.read_exact_context(&ctx, 0, &mut buf);
+    assert_eq!(n, payload.len(), "read_context_exact must return the true byte count, not zero-padded");
+    assert_eq!(&buf[..n], &payload[..]);
+}
+
+/// R2 Task 1: `truncate_context` shrinks the on-disk size, confirmed via
+/// `size_context`.
+#[test]
+fn efatfs_truncate_shrinks_size_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R2TRUNC.BIN";
+    let ctx = e.create_context(path);
+    let (ctx, _) = e.write_at_context(&ctx, 0, &vec![0xABu8; 4096]);
+    let (ctx, _) = e.truncate_context(&ctx, 1000);
+    let (_ctx, sz) = e.size_context(&ctx);
+    assert_eq!(sz, 1000);
+}
+

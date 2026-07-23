@@ -236,10 +236,31 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 		// If there's no second Cluster, or it's fully loaded... we're good to go!
 		if (!clusters[1] || clusters[1]->loaded) {
 goodToGo:
-			// clusters[0] holds the just-copied newClusters[0]; its payload IS this region's base. SR1 Task 5.
-			setupForPlayPosMovedIntoNewCluster(voiceSource, sample,
-			                                   reinterpret_cast<char*>(clusters[0]->payload().data()),
-			                                   bytesPosWithinCluster, sample->byteDepth);
+			// SR1 Task 7: commit the note-start by (re-)establishing the reader's region-port cursor for the
+			// start cluster, instead of pointing currentPlayPos straight at the probe's clusters[0]->payload().
+			// The residency DECISION above stays the pre-port probe (the port's acquire cannot express the
+			// FAILURE-vs-WAIT split, the clusters[1] sub-check, or the defer path's keep-leased-while-loading
+			// semantics), but the SUCCESS commit now flows through the port: unassignAllReasons() drops the
+			// probe leases (clusters[0], and clusters[1] if held); the still-resident start cluster is
+			// immediately re-pinned by setupClustersForPlayFromByte() -> assignClusters() through
+			// deluge_sample_region_acquire(), which sets source_->current + the clusters[0] mirror + region_
+			// (so setupReassessmentLocation's Task-6 interpolation-window base sources from a fresh, matching
+			// region_.payload_base rather than a stale one) and prefetches the neighbour. This mirrors the
+			// accepted unassign-then-setup idiom in TimeStretcher::setupNewPlayHead. startAtByte >>
+			// Cluster::size_magnitude == startAtClusterIndex and startAtByte & (Cluster::size-1) == the
+			// byte-within-cluster, so the resulting setupForPlayPosMovedIntoNewCluster() is byte-identical to
+			// the old direct clusters[0] setup.
+			unassignAllReasons(false);
+			// Priority == get_cluster()'s default (0xFFFFFFFF) — the exact value the probe loop above used, so
+			// the re-acquire's clusters[0] fetch and neighbour prefetch match the probe byte-for-byte.
+			if (!setupClustersForPlayFromByte(voiceSource, sample, static_cast<int32_t>(startAtByte),
+			                                  static_cast<int32_t>(0xFFFFFFFFU))) {
+				// The start cluster was resident-and-loaded a few statements ago (checked above), so a false
+				// here is a shouldn't-happen (reclaimed in the zero-gap, or out of range). Take the same
+				// defer-and-retry the not-loaded checks below take — never a drop — and converge on the single
+				// WAIT/noteUnderrunWait site so it stays "exactly one place".
+				goto waitForResidency;
+			}
 
 			pendingSamplesLate = 0;
 
@@ -265,6 +286,7 @@ goodToGo:
 
 	// If still here, that didn't work, so we have to wait, and come back later when hopefully some loading has taken
 	// place
+waitForResidency:
 	pendingSamplesLate += numSamples;
 #ifdef DELUGE_HOST
 	// The streaming-underrun harness's primary signal: this is the single convergence point for
@@ -366,7 +388,14 @@ bool VoiceSample::weShouldBeTimeStretchingNow(Sample* sample, SamplePlaybackGuid
 
 bool VoiceSample::stopReadingFromCache() {
 	// Have to check Cluster is loaded, because we chose not to check this before, cos we didn't know if we'd actually
-	// be reading from it
+	// be reading from it.
+	// SR1 Task 7: this is the cache-fallback residency check, mapped to the region port's NotReady. clusters[0] is
+	// the port's current-region mirror (pinned by assignClusters/moveOnToNextCluster from region_.lease), so
+	// `!clusters[0] || !clusters[0]->loaded` IS exactly the null-or-!loaded decision deluge_sample_region_acquire()
+	// makes internally (sample_source.cpp step 2) — the same NotReady that drops the voice at moveOnToNextCluster's
+	// sibling UNASSIGN-class site. Expressed against the port's residency state directly (no re-acquire: this no-arg
+	// path has no play-direction/priority to drive one, and re-pinning the already-mirrored current would only churn
+	// leases for no behavioural change), so the drop decision stays byte-for-byte.
 	if (!clusters[0] || !clusters[0]->loaded) {
 #ifdef DELUGE_HOST
 		// The streaming-underrun harness's UNASSIGN-class signal: the cache-stop path found the

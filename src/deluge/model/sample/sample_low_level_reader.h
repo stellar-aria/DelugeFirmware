@@ -120,7 +120,12 @@ public:
 	//     repitch/time-stretch cache the reader tracks the uncached resume cluster in clusters[]
 	//     (get_cluster, NOT the port), so region_ is STALE there; getPlayByteLowLevel and
 	//     reassessReassessmentLocation's pre-reacquire reads therefore also stay on clusters[0].
-	//   * external presence consumers (voice.cpp auto-release, time_stretcher, sample_playback_guide).
+	//   * external presence consumers -- reads made by code outside this class hierarchy (VoiceSample's
+	//     own clusters[] reads, covered by the bullets above, are internal): TimeStretcher's
+	//     olderPartReader.clusters[0]/voiceSample->clusters[0] presence checks (time_stretcher.cpp
+	//     ~570, ~880, ~1015) and SamplePlaybackGuide::adjustPitchToCorrectDriftFromSync's
+	//     voiceSample->clusters[0] "clusters not set up yet" guard (sample_playback_guide.cpp ~131).
+	//     voice.cpp itself no longer reads clusters[] at all (SR1 Task 8 removed its last read).
 	// Fully retiring clusters[] would require routing those port-uncovered paths through the port so
 	// region_ becomes authoritative during cache/probe too -- deferred (see SR1 Task 8 report).
 	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};

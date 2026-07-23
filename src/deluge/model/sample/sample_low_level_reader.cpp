@@ -74,6 +74,10 @@ void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAg
 			clusters[l] = nullptr;
 		}
 	}
+	// SR1 Task 8: the leases just released above may be the last ones on that chunk, so
+	// region_.payload_base can now dangle. Clear the mirror so nothing can read a stale region before
+	// the reader's next acquire (assignClusters / moveOnToNextCluster) repopulates it.
+	region_ = {};
 }
 
 // Relative to audio file start, including WAV file header.
@@ -434,6 +438,12 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	                                  static_cast<uint32_t>(priorityRating), &region)) {
 		D_PRINTLN("late or reached end of waveform. last Cluster was:  %d", oldClusterIndex);
 		currentPlayPos = nullptr;
+
+		// SR1 Task 8: the old current's INDEPENDENT clusters[] lease was already dropped above, and this
+		// failed acquire means the port isn't handing us a replacement -- region_ still mirrors that now-
+		// released chunk. Clear it alongside the clusters[0]-stays-null drop so nothing downstream reads
+		// a stale payload_base before the next successful acquire.
+		region_ = {};
 
 #ifdef DELUGE_HOST
 		// Streaming-underrun harness, UNASSIGN-class signal: ordinary (non-cache, non-time-stretch)
@@ -1319,6 +1329,14 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 		other.source_ = nullptr;
 		other.source_backing_ = nullptr;
 	}
+	else {
+		// SR1 Task 8: `region_` was copied from `other` by the caller's initializer list, but this
+		// reader's own `source_` is left null (re-opened lazily above) -- so `region_` is a snapshot from
+		// a cursor this reader doesn't own and can't keep coherent (`other`'s cursor may advance/release
+		// the chunk it points at independently of this copy's own clusters[] lease). Clear it so nothing
+		// reads it before this reader's own assignClusters() repopulates it.
+		region_ = {};
+	}
 }
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader& other, bool stealReasons)
     : oscPos{other.oscPos}, currentPlayPos{other.currentPlayPos}, reassessmentLocation{other.reassessmentLocation},
@@ -1346,8 +1364,12 @@ SampleLowLevelReader& SampleLowLevelReader::operator=(SampleLowLevelReader&& oth
 	reassessmentAction = other.reassessmentAction;
 	interpolationBufferSizeLastTime = other.interpolationBufferSizeLastTime;
 	interpolator_ = other.interpolator_;
-	region_ = other.region_;
+	// SR1 Task 8: unassignAllReasons() now clears region_ as part of dropping this reader's OWN old
+	// leases -- so the transfer of `other`'s region has to happen after it (not before, as previously),
+	// or the clear would immediately wipe out the value we just moved in. steal_clusters(other, true)
+	// doesn't touch region_, so this still lands on exactly the same end state as before.
 	unassignAllReasons(false);
 	steal_clusters(other, true);
+	region_ = other.region_;
 	return *this;
 }

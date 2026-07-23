@@ -23,6 +23,15 @@
 
 #![allow(dead_code)]
 
+// R2 Task 3: `readdir_open`'s snapshot `Vec` needs `alloc` -- this module
+// compiles both `no_std` (device) and `std` (host_app / fs_differential's
+// `#[path]` include), and `extern crate` visibility is per-module in Rust
+// 2018+, so this can't rely on another module's `extern crate alloc;`
+// (`bench_fs.rs` declares its own for the same reason). Harmless under a
+// `std` build too -- `alloc` is always in the sysroot there.
+extern crate alloc;
+use alloc::vec::Vec;
+
 use embedded_fatfs::{
     Date, DateTime, File, FileContext, FileSystem, OemCpConverter, ReadWriteSeek, Time,
     TimeProvider,
@@ -476,4 +485,215 @@ where
     ));
     f.close().await.ok()?;
     Some(())
+}
+
+// --- R2 Task 3: directory enumeration + opaque open-by-locator -------------
+//
+// `Dir`/`DirIter` borrow `&FileSystem` (`Dir::iter(&self) -> DirIter<'a,
+// ..>`, `crates/embedded-fatfs/src/dir.rs:134`), so a live iterator can't be
+// held across an `.await` boundary or returned from a function bound to a
+// short-lived `&FileSystem` borrow -- the same "no borrow across the FS call"
+// constraint every other primitive in this module sidesteps via detached,
+// owned `FileContext`s. `readdir_open` sidesteps it the same way: it walks
+// the WHOLE directory to completion under one `with_fs` call and returns an
+// owned snapshot (`DirCursor`, a `Vec` + a walk index), not a live borrow.
+//
+// Locator plan-time investigation (recorded here; see the Task-3 commit body
+// for the summary). The brief's default shape was an
+// `EfatfsLocator{first_cluster: u32, size: u32}` with `open_by_locator`
+// "constructing a File from first_cluster". That is NOT cheaply available
+// from OUTSIDE this crate:
+//   - `DirEntry::first_cluster()` and `File::new` are both `pub(crate)` in
+//     embedded-fatfs (dir_entry.rs:647, file.rs:52) -- unreachable here
+//     without vendoring a new public constructor.
+//   - Even from inside the crate, the only supported "resume this file"
+//     entry point, `File::new_from_context`, REJECTS a context with no
+//     `entry: Option<DirEntryEditor>` outright (file.rs:77,
+//     `context.entry.as_ref().ok_or(Error::InvalidInput)?`). A `File` built
+//     from a bare cluster with no entry also loses its EOF/size bound
+//     (`File::size` returns `None` without an `entry`, file.rs:224-229) and
+//     can never persist (`truncate`/`flush`'s dir-entry update no-op or
+//     panic without one, file.rs:104-124,271-280). A first_cluster alone is
+//     missing exactly the on-disk validation and size-tracking the `entry`
+//     carries -- the entry validation this module's other primitives already
+//     lean on (see `read_context`'s doc comment and the module doc's
+//     generation-guard rationale).
+//
+// What IS public and already free: `DirEntry::to_file()` builds a `File`
+// complete with its `DirEntryEditor`, and `File::close()` detaches that to a
+// plain `FileContext` -- the SAME opaque value `open_context`/`HandleTable`
+// already pass around by handle. So `readdir_open`'s single snapshot pass
+// detaches a `FileContext` per FILE entry exactly the way `open_context`
+// does, and `EfatfsLocator` carries THAT (plus a cached `size`, so a caller
+// doesn't need to reopen just to learn it). `open_by_locator` is then
+// `File::new_from_context` + `close()` -- genuinely O(1) (one directory-entry
+// byte comparison at the position `close()` captured, no path walk, no
+// cluster-chain restart from `first_cluster`) and keeps the SAME
+// entry-validated read/write/flush semantics every other `*_context`
+// primitive here has. This is neither the brief's literal
+// `{first_cluster, size}` shape nor the path-based fallback it names as the
+// accepted degrade -- it is the crate's own supported "resume a file"
+// mechanism, reused; no vendored-crate changes were needed. Directories have
+// no `FileContext` (`DirEntry::to_file()` panics on a directory entry --
+// dir_entry.rs:666), so `EfatfsLocator`/`open_by_locator` are FILE-only;
+// `readdir_open` leaves the locator `None` for `is_dir` entries.
+
+/// One directory entry snapshotted by [`readdir_open`]/[`readdir_next`].
+///
+/// `modified` is the same packed 32-bit FAT date/time [`set_time`]
+/// documents: `(dos_date << 16) | dos_time`, `dos_date =
+/// (year-1980)<<9 | month<<5 | day`, `dos_time = hour<<11 | min<<5 | sec/2`
+/// -- matching C-FatFS's `FILINFO::fdate,ftime` convention this codebase
+/// already uses elsewhere.
+///
+/// `attrs` is the raw FAT attribute byte
+/// (`embedded_fatfs::FileAttributes::bits()`: READ_ONLY=0x01, HIDDEN=0x02,
+/// SYSTEM=0x04, VOLUME_ID=0x08, DIRECTORY=0x10, ARCHIVE=0x20), bit-for-bit
+/// C-FatFS's `FILINFO::fattrib` (`AM_*`).
+#[derive(Clone)]
+pub struct DirEntryInfo {
+    pub name: heapless::String<256>,
+    pub is_dir: bool,
+    pub size: u32,
+    pub modified: u32,
+    pub attrs: u8,
+}
+
+/// Opaque, O(1)-reopenable locator for a FILE entry surfaced by
+/// [`readdir_next`] via [`readdir_locator`] -- Task 5's sample browser wants
+/// O(1) reopen without a directory-tree walk. See this section's module
+/// comment for the plan-time investigation behind this shape. `size` is
+/// cached from the same snapshot pass so a caller can read it without
+/// reopening.
+#[derive(Clone)]
+#[repr(C)]
+pub struct EfatfsLocator {
+    ctx: FileContext,
+    pub size: u32,
+}
+
+/// A directory snapshot collected by [`readdir_open`]: an owned `Vec` of
+/// `(entry, locator)` pairs plus a walk index -- see this section's module
+/// comment for why this can't be a live `DirIter` borrow instead.
+pub struct DirCursor {
+    entries: Vec<(DirEntryInfo, Option<EfatfsLocator>)>,
+    idx: usize,
+}
+
+/// Pack an embedded-fatfs `DateTime` into the `(dos_date << 16) | dos_time`
+/// convention [`set_time`] documents and consumes, using `Date`/`Time`'s
+/// public `year`/`month`/`day`/`hour`/`min`/`sec` fields (the crate's own
+/// `encode()` doing the same math is `pub(crate)`).
+fn pack_fat_datetime(dt: DateTime) -> u32 {
+    let dos_date = ((dt.date.year - 1980) << 9) | (dt.date.month << 5) | dt.date.day;
+    let dos_time = (dt.time.hour << 11) | (dt.time.min << 5) | (dt.time.sec / 2);
+    (u32::from(dos_date) << 16) | u32::from(dos_time)
+}
+
+/// Open `path` as a directory and snapshot ALL of its entries in one pass
+/// (see this section's module comment for why a snapshot, not a live
+/// iterator). Skips the `.`/`..` pseudo-entries embedded-fatfs's iterator
+/// yields for non-root directories -- C-FatFS's `f_readdir` never surfaces
+/// those, so this matches its enumeration surface (same filter
+/// `fs_differential::efatfs::EFatFs::read_dir` already applies). `path`
+/// empty (or all `/`) opens the volume root. `None` on any FS error,
+/// including `path` not naming a directory.
+pub async fn readdir_open<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    path: &str,
+) -> Option<DirCursor>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let root = fs.root_dir();
+    let dir = if path.trim_matches('/').is_empty() {
+        root
+    } else {
+        root.open_dir(path).await.ok()?
+    };
+    let mut iter = dir.iter();
+    let mut entries = Vec::new();
+    while let Some(r) = iter.next().await {
+        let e = r.ok()?;
+        let name = e.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let is_dir = e.is_dir();
+        let size = if is_dir { 0 } else { e.len() as u32 };
+        let info = DirEntryInfo {
+            name: heapless::String::try_from(name.as_str()).ok()?,
+            is_dir,
+            size,
+            modified: pack_fat_datetime(e.modified()),
+            attrs: e.attributes().bits(),
+        };
+        // Directories have no FileContext to detach (DirEntry::to_file()
+        // panics on one) -- only FILE entries get a locator.
+        let locator = if is_dir {
+            None
+        } else {
+            let ctx = e.to_file().close().await.ok()?;
+            Some(EfatfsLocator { ctx, size })
+        };
+        entries.push((info, locator));
+    }
+    Some(DirCursor { entries, idx: 0 })
+}
+
+/// Advance `cursor` and return the next entry. Outer `Option` is an FS
+/// error (`None`); inner `Option` is end-of-directory (`None`). `cursor` is
+/// an owned snapshot (see [`readdir_open`]), so this never touches `fs` or
+/// does any FS I/O -- `fs` is taken only to keep this call symmetric with
+/// [`readdir_open`]'s and mirror the rest of this module's `fs`-taking
+/// primitives; an FS-error outer `None` cannot occur for a snapshot cursor
+/// today, but the signature leaves room for a future non-snapshot cursor
+/// that could fail mid-walk.
+#[allow(clippy::unnecessary_wraps)]
+pub fn readdir_next<IO, TP, OCC>(
+    _fs: &FileSystem<IO, TP, OCC>,
+    cursor: &mut DirCursor,
+) -> Option<Option<DirEntryInfo>>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let Some((info, _locator)) = cursor.entries.get(cursor.idx) else {
+        return Some(None); // end of directory
+    };
+    let info = info.clone();
+    cursor.idx += 1;
+    Some(Some(info))
+}
+
+/// The [`EfatfsLocator`] for the entry most recently yielded by
+/// [`readdir_next`] -- `None` for a directory entry (see [`EfatfsLocator`]'s
+/// doc), or if `readdir_next` has not yet been called on this cursor, or the
+/// cursor is already at end-of-directory.
+pub fn readdir_locator(cursor: &DirCursor) -> Option<EfatfsLocator> {
+    let i = cursor.idx.checked_sub(1)?;
+    cursor.entries.get(i)?.1.clone()
+}
+
+/// Reopen the file `loc` names -- O(1): [`File::new_from_context`]
+/// revalidates against the single on-disk directory entry `loc`'s
+/// [`FileContext`] already points at (no directory-tree walk, no
+/// cluster-chain restart from `first_cluster`), the same validation
+/// `read_context`/`write_context` rely on. `None` if the file has since been
+/// deleted/modified/moved (the on-disk entry no longer matches) or on any
+/// other FS error.
+pub async fn open_by_locator<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    loc: EfatfsLocator,
+) -> Option<FileContext>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let f = File::new_from_context(loc.ctx, fs).await.ok()?;
+    f.close().await.ok()
 }

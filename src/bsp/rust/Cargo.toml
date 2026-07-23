@@ -25,6 +25,12 @@ embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 log = "0.4"
 rtt-target = { version = "0.6", features = ["log"], optional = true }
+# R2 Task 3: `efatfs_core::DirEntryInfo::name` is a fixed-capacity
+# `heapless::String<256>`, not an `alloc::String` -- this module is compiled
+# both `no_std` (device) and `std` (host_app/fs_differential), and a
+# directory-entry name has a natural FAT LFN bound (255 UTF-16 units) so a
+# fixed-capacity type is a better fit than a heap allocation either way.
+heapless = { version = "0.8", default-features = false }
 
 # Sibling deluge-sdk BSP + HAL (DelugeFirmware and deluge-sdk cloned side by
 # side). Both are dual-target as of deluge-sdk's feat/deluge-bsp-host: `sd`

@@ -151,6 +151,16 @@ impl CFatFs {
         v
     }
 
+    /// R2 Task 3 test helper: `read_dir` collapsed to the differential's
+    /// comparison shape (`(name, is_dir, size)`), for the enumeration-set
+    /// equivalence test against [`EFatFs::readdir_all`](crate::efatfs::EFatFs::readdir_all).
+    pub fn readdir_all(&self, path: &str) -> Vec<(String, bool, u32)> {
+        self.read_dir(path)
+            .into_iter()
+            .map(|e| (e.name, e.is_dir, e.size as u32))
+            .collect()
+    }
+
     fn zeroed_filinfo() -> FILINFO {
         FILINFO {
             fsize: 0,

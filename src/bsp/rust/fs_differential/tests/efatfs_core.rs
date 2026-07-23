@@ -784,3 +784,75 @@ fn efatfs_set_time_matches_cfatfs_fat32() {
     );
 }
 
+// --- R2 Task 3: directory enumeration + opaque open-by-locator -------------
+
+/// R2 Task 3 Step 1 (brief-verbatim): efatfs's directory listing matches
+/// C-FatFS's, as a SET of (name, is_dir, size) tuples (order not compared).
+#[test]
+fn efatfs_readdir_matches_cfatfs_set_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let dir = "/SAMPLES"; // exists in the fixture tree
+    // efatfs entries as a set of (name, is_dir, size)
+    let mut got: Vec<(String, bool, u32)> = e.readdir_all(dir);
+    got.sort();
+    let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all(dir); // add this helper
+    want.sort();
+    assert_eq!(got, want, "efatfs directory listing diverged from C-FatFS (as a set)");
+}
+
+/// R2 Task 3: the REAL `efatfs_core::readdir_open`/`readdir_next` (not the
+/// `EFatFs`/`CFatFs` differential wrappers above) walked directly, matching
+/// C-FatFS's listing as a set, AND the `EfatfsLocator` surfaced alongside a
+/// FILE entry actually reopens (`open_by_locator`) THAT file with the right
+/// content -- proving the O(1) locator round-trips to the right bytes, not
+/// just that the enumeration metadata matches.
+#[test]
+fn efatfs_core_readdir_and_locator_roundtrip_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let efatfs = EFatFs::mount();
+    let fs = efatfs.raw();
+
+    let mut got: Vec<(String, bool, u32)> = Vec::new();
+    let mut hello_locator = None;
+
+    block_on(async {
+        let mut cursor = efatfs_core::readdir_open(fs, "/SAMPLES")
+            .await
+            .expect("readdir_open /SAMPLES");
+        loop {
+            match efatfs_core::readdir_next(fs, &mut cursor) {
+                Some(Some(info)) => {
+                    got.push((info.name.as_str().to_string(), info.is_dir, info.size));
+                    if info.name.as_str() == "hello.txt" {
+                        hello_locator = efatfs_core::readdir_locator(&cursor);
+                    }
+                }
+                Some(None) => break, // EOF
+                None => panic!("readdir_next returned an FS error"),
+            }
+        }
+    });
+
+    got.sort();
+    let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all("/SAMPLES");
+    want.sort();
+    assert_eq!(got, want, "efatfs_core readdir diverged from C-FatFS (as a set)");
+
+    let loc = hello_locator.expect("hello.txt locator not captured during the walk");
+    let expected = efatfs.read_file("/SAMPLES/hello.txt");
+    block_on(async {
+        let ctx = efatfs_core::open_by_locator(fs, loc)
+            .await
+            .expect("open_by_locator hello.txt");
+        let mut buf = vec![0u8; expected.len()];
+        let (_ctx, filled) = efatfs_core::read_context(fs, ctx, 0, &mut buf)
+            .await
+            .expect("read_context via locator");
+        assert!(filled, "locator-opened read was short");
+        assert_eq!(buf, expected, "locator-opened hello.txt content diverged from the whole-file oracle");
+    });
+}
+

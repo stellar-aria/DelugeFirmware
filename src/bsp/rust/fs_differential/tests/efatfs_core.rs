@@ -901,3 +901,91 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
         "efatfs_core readdir diverged from C-FatFS (as a set)"
     );
 }
+
+// --- R3 Task 3: persistent stream-write path round-trip + temporary sector_of --------------
+//
+// `deluge::io::Stream` (stream.cpp) routes the sample recorder's writes through the
+// `deluge_efatfs_stream_*` C-ABI (`efatfs_fs.rs`/`efatfs_host_shim.rs`), which composes the SAME
+// `write_context_noflush`/`flush_context`/`FileSystem::sector_of_context` primitives exercised
+// here -- fs_differential only `#[path]`-includes `efatfs_core.rs` (see this file's module doc)
+// and does not link the `deluge-bsp-rust` binary crate the C-ABI `extern "C"` symbols live in, so
+// the C-ABI wiring itself is instead covered by `cargo build -p deluge-bsp-rust --features
+// host_app,efatfs_streaming` + `cargo test -p deluge-bsp-rust --target x86_64-unknown-linux-gnu`
+// (the whole host suite, which builds and links those symbols). This test proves the primitives
+// underneath them: a recording-shaped sequential multi-cluster write through the no-flush write
+// path, `sector_of_context` resolving a physical sector for the just-written cluster (rejecting
+// any other cluster index, matching the C-FatFS `deluge_stream_sector_of` write-mode contract),
+// that sector's raw disk bytes matching the payload (proving the geometry, not just the API
+// shape), and a final flush+close making the whole file visible byte-exact to an independent
+// C-FatFS reader.
+
+/// R3 Task 3 Step 3 (brief-verbatim): a recording-shaped sequential write via the efatfs
+/// persistent-context write primitives, closed+flushed, then read back byte-exact via an
+/// independent C-FatFS read -- proving the persistent-context Stream write path round-trips.
+/// Also proves the TEMPORARY `sector_of_context` accessor (`Stream::sector_of`'s efatfs backend,
+/// retired in Task 6): after each cluster's write, the returned sector's raw disk bytes must be
+/// that exact cluster's payload, and only that cluster's index may resolve (mirroring
+/// `SampleRecorder::writeCluster`'s `write_at` immediately followed by `sector_of` for the SAME
+/// cluster index -- see `sample_recorder.cpp`).
+#[test]
+fn efatfs_stream_persistent_write_sector_of_roundtrip_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R3STREAM.BIN";
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the R3 Task 1 test)
+    const NUM_CLUSTERS: u32 = 4;
+
+    let mut ctx = e.create_context(path, false); // WRITE_CREATE
+    let mut clusters: Vec<Vec<u8>> = Vec::new();
+    for c in 0..NUM_CLUSTERS {
+        // Distinct-per-cluster content so a mixed-up sector or cluster order fails loudly.
+        let payload: Vec<u8> = (0..CB).map(|i| ((c as usize * 31 + i) & 0xff) as u8).collect();
+        let (newctx, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
+        assert_eq!(w, CB, "write_at_via_context_noflush must write a whole cluster");
+        ctx = newctx;
+
+        // sector_of resolves for the cluster just written...
+        let sector = e
+            .sector_of(&ctx, c)
+            .unwrap_or_else(|| panic!("sector_of({c}) must resolve right after writing that cluster"));
+        // ...and its raw disk bytes are exactly this cluster's payload -- the geometry is right,
+        // not just API-shape-correct.
+        let mut on_disk = vec![0u8; CB];
+        let n = RamDisk::read_at(u64::from(sector) * 512, &mut on_disk);
+        assert_eq!(n, CB);
+        assert_eq!(
+            on_disk, payload,
+            "cluster {c}'s sector_of-reported sector does not hold that cluster's data"
+        );
+
+        // ...but no other cluster index resolves (no write-side layout table -- matches
+        // deluge_stream_sector_of's write-mode "only the most recently written cluster" contract).
+        assert!(
+            e.sector_of(&ctx, c + 1).is_none(),
+            "sector_of must not resolve a cluster index other than the one just written"
+        );
+
+        clusters.push(payload);
+    }
+
+    // On-disk dir size is still stale pre-flush (same precondition the R3 Task 1 test checks).
+    assert_eq!(
+        CFatFs::mount().read_file(path).len(),
+        0,
+        "precondition: dir size not yet flushed"
+    );
+
+    // Finalize: flush persists the accumulated size/mtime edit (`Stream::close`'s efatfs branch).
+    let _ctx = e.flush_context(&ctx);
+
+    // Independent C-FatFS read: byte-exact round trip of every cluster written, in order.
+    let want: Vec<u8> = clusters.into_iter().flatten().collect();
+    let got = CFatFs::mount().read_file(path);
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "flushed file size doesn't match the total bytes written"
+    );
+    assert_eq!(got, want, "flushed file contents diverged from what was written");
+}

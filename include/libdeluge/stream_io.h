@@ -134,6 +134,16 @@ bool deluge_efatfs_stream_size(uint32_t handle, uint32_t* out_size);
 ///        opened via `deluge_efatfs_stream_open`, freeing its slot.
 bool deluge_efatfs_stream_close(uint32_t handle);
 
+/// @brief R3 Task 3 -- TEMPORARY, retired in Task 6. The physical sector backing the handle's
+///        most-recently-`write_at`-completed cluster (`cluster_index`, 0-based), mirroring
+///        `deluge_stream_sector_of`'s write-mode "only the most recently written cluster"
+///        contract above -- no write-side layout table is kept here either. Exists purely to keep
+///        `SampleRecorder::writeCluster`'s per-cluster `sdAddress` (and `BlockReadSource`'s
+///        consumption of it) valid while the recorder still writes through `deluge::io::Stream`;
+///        deleted once Task 6 retires that consumer. `false` on a bad handle or a `cluster_index`
+///        that isn't the most-recently-written cluster.
+bool deluge_efatfs_stream_sector_of(uint32_t handle, uint32_t cluster_index, uint32_t* out_sector);
+
 #ifdef __cplusplus
 }
 #endif

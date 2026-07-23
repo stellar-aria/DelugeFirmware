@@ -841,6 +841,17 @@ async fn stream_size(handle: u32) -> Option<u32> {
     Some(size)
 }
 
+/// R3 Task 3 (TEMPORARY -- retired in Task 6): physical sector backing the handle's
+/// most-recently-written cluster (`FileSystem::sector_of_context` -- a Deluge-fork addition on
+/// `embedded-fatfs`), validated against `cluster_index`. `None` on a bad handle, an unmounted FS,
+/// or a `cluster_index` that doesn't match the most-recently-written cluster. Purely a local
+/// `FileContext` read (no FS I/O), so `checkout`'s clone is all this needs -- there is no advanced
+/// state to write back, unlike `stream_write_at`/`stream_size`.
+async fn stream_sector_of(handle: u32, cluster_index: u32) -> Option<u32> {
+    let (_generation, ctx) = STREAM_WRITE_CTX.lock().await.checkout(handle)?;
+    with_fs(async |fs| fs.sector_of_context(&ctx, cluster_index)).await?
+}
+
 /// Flush (see [`stream_flush`]) then free `handle`'s slot. Returns whether the flush succeeded;
 /// the slot is freed either way (mirrors `deluge_efatfs_file_close`'s "invalid after this call
 /// regardless of status" contract at the C-ABI layer).
@@ -980,4 +991,29 @@ pub extern "C" fn deluge_efatfs_stream_close(handle: u32) -> bool {
         return false;
     }
     crate::fiber::block_on_fiber(stream_close(handle))
+}
+
+/// C-ABI (R3 Task 3, TEMPORARY -- retired in Task 6): physical sector backing `handle`'s
+/// most-recently-written cluster (`cluster_index`, 0-based). Keeps `SampleRecorder::writeCluster`'s
+/// `sdAddress` bookkeeping (and `BlockReadSource`'s consumption of it) valid while the recorder
+/// still writes through `deluge::io::Stream` -- see `include/libdeluge/stream_io.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_sector_of(
+    handle: u32,
+    cluster_index: u32,
+    out_sector: *mut u32,
+) -> bool {
+    if !crate::fiber::on_fiber() || out_sector.is_null() {
+        return false;
+    }
+    match crate::fiber::block_on_fiber(stream_sector_of(handle, cluster_index)) {
+        Some(sector) => {
+            // SAFETY: `out_sector` is non-null (checked above).
+            unsafe {
+                *out_sector = sector;
+            }
+            true
+        }
+        None => false,
+    }
 }

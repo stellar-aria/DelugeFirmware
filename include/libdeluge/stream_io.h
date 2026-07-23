@@ -76,11 +76,14 @@ DelugeStatus deluge_stream_close(DelugeStream* stream);
 /// `write_at`-completed cluster (returns `DELUGE_ERR_PARAM` for any other index -- this
 /// boundary never keeps a full write-side layout table). Only meaningful for
 /// sector-addressed backends (FatFS-family); a backend without sector geometry (e.g. a
-/// future Linux/POSIX implementation) returns `DELUGE_ERR_UNSUPPORTED`. Exists for two
-/// FatFS-specific, non-hot-path callers: `AudioFileManager`'s cold-path "did the card's
-/// file change" identity re-validation on the read side, and `SampleRecorder`'s
-/// per-cluster `sdAddress` bookkeeping on the write side -- the real-time read path goes
-/// through embedded-fatfs (`deluge_efatfs_read_at`), not this boundary. [task]
+/// future Linux/POSIX implementation) returns `DELUGE_ERR_UNSUPPORTED`. R3 Task 6: its
+/// only remaining caller is `AudioFileManager`'s cold-path "did the card's file change"
+/// identity re-validation on the read side (`SampleRecorder`'s write-side `sdAddress`
+/// bookkeeping this used to also serve is retired) -- the real-time read path goes
+/// through embedded-fatfs (`deluge_efatfs_read_at`), not this boundary. Present-but-dead
+/// on the C++ side whenever efatfs is the active backend (`deluge::io::Stream::sector_of`
+/// doesn't call this in that case -- see its doc); kept for R4 to remove alongside the
+/// rest of the C-FatFS `deluge_stream_*` write backing. [task]
 DelugeStatus deluge_stream_sector_of(DelugeStream* stream, uint32_t cluster_index, uint32_t* out_sector);
 
 /// R3 Task 2 -- the embedded-fatfs (Rust `efatfs_streaming`) persistent stream-write C-ABI.
@@ -133,16 +136,6 @@ bool deluge_efatfs_stream_size(uint32_t handle, uint32_t* out_size);
 /// @brief Flush (see `deluge_efatfs_stream_flush`) and close a persistent stream-write handle
 ///        opened via `deluge_efatfs_stream_open`, freeing its slot.
 bool deluge_efatfs_stream_close(uint32_t handle);
-
-/// @brief R3 Task 3 -- TEMPORARY, retired in Task 6. The physical sector backing the handle's
-///        most-recently-`write_at`-completed cluster (`cluster_index`, 0-based), mirroring
-///        `deluge_stream_sector_of`'s write-mode "only the most recently written cluster"
-///        contract above -- no write-side layout table is kept here either. Exists purely to keep
-///        `SampleRecorder::writeCluster`'s per-cluster `sdAddress` (and `BlockReadSource`'s
-///        consumption of it) valid while the recorder still writes through `deluge::io::Stream`;
-///        deleted once Task 6 retires that consumer. `false` on a bad handle or a `cluster_index`
-///        that isn't the most-recently-written cluster.
-bool deluge_efatfs_stream_sector_of(uint32_t handle, uint32_t cluster_index, uint32_t* out_sector);
 
 #ifdef __cplusplus
 }

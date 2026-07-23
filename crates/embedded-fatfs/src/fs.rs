@@ -15,7 +15,7 @@ use crate::boot_sector::{format_boot_sector, BiosParameterBlock, BootSector};
 use crate::dir::{Dir, DirRawStream};
 use crate::dir_entry::{DirFileEntryData, FileAttributes, SFN_PADDING, SFN_SIZE};
 use crate::error::Error;
-use crate::file::{File, FileContext};
+use crate::file::File;
 use crate::io::{self, IoBase, Read, ReadLeExt, Seek, SeekFrom, Write, WriteLeExt};
 use crate::table::{
     alloc_cluster, count_free_clusters, format_fat, read_fat_flags, ClusterIterator, RESERVED_FAT_ENTRIES,
@@ -461,26 +461,6 @@ impl<IO: ReadWriteSeek, TP, OCC> FileSystem<IO, TP, OCC> {
 
     pub fn cluster_size(&self) -> u32 {
         self.bpb.cluster_size()
-    }
-
-    /// R3 Task 3 (Deluge fork addition, TEMPORARY -- retired once the Deluge firmware's R3
-    /// Task 6 lands): the physical sector backing a detached [`FileContext`]'s
-    /// most-recently-written cluster, i.e. `sector_from_cluster` of `ctx.current_cluster`.
-    ///
-    /// `cluster_index` is the caller's 0-based cluster index into the file
-    /// (`byte_offset / cluster_size()`); it is validated against the cluster `ctx.offset`
-    /// actually lands in after the write that produced `ctx`, so this only ever answers for
-    /// the cluster the context's last write touched -- there is no cached per-cluster layout
-    /// table here, mirroring the equivalent C-FatFS `deluge_stream_sector_of` write-mode
-    /// contract (see the Deluge firmware's `include/libdeluge/stream_io.h`). Returns `None`
-    /// if the context has no cluster yet (nothing written) or `cluster_index` doesn't match.
-    pub fn sector_of_context(&self, ctx: &FileContext, cluster_index: u32) -> Option<u32> {
-        let current_cluster = ctx.current_cluster?;
-        let last_written_offset = ctx.offset.checked_sub(1)?;
-        if last_written_offset / self.cluster_size() != cluster_index {
-            return None;
-        }
-        Some(self.sector_from_cluster(current_cluster))
     }
 
     pub(crate) fn offset_from_cluster(&self, cluster: u32) -> u64 {

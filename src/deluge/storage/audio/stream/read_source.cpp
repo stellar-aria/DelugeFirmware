@@ -1,20 +1,18 @@
 #include "storage/audio/stream/read_source.h"
-#include "model/sample/sample.h"
-
-extern "C" {
-#include "libdeluge/block_device.h"
-}
+#include "io/file.hpp" // deluge::io::to_deluge_status
 
 namespace deluge::audio::stream {
 
-std::expected<uint32_t, DelugeStatus> BlockReadSource::read(uint32_t cluster_index, std::span<std::byte> dst) {
-	uint32_t num_sectors = static_cast<uint32_t>(dst.size()) >> 9;
-	DelugeStatus status = deluge_block_read(deluge_block_sd_unit(), reinterpret_cast<uint8_t*>(dst.data()),
-	                                        sample_.stream().sd_address_at(cluster_index), num_sectors);
-	if (status != DELUGE_OK) {
-		return std::unexpected(status);
+std::expected<uint32_t, DelugeStatus> RecordingReadSource::read(uint32_t cluster_index, std::span<std::byte> dst) {
+	if (write_stream_ == nullptr || !write_stream_->has_value()) {
+		return std::unexpected(DELUGE_ERR_IO); // recording finished / write context not open
 	}
-	return static_cast<uint32_t>(num_sectors) * 512u;
+	uint32_t byte_offset = cluster_index << cluster_size_magnitude_;
+	auto readResult = write_stream_->value().read_at_via(byte_offset, dst);
+	if (!readResult) {
+		return std::unexpected(deluge::io::to_deluge_status(readResult.error()));
+	}
+	return readResult.value();
 }
 
 std::expected<uint32_t, DelugeStatus> EfatfsReadSource::read(uint32_t cluster_index, std::span<std::byte> dst) {

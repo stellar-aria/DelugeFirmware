@@ -28,7 +28,7 @@ struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cl
 /// replacing the manual cleanup the loader used to thread through a goto. Replaces SampleReader.
 class ClusterByteSource final : public AudioByteSource {
 public:
-	/// `sample` must already have its cluster index table (clusters[].sdAddress) populated.
+	/// `sample` must already have its read stream open (see SampleStream::open_read_stream()).
 	ClusterByteSource(Sample& sample, uint32_t fileSize);
 	~ClusterByteSource() override;
 

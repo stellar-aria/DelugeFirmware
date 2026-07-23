@@ -335,10 +335,4 @@ __attribute__((weak)) bool deluge_efatfs_stream_close(uint32_t /*handle*/) {
 	return false; // No stream-write context table on this BSP/config.
 }
 
-// R3 Task 3, TEMPORARY (retired in Task 6): weak fallback for `deluge_efatfs_stream_sector_of`.
-__attribute__((weak)) bool deluge_efatfs_stream_sector_of(uint32_t /*handle*/, uint32_t /*cluster_index*/,
-                                                          uint32_t* /*out_sector*/) {
-	return false;
-}
-
 } // extern "C"

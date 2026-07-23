@@ -246,17 +246,11 @@ clusterSizeChangedButItsOk:
 
 					// If we couldn't resolve cluster 0's sector at all, the file is gone/unreadable on the
 					// reinserted card.
+					// R3 Task 6: this used to also assert the sector was unchanged against a C-FatFS
+					// sdAddress baseline recorded on recorder-written samples -- sdAddress (and the
+					// recorder's population of it) is retired, so there is no baseline left to compare;
+					// a successful open + resolvable sector 0 is now the whole check.
 					if (!firstSector) {
-						((Sample*)thisAudioFile)->markAsUnloadable();
-						continue;
-					}
-					// Only assert the sector address is unchanged when a C-FatFS sdAddress baseline was
-					// recorded (recorder-written samples). Streamed samples read via efatfs and no longer seed
-					// a baseline (R1: the sdAddress seeding loop was removed), so sd_address_at(0) == 0 means
-					// "no baseline" — a successful open + resolvable sector 0 is sufficient validation. Sector 0
-					// is the boot sector, never a valid data cluster, so 0 is a safe "unseeded" sentinel.
-					uint32_t baseline = ((Sample*)thisAudioFile)->stream().sd_address_at(0);
-					if (baseline != 0 && *firstSector != baseline) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -809,9 +803,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
 		// Open the stream_io.h boundary once for this Sample's lifetime; SampleStream::read_cluster_data
-		// (called per-cluster during playback) reads through it. sdAddress stays populated too -- it feeds
-		// AudioFileManager's cold-path "did the card's file change" re-validation check, a separate,
-		// FatFS-specific concern outside the real-time read path.
+		// (called per-cluster during playback) reads through it.
 		//
 		// `filePath` is only the file's *actual* on-disk location when it wasn't resolved via the
 		// alternate-load-dir mechanism (see resolveFilePointer): when `usingAlternateLocation` is

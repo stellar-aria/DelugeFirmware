@@ -129,8 +129,9 @@ void SampleStream::release_asset() {
 bool SampleStream::open_read_stream(std::string_view path) {
 	// R1: efatfs IS the streaming read path — no C-FatFS fallback. Open the efatfs file handle; a
 	// failure to open is a stream-open failure propagated to the caller (the sample won't load).
-	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone; the recorder
-	// keeps its own sdAddress (sample_recorder.cpp) — that's R3.
+	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone; a still-
+	// recording sample instead reads through the recorder's own open write context (R3 Task 6; see
+	// recording_write_stream_).
 	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
 	uint32_t handle = 0;
 	if (!deluge_efatfs_open(cpath.c_str(), &handle)) {
@@ -141,11 +142,14 @@ bool SampleStream::open_read_stream(std::string_view path) {
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
-	// R1: efatfs handle = the streaming read path; else BlockReadSource (recorder read-back, R3).
+	// R1: an open efatfs read handle = the streaming read path (a normal card-loaded sample).
+	// R3 Task 6: otherwise, this sample is still being recorded -- read its evicted cluster back
+	// through the recorder's own open write context instead (recording_write_stream_).
 	if (efatfs_handle_ != 0) {
 		return std::make_unique<EfatfsReadSource>(efatfs_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
 	}
-	return std::make_unique<BlockReadSource>(sample_);
+	return std::make_unique<RecordingReadSource>(recording_write_stream_,
+	                                             static_cast<uint8_t>(Cluster::size_magnitude));
 }
 
 #define REPORT_LOAD_TIME 0
@@ -331,10 +335,6 @@ SampleCluster& SampleStream::entry(uint32_t index) {
 }
 const SampleCluster& SampleStream::entry(uint32_t index) const {
 	return table_[index];
-}
-
-uint32_t SampleStream::sd_address_at(uint32_t index) const {
-	return table_[index].sdAddress;
 }
 
 size_t SampleStream::num_clusters() const {

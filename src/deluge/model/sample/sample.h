@@ -101,8 +101,8 @@ public:
 	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
 	/// @copydoc stream()
 	///
-	/// Const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
-	/// accessors (sd_address_at et al.) without dropping const.
+	/// Const overload -- lets a `const Sample&` consumer reach read-only accessors without dropping
+	/// const.
 	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
 
 	// Floating point

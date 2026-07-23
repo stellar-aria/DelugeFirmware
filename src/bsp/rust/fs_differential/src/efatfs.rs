@@ -259,15 +259,6 @@ impl EFatFs {
         })
     }
 
-    /// R3 Task 3 host analog of the C-ABI `deluge_efatfs_stream_sector_of` (which composes the
-    /// same `FileSystem::sector_of_context` this delegates to, under the device/host stream-write
-    /// handle table's lock discipline -- see `src/efatfs_fs.rs`/`efatfs_host_shim.rs`). No
-    /// reattach/detach needed -- `sector_of_context` reads `ctx` locally, no FS I/O. `None` if
-    /// `ctx` has no cluster yet or `cluster_index` isn't the cluster `ctx`'s last write touched.
-    pub fn sector_of(&self, ctx: &FileContext, cluster_index: u32) -> Option<u32> {
-        self.fs.sector_of_context(ctx, cluster_index)
-    }
-
     /// Host analog of `efatfs_core::read_context_exact`: EOF-honest — returns
     /// the true accumulated byte count on the first short read, NO
     /// zero-padding (unlike `read_at_context`/`fill`'s streaming-read

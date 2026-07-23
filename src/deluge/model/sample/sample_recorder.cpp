@@ -26,7 +26,6 @@
 #include "libdeluge/control_surface.h"
 #include "libdeluge/file_io.h"
 #include "libdeluge/stream_io.h"
-#include "libdeluge/streaming_fill.h" // deluge_streaming_efatfs_active
 #include "memory/general_memory_allocator.h"
 #include "model/clip/audio_clip.h"
 #include "model/sample/sample.h"
@@ -46,10 +45,6 @@
 
 static_assert(std::atomic<int32_t>::is_always_lock_free,
               "recorder hand-off relies on a lock-free atomic index on this target");
-
-extern "C" {
-#include "fatfs/diskio.h"
-}
 
 #define MAX_FILE_SIZE_MAGNITUDE 32
 
@@ -112,6 +107,10 @@ void SampleRecorder::detachSample() {
 		firstUnwrittenClusterIndex++;
 	}
 
+	// R3 Task 6: unwire the read-back path before this recorder can be destructed -- see
+	// set_recording_write_stream()'s doc.
+	sample->stream().set_recording_write_stream(nullptr);
+
 	sample->removeReason("E400");
 }
 
@@ -132,6 +131,12 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 	}
 
 	sample = new (sample_memory) Sample;
+
+	// R3 Task 6: wire this sample's read path to this recorder's own write context (stable address
+	// for the recorder's whole lifetime -- see set_recording_write_stream()'s doc) -- a still-
+	// recording sample's evicted clusters read back through it (RecordingReadSource). Cleared in
+	// detachSample(), the point after which this recorder may be destructed.
+	sample->stream().set_recording_write_stream(&file);
 
 	// Reserve the residency table's segment-pointer index to the max recording size up front
 	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that
@@ -822,13 +827,12 @@ Error SampleRecorder::finalizeRecordedFile() {
 		    sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile);
 
-		// R3 Task 4: on the efatfs path, the patched first sector goes out through the still-open
-		// persistent write context via Stream::write_at -- write_at needs an open handle, so this
-		// must happen BEFORE file->close() below (unlike the C-FatFS raw disk_write further down,
-		// which addresses the card directly by sdAddress and doesn't care whether the file handle
-		// is open). Keeps the two backends' close-vs-write ordering apart on purpose.
-		bool efatfsActive = deluge_streaming_efatfs_active();
-		if (efatfsActive && headerNeedsPatch) {
+		// R3 Task 6: the patched first sector goes out through the still-open persistent write
+		// context via Stream::write_at -- write_at needs an open handle, so this must happen BEFORE
+		// file->close() below. (Tasks 4-5 also had a C-FatFS raw disk_write branch here, addressing
+		// the card directly by sdAddress; retired along with sdAddress -- the recorder is efatfs-only
+		// now.)
+		if (headerNeedsPatch) {
 
 			// Update data length as written in first cluster
 			StreamedChunk* cluster =
@@ -862,44 +866,6 @@ Error SampleRecorder::finalizeRecordedFile() {
 		this->file.reset();
 		if (!closeResult) {
 			return Error::SD_CARD;
-		}
-
-		if (!efatfsActive && headerNeedsPatch) {
-
-			// Update data length as written in first cluster
-			SampleCluster& firstSampleCluster = sample->stream().entry(0);
-			StreamedChunk* cluster =
-			    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-			if (cluster) {
-
-				// Bug hunting - newly gotten Cluster
-				cluster->num_reasons_held_by_sample_recorder++;
-
-				// Do a last-ditch check that the SD address doesn't look invalid
-				if (firstSampleCluster.sdAddress == 0) {
-					FREEZE_WITH_ERROR("E268");
-				}
-				if ((firstSampleCluster.sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-					FREEZE_WITH_ERROR("E269");
-				}
-
-				audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
-				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
-				updateDataLengthInFirstCluster(cluster);
-
-				// Write just that one first sector back to the card
-				disk_write(0, (BYTE*)cluster->payload().data(), firstSampleCluster.sdAddress, 1);
-
-				// If that failed, well, that's a shame, but we don't need to do anything
-
-				// Some bug-hunting
-				if (!cluster->num_reasons_held_by_sample_recorder) {
-					FREEZE_WITH_ERROR("E349");
-				}
-				cluster->num_reasons_held_by_sample_recorder--;
-
-				deluge::cluster::remove_reason(*cluster, "E026");
-			}
 		}
 	}
 
@@ -953,17 +919,10 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	// allocate new SampleClusters and move them around!
 	sampleCluster = &sample->stream().entry(clusterIndex);
 
-	// Grab the SD address, for later
-	uint32_t sector = 0;
-	auto sectorResult = file->sector_of(static_cast<uint32_t>(clusterIndex));
-	if (sectorResult) {
-		sector = *sectorResult;
-	}
-	sampleCluster->sdAddress = sector;
-
-	// Now flushed to the card with its sdAddress recorded, this cluster is reconstructable like any
-	// sample cluster (materialize re-reads it) — so clear dirty, letting the manager evict + reload
-	// it under pressure. (Until now it was held dirty so the unflushed audio could not be evicted.)
+	// Now flushed to the card, this cluster is reconstructable like any sample cluster (materialize
+	// re-reads it, via the recorder's own still-open write context -- RecordingReadSource) -- so
+	// clear dirty, letting the manager evict + reload it under pressure. (Until now it was held dirty
+	// so the unflushed audio could not be evicted.)
 	if (sampleCluster->cluster != nullptr) {
 		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 		if (mgr != nullptr) {
@@ -1351,21 +1310,18 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 
 	D_PRINTLN("altering file");
 
-	// R3 Task 5: on the efatfs path, this function's SD writes go through a persistent write
-	// context -- unlike C-FatFS, which addresses the card directly by sdAddress and needs no open
-	// file handle for its raw sector writes -- opened here, at the top, and held open for the WHOLE
-	// alteration. Every mid-loop and final-cluster write below reuses it via Stream::write_at, and
-	// it's closed exactly once: either by the end-of-alteration truncate block, or, if that branch
-	// doesn't run (nothing left to flush, or no truncation was needed), right before this function
-	// returns.
-	bool efatfsActive = deluge_streaming_efatfs_active();
-	if (efatfsActive) {
-		auto openedStream = deluge::io::Stream::open(sample->filePath, DELUGE_STREAM_WRITE_APPEND);
-		if (!openedStream) {
-			return Error::SD_CARD;
-		}
-		this->file = std::move(openedStream.value());
+	// R3 Task 6: this function's SD writes go through a persistent write context -- opened here, at
+	// the top, and held open for the WHOLE alteration. Every mid-loop and final-cluster write below
+	// reuses it via Stream::write_at, and it's closed exactly once: either by the end-of-alteration
+	// truncate block, or, if that branch doesn't run (nothing left to flush, or no truncation was
+	// needed), right before this function returns. (Tasks 3-5 gated this behind an `efatfsActive`
+	// runtime check, with a C-FatFS fallback that addressed the card directly by sdAddress; retired
+	// along with sdAddress -- the recorder is efatfs-only now.)
+	auto openedStream = deluge::io::Stream::open(sample->filePath, DELUGE_STREAM_WRITE_APPEND);
+	if (!openedStream) {
+		return Error::SD_CARD;
 	}
+	this->file = std::move(openedStream.value());
 
 	int32_t currentReadClusterIndex = 0;
 	int32_t currentWriteClusterIndex = 0;
@@ -1492,31 +1448,14 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 
 			currentWriteCluster->loaded = true; // I don't think this is necessary anymore
 
-			DRESULT result = RES_OK;
-			if (efatfsActive) {
-				// R3 Task 5: positional write of the whole cluster at its own byte offset -- the file
-				// is open for writing for the entire alteration (opened at the top of this function),
-				// so this is a direct in-place rewrite. There's no raw sector address on this backend,
-				// so no sdAddress/geometry to validate.
-				uint32_t byteOffset = static_cast<uint32_t>(currentWriteClusterIndex) << Cluster::size_magnitude;
-				auto writeResult = file->write_at(
-				    byteOffset, std::span<const std::byte>(currentWriteCluster->payload().data(), Cluster::size));
-				result = (writeResult && *writeResult == Cluster::size) ? RES_OK : RES_ERROR;
-			}
-			else {
-				uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
-
-				// Do a last-ditch check that the SD address doesn't look invalid
-				if (sdAddress == 0) {
-					FREEZE_WITH_ERROR("E268");
-				}
-				if ((sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-					FREEZE_WITH_ERROR("E275");
-				}
-
-				// Write the Cluster we just finished processing to card
-				result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, Cluster::size >> 9);
-			}
+			// R3 Task 6: positional write of the whole cluster at its own byte offset -- the file is
+			// open for writing for the entire alteration (opened at the top of this function), so
+			// this is a direct in-place rewrite. (Tasks 3-5 also had a C-FatFS raw disk_write branch
+			// here, addressing the card directly by sdAddress; retired along with sdAddress.)
+			uint32_t byteOffset = static_cast<uint32_t>(currentWriteClusterIndex) << Cluster::size_magnitude;
+			auto writeResult = file->write_at(
+			    byteOffset, std::span<const std::byte>(currentWriteCluster->payload().data(), Cluster::size));
+			bool clusterWriteFailed = !writeResult || *writeResult != Cluster::size;
 
 			// Grab any overshot / extra bytes from the end of the Cluster we just finished...
 			uint8_t extraBytes[5]; // 5 is the max number of bytes we could have overshot
@@ -1539,7 +1478,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 			currentWriteCluster = nullptr;
 
 			// If write operation failed, now's the time to get out
-			if (result) {
+			if (clusterWriteFailed) {
 writeFailed:
 				// Before we get out, remove "reasons" from the clusters we've been reading from
 
@@ -1672,35 +1611,14 @@ writeFailed:
 		// And from this final Cluster, give the Cluster *before that* the extra bytes from its start
 		setExtraBytesOnPreviousCluster(currentWriteCluster, currentWriteClusterIndex);
 
-		DRESULT result = RES_OK;
-		if (efatfsActive) {
-			// R3 Task 5: positional write of exactly the valid tail bytes. Byte-granular, so (unlike
-			// the C-FatFS sector write below) there's no sector-rounding and nothing to overshoot past
-			// the end of the file.
-			uint32_t byteOffset = static_cast<uint32_t>(currentWriteClusterIndex) << Cluster::size_magnitude;
-			auto writeResult =
-			    file->write_at(byteOffset, std::span<const std::byte>(currentWriteCluster->payload().data(),
-			                                                          bytesToWriteFinalCluster));
-			result = (writeResult && *writeResult == bytesToWriteFinalCluster) ? RES_OK : RES_ERROR;
-		}
-		else {
-			uint32_t numSectorsToWrite = ((bytesToWriteFinalCluster - 1) >> 9) + 1;
-			if (numSectorsToWrite > (Cluster::size >> 9)) {
-				FREEZE_WITH_ERROR("E239");
-			}
-
-			uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
-
-			// Do a last-ditch check that the SD address doesn't look invalid
-			if (sdAddress == 0) {
-				FREEZE_WITH_ERROR("E268");
-			}
-			if ((sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-				FREEZE_WITH_ERROR("E276");
-			}
-
-			result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, numSectorsToWrite);
-		}
+		// R3 Task 6: positional write of exactly the valid tail bytes, byte-granular -- no sector-
+		// rounding, nothing to overshoot past the end of the file. (Tasks 3-5 also had a C-FatFS
+		// sector-rounded raw disk_write branch here, addressing the card directly by sdAddress;
+		// retired along with sdAddress.)
+		uint32_t byteOffset = static_cast<uint32_t>(currentWriteClusterIndex) << Cluster::size_magnitude;
+		auto writeResult = file->write_at(
+		    byteOffset, std::span<const std::byte>(currentWriteCluster->payload().data(), bytesToWriteFinalCluster));
+		bool finalWriteFailed = !writeResult || *writeResult != bytesToWriteFinalCluster;
 
 		// Some bug-hunting
 		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
@@ -1712,22 +1630,14 @@ writeFailed:
 		currentWriteCluster = nullptr;
 
 		// If writing disk failed, above, we've now removed that "reason", so we can get out
-		if (result) {
+		if (finalWriteFailed) {
 			return Error::SD_CARD;
 		}
 
 		if (action != MonitoringAction::NONE || capturedTooMuch) {
 
-			if (!efatfsActive) {
-				deluge_file_invalidate_cache();
-				auto reopenedStream = deluge::io::Stream::open(sample->filePath, DELUGE_STREAM_WRITE_APPEND);
-				if (!reopenedStream) {
-					return Error::SD_CARD;
-				}
-				this->file = std::move(reopenedStream.value());
-			}
-			// efatfs: `this->file` has been open -- receiving every write_at call above -- for the
-			// whole alteration, opened at the top of this function, so there's nothing to reopen here.
+			// `this->file` has been open -- receiving every write_at call above -- for the whole
+			// alteration, opened at the top of this function, so there's nothing to reopen here.
 
 			Error error = truncateFileDownToSize(dataLengthAfterAction + sample->audioDataStartPosBytes);
 			if (error != Error::NONE) {
@@ -1753,10 +1663,10 @@ writeFailed:
 		currentWriteCluster = nullptr;
 	}
 
-	// R3 Task 5: efatfs's write context (opened at the top of this function) is closed exactly
-	// once. The truncate branch above already closed it (and reset `this->file`) whenever it ran;
-	// if it didn't run -- nothing left to flush, or no truncation was needed -- close it here.
-	if (efatfsActive && this->file) {
+	// R3 Task 6: the write context (opened at the top of this function) is closed exactly once. The
+	// truncate branch above already closed it (and reset `this->file`) whenever it ran; if it didn't
+	// run -- nothing left to flush, or no truncation was needed -- close it here.
+	if (this->file) {
 		auto closeResult = this->file->close();
 		this->file.reset();
 		if (!closeResult) {

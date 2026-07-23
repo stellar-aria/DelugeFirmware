@@ -36,6 +36,15 @@ public:
 
 	[[nodiscard]] static std::expected<Stream, Status> open(std::string_view path, DelugeStreamMode mode);
 	std::expected<uint32_t, Status> write_at(uint32_t byte_offset, std::span<const std::byte> buffer);
+	/// @brief Read @p dst.size() bytes at absolute @p byte_offset back through this stream's OWN
+	///        open efatfs write context, bounded by its in-memory (not yet flushed) size.
+	///
+	/// R3: the sample recorder's mid-write read-back path (a still-recording sample's evicted
+	/// cluster) -- see storage/audio/stream/read_source.h's `RecordingReadSource`. Only meaningful
+	/// on the efatfs backend (composes `deluge_efatfs_stream_read_at_via`); there is no C-FatFS
+	/// equivalent (`deluge_stream_*` has no `read_at`, see stream_io.h), so this returns
+	/// `Status::UNSUPPORTED` when `deluge_streaming_efatfs_active()` is false.
+	std::expected<uint32_t, Status> read_at_via(uint32_t byte_offset, std::span<std::byte> dst);
 	std::expected<void, Status> truncate(uint32_t new_size);
 	std::expected<uint32_t, Status> size();
 	std::expected<uint32_t, Status> sector_of(uint32_t cluster_index);

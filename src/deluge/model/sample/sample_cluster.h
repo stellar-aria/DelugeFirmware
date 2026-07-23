@@ -38,20 +38,15 @@ public:
 	SampleCluster(const SampleCluster&) = delete;
 	SampleCluster& operator=(const SampleCluster&) = delete;
 	SampleCluster(SampleCluster&& other) noexcept
-	    : sdAddress(other.sdAddress), cluster(std::exchange(other.cluster, nullptr)), minValue(other.minValue),
-	      maxValue(other.maxValue), investigatedWholeLength(other.investigatedWholeLength) {}
+	    : cluster(std::exchange(other.cluster, nullptr)), minValue(other.minValue), maxValue(other.maxValue),
+	      investigatedWholeLength(other.investigatedWholeLength) {}
 	SampleCluster& operator=(SampleCluster&& other) noexcept {
-		std::swap(sdAddress, other.sdAddress);
 		std::swap(cluster, other.cluster);
 		std::swap(minValue, other.minValue);
 		std::swap(maxValue, other.maxValue);
 		std::swap(investigatedWholeLength, other.investigatedWholeLength);
 		return *this;
 	}
-
-	// In sectors. (Those 512 byte things. Not to be confused with clusters.)
-	// 0 means invalid, and we check for this as a last resort before writing
-	uint32_t sdAddress = 0;
 
 	StreamedChunk* cluster = nullptr; ///< Null when not resident. May be automatically nulled if the manager needs
 	                                  ///< to deallocate the chunk (can only happen once it has no leases

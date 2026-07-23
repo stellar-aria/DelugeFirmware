@@ -29,6 +29,7 @@
 #include "storage/cluster/cluster.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -74,25 +75,45 @@ constexpr size_t kSampleSourcePoolSize =
     16 * kMaxNumVoicesUnison * kNumSources; // = 256; see derivation above (96-reader ceiling, ~2.6× headroom)
 
 /// One pooled cursor plus its claimed/free marker. `source` is the first member so a `DelugeSampleSource*`
-/// handed out by open() casts straight back to its enclosing slot in release_source_slot().
+/// handed out by open() casts straight back to its enclosing slot in release_source_slot(). `in_use` is an
+/// atomic (see g_source_pool) so a claim and a release on the same slot can never corrupt each other.
 struct SampleSourceSlot {
 	DelugeSampleSource source;
-	bool in_use = false;
+	std::atomic<bool> in_use{false};
 };
 
-// File-scope static: lives in .bss, never touches the heap. Claimed/released only on the audio render thread
-// (open() is reached via SampleLowLevelReader::ensureSource() → assignClusters() at note-start; close() via the
-// reader destructor / voice unassignment — both render-thread), the SAME single-threaded discipline the
-// get_cluster()/release_lease() calls in this file already run under. So a plain scan-and-flag needs no atomics
-// and no mutex: unlike efatfs's HandleTable (guarded by a CriticalSectionRawMutex because it is reached from the
-// async streaming task and is Send across executors), nothing off the render thread opens or closes a source.
+// SR1 Task 4 (review fix — preemption safety). open() and close() do NOT both run on the render thread, so the
+// slot-integrity flip MUST be atomic:
+//   * open() (claim)   is reached via SampleLowLevelReader::ensureSource() → assignClusters() at note-start —
+//     on the AUDIO RENDER path, which runs as a preemptive interrupt-executor (see stack_guard.cpp).
+//   * close() (release) is reached via ~SampleLowLevelReader → deluge_sample_source_close from
+//     Sound::killAllVoices() → Voice::unassignStuff (UI/menu handlers, song-swap in deluge.cpp, playback-stop
+//     in playback_handler.cpp, card-reinsert) — on the MAIN executor, OFF the audio path.
+// The render interrupt-executor can preempt the main executor mid-flip, so a render-thread claim can race a
+// main-thread release, or two claims can collide. A bare non-atomic scan/flip (the prior code) could then hand
+// the same slot to two readers or lose a release. We make each slot's in_use an atomic and claim it with a
+// CAS (false→true): the winner of the CAS owns the slot, so slot integrity holds under arbitrary preemption
+// without any lock the audio ISR could not take. This mirrors the reentrancy-tolerant Cell<Slot> discipline in
+// crates/deluge_resource/src/manager.rs (interior mutation, no &mut, safe against the audio-ISR-vs-main race).
+// NOTE: this protects only POOL SLOT INTEGRITY. The separate "a reader is torn down while audio still renders
+// that same voice" hazard is pre-existing (clusters[] has it too) and out of scope here.
+//
+// File-scope static: lives in .bss, never touches the heap. The atomic must be genuinely lock-free (an ISR must
+// never fall back into a libatomic lock), which the static_assert below guarantees on this target.
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "the source-pool claim/release must be lock-free — it runs from the audio interrupt-executor");
 std::array<SampleSourceSlot, kSampleSourcePoolSize> g_source_pool{};
 
 /// @brief Claim a free pool slot, or nullptr if the pool is exhausted.
+///
+/// Lock-free: each slot's in_use is CAS'd false→true; the thread that wins the CAS owns the slot. Safe against
+/// the audio interrupt-executor preempting the main executor (or vice versa) mid-scan — a slot handed to one
+/// caller can never be handed to another.
 [[nodiscard]] DelugeSampleSource* claim_source_slot() {
 	for (SampleSourceSlot& slot : g_source_pool) {
-		if (!slot.in_use) {
-			slot.in_use = true;
+		bool expected = false;
+		// acquire on success so the payload writes that follow are ordered after the claim is visible.
+		if (slot.in_use.compare_exchange_strong(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) {
 			return &slot.source;
 		}
 	}
@@ -100,10 +121,13 @@ std::array<SampleSourceSlot, kSampleSourcePoolSize> g_source_pool{};
 }
 
 /// @brief Return @p src's slot to the pool. @p src must be a live pointer previously handed out by open().
+///
+/// The release is a single atomic store (memory_order_release, pairing with claim's acquire), so it cannot tear
+/// or corrupt a concurrent claim of any other slot.
 void release_source_slot(DelugeSampleSource* src) {
 	static_assert(offsetof(SampleSourceSlot, source) == 0,
 	              "release relies on &slot.source == &slot to recover the enclosing slot");
-	reinterpret_cast<SampleSourceSlot*>(src)->in_use = false;
+	reinterpret_cast<SampleSourceSlot*>(src)->in_use.store(false, std::memory_order_release);
 }
 
 /// @brief Valid payload bytes for cluster @p index, clamping the last cluster to the geometry's
@@ -159,6 +183,13 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out) {
+	// Null-tolerant, matching _release / _close below: open() returns nullptr on pool exhaustion (its
+	// FREEZE_WITH_ERROR("SSP1") is NOT a hard halt on hardware — it blocks then RESUMES), so `src` can be
+	// null here. Treat it as NotReady and leave `out` untouched, rather than dereferencing src->prefetch.
+	if (src == nullptr) {
+		return false;
+	}
+
 	StreamedChunk* chunk = nullptr;
 
 	// 1. A hit on the standing prefetch promotes it to current -- no new get_cluster(), the lease

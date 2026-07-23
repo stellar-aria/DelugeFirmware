@@ -339,6 +339,15 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
                                           int32_t priorityRating) {
 	ensureSource(sample);
 
+	// ensureSource() can leave source_ null when the source pool is exhausted: open() freezes with
+	// FREEZE_WITH_ERROR("SSP1") but that is not a hard halt on hardware (OLED::freezeWithError blocks then
+	// RESUMES), so it returns nullptr. Treat a null source as NotReady — drop the voice gracefully, the same
+	// as an underrun — so nothing downstream dereferences a null source. (deluge_sample_region_acquire is
+	// itself null-tolerant too; this is the explicit, self-documenting guard.)
+	if (source_ == nullptr) {
+		return false;
+	}
+
 	// SR1 Task 4: acquire the current region's residency through the region port instead of a direct
 	// get_cluster(). A `false` return is NotReady -- the exact residency state the old loop treated as
 	// failure (slot-0 chunk null, or present-but-not-yet-loaded): the port makes the same null/!loaded

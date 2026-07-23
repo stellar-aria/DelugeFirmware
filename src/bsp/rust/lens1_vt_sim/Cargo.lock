@@ -785,6 +785,7 @@ dependencies = [
  "embedded-fatfs",
  "embedded-io-async 0.7.0",
  "env_logger",
+ "heapless 0.8.0",
  "log",
 ]
 

@@ -85,6 +85,11 @@ embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features 
     "alloc",
 ] }
 embedded-io-async = "0.7.0"
+# `efatfs_core.rs`'s `DirEntryInfo::name` is a `heapless::String<256>` (R2 Task 4's
+# directory enumeration), so the path-included module needs the same dep — and the
+# same version pin — the main crate and `fs_differential` carry. Without it this
+# package fails to build with `unresolved import heapless`.
+heapless = { version = "0.8", default-features = false }
 
 [features]
 # Both always-on for this package (it exists ONLY to run the real C++ app under

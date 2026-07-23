@@ -27,7 +27,7 @@ use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 
-use crate::efatfs_core::{self, DirHandleTable, HandleTable, LocatorTable, TaskFileTable};
+use crate::efatfs_core::{self, DirHandleTable, HandleTable, TaskFileTable};
 use crate::fat_block_device::SdBlockDevice;
 
 type Storage = StreamSlice<BufStream<SdBlockDevice, 512>>;
@@ -243,13 +243,12 @@ pub extern "C" fn deluge_efatfs_read_at(
 // Separate from [`HANDLES`] above -- see `efatfs_core::TaskFileTable`'s doc for
 // why task-context file I/O (explicit `seek()` + position-implicit `read`/
 // `write`, `file_io.h`'s contract) needs its own position-carrying table rather
-// than reusing the streaming path's `Slot`. [`DIR_HANDLES`]/[`LOCATORS`] back
-// `include/libdeluge/file_io.h`'s directory-enumeration + opaque-reopen C-ABI.
+// than reusing the streaming path's `Slot`. [`DIR_HANDLES`] backs
+// `include/libdeluge/file_io.h`'s directory-enumeration C-ABI.
 
 static TASK_FILES: Mutex<CriticalSectionRawMutex, TaskFileTable> = Mutex::new(TaskFileTable::new());
 static DIR_HANDLES: Mutex<CriticalSectionRawMutex, DirHandleTable> =
     Mutex::new(DirHandleTable::new());
-static LOCATORS: Mutex<CriticalSectionRawMutex, LocatorTable> = Mutex::new(LocatorTable::new());
 
 /// `DelugeFileOpenMode` mode selector matching `file_io.h`'s C enum's implicit
 /// declaration-order values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW.
@@ -357,22 +356,12 @@ async fn task_dir_open(path: &str) -> Option<u32> {
     DIR_HANDLES.lock().await.insert(cursor)
 }
 
-/// One fitting directory entry, plus its locator-table handle
-/// ([`efatfs_core::NO_LOCATOR`] for a directory entry, which has none).
-struct DirReadResult {
-    info: efatfs_core::DirEntryInfo,
-    locator: u32,
-}
-
 /// Outcome of advancing a [`DirCursor`](efatfs_core) past zero or more
 /// too-long-for-the-C-buffer entries (see the module comment above) to either a
 /// fitting entry or end-of-directory.
 enum NextFit {
     Eof,
-    Found(
-        efatfs_core::DirEntryInfo,
-        Option<efatfs_core::EfatfsLocator>,
-    ),
+    Found(efatfs_core::DirEntryInfo),
 }
 
 /// Advance `handle`'s cursor to the next entry whose name fits in
@@ -387,9 +376,12 @@ enum NextFit {
 /// Outer `None`: bad handle or an FS error (`with_fs` returned `None`, or a
 /// mid-walk error the `?` inside propagates) -- the C-ABI reports this as
 /// `false`. Inner `None`: end of directory -- `deluge_dir_read`'s existing
-/// contract ("no more entries" is not an error). `Some(result)`: a fitting
-/// entry, its locator already stashed in [`LOCATORS`] if it's a file.
-async fn task_dir_read(handle: u32, max_name_bytes: usize) -> Option<Option<DirReadResult>> {
+/// contract ("no more entries" is not an error). `Some(Some(info))`: a fitting
+/// entry.
+async fn task_dir_read(
+    handle: u32,
+    max_name_bytes: usize,
+) -> Option<Option<efatfs_core::DirEntryInfo>> {
     let mut dir_table = DIR_HANDLES.lock().await;
     let cursor = dir_table.get_mut(handle)?;
     // R2 Task 4 review fix: `readdir_next` is FS-free (it only walks the
@@ -404,40 +396,18 @@ async fn task_dir_read(handle: u32, max_name_bytes: usize) -> Option<Option<DirR
                 if info.name.len() >= max_name_bytes {
                     continue; // doesn't fit the caller's buffer; skip, don't fail the browse
                 }
-                let locator = efatfs_core::readdir_locator(cursor);
-                break NextFit::Found(info, locator);
+                break NextFit::Found(info);
             }
         }
     };
-    drop(dir_table); // release before taking LOCATORS below
     Some(match next {
         NextFit::Eof => None,
-        NextFit::Found(info, locator) => {
-            let locator_handle = match locator {
-                Some(loc) => LOCATORS.lock().await.insert(loc),
-                None => efatfs_core::NO_LOCATOR,
-            };
-            Some(DirReadResult {
-                info,
-                locator: locator_handle,
-            })
-        }
+        NextFit::Found(info) => Some(info),
     })
 }
 
 async fn task_dir_close(handle: u32) {
     DIR_HANDLES.lock().await.remove(handle);
-}
-
-/// Open the file behind `locator_handle` (a handle previously returned via
-/// [`DirReadResult::locator`] by [`deluge_efatfs_dir_read`]), installing it into
-/// [`TASK_FILES`] like [`task_file_open`]. `None` if the locator handle is
-/// unknown/stale (see `efatfs_core::LocatorTable::get`) or the underlying file
-/// has since been deleted/moved (`efatfs_core::open_by_locator`).
-async fn task_open_by_locator(locator_handle: u32) -> Option<u32> {
-    let loc = LOCATORS.lock().await.get(locator_handle)?;
-    let ctx = with_fs(async |fs| efatfs_core::open_by_locator(fs, loc).await).await??;
-    TASK_FILES.lock().await.insert(ctx)
 }
 
 // --- Task-context FFI bridge (Task 4) ---------------------------------------
@@ -623,9 +593,6 @@ pub extern "C" fn deluge_efatfs_dir_open(path: *const c_char, out_handle: *mut u
 /// shape this mirrors). `out_name` must point at `out_name_cap` writable bytes
 /// (`DELUGE_MAX_FILENAME` in practice); an entry whose name doesn't fit is
 /// skipped internally (see [`task_dir_read`]), never truncated into `out_name`.
-/// `out_locator` receives a locator-table handle usable with
-/// `deluge_efatfs_open_by_locator`, or `DELUGE_EFATFS_NO_LOCATOR` for a
-/// directory entry.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_efatfs_dir_read(
     handle: u32,
@@ -635,7 +602,6 @@ pub extern "C" fn deluge_efatfs_dir_read(
     out_size: *mut u32,
     out_modified: *mut u32,
     out_attrs: *mut u8,
-    out_locator: *mut u32,
     out_has: *mut bool,
 ) -> bool {
     if !crate::fiber::on_fiber()
@@ -645,7 +611,6 @@ pub extern "C" fn deluge_efatfs_dir_read(
         || out_size.is_null()
         || out_modified.is_null()
         || out_attrs.is_null()
-        || out_locator.is_null()
         || out_has.is_null()
     {
         return false;
@@ -658,8 +623,8 @@ pub extern "C" fn deluge_efatfs_dir_read(
             }
             true
         }
-        Some(Some(result)) => {
-            let name_bytes = result.info.name.as_bytes();
+        Some(Some(info)) => {
+            let name_bytes = info.name.as_bytes();
             // SAFETY: `task_dir_read` only returns entries with
             // `name.len() < out_name_cap`, so `name_bytes.len() + 1 <= out_name_cap`;
             // every `out_*` pointer is non-null (checked above) and owned by the
@@ -669,11 +634,10 @@ pub extern "C" fn deluge_efatfs_dir_read(
                     core::slice::from_raw_parts_mut(out_name.cast::<u8>(), out_name_cap as usize);
                 dst[..name_bytes.len()].copy_from_slice(name_bytes);
                 dst[name_bytes.len()] = 0;
-                *out_is_dir = result.info.is_dir;
-                *out_size = result.info.size;
-                *out_modified = result.info.modified;
-                *out_attrs = result.info.attrs;
-                *out_locator = result.locator;
+                *out_is_dir = info.is_dir;
+                *out_size = info.size;
+                *out_modified = info.modified;
+                *out_attrs = info.attrs;
                 *out_has = true;
             }
             true
@@ -765,26 +729,4 @@ pub extern "C" fn deluge_efatfs_set_time(
     }))
     .flatten()
     .is_some()
-}
-
-/// C-ABI: open the file behind `locator_handle` (see [`task_open_by_locator`]),
-/// writing the resulting task-context file handle to `*out_file_handle`.
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_open_by_locator(
-    locator_handle: u32,
-    out_file_handle: *mut u32,
-) -> bool {
-    if !crate::fiber::on_fiber() || out_file_handle.is_null() {
-        return false;
-    }
-    match crate::fiber::block_on_fiber(task_open_by_locator(locator_handle)) {
-        Some(h) => {
-            // SAFETY: `out_file_handle` is non-null (checked above).
-            unsafe {
-                *out_file_handle = h;
-            }
-            true
-        }
-        None => false,
-    }
 }

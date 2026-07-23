@@ -487,7 +487,7 @@ where
     Some(())
 }
 
-// --- R2 Task 3: directory enumeration + opaque open-by-locator -------------
+// --- R2 Task 3: directory enumeration --------------------------------------
 //
 // `Dir`/`DirIter` borrow `&FileSystem` (`Dir::iter(&self) -> DirIter<'a,
 // ..>`, `crates/embedded-fatfs/src/dir.rs:134`), so a live iterator can't be
@@ -498,45 +498,11 @@ where
 // the WHOLE directory to completion under one `with_fs` call and returns an
 // owned snapshot (`DirCursor`, a `Vec` + a walk index), not a live borrow.
 //
-// Locator plan-time investigation (recorded here; see the Task-3 commit body
-// for the summary). The brief's default shape was an
-// `EfatfsLocator{first_cluster: u32, size: u32}` with `open_by_locator`
-// "constructing a File from first_cluster". That is NOT cheaply available
-// from OUTSIDE this crate:
-//   - `DirEntry::first_cluster()` and `File::new` are both `pub(crate)` in
-//     embedded-fatfs (dir_entry.rs:647, file.rs:52) -- unreachable here
-//     without vendoring a new public constructor.
-//   - Even from inside the crate, the only supported "resume this file"
-//     entry point, `File::new_from_context`, REJECTS a context with no
-//     `entry: Option<DirEntryEditor>` outright (file.rs:77,
-//     `context.entry.as_ref().ok_or(Error::InvalidInput)?`). A `File` built
-//     from a bare cluster with no entry also loses its EOF/size bound
-//     (`File::size` returns `None` without an `entry`, file.rs:224-229) and
-//     can never persist (`truncate`/`flush`'s dir-entry update no-op or
-//     panic without one, file.rs:104-124,271-280). A first_cluster alone is
-//     missing exactly the on-disk validation and size-tracking the `entry`
-//     carries -- the entry validation this module's other primitives already
-//     lean on (see `read_context`'s doc comment and the module doc's
-//     generation-guard rationale).
-//
-// What IS public and already free: `DirEntry::to_file()` builds a `File`
-// complete with its `DirEntryEditor`, and `File::close()` detaches that to a
-// plain `FileContext` -- the SAME opaque value `open_context`/`HandleTable`
-// already pass around by handle. So `readdir_open`'s single snapshot pass
-// detaches a `FileContext` per FILE entry exactly the way `open_context`
-// does, and `EfatfsLocator` carries THAT (plus a cached `size`, so a caller
-// doesn't need to reopen just to learn it). `open_by_locator` is then
-// `File::new_from_context` + `close()` -- genuinely O(1) (one directory-entry
-// byte comparison at the position `close()` captured, no path walk, no
-// cluster-chain restart from `first_cluster`) and keeps the SAME
-// entry-validated read/write/flush semantics every other `*_context`
-// primitive here has. This is neither the brief's literal
-// `{first_cluster, size}` shape nor the path-based fallback it names as the
-// accepted degrade -- it is the crate's own supported "resume a file"
-// mechanism, reused; no vendored-crate changes were needed. Directories have
-// no `FileContext` (`DirEntry::to_file()` panics on a directory entry --
-// dir_entry.rs:666), so `EfatfsLocator`/`open_by_locator` are FILE-only;
-// `readdir_open` leaves the locator `None` for `is_dir` entries.
+// R2 Task 5a removed the open-by-locator fast-open sub-feature this section
+// used to carry (`EfatfsLocator`/`open_by_locator`/`readdir_locator`): the UI
+// identifies files by path, not by a locator handle, so the locator machinery
+// was a premature optimization with no consumer. `DirCursor` entries are now
+// plain `DirEntryInfo`, no `Option<EfatfsLocator>` half.
 
 /// One directory entry snapshotted by [`readdir_open`]/[`readdir_next`].
 ///
@@ -559,24 +525,11 @@ pub struct DirEntryInfo {
     pub attrs: u8,
 }
 
-/// Opaque, O(1)-reopenable locator for a FILE entry surfaced by
-/// [`readdir_next`] via [`readdir_locator`] -- Task 5's sample browser wants
-/// O(1) reopen without a directory-tree walk. See this section's module
-/// comment for the plan-time investigation behind this shape. `size` is
-/// cached from the same snapshot pass so a caller can read it without
-/// reopening.
-#[derive(Clone)]
-#[repr(C)]
-pub struct EfatfsLocator {
-    ctx: FileContext,
-    pub size: u32,
-}
-
 /// A directory snapshot collected by [`readdir_open`]: an owned `Vec` of
-/// `(entry, locator)` pairs plus a walk index -- see this section's module
-/// comment for why this can't be a live `DirIter` borrow instead.
+/// entries plus a walk index -- see this section's module comment for why
+/// this can't be a live `DirIter` borrow instead.
 pub struct DirCursor {
-    entries: Vec<(DirEntryInfo, Option<EfatfsLocator>)>,
+    entries: Vec<DirEntryInfo>,
     idx: usize,
 }
 
@@ -641,15 +594,7 @@ where
             modified: pack_fat_datetime(e.modified()),
             attrs: e.attributes().bits(),
         };
-        // Directories have no FileContext to detach (DirEntry::to_file()
-        // panics on one) -- only FILE entries get a locator.
-        let locator = if is_dir {
-            None
-        } else {
-            let ctx = e.to_file().close().await.ok()?;
-            Some(EfatfsLocator { ctx, size })
-        };
-        entries.push((info, locator));
+        entries.push(info);
     }
     Some(DirCursor { entries, idx: 0 })
 }
@@ -667,41 +612,12 @@ where
 /// that could fail mid-walk.
 #[allow(clippy::unnecessary_wraps)]
 pub fn readdir_next(cursor: &mut DirCursor) -> Option<Option<DirEntryInfo>> {
-    let Some((info, _locator)) = cursor.entries.get(cursor.idx) else {
+    let Some(info) = cursor.entries.get(cursor.idx) else {
         return Some(None); // end of directory
     };
     let info = info.clone();
     cursor.idx += 1;
     Some(Some(info))
-}
-
-/// The [`EfatfsLocator`] for the entry most recently yielded by
-/// [`readdir_next`] -- `None` for a directory entry (see [`EfatfsLocator`]'s
-/// doc), or if `readdir_next` has not yet been called on this cursor, or the
-/// cursor is already at end-of-directory.
-pub fn readdir_locator(cursor: &DirCursor) -> Option<EfatfsLocator> {
-    let i = cursor.idx.checked_sub(1)?;
-    cursor.entries.get(i)?.1.clone()
-}
-
-/// Reopen the file `loc` names -- O(1): [`File::new_from_context`]
-/// revalidates against the single on-disk directory entry `loc`'s
-/// [`FileContext`] already points at (no directory-tree walk, no
-/// cluster-chain restart from `first_cluster`), the same validation
-/// `read_context`/`write_context` rely on. `None` if the file has since been
-/// deleted/modified/moved (the on-disk entry no longer matches) or on any
-/// other FS error.
-pub async fn open_by_locator<IO, TP, OCC>(
-    fs: &FileSystem<IO, TP, OCC>,
-    loc: EfatfsLocator,
-) -> Option<FileContext>
-where
-    IO: ReadWriteSeek,
-    TP: TimeProvider,
-    OCC: OemCpConverter,
-{
-    let f = File::new_from_context(loc.ctx, fs).await.ok()?;
-    f.close().await.ok()
 }
 
 /// Pack a decomposed timestamp into the `(dos_date << 16) | dos_time` convention
@@ -718,8 +634,7 @@ pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, secon
     (u32::from(dos_date) << 16) | u32::from(dos_time)
 }
 
-// --- R2 Task 4: task-context file-handle table + dir-cursor table + locator
-// table -------------------------------------------------------------------
+// --- R2 Task 4: task-context file-handle table + dir-cursor table ----------
 //
 // The streaming-read `HandleTable` above is deliberately NOT reused for
 // task-context file I/O: task-context `deluge::io::File` callers `seek()` then
@@ -731,11 +646,10 @@ pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, secon
 // absolute `byte_offset`). Extending the streaming `Slot`/`HandleTable` to
 // carry a position would touch the already-proven R1 streaming path for a
 // field it never uses; a separate, small `TaskFileTable` keeps the two
-// concerns apart. `readdir_next`/`readdir_locator` are synchronous (no `.await`,
-// no FS access -- see the module comment above [`DirCursor`]), so
-// [`DirHandleTable`] needs no generation-guarded checkout/commit dance: its
-// slots are claimed/read/freed under one lock, never split across an FS-mutex
-// await.
+// concerns apart. `readdir_next` is synchronous (no `.await`, no FS access --
+// see the module comment above [`DirCursor`]), so [`DirHandleTable`] needs no
+// generation-guarded checkout/commit dance: its slots are claimed/read/freed
+// under one lock, never split across an FS-mutex await.
 
 /// Max concurrent task-context file handles (mirrors [`HandleTable`]'s
 /// `MAX_HANDLES` cap; task-context file I/O is not high-concurrency).
@@ -854,10 +768,10 @@ struct DirSlot {
 
 /// A fixed-capacity table of open [`DirCursor`] snapshots keyed by a `u32`
 /// handle. Unlike [`TaskFileTable`]/[`HandleTable`], entries need no generation
-/// guard: [`readdir_next`]/[`readdir_locator`] are synchronous and never touch
-/// the FS, so a slot is claimed, read some number of times, and freed all under
-/// one lock -- there is no split checkout/`with_fs`/commit window for a
-/// concurrent `close` to race.
+/// guard: [`readdir_next`] is synchronous and never touches the FS, so a slot
+/// is claimed, read some number of times, and freed all under one lock --
+/// there is no split checkout/`with_fs`/commit window for a concurrent `close`
+/// to race.
 pub struct DirHandleTable {
     slots: [DirSlot; MAX_DIR_HANDLES],
 }
@@ -887,7 +801,7 @@ impl DirHandleTable {
         None
     }
 
-    /// Borrow `handle`'s cursor mutably (for [`readdir_next`]/[`readdir_locator`]).
+    /// Borrow `handle`'s cursor mutably (for [`readdir_next`]).
     /// `None` if out of range or free.
     pub fn get_mut(&mut self, handle: u32) -> Option<&mut DirCursor> {
         self.slots.get_mut(handle as usize)?.cursor.as_mut()
@@ -898,94 +812,5 @@ impl DirHandleTable {
         if let Some(slot) = self.slots.get_mut(handle as usize) {
             slot.cursor = None;
         }
-    }
-}
-
-/// Sentinel returned by [`LocatorTable::insert`]'s caller in
-/// `efatfs_fs.rs`/`efatfs_host_shim.rs` for a directory entry with no locator
-/// (a directory, not a file -- see [`EfatfsLocator`]'s doc) -- "no locator
-/// available", never a value [`LocatorTable::insert`] can itself produce (see
-/// its doc).
-pub const NO_LOCATOR: u32 = u32::MAX;
-
-/// Max live locator handles. A ring buffer (see [`LocatorTable::insert`]), not
-/// a "table full" cap -- this bounds how many of the MOST RECENTLY surfaced
-/// directory entries can still be opened by locator, not how many entries a
-/// browse can enumerate.
-pub const MAX_LOCATORS: usize = 64;
-
-struct LocatorSlot {
-    generation: u32,
-    loc: Option<EfatfsLocator>,
-}
-
-/// A directory-browse-lifetime-independent table of [`EfatfsLocator`]s, keyed
-/// by an opaque `u32` handle that packs a generation into its high 8 bits and
-/// the ring slot index into its low 24 bits (`MAX_LOCATORS` is nowhere near
-/// 2^24, so the two never collide).
-///
-/// Deliberately NOT keyed to any [`DirHandleTable`] entry's lifetime: Task 5's
-/// sample browser snapshots a whole folder's entries to display a scrollable
-/// list (readdir_next never rewinds), which means it may enumerate -- and
-/// close -- the directory handle well before the user picks an entry to open.
-/// A [`LocatorTable`] entry must therefore outlive its originating
-/// [`DirHandleTable`] slot.
-///
-/// [`insert`](Self::insert) never fails: it is a fixed-size RING that always
-/// claims the next slot round-robin, overwriting whatever locator (if any)
-/// was there. This bounds memory without a "table full" degrade path to
-/// handle at the C-ABI layer, at the cost of very old (long-scrolled-past)
-/// locator handles silently no longer resolving once their slot is recycled --
-/// [`get`](Self::get) detects that via the packed generation and returns
-/// `None`, which the browser (Task 5) is expected to treat as "reopen by path
-/// instead," the same graceful degrade a deleted/moved file already forces
-/// via [`open_by_locator`]'s own `None` case.
-pub struct LocatorTable {
-    slots: [LocatorSlot; MAX_LOCATORS],
-    next: usize,
-}
-
-impl Default for LocatorTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LocatorTable {
-    pub const fn new() -> Self {
-        Self {
-            slots: [const {
-                LocatorSlot {
-                    generation: 0,
-                    loc: None,
-                }
-            }; MAX_LOCATORS],
-            next: 0,
-        }
-    }
-
-    /// Claim the ring's next slot for `loc`, overwriting its previous contents.
-    /// Always succeeds. Returns the packed handle (generation << 24 | index).
-    pub fn insert(&mut self, loc: EfatfsLocator) -> u32 {
-        let idx = self.next;
-        self.next = (self.next + 1) % MAX_LOCATORS;
-        let slot = &mut self.slots[idx];
-        slot.generation = (slot.generation + 1) & 0xFF;
-        slot.loc = Some(loc);
-        (slot.generation << 24) | (idx as u32)
-    }
-
-    /// Clone the [`EfatfsLocator`] behind `handle`, iff the slot it names still
-    /// carries the SAME generation `handle` was minted with (i.e. hasn't been
-    /// recycled by the ring for a different entry since). `None` for
-    /// [`NO_LOCATOR`], an out-of-range index, or a stale/recycled generation.
-    pub fn get(&self, handle: u32) -> Option<EfatfsLocator> {
-        let idx = (handle & 0x00FF_FFFF) as usize;
-        let generation = handle >> 24;
-        let slot = self.slots.get(idx)?;
-        if slot.generation != generation {
-            return None;
-        }
-        slot.loc.clone()
     }
 }

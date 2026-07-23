@@ -17,7 +17,7 @@
 
 #include "storage/audio/stream/async_fill.h"
 
-#include "libdeluge/file_io.h" // R2 Task 4: deluge_efatfs_file_*/_dir_*/_open_by_locator weak stubs
+#include "libdeluge/file_io.h" // R2 Task 4: deluge_efatfs_file_*/_dir_* weak stubs
 
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
@@ -270,7 +270,7 @@ __attribute__((weak)) bool deluge_efatfs_dir_open(const char* /*path*/, uint32_t
 __attribute__((weak)) bool deluge_efatfs_dir_read(uint32_t /*handle*/, char* /*out_name*/, uint32_t /*out_name_cap*/,
                                                   bool* /*out_is_dir*/, uint32_t* /*out_size*/,
                                                   uint32_t* /*out_modified*/, uint8_t* /*out_attrs*/,
-                                                  uint32_t* /*out_locator*/, bool* /*out_has_entry*/) {
+                                                  bool* /*out_has_entry*/) {
 	return false;
 }
 
@@ -293,10 +293,6 @@ __attribute__((weak)) bool deluge_efatfs_rename(const char* /*old_path*/, const 
 __attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t /*year*/, uint8_t /*month*/,
                                                   uint8_t /*day*/, uint8_t /*hour*/, uint8_t /*minute*/,
                                                   uint8_t /*second*/) {
-	return false;
-}
-
-__attribute__((weak)) bool deluge_efatfs_open_by_locator(uint32_t /*locator_handle*/, uint32_t* /*out_file_handle*/) {
 	return false;
 }
 

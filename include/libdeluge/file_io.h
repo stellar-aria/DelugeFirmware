@@ -47,12 +47,6 @@ typedef struct DelugeDir DelugeDir;
 /// terminator (FAT LFN max is 255 characters).
 #define DELUGE_MAX_FILENAME 256
 
-/// Sentinel value for `DelugeDirEntry::locator` meaning "no locator available"
-/// -- either the entry is a directory (locators are file-only) or the efatfs
-/// backend's locator table was full when this entry was read. Never a value
-/// `deluge_efatfs_open_by_locator` will accept.
-#define DELUGE_EFATFS_NO_LOCATOR 0xFFFFFFFFu
-
 typedef enum DelugeFileOpenMode {
 	DELUGE_FILE_READ,             ///< open an existing file for reading
 	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
@@ -94,16 +88,6 @@ typedef struct DelugeDirEntry {
 	bool is_hidden;
 	bool is_system;
 	bool is_archive;
-
-	/// R2 Task 4 (efatfs backend only): an opaque, O(1)-reopenable handle for
-	/// this entry, usable with `deluge_efatfs_open_by_locator`. `DELUGE_EFATFS_NO_LOCATOR`
-	/// for a directory entry, or on the C-FatFS backend (which has no locator
-	/// concept). The locator table this handle indexes is independent of any
-	/// directory handle's lifetime -- it stays valid after the `DelugeDir` that
-	/// surfaced it is closed, but may still go stale (this sentinel again on
-	/// reopen) if the underlying file is deleted/moved, or if enough OTHER
-	/// entries are read afterward to recycle its ring slot.
-	uint32_t locator;
 } DelugeDirEntry;
 
 /// Open `path` as a directory for iteration. [task]
@@ -183,32 +167,28 @@ bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size);
 ///        cursor position is left unchanged (matches POSIX `ftruncate`).
 bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len);
 
-/// @brief Close a task-context file handle opened via `deluge_efatfs_file_open`
-///        or `deluge_efatfs_open_by_locator`.
+/// @brief Close a task-context file handle opened via `deluge_efatfs_file_open`.
 void deluge_efatfs_file_close(uint32_t handle);
 
 /// @brief Open `path` as a directory for iteration.
 bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle);
 
 /// @brief Read the next directory entry's fields into the caller's out-params
-///        (mirrors `DelugeDirEntry`'s fields, plus `out_locator`). If there are
-///        no more entries, `*out_has_entry` is set to `false` and the call
-///        still returns `true` (end of directory is not an error, matching
-///        `deluge_dir_read`). An entry whose name doesn't fit in
-///        `DELUGE_MAX_FILENAME` bytes (including the NUL) is skipped
-///        internally -- never truncated into `out_name` -- so this never fails
-///        the whole enumeration over one oversized filename.
+///        (mirrors `DelugeDirEntry`'s fields). If there are no more entries,
+///        `*out_has_entry` is set to `false` and the call still returns `true`
+///        (end of directory is not an error, matching `deluge_dir_read`). An
+///        entry whose name doesn't fit in `DELUGE_MAX_FILENAME` bytes
+///        (including the NUL) is skipped internally -- never truncated into
+///        `out_name` -- so this never fails the whole enumeration over one
+///        oversized filename.
 /// @param out_name NUL-terminated on success; must point at `DELUGE_MAX_FILENAME`
 ///                  writable bytes.
 /// @param out_modified Packed FAT date/time: `(dos_date << 16) | dos_time`,
 ///                       the same convention `deluge_efatfs_set_time` packs.
 /// @param out_attrs Raw FAT attribute byte (`RDO`=0x01, `HID`=0x02, `SYS`=0x04,
 ///                    `DIR`=0x10, `ARC`=0x20).
-/// @param out_locator An opaque handle for `deluge_efatfs_open_by_locator`, or
-///                      `DELUGE_EFATFS_NO_LOCATOR` for a directory entry.
 bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
-                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, uint32_t* out_locator,
-                            bool* out_has_entry);
+                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, bool* out_has_entry);
 
 /// @brief Close a directory handle opened via `deluge_efatfs_dir_open`.
 void deluge_efatfs_dir_close(uint32_t handle);
@@ -225,15 +205,6 @@ bool deluge_efatfs_rename(const char* old_path, const char* new_path);
 /// @brief Set a file or directory's last-modified timestamp.
 bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
                             uint8_t second);
-
-/// @brief Reopen the file behind `locator_handle` (as surfaced by
-///        `deluge_efatfs_dir_read`'s `out_locator`) in O(1) -- no path walk.
-///        `*out_file_handle` is a normal task-context file handle, usable with
-///        every `deluge_efatfs_file_*` function above. Fails (returns `false`)
-///        if `locator_handle` is `DELUGE_EFATFS_NO_LOCATOR`, unknown, stale (its
-///        ring slot has been recycled), or the underlying file has since been
-///        deleted/moved.
-bool deluge_efatfs_open_by_locator(uint32_t locator_handle, uint32_t* out_file_handle);
 
 #ifdef __cplusplus
 }

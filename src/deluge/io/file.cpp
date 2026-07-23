@@ -239,12 +239,11 @@ std::expected<Directory, Status> Directory::open(std::string_view path) {
 std::expected<std::optional<DelugeDirEntry>, Status> Directory::read() {
 	if (deluge_streaming_efatfs_active()) {
 		DelugeDirEntry entry{};
-		entry.locator = DELUGE_EFATFS_NO_LOCATOR;
 		bool has_entry = false;
 		uint32_t modified = 0;
 		uint8_t attrs = 0;
 		if (!deluge_efatfs_dir_read(unbox_dir_handle(handle_), entry.name, DELUGE_MAX_FILENAME, &entry.is_directory,
-		                            &entry.size, &modified, &attrs, &entry.locator, &has_entry)) {
+		                            &entry.size, &modified, &attrs, &has_entry)) {
 			return std::unexpected(Status::ERR);
 		}
 		if (!has_entry) {
@@ -258,7 +257,6 @@ std::expected<std::optional<DelugeDirEntry>, Status> Directory::read() {
 		return entry;
 	}
 	DelugeDirEntry entry{};
-	entry.locator = DELUGE_EFATFS_NO_LOCATOR; // C-FatFS backend has no locator concept
 	bool has_entry = false;
 	DelugeStatus status = deluge_dir_read(handle_, &entry, &has_entry);
 	if (status != DELUGE_OK) {

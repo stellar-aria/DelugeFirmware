@@ -236,6 +236,10 @@ int main(int argc, char** argv) {
 		at_quick_exit(cleanup_temp_image);
 		atexit(cleanup_temp_image);
 		setenv("DELUGE_SD_IMAGE", g_temp_image, 1);
+		// The streaming-read path (SampleStream::open_read_stream) is efatfs-only and bypasses
+		// the packed FAT image entirely — point the host passthrough (host_efatfs_passthrough.cpp)
+		// at the reconstructed project directory itself so streamed samples actually load.
+		setenv("DELUGE_SD_ROOT", project, 1);
 	}
 	else {
 		setenv("DELUGE_SD_IMAGE", image, 1);

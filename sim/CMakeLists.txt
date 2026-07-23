@@ -379,6 +379,7 @@ add_executable(deluge_host
     ${REPO_ROOT}/src/bsp/host/host_midi.c
     ${REPO_ROOT}/src/bsp/host/host_main.c
     ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
 )
 # host_debug.cpp reaches into the app's reason_check (memory/reason_check.h) for the host-sim leak triggers - allowed
 # (the boundary check only forbids the app depending on the BSP, not the reverse), so put src/deluge on the path.
@@ -403,6 +404,7 @@ add_executable(deluge_render
     ${REPO_ROOT}/src/bsp/host/host_midi.c
     ${REPO_ROOT}/src/bsp/host/host_render_main.cpp
     ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
 )
 # host_debug.cpp provides deluge_host_debug_poll() (called from host_audio.c) + reaches the app's reason_check;
 # src/deluge on the path for memory/reason_check.h (the boundary check only forbids app→BSP, not BSP→app).
@@ -426,6 +428,7 @@ add_executable(deluge_loadcheck
     ${REPO_ROOT}/src/bsp/host/host_midi.c
     ${REPO_ROOT}/src/bsp/host/host_loadcheck_main.cpp
     ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
 )
 # host_debug.cpp provides deluge_host_debug_poll() (called from host_audio.c) + reaches the app's reason_check;
 # src/deluge on the path for memory/reason_check.h (the boundary check only forbids app→BSP, not BSP→app).

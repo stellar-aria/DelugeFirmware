@@ -29,14 +29,15 @@
 class VoiceSamplePlaybackGuide;
 class Voice;
 class Sample;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct StreamedChunk;      // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
+struct DelugeSampleSource; // per-reader residency cursor over the region port (libdeluge/sample_source.h)
 class TimeStretcher;
 class SamplePlaybackGuide;
 
 class SampleLowLevelReader {
 public:
 	SampleLowLevelReader() = default;
-	virtual ~SampleLowLevelReader() { unassignAllReasons(false); };
+	virtual ~SampleLowLevelReader();
 	explicit SampleLowLevelReader(SampleLowLevelReader&, bool stealReasons = false);
 	SampleLowLevelReader(SampleLowLevelReader&& other) noexcept;
 	SampleLowLevelReader& operator=(const SampleLowLevelReader& other) = delete;
@@ -106,6 +107,17 @@ public:
 	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
 
 private:
+	// SR1 Task 4: residency acquisition now goes through the region port (libdeluge/sample_source.h)
+	// instead of a per-slot SampleStream::get_cluster() loop. `source_` is a per-reader cursor opened
+	// lazily against the sample's `stream()` (see ensureSource); `clusters[]` is kept populated in
+	// parallel (it still holds its own leases) so the untouched moveOnToNextCluster / steal_clusters /
+	// DSP consumers stay byte-for-byte identical until they migrate in a later task.
+	DelugeSampleSource* source_ = nullptr;
+	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
+
+	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
+	void ensureSource(Sample* sample);
+
 	bool assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex, int32_t priorityRating);
 	bool fillInterpolationBufferForward(SamplePlaybackGuide* guide, Sample* sample, int32_t interpolationBufferSize,
 	                                    bool loopingAtLowLevel, int32_t numSpacesToFill, int32_t priorityRating);

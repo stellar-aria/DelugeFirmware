@@ -22,6 +22,7 @@
 #include "dsp/timestretch/time_stretcher.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
+#include "libdeluge/sample_source.h"
 #include "model/sample/sample.h"
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample_playback_guide.h"
@@ -29,6 +30,42 @@
 #ifdef DELUGE_HOST
 #include "harness/streaming_underrun.h"
 #endif
+
+SampleLowLevelReader::~SampleLowLevelReader() {
+	unassignAllReasons(false);
+	// Close the region-port cursor last: it releases any leases still held on `source_`'s current /
+	// prefetch chunks (which are held independently of `clusters[]`, cleared just above).
+	if (source_ != nullptr) {
+		deluge_sample_source_close(source_);
+		source_ = nullptr;
+		source_backing_ = nullptr;
+	}
+}
+
+// SR1 Task 4: open the per-reader region-port cursor once, lazily, at the first assignClusters() for
+// this sample. Geometry is parsed here (above the port) from the immutable per-sample fields. A reader
+// object can be reused for a different sample (voices are pooled), so re-open if the backing stream
+// changed.
+void SampleLowLevelReader::ensureSource(Sample* sample) {
+	void* backing = &sample->stream();
+	if (source_ != nullptr && source_backing_ != backing) {
+		deluge_sample_source_close(source_);
+		source_ = nullptr;
+		source_backing_ = nullptr;
+	}
+	if (source_ == nullptr) {
+		DelugeSampleGeometry geometry{
+		    .audio_data_start_bytes = sample->audioDataStartPosBytes,
+		    .audio_data_length_bytes = sample->audioDataLengthBytes,
+		    .cluster_size_bytes = static_cast<uint32_t>(Cluster::size),
+		    .byte_depth = static_cast<uint8_t>(sample->byteDepth),
+		    .num_channels = static_cast<uint8_t>(sample->numChannels),
+		    .raw_data_format = static_cast<uint8_t>(sample->rawDataFormat),
+		};
+		source_ = deluge_sample_source_open(backing, geometry);
+		source_backing_ = backing;
+	}
+}
 
 void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
@@ -300,30 +337,38 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 // Unassign the old ones before you call this.
 bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
                                           int32_t priorityRating) {
+	ensureSource(sample);
+
+	// SR1 Task 4: acquire the current region's residency through the region port instead of a direct
+	// get_cluster(). A `false` return is NotReady -- the exact residency state the old loop treated as
+	// failure (slot-0 chunk null, or present-but-not-yet-loaded): the port makes the same null/!loaded
+	// decision internally and leaves `out` untouched on false.
+	DelugeSampleRegion region;
+	if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
+	                                  static_cast<uint32_t>(priorityRating), &region)) {
+		return false;
+	}
+
+	// clusters[0] now sources its pinned payload base from the port's region (region.payload_base ==
+	// this chunk's payload().data()). Take an INDEPENDENT clusters[] lease on the same chunk -- the
+	// port holds its own -- so the still-direct moveOnToNextCluster / unassignAllReasons / steal_clusters
+	// lease arithmetic stays byte-for-byte identical this task (ref-counted leases, freed at zero).
+	clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
+	deluge::cluster::add_lease(clusters[0]);
+
+	// clusters[1..]: the look-ahead slots moveOnToNextCluster consumes when it crosses a boundary.
+	// Populate them exactly as the old per-slot loop did -- owning get_cluster leases, no loaded-check
+	// past slot 0, stopping at the final cluster -- so a boundary crossing still finds its prefetched
+	// neighbour resident. (The port also prefetches internally; these mirror it for the untouched
+	// consumer, and the two residencies reconcile at the next acquire / close.)
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
-
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-
-		// Grab it. Boundary-crossing refill: one stream() hop per lookahead slot, at reassessment /
-		// cluster-boundary time, NOT per sample -- the per-sample inner render loop below only ever
-		// reads the local `clusters[]` array filled here.
-		clusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE, priorityRating);
-
-		// The first one is required to not only have returned an object to us (which it might not have if insufficient
-		// RAM or maybe other reasons), but also to be fully loaded.
-		if (l == 0) {
-
-			if (!clusters[l] || !clusters[l]->loaded) {
-				return false;
-			}
-		}
-
-		// If that was the final Cluster, that's all we need to do
-		if (clusterIndex == finalClusterIndex) {
+	int32_t lookaheadIndex = clusterIndex;
+	for (int32_t l = 1; l < kNumClustersLoadedAhead; l++) {
+		if (lookaheadIndex == finalClusterIndex) {
 			break;
 		}
-
-		clusterIndex += guide->playDirection;
+		lookaheadIndex += guide->playDirection;
+		clusters[l] = sample->stream().get_cluster(lookaheadIndex, CLUSTER_ENQUEUE, priorityRating);
 	}
 
 	return true;
@@ -1242,6 +1287,20 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 				deluge::cluster::add_lease(clusters[l]);
 			}
 		}
+	}
+
+	// SR1 Task 4: a move (stealReasons) transfers the region-port cursor -- and with it the leases it
+	// holds on the current/prefetch chunks -- from `other` to `this`. A non-stealing copy (which
+	// add_lease's the shared clusters above) leaves this reader's `source_` closed; it re-opens its own
+	// cursor lazily on the next assignClusters().
+	if (stealReasons) {
+		if (source_ != nullptr) {
+			deluge_sample_source_close(source_);
+		}
+		source_ = other.source_;
+		source_backing_ = other.source_backing_;
+		other.source_ = nullptr;
+		other.source_backing_ = nullptr;
 	}
 }
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader& other, bool stealReasons)

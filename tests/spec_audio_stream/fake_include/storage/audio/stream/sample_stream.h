@@ -50,6 +50,17 @@ public:
 		slot.chunk.loaded = loaded;
 	}
 
+	/// Make cluster `index` un-reservable: get_cluster() returns nullptr for it (and takes no lease),
+	/// standing in for the real "no free RAM / nothing stealable" outcome the region port maps to
+	/// DELUGE_REGION_UNAVAILABLE. Distinct from an in-range-but-unloaded cluster (DELUGE_REGION_LOADING).
+	void set_cluster_unavailable(uint32_t index, bool unavailable = true) {
+		slots_.at(index).unavailable = unavailable;
+	}
+
+	/// Mark cluster `index` loaded (or not) without touching its payload — the "the fill landed"
+	/// transition a deferring caller is waiting for.
+	void set_cluster_loaded(uint32_t index, bool loaded) { slots_.at(index).chunk.loaded = loaded; }
+
 	/// Number of get_cluster() calls made across every index (the "backing read" instrumentation).
 	[[nodiscard]] int get_cluster_calls() const { return total_calls_; }
 	/// Number of get_cluster() calls made for cluster `index` specifically.
@@ -70,6 +81,10 @@ public:
 		Slot& slot = slots_[index];
 		++slot.call_count;
 		++total_calls_;
+		if (slot.unavailable) {
+			// The real get_cluster()'s no-RAM path: null return, and no lease taken.
+			return nullptr;
+		}
 		// Mirrors get_cluster()'s real contract ("always takes a manager lease on a non-null
 		// return") so the port's release-on-NotReady and stale-current-release paths are exercised
 		// against a real refcount, not a no-op.
@@ -86,6 +101,7 @@ private:
 		std::vector<std::byte> storage;
 		StreamedChunk chunk{};
 		int call_count = 0;
+		bool unavailable = false;
 	};
 	std::vector<Slot> slots_;
 	int total_calls_ = 0;

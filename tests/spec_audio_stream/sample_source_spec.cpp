@@ -46,6 +46,34 @@ DelugeSampleGeometry make_geometry(uint64_t audio_data_length_bytes) {
 	};
 }
 
+// 8b Task 1: DelugeRegionState has no ostream<< for CppSpec's matcher output, so states are compared
+// as ints via these names -- a failure then reads "expected 1, got 2" against a legible constant.
+constexpr int kReady = static_cast<int>(DELUGE_REGION_READY);
+constexpr int kLoading = static_cast<int>(DELUGE_REGION_LOADING);
+constexpr int kUnavailable = static_cast<int>(DELUGE_REGION_UNAVAILABLE);
+
+int acquire_state(DelugeSampleSource* src, uint32_t index, int8_t direction, DelugeSampleRegion* out) {
+	return static_cast<int>(deluge_sample_region_acquire_ex(src, index, direction, /*priority=*/0, out));
+}
+
+int prefetch_state(const DelugeSampleSource* src) {
+	return static_cast<int>(deluge_sample_region_prefetch_state(src));
+}
+
+/// A region descriptor pre-filled with recognisable junk, so "`out` was not written" is a real
+/// assertion rather than an absence of one.
+DelugeSampleRegion sentinel_region() {
+	return DelugeSampleRegion{.payload_base = reinterpret_cast<void*>(0xdeadbeefULL),
+	                          .region_index = 999,
+	                          .resident_bytes = 999,
+	                          .lease = 999};
+}
+
+bool is_untouched(const DelugeSampleRegion& out) {
+	return out.payload_base == reinterpret_cast<void*>(0xdeadbeefULL) && out.region_index == 999u
+	       && out.resident_bytes == 999u && out.lease == uint64_t{999};
+}
+
 } // namespace
 
 // clang-format off
@@ -121,19 +149,194 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		DelugeSampleGeometry geo = make_geometry(32);
 		auto* src = deluge_sample_source_open(&stream, geo);
 
-		void* sentinel_ptr = reinterpret_cast<void*>(0xdeadbeefULL);
-		DelugeSampleRegion out{
-		    .payload_base = sentinel_ptr, .region_index = 999, .resident_bytes = 999, .lease = 999};
+		DelugeSampleRegion out = sentinel_region();
 		bool ok = deluge_sample_region_acquire(src, /*index=*/1, /*direction=*/1, /*priority=*/0, &out);
 		expect(ok).to_equal(false);
-		expect(out.payload_base == sentinel_ptr).to_equal(true);
-		expect(out.region_index).to_equal(999u);
-		expect(out.resident_bytes).to_equal(999u);
-		expect(out.lease).to_equal(uint64_t{999});
-		// The probing lease taken on cluster 1 must be released on the NotReady path, not leaked.
+		expect(is_untouched(out)).to_equal(true);
+		// 8b Task 1: the boolean wrapper still says NotReady, but the lease is now RETAINED (the
+		// scheduled fill must keep progressing) rather than released -- see the LOADING specs below.
+		// close() is what finally drops it.
+		expect(deluge_test_total_lease_count()).to_equal(1u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: a scheduled-but-unloaded region is LOADING and its lease is RETAINED across the call", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(2);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		// Cluster 1: constructed and schedulable, but the fill has not landed.
+		DelugeSampleGeometry geo = make_geometry(32);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out = sentinel_region();
+		expect(acquire_state(src, /*index=*/1, /*direction=*/1, &out)).to_equal(kLoading);
+		expect(is_untouched(out)).to_equal(true);
+		// THE load-bearing assertion: the lease get_cluster() took is still held after the call
+		// returns. Release it here and the background fill's chunk becomes stealable while the
+		// caller is deferring -- the retry could then spin forever.
+		expect(deluge_test_total_lease_count()).to_equal(1u);
+
+		// A defer/retry cycle is idempotent: still LOADING, and leases do not accumulate.
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kLoading);
+		expect(deluge_test_total_lease_count()).to_equal(1u);
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kLoading);
+		expect(deluge_test_total_lease_count()).to_equal(1u);
+
+		// When the fill lands, the same retry becomes READY and the retained lease folds into the
+		// current pin -- exactly one lease on cluster 1, no duplicate from the retries.
+		stream.set_cluster_loaded(1, true);
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kReady);
+		expect(out.region_index).to_equal(1u);
+		expect(out.resident_bytes).to_equal(kClusterSize);
+		expect(deluge_test_total_lease_count()).to_equal(1u); // cluster 1 only: index 2 is out of range
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: LOADING does not disturb the region the caller is still reading", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		stream.set_cluster_data(1, make_ramp(1, kClusterSize));
+		// Cluster 2 left unloaded.
+		DelugeSampleGeometry geo = make_geometry(48);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion current{};
+		expect(acquire_state(src, 0, 1, &current)).to_equal(kReady);
+		expect(deluge_test_total_lease_count()).to_equal(2u); // current(0) + prefetch(1)
+
+		// Probing a region that is still loading must not release current(0)'s pin: the caller can
+		// keep reading `current.payload_base` while it waits.
+		DelugeSampleRegion probe = sentinel_region();
+		expect(acquire_state(src, 2, 1, &probe)).to_equal(kLoading);
+		expect(is_untouched(probe)).to_equal(true);
+		auto ramp0 = make_ramp(0, kClusterSize);
+		auto* bytes0 = static_cast<std::byte*>(current.payload_base);
+		expect(std::equal(ramp0.begin(), ramp0.end(), bytes0)).to_equal(true);
+		// current(0) + prefetch(1) + the retained pending(2).
+		expect(deluge_test_total_lease_count()).to_equal(3u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: an unreservable region is UNAVAILABLE and leaves the lease count unchanged", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		for (uint32_t i = 0; i < 3; ++i) {
+			stream.set_cluster_data(i, make_ramp(i, kClusterSize));
+		}
+		stream.set_cluster_unavailable(2); // no free RAM / nothing stealable for cluster 2
+		DelugeSampleGeometry geo = make_geometry(48);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(deluge_test_total_lease_count()).to_equal(2u); // current(0) + prefetch(1)
+
+		DelugeSampleRegion probe = sentinel_region();
+		expect(acquire_state(src, 2, 1, &probe)).to_equal(kUnavailable);
+		expect(is_untouched(probe)).to_equal(true);
+		// Nothing leaked and nothing retained for the region that could not be reserved: there is no
+		// fill in flight to keep alive, so the count is exactly what it was before the call.
+		expect(deluge_test_total_lease_count()).to_equal(2u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: a pending LOADING region that becomes unreservable is dropped, not stranded", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(2);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		// Cluster 1 constructed but unloaded.
+		DelugeSampleGeometry geo = make_geometry(32);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kLoading);
+		expect(deluge_test_total_lease_count()).to_equal(1u);
+
+		// The chunk is reclaimed out from under the wait; the retry now reports UNAVAILABLE and the
+		// retained lease is released rather than held forever on a dead reservation.
+		stream.set_cluster_unavailable(1);
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kUnavailable);
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 
 		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: prefetch_state reports the neighbour's residency without acquiring it", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		stream.set_cluster_data(1, make_ramp(1, kClusterSize));
+		stream.set_cluster_data(2, make_ramp(2, kClusterSize), /*loaded=*/false);
+		DelugeSampleGeometry geo = make_geometry(48);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		expect(prefetch_state(nullptr)).to_equal(kUnavailable); // null-safe, like every other entry point
+		expect(prefetch_state(src)).to_equal(kUnavailable);     // nothing prefetched yet
+
+		DelugeSampleRegion out{};
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(stream.get_cluster_calls()).to_equal(2); // cluster 0 + its prefetch of cluster 1
+		// The loaded neighbour: READY, and purely observed -- no extra backing read, no extra lease.
+		expect(prefetch_state(src)).to_equal(kReady);
+		expect(stream.get_cluster_calls()).to_equal(2);
+		expect(deluge_test_total_lease_count()).to_equal(2u);
+
+		// Advance: cluster 2 is now the prefetched neighbour, and it has not loaded.
+		expect(acquire_state(src, 1, 1, &out)).to_equal(kReady);
+		expect(prefetch_state(src)).to_equal(kLoading);
+		expect(stream.get_cluster_calls()).to_equal(3);
+
+		// It lands -- the same observation now reports READY, still without acquiring.
+		stream.set_cluster_loaded(2, true);
+		expect(prefetch_state(src)).to_equal(kReady);
+		expect(stream.get_cluster_calls()).to_equal(3);
+
+		// Past the last cluster there is no neighbour to look ahead to: UNAVAILABLE.
+		expect(acquire_state(src, 2, 1, &out)).to_equal(kReady);
+		expect(prefetch_state(src)).to_equal(kUnavailable);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b: acquire_ex's READY path is the boolean acquire's true, unchanged", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(2);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		stream.set_cluster_data(1, make_ramp(1, kClusterSize));
+		DelugeSampleGeometry geo = make_geometry(32);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		auto* src_bool = deluge_sample_source_open(&stream, geo); // a second cursor, so neither call re-acquires
+
+		DelugeSampleRegion via_ex{};
+		expect(acquire_state(src, 0, 1, &via_ex)).to_equal(kReady);
+		DelugeSampleRegion via_bool{};
+		expect(deluge_sample_region_acquire(src_bool, 0, 1, 0, &via_bool)).to_equal(true);
+		expect(via_bool.payload_base == via_ex.payload_base).to_equal(true);
+		expect(via_bool.region_index).to_equal(via_ex.region_index);
+		expect(via_bool.resident_bytes).to_equal(via_ex.resident_bytes);
+		expect(via_bool.lease).to_equal(via_ex.lease);
+
+		// ...and the wrapper is false for both non-READY states.
+		DelugeSampleRegion probe{};
+		stream.set_cluster_loaded(1, false);
+		expect(deluge_sample_region_acquire(src_bool, 1, 1, 0, &probe)).to_equal(false); // LOADING
+		expect(deluge_sample_region_acquire(src, 5, 1, 0, &probe)).to_equal(false);     // UNAVAILABLE
+
+		deluge_sample_source_close(src);
+		deluge_sample_source_close(src_bool);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});
 
 	it("normal acquire/release then close drops every lease", _ {

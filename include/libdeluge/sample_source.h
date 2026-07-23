@@ -36,6 +36,27 @@ typedef struct DelugeSampleGeometry {
 	uint8_t raw_data_format; ///< RawDataFormat, opaque to the port
 } DelugeSampleGeometry;
 
+/// Residency outcome of a region query. Distinguishes the two outcomes the plain boolean
+/// `deluge_sample_region_acquire` collapses into `false`: "not loaded YET" (worth waiting for) and
+/// "could not be reserved at all" (nothing is coming — give up).
+///
+/// Each state carries a LEASE POLICY, which is part of the contract, not an implementation detail:
+typedef enum DelugeRegionState {
+	/// Resident AND loaded. `out` is filled and the source holds the pin backing it; the caller may
+	/// read `payload_base` until it releases the lease, closes, or acquires a different region.
+	DELUGE_REGION_READY = 0,
+	/// Reserved, leased and scheduled, but the data has not landed yet. `out` is NOT filled.
+	/// The source RETAINS the lease on the region across the call, so the background fill keeps
+	/// progressing (and the region cannot be stolen) while the caller defers and retries. Retrying
+	/// the same index is idempotent — it does not accumulate leases. The retained lease is dropped
+	/// by the next acquire on this source or by `deluge_sample_source_close`.
+	DELUGE_REGION_LOADING = 1,
+	/// The region could not be reserved or constructed at all (out of RAM / nothing stealable / out
+	/// of range / null source). `out` is NOT filled and NOTHING is left leased for it — no fill is
+	/// in flight, so retrying gains the caller nothing.
+	DELUGE_REGION_UNAVAILABLE = 2,
+} DelugeRegionState;
+
 /// One acquired, pinned, borrowed region of resident sample data.
 typedef struct DelugeSampleRegion {
 	void* payload_base;      ///< StreamedChunk payload().data() for the resident cluster (pinned)
@@ -48,15 +69,30 @@ typedef struct DelugeSampleRegion {
 /// (SR1: a `deluge::audio::stream::SampleStream*`; SR2: an opaque source id).
 DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSampleGeometry geometry);
 
-/// Make the region containing cluster `index` resident-or-scheduled, pin it, and return it.
-/// Non-blocking (CLUSTER_ENQUEUE semantics). Prefetches the next cluster in `direction`.
-/// Returns false = NotReady: the region is not resident yet (a fetch was scheduled); `out` untouched.
-/// `direction` is +1 (forward) or -1 (reverse) and selects which neighbour is prefetched.
-/// acquire releases any region previously acquired on this source (the caller need not release
-/// before re-acquiring); a matching lease is still required for the region the caller is done
-/// reading only if it wants to drop the pin earlier.
+/// Make the region containing cluster `index` resident-or-scheduled, pin it, and report which.
+/// Non-blocking (CLUSTER_ENQUEUE semantics), allocation-free. On DELUGE_REGION_READY the next
+/// cluster in `direction` is also prefetched; `direction` is +1 (forward) or -1 (reverse).
+///
+/// `out` is filled only on DELUGE_REGION_READY, and only then does the source release the region it
+/// previously handed out (so the caller need not release before re-acquiring). The other two states
+/// leave the standing current region alone — a deferring caller keeps reading what it already has.
+/// See DelugeRegionState for each state's lease policy; in particular DELUGE_REGION_LOADING keeps
+/// the region leased so the fill continues across the caller's defer/retry cycle.
+DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
+                                                  uint32_t priority, DelugeSampleRegion* out);
+
+/// Boolean form of deluge_sample_region_acquire_ex: true == DELUGE_REGION_READY. Callers that
+/// cannot act on the LOADING/UNAVAILABLE distinction (both are simply "NotReady") use this.
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out);
+
+/// Residency of the neighbour this source prefetched on its last successful acquire, WITHOUT
+/// acquiring it (no lease taken, no fetch scheduled, no state changed).
+///
+/// DELUGE_REGION_UNAVAILABLE means simply "no neighbour is held" — either none exists (the current
+/// region is the last one in the play direction) or it could not be reserved. Those are the same
+/// case to a reader looking ahead: there is nothing further to wait for.
+DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src);
 
 /// Drop a pin taken by acquire. Safe to call with a lease of 0 (no-op).
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease);

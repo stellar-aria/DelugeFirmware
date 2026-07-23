@@ -46,6 +46,14 @@ struct DelugeSampleSource {
 	StreamedChunk* current = nullptr;  ///< == the lease handed out (lease == reinterpret_cast<uint64_t>(current))
 	StreamedChunk* prefetch = nullptr; ///< held so the next acquire is a resident hit
 	uint32_t prefetch_index = UINT32_MAX;
+
+	// 8b Task 1: the region a caller asked for that was reserved+scheduled but not yet loaded
+	// (DELUGE_REGION_LOADING). Its lease is RETAINED here — deliberately NOT released, and
+	// deliberately NOT stored in `current` (which must keep pinning whatever the caller is still
+	// reading) — so the background fill keeps progressing and the chunk cannot be stolen while the
+	// caller defers and retries. At most one is outstanding: each acquire supersedes it.
+	StreamedChunk* pending = nullptr;
+	uint32_t pending_index = UINT32_MAX;
 };
 
 namespace {
@@ -162,6 +170,20 @@ void release_source_slot(DelugeSampleSource* src) {
 	return index < src.stream->num_clusters();
 }
 
+/// @brief Drop the retained DELUGE_REGION_LOADING lease, if one is outstanding.
+///
+/// Every acquire supersedes the previous pending reservation, so this is called on all three
+/// outcome paths. Crucially it runs AFTER the new chunk has been obtained: when the retry lands on
+/// the SAME chunk, get_cluster() has already added its own lease, so the refcount goes 1 -> 2 -> 1
+/// rather than dipping to 0 (which would make the half-filled chunk stealable mid-retry).
+void release_pending(DelugeSampleSource& src) {
+	if (src.pending != nullptr) {
+		deluge::cluster::release_lease(src.pending);
+		src.pending = nullptr;
+	}
+	src.pending_index = UINT32_MAX;
+}
+
 } // namespace
 
 extern "C" {
@@ -181,13 +203,14 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 	return src;
 }
 
-bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
-                                  DelugeSampleRegion* out) {
+DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
+                                                  uint32_t priority, DelugeSampleRegion* out) {
 	// Null-tolerant, matching _release / _close below: open() returns nullptr on pool exhaustion (its
 	// FREEZE_WITH_ERROR("SSP1") is NOT a hard halt on hardware — it blocks then RESUMES), so `src` can be
-	// null here. Treat it as NotReady and leave `out` untouched, rather than dereferencing src->prefetch.
+	// null here. There is no cursor to schedule a fill on, so this is UNAVAILABLE (nothing to wait for),
+	// and `out` is left untouched rather than dereferencing src->prefetch.
 	if (src == nullptr) {
-		return false;
+		return DELUGE_REGION_UNAVAILABLE;
 	}
 
 	StreamedChunk* chunk = nullptr;
@@ -203,21 +226,39 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 		chunk = src->stream->get_cluster(index, CLUSTER_ENQUEUE, priority);
 	}
 
-	// 2. NotReady: mirrors moveOnToNextCluster's/assignClusters' null/!loaded -> false path. The
-	//    lease taken above (fresh or promoted) isn't tracked anywhere in src's fields at this point,
-	//    so it must be released here or it leaks.
-	if (chunk == nullptr || !chunk->loaded) {
-		if (chunk != nullptr) {
-			deluge::cluster::release_lease(chunk);
-		}
-		return false;
+	// 2. UNAVAILABLE: get_cluster() could neither find nor construct/steal a chunk for this region
+	//    (RAM pressure, or out of range). Nothing was leased for it — there is no fill in flight —
+	//    and any earlier pending reservation is moot, so drop that too. `out` untouched.
+	if (chunk == nullptr) {
+		release_pending(*src);
+		return DELUGE_REGION_UNAVAILABLE;
 	}
 
-	// 3. Pin it as current and fill the region descriptor. If a different chunk was already pinned as
+	// 3. LOADING: reserved, leased and scheduled, but the data hasn't landed. This is the half the
+	//    old boolean `false` conflated with the UNAVAILABLE case above. RETAIN the lease taken here
+	//    (fresh from get_cluster, or promoted from the standing prefetch) as `pending` so the fill
+	//    keeps progressing and the chunk can't be stolen while the caller defers and retries;
+	//    releasing it — as the pre-8b code did — could let the just-scheduled chunk be reclaimed
+	//    before the retry, so the caller could spin forever. `current` is deliberately left alone:
+	//    the caller may still be reading the region it already has. release_pending() runs AFTER the
+	//    new lease is in hand, so a retry on the same chunk nets exactly one lease (see its doc).
+	if (!chunk->loaded) {
+		release_pending(*src);
+		src->pending = chunk;
+		src->pending_index = index;
+		return DELUGE_REGION_LOADING;
+	}
+
+	// READY from here down. Any pending reservation is superseded — if it is this very chunk (the
+	// retry that finally landed) this drops the duplicate lease get_cluster just added, leaving the
+	// single lease `current` is about to hold.
+	release_pending(*src);
+
+	// 4. Pin it as current and fill the region descriptor. If a different chunk was already pinned as
 	//    `current`, its lease is fused into this advance -- mirrors moveOnToNextCluster's fused
 	//    old-cluster remove_reason (sample_low_level_reader.cpp:343). This makes acquire self-
 	//    releasing: the caller need not release before re-acquiring. Re-acquiring the SAME resident
-	//    chunk (src->current == chunk) must NOT release -- that's its only lease.
+	//    chunk (src->current == chunk) must NOT release the pin we are about to hand back out.
 	if (src->current != nullptr && src->current != chunk) {
 		deluge::cluster::release_lease(src->current);
 	}
@@ -229,7 +270,7 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 	    .lease = reinterpret_cast<uint64_t>(chunk),
 	};
 
-	// 4. Prefetch the next cluster in `direction`, if in range and not already held.
+	// 5. Prefetch the next cluster in `direction`, if in range and not already held.
 	int64_t next_signed = static_cast<int64_t>(index) + direction;
 	if (next_signed >= 0 && index_in_range(*src, static_cast<uint32_t>(next_signed))) {
 		auto next_index = static_cast<uint32_t>(next_signed);
@@ -246,7 +287,26 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 		// else: already the standing prefetch -- nothing to do.
 	}
 
-	return true;
+	return DELUGE_REGION_READY;
+}
+
+bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
+                                  DelugeSampleRegion* out) {
+	// The pre-8b boolean, expressed in terms of the tri-state: everything that is not READY is the
+	// single "NotReady" the SR1 call sites act on, so they are unchanged by the split.
+	return deluge_sample_region_acquire_ex(src, index, direction, priority, out) == DELUGE_REGION_READY;
+}
+
+DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src) {
+	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). This is
+	// what the direct `!clusters[1] || clusters[1]->loaded` look-ahead read becomes once clusters[]
+	// is gone: "no neighbour held" (none exists in this direction, or it could not be reserved) is
+	// UNAVAILABLE, matching that read's null case, which callers treat as "nothing further to wait
+	// for" rather than as a failure.
+	if (src == nullptr || src->prefetch == nullptr) {
+		return DELUGE_REGION_UNAVAILABLE;
+	}
+	return src->prefetch->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
 }
 
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease) {
@@ -273,6 +333,10 @@ void deluge_sample_source_close(DelugeSampleSource* src) {
 		deluge::cluster::release_lease(src->prefetch);
 		src->prefetch = nullptr;
 	}
+	// 8b Task 1: the retained DELUGE_REGION_LOADING lease. A caller that gives up mid-wait (voice
+	// unassigned, note killed) closes without ever seeing the region become READY, so this is the
+	// backstop that keeps "retain across the retry cycle" from becoming "retain forever".
+	release_pending(*src);
 	release_source_slot(src); // return the slot to the static pool (no heap free)
 }
 

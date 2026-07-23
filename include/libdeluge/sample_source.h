@@ -82,9 +82,9 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 /// the region leased so the fill continues across the caller's defer/retry cycle.
 ///
 /// If `index` is exactly the standing prefetched neighbour, that lease is PROMOTED into this call's
-/// result rather than re-fetched — which, on a LOADING outcome, empties the prefetch slot (see
-/// deluge_sample_region_prefetch_state: it reports the promoted reservation instead, so the query
-/// stays truthful).
+/// result rather than re-fetched — which, on a LOADING outcome, empties the prefetch slot and moves
+/// the reservation to `pending` (see deluge_sample_region_state: querying `index` afterwards still
+/// finds it, now via `pending` instead of `prefetch`, so the query stays truthful).
 DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
                                                   uint32_t priority, DelugeSampleRegion* out);
 
@@ -93,20 +93,31 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out);
 
-/// Residency of whatever this source is holding a reservation on BEYOND the region it last handed
-/// back READY, WITHOUT acquiring anything (no lease taken, no fetch scheduled, no state changed).
-/// This is normally the standing prefetched neighbour — but if the most recent acquire_ex call on
-/// this source returned DELUGE_REGION_LOADING, it reports that call's retained (`pending`)
-/// reservation instead, since a LOADING acquire on the standing prefetch's index promotes and empties
-/// the prefetch slot (see deluge_sample_region_acquire_ex). Callers get a truthful answer either way:
-/// a fill is in flight iff this returns DELUGE_REGION_LOADING, regardless of which internal slot is
-/// carrying it.
+/// Residency of `index` as tracked by this cursor RIGHT NOW, WITHOUT acquiring anything (no lease
+/// taken, no fetch scheduled, no state changed). This consults every reservation the cursor is
+/// currently holding -- `current`, the standing `prefetch`, and any retained `pending` LOADING
+/// reservation from a previous acquire_ex call -- and reports on whichever of them is tracking
+/// `index`, by matching that reservation's OWN cluster index (never by assuming `index` is "the
+/// neighbour" or "the last call's subject").
 ///
-/// DELUGE_REGION_UNAVAILABLE means simply "nothing is held" — no prefetch, no pending reservation,
-/// either because none exists (the current region is the last one in the play direction) or because
-/// it could not be reserved. That is the case to a reader looking ahead or deciding whether to keep
-/// deferring: there is nothing further to wait for, so give up rather than retry.
-DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src);
+/// Because the match is by index, this cannot conflate two different clusters the way an unindexed
+/// query would: after an acquire_ex(0) READY followed by an acquire_ex(5) LOADING (index 5 jumped
+/// ahead of the standing prefetch), deluge_sample_region_state(src, 6) still reports on the TRUE
+/// neighbour (index 6, tracked by `prefetch` if in range, else UNAVAILABLE) — it does not fall back
+/// to reporting index 5's LOADING state just because index 5 is what the cursor most recently
+/// resolved.
+///
+/// Returns:
+///   * DELUGE_REGION_READY   -- `index` is tracked by this cursor and its data has landed.
+///   * DELUGE_REGION_LOADING -- `index` is tracked by this cursor (as `pending` or `prefetch`) but
+///                              has not landed yet; a fill is in flight for it.
+///   * DELUGE_REGION_UNAVAILABLE -- this cursor has NOTHING in flight or resident for `index` right
+///                              now (it isn't `current`, `pending`, or `prefetch`). This means only
+///                              "ask me again after a different acquire_ex call, if you want to know
+///                              about this index" — it is NOT a claim that `index` can never load;
+///                              a fresh acquire_ex(index, ...) may still succeed. `src == nullptr`
+///                              also reports UNAVAILABLE.
+DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index);
 
 /// Drop a pin taken by acquire. Safe to call with a lease of 0 (no-op).
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease);

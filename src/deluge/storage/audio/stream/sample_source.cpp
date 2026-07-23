@@ -53,9 +53,11 @@ struct DelugeSampleSource {
 	// reading) — so the background fill keeps progressing and the chunk cannot be stolen while the
 	// caller defers and retries. At most one is outstanding: each acquire supersedes it.
 	//
-	// No `pending_index` field: nothing reads it. `prefetch_state()` reports on `pending` by identity
-	// (is it set, and is it loaded), never by comparing indices, so there has never been a consumer
-	// for the index -- keep it out (YAGNI) until one appears.
+	// No `pending_index` field: `deluge_sample_region_state` resolves an index against `pending` by
+	// reading the chunk's OWN `cluster_index` (StreamedChunk already carries it), the same way it
+	// resolves against `current` and `prefetch` -- a second, cursor-side copy of the index would just
+	// be a value that could drift out of sync with the chunk it is meant to describe. Keep it out
+	// unless a consumer needs the index WITHOUT the chunk pointer (none does).
 	StreamedChunk* pending = nullptr;
 };
 
@@ -308,31 +310,36 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 	return deluge_sample_region_acquire_ex(src, index, direction, priority, out) == DELUGE_REGION_READY;
 }
 
-DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src) {
-	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). This is
-	// what the direct `!clusters[1] || clusters[1]->loaded` look-ahead read becomes once clusters[]
-	// is gone: "nothing held" (none exists in this direction, or it could not be reserved) is
-	// UNAVAILABLE, matching that read's null case, which callers treat as "nothing further to wait
-	// for" rather than as a failure.
+DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index) {
+	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). Resolves
+	// `index` by matching it against each tracked chunk's OWN `cluster_index`, never by assuming
+	// `index` is "the standing prefetch" or "whatever the last acquire_ex call was about" -- that
+	// assumption is exactly the 8b review bug this indexed form replaces (an unindexed query could
+	// not tell "the current region is still loading" from "the neighbour is still loading" once a
+	// caller jumped ahead of the standing prefetch; see the file header / spec for the failing
+	// sequence). By construction (see acquire_ex) `current`, `pending`, and `prefetch` never track the
+	// same index as one another at once, so at most one of the three checks below can match.
 	//
-	// 8b Task 1 fix: `pending` takes priority over `prefetch`. A LOADING acquire_ex on the standing
-	// prefetch's index PROMOTES it (see acquire_ex step 1) -- src->prefetch goes back to null even
-	// though a fill is very much in flight, now tracked as src->pending. Answering from `prefetch`
-	// alone would then report UNAVAILABLE ("nothing further to wait for") while a fill the caller
-	// itself just scheduled is still running -- exactly the trap a late-start consumer's defer-vs-
-	// give-up decision must not fall into. Checking `pending` first makes the answer truthful for
-	// both callers: one that only ever reads the standing prefetch, and one that just received
-	// DELUGE_REGION_LOADING from acquire_ex and wants to know whether that same reservation is still
-	// alive.
+	// `current` is checked first: whenever it is non-null it is, by invariant, already loaded (only a
+	// loaded chunk is ever pinned into `current` -- see acquire_ex step 4), so a match is always READY.
 	if (src == nullptr) {
 		return DELUGE_REGION_UNAVAILABLE;
 	}
-	if (src->pending != nullptr) {
+	if (src->current != nullptr && src->current->cluster_index == index) {
+		return DELUGE_REGION_READY;
+	}
+	// `pending`: the retained LOADING reservation from a previous acquire_ex call (fresh-fetched, or
+	// promoted off the standing prefetch -- see acquire_ex step 1/3). Checked before `prefetch` since
+	// promotion empties the prefetch slot for exactly this index, moving the tracking here.
+	if (src->pending != nullptr && src->pending->cluster_index == index) {
 		return src->pending->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
 	}
-	if (src->prefetch != nullptr) {
+	// The standing prefetched neighbour.
+	if (src->prefetch != nullptr && src->prefetch->cluster_index == index) {
 		return src->prefetch->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
 	}
+	// Nothing this cursor is tracking matches `index` -- not "never available", just "nothing in
+	// flight for it right now" (see the header doc).
 	return DELUGE_REGION_UNAVAILABLE;
 }
 

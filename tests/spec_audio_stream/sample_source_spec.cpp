@@ -56,8 +56,8 @@ int acquire_state(DelugeSampleSource* src, uint32_t index, int8_t direction, Del
 	return static_cast<int>(deluge_sample_region_acquire_ex(src, index, direction, /*priority=*/0, out));
 }
 
-int prefetch_state(const DelugeSampleSource* src) {
-	return static_cast<int>(deluge_sample_region_prefetch_state(src));
+int region_state(const DelugeSampleSource* src, uint32_t index) {
+	return static_cast<int>(deluge_sample_region_state(src, index));
 }
 
 /// A region descriptor pre-filled with recognisable junk, so "`out` was not written" is a real
@@ -271,7 +271,8 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});
 
-	it("8b: prefetch_state reports the neighbour's residency without acquiring it", _ {
+	it("8b Task 1: deluge_sample_region_state reports the neighbour's residency, by index, "
+	   "without acquiring it", _ {
 		deluge_test_reset_lease_tracking();
 		deluge::audio::stream::SampleStream stream(3);
 		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
@@ -280,37 +281,43 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		DelugeSampleGeometry geo = make_geometry(48);
 		auto* src = deluge_sample_source_open(&stream, geo);
 
-		expect(prefetch_state(nullptr)).to_equal(kUnavailable); // null-safe, like every other entry point
-		expect(prefetch_state(src)).to_equal(kUnavailable);     // nothing prefetched yet
+		expect(region_state(nullptr, 0)).to_equal(kUnavailable); // null-safe, like every other entry point
+		expect(region_state(src, 0)).to_equal(kUnavailable);     // nothing tracked yet
+		expect(region_state(src, 1)).to_equal(kUnavailable);
 
 		DelugeSampleRegion out{};
 		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
 		expect(stream.get_cluster_calls()).to_equal(2); // cluster 0 + its prefetch of cluster 1
-		// The loaded neighbour: READY, and purely observed -- no extra backing read, no extra lease.
-		expect(prefetch_state(src)).to_equal(kReady);
+		// The current region: READY (see deluge_sample_region_state's doc -- `current` is only ever
+		// pinned once loaded).
+		expect(region_state(src, 0)).to_equal(kReady);
+		// The loaded neighbour: READY too, and purely observed -- no extra backing read, no lease.
+		expect(region_state(src, 1)).to_equal(kReady);
 		expect(stream.get_cluster_calls()).to_equal(2);
 		expect(deluge_test_total_lease_count()).to_equal(2u);
 
 		// Advance: cluster 2 is now the prefetched neighbour, and it has not loaded.
 		expect(acquire_state(src, 1, 1, &out)).to_equal(kReady);
-		expect(prefetch_state(src)).to_equal(kLoading);
+		expect(region_state(src, 2)).to_equal(kLoading);
 		expect(stream.get_cluster_calls()).to_equal(3);
 
-		// It lands -- the same observation now reports READY, still without acquiring.
+		// It lands -- the same indexed observation now reports READY, still without acquiring.
 		stream.set_cluster_loaded(2, true);
-		expect(prefetch_state(src)).to_equal(kReady);
+		expect(region_state(src, 2)).to_equal(kReady);
 		expect(stream.get_cluster_calls()).to_equal(3);
 
-		// Past the last cluster there is no neighbour to look ahead to: UNAVAILABLE.
+		// Past the last cluster there is no neighbour to look ahead to: UNAVAILABLE for any index
+		// this cursor isn't tracking, including the now-superseded index 1.
 		expect(acquire_state(src, 2, 1, &out)).to_equal(kReady);
-		expect(prefetch_state(src)).to_equal(kUnavailable);
+		expect(region_state(src, 3)).to_equal(kUnavailable); // out of range, nothing to prefetch
+		expect(region_state(src, 1)).to_equal(kUnavailable); // superseded, no longer tracked
 
 		deluge_sample_source_close(src);
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});
 
-	it("8b Task 1 fix: a LOADING acquire that consumes the standing prefetch still reports a truthful "
-	   "prefetch_state (the in-flight pending reservation, not UNAVAILABLE)", _ {
+	it("8b Task 1: a LOADING acquire that consumes the standing prefetch still reports a truthful "
+	   "state for that same index (the in-flight `pending` reservation, not UNAVAILABLE)", _ {
 		deluge_test_reset_lease_tracking();
 		deluge::audio::stream::SampleStream stream(3);
 		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
@@ -322,7 +329,7 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		DelugeSampleRegion out{};
 		// acquire(0) establishes cluster 1 as the standing prefetch (unloaded).
 		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
-		expect(prefetch_state(src)).to_equal(kLoading); // the standing prefetch, not yet landed
+		expect(region_state(src, 1)).to_equal(kLoading); // the standing prefetch, not yet landed
 
 		// The caller now asks for exactly that prefetched index. It is not loaded, so this promotes
 		// the prefetch lease into `pending` and returns LOADING -- and, as a side effect, EMPTIES the
@@ -332,19 +339,68 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(is_untouched(probe)).to_equal(true);
 
 		// THE load-bearing assertion: a fill on cluster 1 is genuinely still in flight (it is held as
-		// `pending`, retained by the LOADING acquire above), so prefetch_state() must say LOADING --
-		// NOT UNAVAILABLE. Reporting UNAVAILABLE here would tell a deferring caller "nothing further
-		// to wait for" while data is actively being loaded, driving it to give up prematurely.
-		expect(prefetch_state(src)).to_equal(kLoading);
+		// `pending` now instead of `prefetch`), so querying index 1 must still say LOADING -- NOT
+		// UNAVAILABLE. Reporting UNAVAILABLE here would tell a deferring caller "nothing further to
+		// wait for" while data is actively being loaded, driving it to give up prematurely. This is
+		// the "promoted prefetch" case, where `pending`'s subject happens to coincide with what was
+		// the true neighbour -- the NEXT spec covers the case where it does not.
+		expect(region_state(src, 1)).to_equal(kLoading);
 
-		// When the fill lands, the same query reports READY -- still without acquiring anything.
+		// When the fill lands, the same indexed query reports READY -- still without acquiring.
 		stream.set_cluster_loaded(1, true);
-		expect(prefetch_state(src)).to_equal(kReady);
+		expect(region_state(src, 1)).to_equal(kReady);
 
 		// And the retry that actually acquires it lands cleanly, folding the pending lease into
 		// `current` with no leak and no duplicate.
 		expect(acquire_state(src, 1, 1, &probe)).to_equal(kReady);
 		expect(probe.region_index).to_equal(1u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("8b Task 1: an indexed query disambiguates the current region from the TRUE neighbour after a "
+	   "jump-ahead acquire bypasses the standing prefetch (the review-found defect)", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(7);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		stream.set_cluster_data(1, make_ramp(1, kClusterSize));
+		// Cluster 5: constructed but not yet loaded -- the caller is about to jump straight to it,
+		// bypassing the standing prefetch of cluster 1 entirely (no acquire of clusters 2-4).
+		stream.set_cluster_data(5, make_ramp(5, kClusterSize), /*loaded=*/false);
+		stream.set_cluster_data(6, make_ramp(6, kClusterSize));
+		DelugeSampleGeometry geo = make_geometry(7 * kClusterSize);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		// 1. acquire_ex(0, +1) -> READY: current=0, standing prefetch=1 (already loaded).
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(region_state(src, 1)).to_equal(kReady); // the standing prefetch
+
+		// 2. The caller jumps ahead to index 5 -- well past the prefetched index 1, and NOT the
+		//    standing prefetch, so no promotion happens; get_cluster(5) is called fresh. It isn't
+		//    loaded, so this is LOADING. Per acquire_ex's doc, the LOADING path never reaches the
+		//    prefetch-scheduling step, so the standing prefetch of cluster 1 is left exactly as it
+		//    was -- now stale relative to where the cursor actually is (index 6 is the TRUE neighbour
+		//    of index 5, but nothing has scheduled it).
+		DelugeSampleRegion probe = sentinel_region();
+		expect(acquire_state(src, 5, 1, &probe)).to_equal(kLoading);
+		expect(is_untouched(probe)).to_equal(true);
+
+		// THE load-bearing assertions -- this is the defect the old unindexed prefetch_state() could
+		// not detect (it always answered "pending if set, else prefetch", regardless of what index
+		// the caller actually meant):
+		//
+		// Index 5 -- what acquire_ex just answered about -- correctly reports LOADING (via `pending`).
+		expect(region_state(src, 5)).to_equal(kLoading);
+		// Index 6 -- the TRUE neighbour of the cursor's real position -- must NOT inherit index 5's
+		// LOADING state. Nothing tracks index 6 (the LOADING path never scheduled a prefetch for it),
+		// so it is UNAVAILABLE: "nothing in flight for it right now" (index 6 could still load fine
+		// on a fresh acquire_ex(6, ...) later), not a false LOADING borrowed from an unrelated index.
+		expect(region_state(src, 6)).to_equal(kUnavailable);
+		// And the stale standing prefetch (index 1) is untouched by the jump, and stays
+		// distinguishable from both 5 and 6 -- an indexed query never conflates the three.
+		expect(region_state(src, 1)).to_equal(kReady);
 
 		deluge_sample_source_close(src);
 		expect(deluge_test_total_lease_count()).to_equal(0u);

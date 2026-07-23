@@ -989,3 +989,71 @@ fn efatfs_stream_persistent_write_sector_of_roundtrip_fat32() {
     );
     assert_eq!(got, want, "flushed file contents diverged from what was written");
 }
+
+// --- R3 Task 4: finalize header-patch positional write -----------------------------------
+
+/// R3 Task 4 (brief-verbatim): write a recording-shaped multi-cluster file through the no-flush
+/// write primitives, then -- on the SAME still-open write context, mirroring
+/// `SampleRecorder::finalizeRecordedFile`'s chosen ordering (patch the WAV header via
+/// `Stream::write_at(0, first-sector-span)` BEFORE `Stream::close()`, since `write_at` needs an
+/// open handle) -- overwrite just the first 512-byte sector at offset 0 with a distinct "patched
+/// header" pattern via a second no-flush positional write. Flush+close, then read the WHOLE file
+/// back via an independent C-FatFS read and assert the first sector reflects the patch AND every
+/// byte after it is untouched -- proving a positional write back to offset 0 composes correctly
+/// with a prior sequential multi-cluster write under the SAME persistent write context.
+#[test]
+fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R3HDR.BIN";
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the R3 Task 1/3 tests)
+    const NUM_CLUSTERS: u32 = 3;
+    const SECTOR: usize = 512;
+
+    // Write the recording body: NUM_CLUSTERS distinct-content clusters, no flush between (the
+    // sample recorder's RT write loop, `SampleRecorder::writeCluster`).
+    let mut ctx = e.create_context(path, false); // WRITE_CREATE
+    let mut clusters: Vec<Vec<u8>> = Vec::new();
+    for c in 0..NUM_CLUSTERS {
+        let payload: Vec<u8> = (0..CB).map(|i| ((c as usize * 17 + i) & 0xff) as u8).collect();
+        let (nc, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
+        assert_eq!(w, CB, "body write must write a whole cluster");
+        ctx = nc;
+        clusters.push(payload);
+    }
+
+    // The finalize header patch: a second, independent positional write at offset 0, still on
+    // the same open context -- `SampleRecorder::finalizeRecordedFile`'s
+    // `Stream::write_at(0, first-sector-span)` before `Stream::close()`.
+    let patched_header: Vec<u8> = (0..SECTOR).map(|i| 0xEEu8 ^ (i as u8)).collect();
+    let (nc, w) = e.write_at_via_context_noflush(&ctx, 0, &patched_header);
+    assert_eq!(w, SECTOR, "header-patch write must write the full first sector");
+    ctx = nc;
+
+    // Finalize: flush persists the accumulated size/mtime edit and every write (patch included) --
+    // `Stream::close`'s efatfs branch.
+    let _ctx = e.flush_context(&ctx);
+
+    // Independent C-FatFS read proves the patch landed on disk (not just in the in-memory
+    // context), and that the rest of the recorded body is untouched by it.
+    let got = CFatFs::mount().read_file(path);
+    let mut want: Vec<u8> = clusters.into_iter().flatten().collect();
+    want[..SECTOR].copy_from_slice(&patched_header);
+
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "flushed file size must be unaffected by the header patch"
+    );
+    assert_eq!(
+        &got[..SECTOR],
+        &patched_header[..],
+        "first sector must reflect the header patch"
+    );
+    assert_eq!(
+        &got[SECTOR..],
+        &want[SECTOR..],
+        "bytes after the patched header sector must be byte-identical to the originally written body"
+    );
+}

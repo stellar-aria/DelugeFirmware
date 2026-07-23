@@ -26,6 +26,7 @@
 #include "libdeluge/control_surface.h"
 #include "libdeluge/file_io.h"
 #include "libdeluge/stream_io.h"
+#include "libdeluge/streaming_fill.h" // deluge_streaming_efatfs_active
 #include "memory/general_memory_allocator.h"
 #include "model/clip/audio_clip.h"
 #include "model/sample/sample.h"
@@ -815,16 +816,55 @@ Error SampleRecorder::finalizeRecordedFile() {
 			Error error = truncateFileDownToSize(correctLength);
 		}
 
+		// If the actual audio data length we ended up with is not the same as was written in the headers in the first
+		// cluster (very likely; various reasons)
+		bool headerNeedsPatch =
+		    sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
+		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile);
+
+		// R3 Task 4: on the efatfs path, the patched first sector goes out through the still-open
+		// persistent write context via Stream::write_at -- write_at needs an open handle, so this
+		// must happen BEFORE file->close() below (unlike the C-FatFS raw disk_write further down,
+		// which addresses the card directly by sdAddress and doesn't care whether the file handle
+		// is open). Keeps the two backends' close-vs-write ordering apart on purpose.
+		bool efatfsActive = deluge_streaming_efatfs_active();
+		if (efatfsActive && headerNeedsPatch) {
+
+			// Update data length as written in first cluster
+			StreamedChunk* cluster =
+			    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+			if (cluster) {
+
+				// Bug hunting - newly gotten Cluster
+				cluster->num_reasons_held_by_sample_recorder++;
+
+				audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
+				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
+				updateDataLengthInFirstCluster(cluster);
+
+				// Write just that one first sector back to the card, at its file-relative offset
+				constexpr uint32_t kFirstSectorBytes = 512;
+				file->write_at(0, std::span<const std::byte>(cluster->payload().data(), kFirstSectorBytes));
+
+				// If that failed, well, that's a shame, but we don't need to do anything
+
+				// Some bug-hunting
+				if (!cluster->num_reasons_held_by_sample_recorder) {
+					FREEZE_WITH_ERROR("E349");
+				}
+				cluster->num_reasons_held_by_sample_recorder--;
+
+				deluge::cluster::remove_reason(*cluster, "E026");
+			}
+		}
+
 		auto closeResult = this->file->close();
 		this->file.reset();
 		if (!closeResult) {
 			return Error::SD_CARD;
 		}
 
-		// If the actual audio data length we ended up with is not the same as was written in the headers in the first
-		// cluster (very likely; various reasons)
-		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
-		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
+		if (!efatfsActive && headerNeedsPatch) {
 
 			// Update data length as written in first cluster
 			SampleCluster& firstSampleCluster = sample->stream().entry(0);

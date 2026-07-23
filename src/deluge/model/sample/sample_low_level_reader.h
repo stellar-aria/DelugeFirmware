@@ -117,9 +117,11 @@ public:
 	//     probe leases across a WAIT. Golden-UNVALIDATED (the deterministic sim has no SD latency), so
 	//     deliberately left on clusters[].
 	//   * VoiceSample::render's cache-resync tracking + stopReadingFromCache -- while replaying a
-	//     repitch/time-stretch cache the reader tracks the uncached resume cluster in clusters[]
-	//     (get_cluster, NOT the port), so region_ is STALE there; getPlayByteLowLevel and
-	//     reassessReassessmentLocation's pre-reacquire reads therefore also stay on clusters[0].
+	//     repitch/time-stretch cache the reader tracks the uncached resume cluster here. 8b Task 2
+	//     moved the resync's ACQUIRE onto the port (voice_sample.cpp ~900), so `region_` now tracks the
+	//     cache position too and is no longer stale during cache replay; clusters[0] is written from
+	//     that same acquire and the two move together. stopReadingFromCache still reads
+	//     clusters[0]->loaded directly (the port's bool acquire cannot express "held but not loaded").
 	//   * external presence consumers -- reads made by code outside this class hierarchy (VoiceSample's
 	//     own clusters[] reads, covered by the bullets above, are internal): TimeStretcher's
 	//     olderPartReader.clusters[0]/voiceSample->clusters[0] presence checks (time_stretcher.cpp
@@ -130,7 +132,12 @@ public:
 	// region_ becomes authoritative during cache/probe too -- deferred (see SR1 Task 8 report).
 	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
 
-private:
+protected:
+	// 8b Task 2: the cursor + its retained region are `protected`, not `private`, because the
+	// cache-replay resync in VoiceSample::render (the subclass) acquires the uncached resume cluster
+	// through this same cursor -- that is what keeps `region_` tracking the CACHE position instead of
+	// the stale pre-cache one. Everything else about them is unchanged; no other class can reach them.
+	//
 	// SR1 Task 4: residency acquisition goes through the region port (libdeluge/sample_source.h)
 	// instead of a per-slot SampleStream::get_cluster() loop. `source_` is a per-reader cursor opened
 	// lazily against the sample's `stream()` (see ensureSource); it holds the current + prefetch pins.
@@ -149,6 +156,7 @@ private:
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
 	void ensureSource(Sample* sample);
 
+private:
 	bool assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex, int32_t priorityRating);
 	bool fillInterpolationBufferForward(SamplePlaybackGuide* guide, Sample* sample, int32_t interpolationBufferSize,
 	                                    bool loopingAtLowLevel, int32_t numSpacesToFill, int32_t priorityRating);

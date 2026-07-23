@@ -891,21 +891,57 @@ readCachedWindow:
 
 			// If uncached Cluster has changed, update queue
 			if (!clusters[0] || clusters[0]->cluster_index != uncachedClusterIndex) {
+				// 8b Task 2: the cache-resync's residency now comes from the region port, on the reader's
+				// OWN cursor, so `region_` tracks the CACHE position. Previously this loop called
+				// sample->stream().get_cluster() directly and only `clusters[]` moved, leaving `region_`
+				// pinned to the pre-cache region for the whole cache replay (stale) -- which is why the
+				// region_-sourced readers had to stay on the clusters[0] mirror. They can migrate now.
+				//
+				// Drop the old reasons FIRST, exactly as before: releasing before acquiring is what lets
+				// the outgoing Cluster be the one stolen to satisfy the new region under RAM pressure.
+				// unassignAllReasons() also clears `region_`, so the two never disagree.
 				unassignAllReasons(false); // We're going to set new "reasons".
 
-				int32_t nextUncachedClusterIndex = uncachedClusterIndex;
-				for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-					// Boundary-crossing refill (cache-resync when the uncached Cluster changes): one
-					// stream() hop per lookahead slot here, not per sample.
-					clusters[l] = sample->stream().get_cluster(nextUncachedClusterIndex, CLUSTER_ENQUEUE);
-					if (!clusters[l]) {
-						break;
+				// The cursor is normally already open (playback got here through assignClusters), but a
+				// reader can be reused for a different Sample, so re-establish it the same way
+				// assignClusters does before touching the port.
+				ensureSource(sample);
+
+				// Skip the acquire while the port already holds a reservation IN FLIGHT for this exact
+				// index: that is the state the old code recorded by parking the not-yet-loaded chunk in
+				// clusters[0] and not re-fetching until the index changed again. DELUGE_REGION_LOADING
+				// keeps the lease (so the fill progresses and the chunk can't be stolen), and once it
+				// lands this same test reports READY and the acquire below promotes it. UNAVAILABLE ==
+				// "nothing in flight", i.e. the old null get_cluster return, which did retry every render.
+				if (deluge_sample_region_state(source_, static_cast<uint32_t>(uncachedClusterIndex))
+				    != DELUGE_REGION_LOADING) {
+					// Priority == get_cluster()'s default (0xFFFFFFFF) — the exact value the old direct
+					// call used here (it passed no priority_rating), NOT render()'s priorityRating, so the
+					// loader ordering this resync creates is unchanged.
+					DelugeSampleRegion region;
+					if (deluge_sample_region_acquire_ex(source_, static_cast<uint32_t>(uncachedClusterIndex),
+					                                    static_cast<int8_t>(playDirection), 0xFFFFFFFFU, &region)
+					    == DELUGE_REGION_READY) {
+						// Mirror the port's current region in clusters[0] with its own INDEPENDENT lease,
+						// as assignClusters/moveOnToNextCluster do, so the still-direct clusters[]
+						// consumers and unassignAllReasons's uniform release stay self-consistent.
+						clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
+						deluge::cluster::add_lease(clusters[0]);
+						region_ = region;
 					}
-					if (nextUncachedClusterIndex == finalClusterIndex) {
-						break; // If no more Clusters
-					}
-					nextUncachedClusterIndex += playDirection;
+					// Not READY: clusters[0] stays null and currentPlayPos is cleared below. The old code
+					// instead parked a not-yet-loaded chunk in clusters[0]; residency is identical either
+					// way (the port retains that same single lease as `pending`), and the one consumer
+					// that acts on it -- stopReadingFromCache -- already treats "null" and "held but not
+					// loaded" as the same instant-unassign.
 				}
+				// The lookahead slot the old loop filled (clusters[1] = uncachedClusterIndex +
+				// playDirection) is now the port's standing prefetch, taken by the acquire above with the
+				// same priority: same Cluster made resident, same single lease, held by the cursor rather
+				// than by clusters[1]. Identical to the trade SR1 Task 5 made in assignClusters. The port
+				// prefetches whenever the neighbour is in range of the stream, so it can reach one Cluster
+				// past `finalClusterIndex` where the old loop stopped -- the same accepted difference
+				// assignClusters already carries (its loop had the identical finalClusterIndex break).
 			}
 
 			if (clusters[0]) {

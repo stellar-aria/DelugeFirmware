@@ -52,6 +52,9 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 /// Non-blocking (CLUSTER_ENQUEUE semantics). Prefetches the next cluster in `direction`.
 /// Returns false = NotReady: the region is not resident yet (a fetch was scheduled); `out` untouched.
 /// `direction` is +1 (forward) or -1 (reverse) and selects which neighbour is prefetched.
+/// acquire releases any region previously acquired on this source (the caller need not release
+/// before re-acquiring); a matching lease is still required for the region the caller is done
+/// reading only if it wants to drop the pin earlier.
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out);
 

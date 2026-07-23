@@ -112,7 +112,14 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 		return false;
 	}
 
-	// 3. Pin it as current and fill the region descriptor.
+	// 3. Pin it as current and fill the region descriptor. If a different chunk was already pinned as
+	//    `current`, its lease is fused into this advance -- mirrors moveOnToNextCluster's fused
+	//    old-cluster remove_reason (sample_low_level_reader.cpp:343). This makes acquire self-
+	//    releasing: the caller need not release before re-acquiring. Re-acquiring the SAME resident
+	//    chunk (src->current == chunk) must NOT release -- that's its only lease.
+	if (src->current != nullptr && src->current != chunk) {
+		deluge::cluster::release_lease(src->current);
+	}
 	src->current = chunk;
 	*out = DelugeSampleRegion{
 	    .payload_base = chunk->payload().data(),

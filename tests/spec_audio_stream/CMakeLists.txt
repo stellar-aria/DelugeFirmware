@@ -60,10 +60,19 @@ function(create_specs_driver driver_name spec_dir)
     ../../src/deluge/storage/audio/stream/convert.cpp
     ../../src/deluge/storage/audio/stream/stitch.cpp
     ../../src/deluge/util/audio_format_helpers.cpp
+    # sample_source_spec.cpp exercises the real region port (SR1 Task 1/2) against a fake
+    # SampleStream (fake_include/storage/audio/stream/sample_stream.h, shadowed onto the include
+    # path below) rather than the real one, which needs a live Sample + the Rust resource-manager
+    # singleton just to construct -- see that header's comment. sample_source_test_support.cpp
+    # supplies the Cluster::size statics and deluge::cluster::add_lease/release_lease fakes that
+    # storage/cluster/cluster.cpp would otherwise provide (also not linked here).
+    ../../src/deluge/storage/audio/stream/sample_source.cpp
+    sample_source_test_support.cpp
   )
   target_link_libraries(${driver_name} PRIVATE c++spec argon)
   target_include_directories(${driver_name} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    fake_include        # BEFORE ../../src/deluge: shadows storage/audio/stream/sample_stream.h
     ../../include      # libdeluge/types.h
     ../../src         # definitions_cxx.hpp
     ../../src/deluge   # storage/audio/stream/read_source.h, io/stream.hpp

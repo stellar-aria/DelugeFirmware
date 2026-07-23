@@ -74,31 +74,40 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
     /// will corrupt the filesystem. This is a caller invariant — the library
     /// does not track open files.
     ///
-    /// The on-disk staleness check is skipped when `context.entry` is
-    /// already dirty (`DirEntryEditor::dirty()`). A dirty entry only reaches
-    /// here via [`File::detach`] (`close()`'s only other public exit clears
-    /// dirty by flushing first), which is how a long-lived buffered writer
-    /// (the sample recorder) accumulates several no-flush writes before a
-    /// single finalize flush — the in-memory size/mtime legitimately diverges
-    /// from the still-stale on-disk bytes in that window, and comparing them
-    /// would reject every one of the writer's own reattaches. The check still
-    /// runs (and still guards against concurrent external modification) for
-    /// every other, non-dirty caller — the vast majority of `new_from_context`
-    /// callers, whose contexts always came from a flushing `close()`.
+    /// The on-disk staleness check is narrowed to the short-name bytes when
+    /// `context.entry` is already dirty (`DirEntryEditor::dirty()`). A dirty
+    /// entry only reaches here via [`File::detach`] (`close()`'s only other
+    /// public exit clears dirty by flushing first), which is how a
+    /// long-lived buffered writer (the sample recorder) accumulates several
+    /// no-flush writes before a single finalize flush — the in-memory
+    /// size/mtime/first_cluster legitimately diverge from the still-stale
+    /// on-disk bytes in that window, so a full 32-byte comparison would
+    /// reject every one of the writer's own reattaches. The short name is
+    /// stable across that window, so comparing just it still catches a
+    /// wholly different file recycling the slot. The invariant this relies
+    /// on: while a dirty context is unflushed, its holder must be the slot's
+    /// sole holder — nothing else may delete, move, or replace the file, as
+    /// a same-name replacement would not be caught by this narrowed check.
+    /// The full 32-byte check still runs (and still guards against any
+    /// concurrent external modification) for every other, non-dirty caller —
+    /// the vast majority of `new_from_context` callers, whose contexts
+    /// always came from a flushing `close()`.
     pub async fn new_from_context(context: FileContext, fs: &'a FileSystem<IO, TP, OCC>) -> Result<Self, Error<IO::Error>> {
         let editor = context.entry.as_ref().ok_or(Error::InvalidInput)?;
 
-        if !editor.dirty() {
-            let mut on_disk = [0u8; 32];
-            {
-                let mut disk = fs.disk.borrow_mut();
-                disk.seek(SeekFrom::Start(editor.pos())).await?;
-                disk.read_exact(&mut on_disk).await?;
-            }
+        let mut on_disk = [0u8; 32];
+        {
+            let mut disk = fs.disk.borrow_mut();
+            disk.seek(SeekFrom::Start(editor.pos())).await?;
+            disk.read_exact(&mut on_disk).await?;
+        }
 
-            if editor.inner().to_bytes() != on_disk {
+        if editor.dirty() {
+            if editor.inner().name()[..] != on_disk[0..11] {
                 return Err(Error::InvalidInput);
             }
+        } else if editor.inner().to_bytes() != on_disk {
+            return Err(Error::InvalidInput);
         }
 
         Ok(File { context, fs })

@@ -11,17 +11,25 @@ namespace {
 // R2 Task 4: the efatfs backend's `u32` handles are boxed into the opaque
 // DelugeFile*/DelugeDir* pointers, mirroring R1's streaming handle -- these
 // are never dereferenced, only cast back to `u32` before crossing into Rust.
+//
+// The Rust TaskFileTable/DirHandleTable `insert` hands out the lowest free
+// slot starting at 0, so the offset-less cast used to box slot 0 into
+// nullptr. File/Directory's RAII guards (`if (handle_) { close(); }`) treat
+// null as "no handle", so a slot-0 handle would never get closed -- leaking
+// the Rust slot and, for a slot-0 file opened for write, losing unflushed
+// data. Reserve 0/null for "empty" by storing `handle + 1` and recovering
+// `ptr - 1`, so every real slot (including 0) boxes to a non-null pointer.
 DelugeFile* box_file_handle(uint32_t handle) {
-	return reinterpret_cast<DelugeFile*>(static_cast<uintptr_t>(handle));
+	return reinterpret_cast<DelugeFile*>(static_cast<uintptr_t>(handle) + 1);
 }
 uint32_t unbox_file_handle(DelugeFile* handle) {
-	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle));
+	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle) - 1);
 }
 DelugeDir* box_dir_handle(uint32_t handle) {
-	return reinterpret_cast<DelugeDir*>(static_cast<uintptr_t>(handle));
+	return reinterpret_cast<DelugeDir*>(static_cast<uintptr_t>(handle) + 1);
 }
 uint32_t unbox_dir_handle(DelugeDir* handle) {
-	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle));
+	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle) - 1);
 }
 
 // FAT attribute bits (embedded_fatfs::FileAttributes::bits(), bit-for-bit

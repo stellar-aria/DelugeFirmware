@@ -458,22 +458,22 @@ enum NextFit {
 async fn task_dir_read(handle: u32, max_name_bytes: usize) -> Option<Option<DirReadResult>> {
     let mut dir_table = DIR_HANDLES.lock().await;
     let cursor = dir_table.get_mut(handle)?;
-    let next = with_fs(async |fs| {
-        loop {
-            match efatfs_core::readdir_next(fs, cursor)? {
-                None => return Some(NextFit::Eof),
-                Some(info) => {
-                    if info.name.len() >= max_name_bytes {
-                        continue; // doesn't fit the caller's buffer; skip, don't fail the browse
-                    }
-                    let locator = efatfs_core::readdir_locator(cursor);
-                    return Some(NextFit::Found(info, locator));
+    // R2 Task 4 review fix: `readdir_next` is FS-free (it only walks the
+    // in-memory snapshot `cursor` already holds), so this no longer routes
+    // through `with_fs` -- see `efatfs_fs.rs::task_dir_read` for the full
+    // rationale (identical here).
+    let next = loop {
+        match efatfs_core::readdir_next(cursor)? {
+            None => break NextFit::Eof,
+            Some(info) => {
+                if info.name.len() >= max_name_bytes {
+                    continue; // doesn't fit the caller's buffer; skip, don't fail the browse
                 }
+                let locator = efatfs_core::readdir_locator(cursor);
+                break NextFit::Found(info, locator);
             }
         }
-    })
-    .await
-    .flatten()?;
+    };
     drop(dir_table); // release before taking LOCATORS below
     Some(match next {
         NextFit::Eof => None,

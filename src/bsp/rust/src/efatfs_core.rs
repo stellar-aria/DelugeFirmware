@@ -656,22 +656,17 @@ where
 
 /// Advance `cursor` and return the next entry. Outer `Option` is an FS
 /// error (`None`); inner `Option` is end-of-directory (`None`). `cursor` is
-/// an owned snapshot (see [`readdir_open`]), so this never touches `fs` or
-/// does any FS I/O -- `fs` is taken only to keep this call symmetric with
-/// [`readdir_open`]'s and mirror the rest of this module's `fs`-taking
-/// primitives; an FS-error outer `None` cannot occur for a snapshot cursor
+/// an owned snapshot (see [`readdir_open`]), so this never touches the FS or
+/// does any FS I/O -- it used to take an (unused) `&FileSystem` parameter
+/// purely to mirror this module's other `fs`-taking primitives, but that made
+/// callers route an in-memory snapshot read through the single FS mutex for
+/// no reason (R2 Task 4 review finding: it serialized dir-page reads behind
+/// any in-flight streaming SD read). Dropped: this is synchronous and
+/// FS-free. An FS-error outer `None` cannot occur for a snapshot cursor
 /// today, but the signature leaves room for a future non-snapshot cursor
 /// that could fail mid-walk.
 #[allow(clippy::unnecessary_wraps)]
-pub fn readdir_next<IO, TP, OCC>(
-    _fs: &FileSystem<IO, TP, OCC>,
-    cursor: &mut DirCursor,
-) -> Option<Option<DirEntryInfo>>
-where
-    IO: ReadWriteSeek,
-    TP: TimeProvider,
-    OCC: OemCpConverter,
-{
+pub fn readdir_next(cursor: &mut DirCursor) -> Option<Option<DirEntryInfo>> {
     let Some((info, _locator)) = cursor.entries.get(cursor.idx) else {
         return Some(None); // end of directory
     };

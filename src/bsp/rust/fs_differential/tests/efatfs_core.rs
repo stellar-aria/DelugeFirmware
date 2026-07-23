@@ -846,7 +846,7 @@ fn efatfs_core_readdir_and_locator_roundtrip_fat32() {
             .await
             .expect("readdir_open /SAMPLES");
         loop {
-            match efatfs_core::readdir_next(fs, &mut cursor) {
+            match efatfs_core::readdir_next(&mut cursor) {
                 Some(Some(info)) => {
                     got.push((info.name.as_str().to_string(), info.is_dir, info.size));
                     if info.name.as_str() == "hello.txt" {
@@ -910,7 +910,7 @@ where
             .await
             .expect("readdir_open /SAMPLES");
         loop {
-            match efatfs_core::readdir_next(fs, &mut cursor) {
+            match efatfs_core::readdir_next(&mut cursor) {
                 Some(Some(info)) if !info.is_dir => {
                     return efatfs_core::readdir_locator(&cursor)
                         .expect("file entry must have a locator");

@@ -105,14 +105,30 @@ public:
 
 	deluge::dsp::Interpolator interpolator_{};
 
+	// SR1 Task 8: the region port (source_/region_ below) is the reader's residency seam for
+	// steady-state uncached playback -- where region_ mirrors clusters[0] exactly (i023) -- and the
+	// reader's own interpolation-window logic (setupReassessmentLocation / setup*ForPlay*) now sources
+	// its base + cluster index from region_, not this array. `clusters[]` is NOT retired, though: it
+	// stays as the reader's *authoritative* current-cluster residency for the paths the port does not
+	// own, and its leases (add_lease at each port acquire; remove_reason in unassignAllReasons) remain
+	// the single uniform release those paths depend on. It is still read/populated by:
+	//   * attemptLateSampleStart's WAIT-probe -- the FAILURE-vs-WAIT-vs-defer decision reads
+	//     clusters[0]/[1] + ->loaded directly (the port's bool acquire cannot express it) and holds the
+	//     probe leases across a WAIT. Golden-UNVALIDATED (the deterministic sim has no SD latency), so
+	//     deliberately left on clusters[].
+	//   * VoiceSample::render's cache-resync tracking + stopReadingFromCache -- while replaying a
+	//     repitch/time-stretch cache the reader tracks the uncached resume cluster in clusters[]
+	//     (get_cluster, NOT the port), so region_ is STALE there; getPlayByteLowLevel and
+	//     reassessReassessmentLocation's pre-reacquire reads therefore also stay on clusters[0].
+	//   * external presence consumers (voice.cpp auto-release, time_stretcher, sample_playback_guide).
+	// Fully retiring clusters[] would require routing those port-uncovered paths through the port so
+	// region_ becomes authoritative during cache/probe too -- deferred (see SR1 Task 8 report).
 	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
 
 private:
-	// SR1 Task 4: residency acquisition now goes through the region port (libdeluge/sample_source.h)
+	// SR1 Task 4: residency acquisition goes through the region port (libdeluge/sample_source.h)
 	// instead of a per-slot SampleStream::get_cluster() loop. `source_` is a per-reader cursor opened
-	// lazily against the sample's `stream()` (see ensureSource); `clusters[]` is kept populated in
-	// parallel (it still holds its own leases) so the untouched moveOnToNextCluster / steal_clusters /
-	// DSP consumers stay byte-for-byte identical until they migrate in a later task.
+	// lazily against the sample's `stream()` (see ensureSource); it holds the current + prefetch pins.
 	DelugeSampleSource* source_ = nullptr;
 	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
 

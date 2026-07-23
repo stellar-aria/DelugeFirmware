@@ -186,7 +186,10 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 
 	int32_t bytesPerSample = (sample->byteDepth * sample->numChannels);
 
-	int32_t currentClusterIndex = clusters[0]->cluster_index;
+	// SR1 Task 8: the current cluster index sources from the port's region_ (retained at the acquire
+	// that just pinned this region). region_.region_index == clusters[0]->cluster_index here (the i023
+	// assert below verifies region_ IS the clusters[0] chunk), so the reassessment math is unchanged.
+	int32_t currentClusterIndex = region_.region_index;
 
 	// SR1 Task 6: the interpolation window's base pointer -- the reassessmentLocation trailing/front slack
 	// reach and the clusterStartLocation look-behind floor below -- sources from the region port's
@@ -342,9 +345,11 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 
 	int32_t bytePosWithinNewCluster = startPlaybackAtByte - clusterIndex * Cluster::size;
 
-	// clusters[0] was just pinned by assignClusters() from the port's region; its payload IS the region
-	// base (region.payload_base == clusters[0]->payload().data()). SR1 Task 5.
-	setupForPlayPosMovedIntoNewCluster(guide, sample, reinterpret_cast<char*>(clusters[0]->payload().data()),
+	// assignClusters() just acquired the start region through the port; source the play-pos base from
+	// region_.payload_base (== the pinned clusters[0]->payload().data(), asserted i023 in
+	// setupReassessmentLocation) rather than the clusters[0] mirror, matching moveOnToNextCluster's
+	// region.payload_base base. SR1 Task 8 (was Task 5).
+	setupForPlayPosMovedIntoNewCluster(guide, sample, reinterpret_cast<char*>(region_.payload_base),
 	                                   bytePosWithinNewCluster, sample->byteDepth);
 
 	// No check has been made that currentPlayPos is not already later than the new reassessmentLocation.

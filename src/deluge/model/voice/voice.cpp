@@ -911,7 +911,6 @@ uint32_t Voice::getLocalLFOPhaseIncrement(LFO_ID lfoId, deluge::modulation::para
 					VoiceSample* voiceSample = voiceUnisonPartSource->voiceSample;
 
 					Sample* sample = (Sample*)guides[s].audioFileHolder->audioFile;
-					StreamedChunk* cluster = voiceSample->clusters[0];
 					int32_t bytePos = voiceSample->getPlayByteLowLevel(sample, &guides[s]);
 
 					int32_t bytesLeft =

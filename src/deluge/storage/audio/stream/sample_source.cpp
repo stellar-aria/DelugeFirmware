@@ -23,10 +23,13 @@
 
 #include "libdeluge/sample_source.h"
 
-#include "definitions_cxx.hpp" // ClusterLoad (CLUSTER_ENQUEUE)
+#include "definitions_cxx.hpp" // ClusterLoad (CLUSTER_ENQUEUE), kMaxNumVoicesUnison, kNumSources
+#include "foundation/panic.h"  // FREEZE_WITH_ERROR (pool-exhaustion freeze)
 #include "storage/audio/stream/sample_stream.h"
 #include "storage/cluster/cluster.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 // The reader's residency for one region-port cursor: the current pinned chunk plus one prefetched
@@ -45,6 +48,63 @@ struct DelugeSampleSource {
 };
 
 namespace {
+
+// SR1 Task 4 (render-thread alloc-freeness): `deluge_sample_source_open` used to `new DelugeSampleSource`,
+// which routes through deluge::memory::alloc_external (the SDRAM heap — it can walk/lock the heap and throw
+// BAD_ALLOC). That `new` fires at note-start (the first assignClusters() for a sample) on the audio render
+// thread, violating "no allocation on the render thread". The pre-migration get_cluster() residency path was
+// pool/steal (allocation-free), so this cursor must be too. We back the opaque `DelugeSampleSource*` with a
+// fixed static pool instead — claim/release is a bare in-use-flag flip, no heap ops. The C ABI is unchanged:
+// `open` still returns an opaque `DelugeSampleSource*` (now a pointer into the pool), `close` frees the slot.
+//
+// Sizing — the pool must cover every SampleLowLevelReader that can hold an open source concurrently. There are
+// exactly two value-instance sites of SampleLowLevelReader in the tree, and each owns at most one `source_`:
+//   * VoiceSample                (subclass) — from AudioEngine's VoiceSamplePool, shared by synth voices AND
+//                                 audio clips; drives up to kNumSources × kMaxNumVoicesUnison readers per Sound
+//                                 voice but all draw from the one shared pool (default capacity 48).
+//   * TimeStretcher::olderPartReader (base) — one per TimeStretcher, from AudioEngine's TimeStretcherPool
+//                                 (default capacity 48).
+// So the concurrent open-source ceiling at default pool sizing is 48 + 48 = 96. ObjectPool::acquire() can
+// transiently grow past a pool's capacity under a burst of same-tick note-ons before AudioEngine's CPU culler
+// (numSamplesLimit) reclaims voices, so we size to 256 — ~2.6× the 96-reader combined default, absorbing that
+// spike with wide margin. This is not a mathematically unexceedable bound (the source ObjectPools have no hard
+// cap), so we adopt the same contract the resource asset table uses for its fixed table: generous size,
+// exhaustion is a fatal freeze (see sample_stream.cpp's kAssetCap / RSA1). At ~64 B/slot the pool is ~16 KB.
+constexpr size_t kSampleSourcePoolSize =
+    16 * kMaxNumVoicesUnison * kNumSources; // = 256; see derivation above (96-reader ceiling, ~2.6× headroom)
+
+/// One pooled cursor plus its claimed/free marker. `source` is the first member so a `DelugeSampleSource*`
+/// handed out by open() casts straight back to its enclosing slot in release_source_slot().
+struct SampleSourceSlot {
+	DelugeSampleSource source;
+	bool in_use = false;
+};
+
+// File-scope static: lives in .bss, never touches the heap. Claimed/released only on the audio render thread
+// (open() is reached via SampleLowLevelReader::ensureSource() → assignClusters() at note-start; close() via the
+// reader destructor / voice unassignment — both render-thread), the SAME single-threaded discipline the
+// get_cluster()/release_lease() calls in this file already run under. So a plain scan-and-flag needs no atomics
+// and no mutex: unlike efatfs's HandleTable (guarded by a CriticalSectionRawMutex because it is reached from the
+// async streaming task and is Send across executors), nothing off the render thread opens or closes a source.
+std::array<SampleSourceSlot, kSampleSourcePoolSize> g_source_pool{};
+
+/// @brief Claim a free pool slot, or nullptr if the pool is exhausted.
+[[nodiscard]] DelugeSampleSource* claim_source_slot() {
+	for (SampleSourceSlot& slot : g_source_pool) {
+		if (!slot.in_use) {
+			slot.in_use = true;
+			return &slot.source;
+		}
+	}
+	return nullptr;
+}
+
+/// @brief Return @p src's slot to the pool. @p src must be a live pointer previously handed out by open().
+void release_source_slot(DelugeSampleSource* src) {
+	static_assert(offsetof(SampleSourceSlot, source) == 0,
+	              "release relies on &slot.source == &slot to recover the enclosing slot");
+	reinterpret_cast<SampleSourceSlot*>(src)->in_use = false;
+}
 
 /// @brief Valid payload bytes for cluster @p index, clamping the last cluster to the geometry's
 ///        audio-data end.
@@ -84,7 +144,17 @@ extern "C" {
 
 DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSampleGeometry geometry) {
 	auto* stream = reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing);
-	return new DelugeSampleSource{.stream = stream, .geo = geometry};
+	DelugeSampleSource* src = claim_source_slot();
+	if (src == nullptr) {
+		// Pool exhausted. A caller silently mishandling a nullptr open() would misbehave (leak a note, read a
+		// stale cursor), so freeze distinctly — mirrors sample_stream.cpp's RSA1 resource-asset-table freeze.
+		FREEZE_WITH_ERROR("SSP1"); // sample-source pool exhausted (raise kSampleSourcePoolSize)
+		return nullptr;
+	}
+	// Assign only the `source` payload, leaving the slot's in_use marker set by claim_source_slot(). Default
+	// member initializers reset current/prefetch/prefetch_index to their empty state.
+	*src = DelugeSampleSource{.stream = stream, .geo = geometry};
+	return src;
 }
 
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
@@ -172,7 +242,7 @@ void deluge_sample_source_close(DelugeSampleSource* src) {
 		deluge::cluster::release_lease(src->prefetch);
 		src->prefetch = nullptr;
 	}
-	delete src;
+	release_source_slot(src); // return the slot to the static pool (no heap free)
 }
 
 } // extern "C"

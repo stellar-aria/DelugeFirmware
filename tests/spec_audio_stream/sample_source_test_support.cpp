@@ -7,7 +7,17 @@
 
 #include "storage/cluster/cluster.h"
 
+#include <stdexcept>
 #include <unordered_map>
+
+// SR1 Task 4: sample_source.cpp's pool-exhaustion path calls FREEZE_WITH_ERROR (freezeWithError), the
+// terminal panic primitive the firmware/host-sim would provide. It isn't linked into this driver, so
+// supply a fake that throws instead of halting — the specs never exhaust the pool (they open one source
+// at a time), so this only needs to resolve the symbol; throwing keeps an accidental exhaustion visible
+// rather than silently looping.
+extern "C" void freezeWithError(char const* errmsg) {
+	throw std::runtime_error(errmsg != nullptr ? errmsg : "freezeWithError");
+}
 
 // Cluster's slab-geometry statics. StreamedChunk::payload() (called by sample_source.cpp) reads
 // Cluster::size directly; the real cluster.cpp isn't linked here, so it must be defined once,

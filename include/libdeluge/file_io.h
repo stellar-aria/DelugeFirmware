@@ -47,6 +47,12 @@ typedef struct DelugeDir DelugeDir;
 /// terminator (FAT LFN max is 255 characters).
 #define DELUGE_MAX_FILENAME 256
 
+/// Sentinel value for `DelugeDirEntry::locator` meaning "no locator available"
+/// -- either the entry is a directory (locators are file-only) or the efatfs
+/// backend's locator table was full when this entry was read. Never a value
+/// `deluge_efatfs_open_by_locator` will accept.
+#define DELUGE_EFATFS_NO_LOCATOR 0xFFFFFFFFu
+
 typedef enum DelugeFileOpenMode {
 	DELUGE_FILE_READ,             ///< open an existing file for reading
 	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
@@ -88,6 +94,16 @@ typedef struct DelugeDirEntry {
 	bool is_hidden;
 	bool is_system;
 	bool is_archive;
+
+	/// R2 Task 4 (efatfs backend only): an opaque, O(1)-reopenable handle for
+	/// this entry, usable with `deluge_efatfs_open_by_locator`. `DELUGE_EFATFS_NO_LOCATOR`
+	/// for a directory entry, or on the C-FatFS backend (which has no locator
+	/// concept). The locator table this handle indexes is independent of any
+	/// directory handle's lifetime -- it stays valid after the `DelugeDir` that
+	/// surfaced it is closed, but may still go stale (this sentinel again on
+	/// reopen) if the underlying file is deleted/moved, or if enough OTHER
+	/// entries are read afterward to recycle its ring slot.
+	uint32_t locator;
 } DelugeDirEntry;
 
 /// Open `path` as a directory for iteration. [task]
@@ -119,6 +135,105 @@ DelugeStatus deluge_file_rename(const char* old_path, const char* new_path);
 /// Cannot fail. New code should prefer this boundary's own write functions,
 /// which need no separate call. [task]
 void deluge_file_invalidate_cache(void);
+
+/// R2 Task 4 -- the embedded-fatfs (Rust `efatfs_streaming`) task-context file/
+/// directory C-ABI. `deluge::io::File`/`Directory` (file.cpp) route to these
+/// instead of the `deluge_file_*`/`deluge_dir_*` functions above whenever
+/// `deluge_streaming_efatfs_active()` (declared in streaming_fill.h) is true;
+/// every non-efatfs BSP/config links the `__attribute__((weak))` fallback in
+/// `async_fill.cpp` (always false/no-op), so these symbols always link
+/// regardless of backend. Implemented in `efatfs_fs.rs` (device) /
+/// `efatfs_host_shim.rs` (host), both composing the storage-generic
+/// `efatfs_core` primitives -- see those files' doc comments for the handle-
+/// table/locking discipline. Every handle-taking function's handle is an
+/// opaque `u32` boxed into the corresponding `DelugeFile*`/`DelugeDir*`
+/// pointer (cast, not dereferenced) -- mirrors the R1 streaming handle.
+///
+/// Unlike `deluge_file_*`, these are `bool` (not `DelugeStatus`): the Rust side
+/// has no notion of `DelugeStatus`'s finer-grained error codes, only
+/// success/failure. `file.cpp` maps `false` to `Status::ERR`.
+
+/// @brief Open a task-context file. `mode` matches `DelugeFileOpenMode`'s
+///        declaration-order values (0=READ, 1=WRITE_CREATE, 2=WRITE_CREATE_NEW).
+bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle);
+
+/// @brief Fill-semantics read at the handle's current position: on success
+///        `*out_read == count` always (a short tail at real EOF is zero-padded,
+///        matching the streaming read path's tolerance for a sector-rounded
+///        last-cluster request) -- NOT what `deluge::io::File::read` wants; see
+///        `deluge_efatfs_file_read_exact`.
+bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read);
+
+/// @brief EOF-honest read at the handle's current position -- the efatfs
+///        backend for `deluge::io::File::read`. `*out_read` is the TRUE byte
+///        count actually read (`<= count`, less at real EOF), never zero-padded.
+bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read);
+
+/// @brief Write `count` bytes at the handle's current position, advancing it by
+///        the bytes actually written (`*out_written`).
+bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written);
+
+/// @brief Move the handle's cursor to an absolute byte offset.
+bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset);
+
+/// @brief Total size of the file behind `handle`, in bytes.
+bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size);
+
+/// @brief Truncate the file behind `handle` to `new_len` bytes. The handle's
+///        cursor position is left unchanged (matches POSIX `ftruncate`).
+bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len);
+
+/// @brief Close a task-context file handle opened via `deluge_efatfs_file_open`
+///        or `deluge_efatfs_open_by_locator`.
+void deluge_efatfs_file_close(uint32_t handle);
+
+/// @brief Open `path` as a directory for iteration.
+bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle);
+
+/// @brief Read the next directory entry's fields into the caller's out-params
+///        (mirrors `DelugeDirEntry`'s fields, plus `out_locator`). If there are
+///        no more entries, `*out_has_entry` is set to `false` and the call
+///        still returns `true` (end of directory is not an error, matching
+///        `deluge_dir_read`). An entry whose name doesn't fit in
+///        `DELUGE_MAX_FILENAME` bytes (including the NUL) is skipped
+///        internally -- never truncated into `out_name` -- so this never fails
+///        the whole enumeration over one oversized filename.
+/// @param out_name NUL-terminated on success; must point at `DELUGE_MAX_FILENAME`
+///                  writable bytes.
+/// @param out_modified Packed FAT date/time: `(dos_date << 16) | dos_time`,
+///                       the same convention `deluge_efatfs_set_time` packs.
+/// @param out_attrs Raw FAT attribute byte (`RDO`=0x01, `HID`=0x02, `SYS`=0x04,
+///                    `DIR`=0x10, `ARC`=0x20).
+/// @param out_locator An opaque handle for `deluge_efatfs_open_by_locator`, or
+///                      `DELUGE_EFATFS_NO_LOCATOR` for a directory entry.
+bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
+                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, uint32_t* out_locator,
+                            bool* out_has_entry);
+
+/// @brief Close a directory handle opened via `deluge_efatfs_dir_open`.
+void deluge_efatfs_dir_close(uint32_t handle);
+
+/// @brief Create a directory.
+bool deluge_efatfs_mkdir(const char* path);
+
+/// @brief Delete a file or empty directory.
+bool deluge_efatfs_unlink(const char* path);
+
+/// @brief Rename/move a file or directory.
+bool deluge_efatfs_rename(const char* old_path, const char* new_path);
+
+/// @brief Set a file or directory's last-modified timestamp.
+bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                            uint8_t second);
+
+/// @brief Reopen the file behind `locator_handle` (as surfaced by
+///        `deluge_efatfs_dir_read`'s `out_locator`) in O(1) -- no path walk.
+///        `*out_file_handle` is a normal task-context file handle, usable with
+///        every `deluge_efatfs_file_*` function above. Fails (returns `false`)
+///        if `locator_handle` is `DELUGE_EFATFS_NO_LOCATOR`, unknown, stale (its
+///        ring slot has been recycled), or the underlying file has since been
+///        deleted/moved.
+bool deluge_efatfs_open_by_locator(uint32_t locator_handle, uint32_t* out_file_handle);
 
 #ifdef __cplusplus
 }

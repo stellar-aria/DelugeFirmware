@@ -41,7 +41,10 @@ public:
 	File& operator=(File&& other) noexcept {
 		if (this != &other) {
 			if (handle_) {
-				deluge_file_close(handle_);
+				// Route through close() (not deluge_file_close directly) so the
+				// efatfs/C-FatFS backend selector lives in exactly one place -- see
+				// file.cpp's close().
+				(void)close();
 			}
 			handle_ = other.handle_;
 			other.handle_ = nullptr;
@@ -50,7 +53,7 @@ public:
 	}
 	~File() {
 		if (handle_) {
-			deluge_file_close(handle_);
+			(void)close();
 		}
 	}
 
@@ -74,7 +77,8 @@ public:
 	Directory& operator=(Directory&& other) noexcept {
 		if (this != &other) {
 			if (handle_) {
-				deluge_dir_close(handle_);
+				// Route through close() -- see File's move-assignment for why.
+				(void)close();
 			}
 			handle_ = other.handle_;
 			other.handle_ = nullptr;
@@ -83,7 +87,7 @@ public:
 	}
 	~Directory() {
 		if (handle_) {
-			deluge_dir_close(handle_);
+			(void)close();
 		}
 	}
 

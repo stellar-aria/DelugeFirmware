@@ -72,7 +72,7 @@ use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 
-use crate::efatfs_core::{self, HandleTable};
+use crate::efatfs_core::{self, DirHandleTable, HandleTable, LocatorTable, TaskFileTable};
 
 /// Host `block_device_driver::BlockDevice<512>` that routes every read/write
 /// through `crate::sd::deluge_block_read`/`deluge_block_write` — the same
@@ -311,5 +311,598 @@ pub extern "C" fn deluge_efatfs_read_at(
         true
     } else {
         false
+    }
+}
+
+// --- Task-context file/dir tables (Task 4) ----------------------------------
+//
+// Host sibling of `efatfs_fs.rs`'s task-context tables/bridge -- same split
+// rationale (a separate position-carrying [`TaskFileTable`], distinct from the
+// streaming [`HANDLES`]) and the same `on_fiber`-gated `block_on_fiber`/
+// `block_on` dispatch every function in this module already uses. See that
+// file's doc comments for the design; comments here focus on host-specific
+// differences only.
+
+static TASK_FILES: Mutex<CriticalSectionRawMutex, TaskFileTable> = Mutex::new(TaskFileTable::new());
+static DIR_HANDLES: Mutex<CriticalSectionRawMutex, DirHandleTable> =
+    Mutex::new(DirHandleTable::new());
+static LOCATORS: Mutex<CriticalSectionRawMutex, LocatorTable> = Mutex::new(LocatorTable::new());
+
+/// `DelugeFileOpenMode` mode selector matching `file_io.h`'s C enum's implicit
+/// declaration-order values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW.
+async fn task_file_open(path: &str, mode: u8) -> Option<u32> {
+    let ctx = with_fs(async |fs| match mode {
+        0 => efatfs_core::open_context(fs, path).await,
+        1 => efatfs_core::create_context(fs, path, false).await,
+        2 => efatfs_core::create_context(fs, path, true).await,
+        _ => None,
+    })
+    .await??;
+    TASK_FILES.lock().await.insert(ctx)
+}
+
+/// Fill-semantics read (zero-pads a short tail at EOF, like [`read_at`]) at the
+/// handle's current position, advancing it by `dst.len()` on success.
+async fn task_file_read(handle: u32, dst: &mut [u8]) -> bool {
+    let Some((generation, ctx, pos)) = TASK_FILES.lock().await.checkout(handle) else {
+        return false;
+    };
+    let result = with_fs(async |fs| efatfs_core::read_context(fs, ctx, pos, dst).await).await;
+    match result {
+        Some(Some((newctx, filled))) => {
+            TASK_FILES
+                .lock()
+                .await
+                .commit(handle, generation, newctx, pos + dst.len() as u32);
+            filled
+        }
+        _ => false,
+    }
+}
+
+/// EOF-honest read at the handle's current position -- the default for the
+/// port's `File::read` (`file.cpp`). Returns the TRUE byte count (may be less
+/// than `dst.len()` at EOF, never zero-padded), advancing the position by that
+/// count.
+async fn task_file_read_exact(handle: u32, dst: &mut [u8]) -> Option<usize> {
+    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
+    let (newctx, n) =
+        with_fs(async |fs| efatfs_core::read_context_exact(fs, ctx, pos, dst).await).await??;
+    TASK_FILES
+        .lock()
+        .await
+        .commit(handle, generation, newctx, pos + n as u32);
+    Some(n)
+}
+
+/// Write at the handle's current position, advancing it by the bytes actually
+/// written.
+async fn task_file_write(handle: u32, src: &[u8]) -> Option<usize> {
+    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
+    let (newctx, n) =
+        with_fs(async |fs| efatfs_core::write_context(fs, ctx, pos, src).await).await??;
+    TASK_FILES
+        .lock()
+        .await
+        .commit(handle, generation, newctx, pos + n as u32);
+    Some(n)
+}
+
+/// Set the handle's cursor position directly. No FS access needed.
+async fn task_file_seek(handle: u32, offset: u32) -> bool {
+    TASK_FILES.lock().await.seek(handle, offset)
+}
+
+/// File length in bytes. Leaves the handle's position untouched.
+async fn task_file_size(handle: u32) -> Option<u32> {
+    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
+    let (newctx, size) = with_fs(async |fs| efatfs_core::size_context(fs, ctx).await).await??;
+    TASK_FILES
+        .lock()
+        .await
+        .commit(handle, generation, newctx, pos);
+    Some(size)
+}
+
+/// Truncate to `new_len` bytes. Leaves the handle's position untouched (matches
+/// POSIX `ftruncate`'s file-offset-unchanged convention -- a subsequent read at
+/// a now-past-EOF position simply returns 0 bytes).
+async fn task_file_truncate(handle: u32, new_len: u32) -> bool {
+    let Some((generation, ctx, pos)) = TASK_FILES.lock().await.checkout(handle) else {
+        return false;
+    };
+    let result = with_fs(async |fs| efatfs_core::truncate_context(fs, ctx, new_len).await).await;
+    match result {
+        Some(Some((newctx, ()))) => {
+            TASK_FILES
+                .lock()
+                .await
+                .commit(handle, generation, newctx, pos);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Close a task-context file handle, freeing its slot.
+async fn task_file_close(handle: u32) {
+    TASK_FILES.lock().await.remove(handle);
+}
+
+async fn task_dir_open(path: &str) -> Option<u32> {
+    let cursor = with_fs(async |fs| efatfs_core::readdir_open(fs, path).await).await??;
+    DIR_HANDLES.lock().await.insert(cursor)
+}
+
+/// One fitting directory entry, plus its locator-table handle
+/// ([`efatfs_core::NO_LOCATOR`] for a directory entry, which has none).
+struct DirReadResult {
+    info: efatfs_core::DirEntryInfo,
+    locator: u32,
+}
+
+/// Outcome of advancing a `DirCursor` (`efatfs_core`) past zero or more
+/// too-long-for-the-C-buffer entries to either a fitting entry or
+/// end-of-directory. See `efatfs_fs.rs`'s identical type for the rationale.
+enum NextFit {
+    Eof,
+    Found(
+        efatfs_core::DirEntryInfo,
+        Option<efatfs_core::EfatfsLocator>,
+    ),
+}
+
+/// Advance `handle`'s cursor to the next entry whose name fits in
+/// `max_name_bytes`, skipping any that don't. See `efatfs_fs.rs::task_dir_read`
+/// for the full rationale (identical here).
+async fn task_dir_read(handle: u32, max_name_bytes: usize) -> Option<Option<DirReadResult>> {
+    let mut dir_table = DIR_HANDLES.lock().await;
+    let cursor = dir_table.get_mut(handle)?;
+    let next = with_fs(async |fs| {
+        loop {
+            match efatfs_core::readdir_next(fs, cursor)? {
+                None => return Some(NextFit::Eof),
+                Some(info) => {
+                    if info.name.len() >= max_name_bytes {
+                        continue; // doesn't fit the caller's buffer; skip, don't fail the browse
+                    }
+                    let locator = efatfs_core::readdir_locator(cursor);
+                    return Some(NextFit::Found(info, locator));
+                }
+            }
+        }
+    })
+    .await
+    .flatten()?;
+    drop(dir_table); // release before taking LOCATORS below
+    Some(match next {
+        NextFit::Eof => None,
+        NextFit::Found(info, locator) => {
+            let locator_handle = match locator {
+                Some(loc) => LOCATORS.lock().await.insert(loc),
+                None => efatfs_core::NO_LOCATOR,
+            };
+            Some(DirReadResult {
+                info,
+                locator: locator_handle,
+            })
+        }
+    })
+}
+
+async fn task_dir_close(handle: u32) {
+    DIR_HANDLES.lock().await.remove(handle);
+}
+
+/// Open the file behind `locator_handle`, installing it into [`TASK_FILES`]
+/// like [`task_file_open`].
+async fn task_open_by_locator(locator_handle: u32) -> Option<u32> {
+    let loc = LOCATORS.lock().await.get(locator_handle)?;
+    let ctx = with_fs(async |fs| efatfs_core::open_by_locator(fs, loc).await).await??;
+    TASK_FILES.lock().await.insert(ctx)
+}
+
+// --- Task-context FFI bridge (Task 4) ---------------------------------------
+//
+// Same `on_fiber`-gated `block_on_fiber`/`block_on` dispatch as
+// [`deluge_efatfs_open`] above. See `include/libdeluge/file_io.h` for the
+// C-side contract of every function below.
+
+/// C-ABI: open a task-context file. `mode` matches `DelugeFileOpenMode`'s
+/// declaration-order values (0=READ, 1=WRITE_CREATE, 2=WRITE_CREATE_NEW).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_open(
+    path: *const c_char,
+    mode: u8,
+    out_handle: *mut u32,
+) -> bool {
+    if path.is_null() || out_handle.is_null() {
+        return false;
+    }
+    // SAFETY: `path` is a NUL-terminated C string valid for the duration of this call.
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let opened = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_open(path, mode))
+    } else {
+        embassy_futures::block_on(task_file_open(path, mode))
+    };
+    match opened {
+        Some(h) => {
+            // SAFETY: `out_handle` is non-null (checked above), owned by the caller.
+            unsafe {
+                *out_handle = h;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: fill-semantics read (see [`task_file_read`]) at the handle's current
+/// position; always reports `*out_read = count` on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_read(
+    handle: u32,
+    dst: *mut u8,
+    count: u32,
+    out_read: *mut u32,
+) -> bool {
+    if dst.is_null() || out_read.is_null() {
+        return false;
+    }
+    // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
+    let filled = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_read(handle, buf))
+    } else {
+        embassy_futures::block_on(task_file_read(handle, buf))
+    };
+    if filled {
+        // SAFETY: `out_read` is non-null (checked above).
+        unsafe {
+            *out_read = count;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// C-ABI: EOF-honest read (see [`task_file_read_exact`]) -- the default for the
+/// port's `File::read`. `*out_read` is the true byte count, `<= count`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_read_exact(
+    handle: u32,
+    dst: *mut u8,
+    count: u32,
+    out_read: *mut u32,
+) -> bool {
+    if dst.is_null() || out_read.is_null() {
+        return false;
+    }
+    // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_read_exact(handle, buf))
+    } else {
+        embassy_futures::block_on(task_file_read_exact(handle, buf))
+    };
+    match result {
+        Some(n) => {
+            // SAFETY: `out_read` is non-null (checked above).
+            unsafe {
+                *out_read = n as u32;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: write at the handle's current position. `*out_written` is the true
+/// byte count written.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_write(
+    handle: u32,
+    src: *const u8,
+    count: u32,
+    out_written: *mut u32,
+) -> bool {
+    if src.is_null() || out_written.is_null() {
+        return false;
+    }
+    // SAFETY: `src` points at `count` readable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts(src, count as usize) };
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_write(handle, buf))
+    } else {
+        embassy_futures::block_on(task_file_write(handle, buf))
+    };
+    match result {
+        Some(n) => {
+            // SAFETY: `out_written` is non-null (checked above).
+            unsafe {
+                *out_written = n as u32;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: move the handle's cursor to an absolute byte offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_seek(handle: u32, offset: u32) -> bool {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_seek(handle, offset))
+    } else {
+        embassy_futures::block_on(task_file_seek(handle, offset))
+    }
+}
+
+/// C-ABI: total file size in bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_size(handle: u32, out_size: *mut u32) -> bool {
+    if out_size.is_null() {
+        return false;
+    }
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_size(handle))
+    } else {
+        embassy_futures::block_on(task_file_size(handle))
+    };
+    match result {
+        Some(sz) => {
+            // SAFETY: `out_size` is non-null (checked above).
+            unsafe {
+                *out_size = sz;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: truncate to `new_len` bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_truncate(handle: u32, new_len: u32) -> bool {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_truncate(handle, new_len))
+    } else {
+        embassy_futures::block_on(task_file_truncate(handle, new_len))
+    }
+}
+
+/// C-ABI: close a task-context file handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_file_close(handle: u32) {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_file_close(handle));
+    } else {
+        embassy_futures::block_on(task_file_close(handle));
+    }
+}
+
+/// C-ABI: open `path` as a directory for iteration.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_dir_open(path: *const c_char, out_handle: *mut u32) -> bool {
+    if path.is_null() || out_handle.is_null() {
+        return false;
+    }
+    // SAFETY: `path` is a NUL-terminated C string valid for the duration of this call.
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let opened = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_dir_open(path))
+    } else {
+        embassy_futures::block_on(task_dir_open(path))
+    };
+    match opened {
+        Some(h) => {
+            // SAFETY: `out_handle` is non-null (checked above), owned by the caller.
+            unsafe {
+                *out_handle = h;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: read the next directory entry. See `efatfs_fs.rs`'s identical
+/// function for the full contract this mirrors.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_dir_read(
+    handle: u32,
+    out_name: *mut c_char,
+    out_name_cap: u32,
+    out_is_dir: *mut bool,
+    out_size: *mut u32,
+    out_modified: *mut u32,
+    out_attrs: *mut u8,
+    out_locator: *mut u32,
+    out_has: *mut bool,
+) -> bool {
+    if out_name.is_null()
+        || out_name_cap == 0
+        || out_is_dir.is_null()
+        || out_size.is_null()
+        || out_modified.is_null()
+        || out_attrs.is_null()
+        || out_locator.is_null()
+        || out_has.is_null()
+    {
+        return false;
+    }
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_dir_read(handle, out_name_cap as usize))
+    } else {
+        embassy_futures::block_on(task_dir_read(handle, out_name_cap as usize))
+    };
+    match result {
+        Some(None) => {
+            // SAFETY: `out_has` is non-null (checked above).
+            unsafe {
+                *out_has = false;
+            }
+            true
+        }
+        Some(Some(result)) => {
+            let name_bytes = result.info.name.as_bytes();
+            // SAFETY: `task_dir_read` only returns entries with
+            // `name.len() < out_name_cap`, so `name_bytes.len() + 1 <= out_name_cap`;
+            // every `out_*` pointer is non-null (checked above) and owned by the
+            // caller for the duration of this call.
+            unsafe {
+                let dst =
+                    core::slice::from_raw_parts_mut(out_name.cast::<u8>(), out_name_cap as usize);
+                dst[..name_bytes.len()].copy_from_slice(name_bytes);
+                dst[name_bytes.len()] = 0;
+                *out_is_dir = result.info.is_dir;
+                *out_size = result.info.size;
+                *out_modified = result.info.modified;
+                *out_attrs = result.info.attrs;
+                *out_locator = result.locator;
+                *out_has = true;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: close a directory handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_dir_close(handle: u32) {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_dir_close(handle));
+    } else {
+        embassy_futures::block_on(task_dir_close(handle));
+    }
+}
+
+/// C-ABI: create a directory.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_mkdir(path: *const c_char) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let fut = with_fs(async |fs| efatfs_core::mkdir(fs, path).await);
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten()
+    .is_some()
+}
+
+/// C-ABI: delete a file or empty directory.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_unlink(path: *const c_char) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let fut = with_fs(async |fs| efatfs_core::unlink(fs, path).await);
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten()
+    .is_some()
+}
+
+/// C-ABI: rename/move a file or directory.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_rename(old_path: *const c_char, new_path: *const c_char) -> bool {
+    if old_path.is_null() || new_path.is_null() {
+        return false;
+    }
+    let old = match unsafe { CStr::from_ptr(old_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let new = match unsafe { CStr::from_ptr(new_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let fut = with_fs(async |fs| efatfs_core::rename(fs, old, new).await);
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten()
+    .is_some()
+}
+
+/// C-ABI: set a file or directory's last-modified timestamp (decomposed
+/// fields, packed here via `efatfs_core::pack_timestamp`).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_set_time(
+    path: *const c_char,
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let packed = efatfs_core::pack_timestamp(year, month, day, hour, minute, second);
+    let fut = with_fs(async |fs| efatfs_core::set_time(fs, path, packed).await);
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten()
+    .is_some()
+}
+
+/// C-ABI: open the file behind `locator_handle`, writing the resulting
+/// task-context file handle to `*out_file_handle`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_open_by_locator(
+    locator_handle: u32,
+    out_file_handle: *mut u32,
+) -> bool {
+    if out_file_handle.is_null() {
+        return false;
+    }
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(task_open_by_locator(locator_handle))
+    } else {
+        embassy_futures::block_on(task_open_by_locator(locator_handle))
+    };
+    match result {
+        Some(h) => {
+            // SAFETY: `out_file_handle` is non-null (checked above).
+            unsafe {
+                *out_file_handle = h;
+            }
+            true
+        }
+        None => false,
     }
 }

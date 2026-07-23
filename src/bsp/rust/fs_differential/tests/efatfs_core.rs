@@ -492,7 +492,10 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
 
         // Land at an early cluster first, outside the measured window, so the
         // measured hops all start from a real `current_cluster`, not `None`.
-        assert!(table.read_at_owned(&fs, h, 0, &mut buf).await, "initial read");
+        assert!(
+            table.read_at_owned(&fs, h, 0, &mut buf).await,
+            "initial read"
+        );
 
         BLOCKS_READ.store(0, Ordering::Relaxed);
         let mut reads = 0u64;
@@ -628,7 +631,10 @@ fn efatfs_core_fill_zero_pads_past_logical_eof_last_cluster() {
     let overrun = 300usize;
     let offset = file_len - 200;
     let len = 200 + overrun;
-    assert!(len < CLUSTER_BYTES, "test overrun must stay within one cluster");
+    assert!(
+        len < CLUSTER_BYTES,
+        "test overrun must stay within one cluster"
+    );
     let oracle_remaining = file_len - offset;
 
     let mut buf = vec![0xAAu8; len]; // non-zero fill so the zero-pad assertion is meaningful
@@ -681,7 +687,11 @@ fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
         let (newctx, filled) = e.read_at_context(&ctx, off as u32, &mut buf);
         ctx = newctx;
         assert!(filled, "efatfs short read at off {off}");
-        assert_eq!(&buf[..], &oracle[off..end], "efatfs read diverged at off {off}");
+        assert_eq!(
+            &buf[..],
+            &oracle[off..end],
+            "efatfs read diverged at off {off}"
+        );
     }
 }
 
@@ -706,7 +716,11 @@ fn efatfs_write_then_read_roundtrip_fat32() {
     // EOF-honest read: request MORE than the file holds, get the true short count (not zero-padded).
     let mut buf = vec![0u8; payload.len() + 512];
     let (_ctx, n) = e.read_exact_context(&ctx, 0, &mut buf);
-    assert_eq!(n, payload.len(), "read_context_exact must return the true byte count, not zero-padded");
+    assert_eq!(
+        n,
+        payload.len(),
+        "read_context_exact must return the true byte count, not zero-padded"
+    );
     assert_eq!(&buf[..n], &payload[..]);
 }
 
@@ -738,7 +752,10 @@ fn efatfs_create_unlink_rename_mkdir_fat32() {
     e.mkdir("/R2DIR");
     let ctx = e.create_context("/R2DIR/A.BIN", false);
     let (_ctx, _) = e.write_at_context(&ctx, 0, b"hello");
-    assert!(CFatFs::mount().exists("/R2DIR/A.BIN"), "efatfs create not visible to C-FatFS oracle");
+    assert!(
+        CFatFs::mount().exists("/R2DIR/A.BIN"),
+        "efatfs create not visible to C-FatFS oracle"
+    );
     e.rename("/R2DIR/A.BIN", "/R2DIR/B.BIN");
     assert!(CFatFs::mount().exists("/R2DIR/B.BIN") && !CFatFs::mount().exists("/R2DIR/A.BIN"));
     e.unlink("/R2DIR/B.BIN");
@@ -753,7 +770,10 @@ fn efatfs_create_new_fails_if_exists_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let _ = e.create_context("/R2EXCL.BIN", false); // create it
-    assert!(e.try_create_exclusive("/R2EXCL.BIN").is_none(), "WRITE_CREATE_NEW must fail on existing");
+    assert!(
+        e.try_create_exclusive("/R2EXCL.BIN").is_none(),
+        "WRITE_CREATE_NEW must fail on existing"
+    );
 }
 
 /// R2 Task 2: `set_time` writes a packed FAT date/time (the same
@@ -794,12 +814,15 @@ fn efatfs_readdir_matches_cfatfs_set_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let dir = "/SAMPLES"; // exists in the fixture tree
-    // efatfs entries as a set of (name, is_dir, size)
+                          // efatfs entries as a set of (name, is_dir, size)
     let mut got: Vec<(String, bool, u32)> = e.readdir_all(dir);
     got.sort();
     let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all(dir); // add this helper
     want.sort();
-    assert_eq!(got, want, "efatfs directory listing diverged from C-FatFS (as a set)");
+    assert_eq!(
+        got, want,
+        "efatfs directory listing diverged from C-FatFS (as a set)"
+    );
 }
 
 /// R2 Task 3: the REAL `efatfs_core::readdir_open`/`readdir_next` (not the
@@ -839,7 +862,10 @@ fn efatfs_core_readdir_and_locator_roundtrip_fat32() {
     got.sort();
     let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all("/SAMPLES");
     want.sort();
-    assert_eq!(got, want, "efatfs_core readdir diverged from C-FatFS (as a set)");
+    assert_eq!(
+        got, want,
+        "efatfs_core readdir diverged from C-FatFS (as a set)"
+    );
 
     let loc = hello_locator.expect("hello.txt locator not captured during the walk");
     let expected = efatfs.read_file("/SAMPLES/hello.txt");
@@ -852,7 +878,112 @@ fn efatfs_core_readdir_and_locator_roundtrip_fat32() {
             .await
             .expect("read_context via locator");
         assert!(filled, "locator-opened read was short");
-        assert_eq!(buf, expected, "locator-opened hello.txt content diverged from the whole-file oracle");
+        assert_eq!(
+            buf, expected,
+            "locator-opened hello.txt content diverged from the whole-file oracle"
+        );
     });
 }
 
+// --- R2 Task 4: LocatorTable (ring buffer + packed generation guard) -------
+//
+// `EfatfsLocator`'s `ctx: FileContext` field is private, so a test can't
+// fabricate one directly -- these tests capture a REAL locator via
+// `readdir_open`/`readdir_locator` (same as the roundtrip test above) and
+// clone it to drive `LocatorTable` in isolation. Covers the ring-eviction +
+// packed-generation-guard logic Task 4 added for the "locator must outlive
+// the DirCursor/DirHandleTable it came from" requirement (see
+// `efatfs_core::LocatorTable`'s doc) -- logic that has no FS dependency of its
+// own once a real `EfatfsLocator` is in hand, so it doesn't need the
+// roundtrip test's full walk-and-compare shape.
+
+/// Grab any one file's real, cloneable [`efatfs_core::EfatfsLocator`] from
+/// `/SAMPLES` for the tests below to drive [`efatfs_core::LocatorTable`] with.
+fn any_sample_locator<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>) -> efatfs_core::EfatfsLocator
+where
+    IO: embedded_fatfs::ReadWriteSeek,
+    TP: embedded_fatfs::TimeProvider,
+    OCC: embedded_fatfs::OemCpConverter,
+{
+    block_on(async {
+        let mut cursor = efatfs_core::readdir_open(fs, "/SAMPLES")
+            .await
+            .expect("readdir_open /SAMPLES");
+        loop {
+            match efatfs_core::readdir_next(fs, &mut cursor) {
+                Some(Some(info)) if !info.is_dir => {
+                    return efatfs_core::readdir_locator(&cursor)
+                        .expect("file entry must have a locator");
+                }
+                Some(Some(_)) => continue, // a directory entry; keep looking
+                Some(None) => panic!("/SAMPLES has no file entries to test with"),
+                None => panic!("readdir_next returned an FS error"),
+            }
+        }
+    })
+}
+
+/// A fresh handle round-trips through `get()`, and a bogus handle (never
+/// inserted) does not resolve.
+#[test]
+fn locator_table_insert_get_roundtrip() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let efatfs = EFatFs::mount();
+    let loc = any_sample_locator(efatfs.raw());
+
+    let mut table = efatfs_core::LocatorTable::new();
+    let h = table.insert(loc);
+    assert_ne!(
+        h,
+        efatfs_core::NO_LOCATOR,
+        "a real insert must never mint the NO_LOCATOR sentinel"
+    );
+    assert!(
+        table.get(h).is_some(),
+        "freshly inserted handle must resolve"
+    );
+    assert!(
+        table.get(h ^ 0xDEAD_BEEF).is_none(),
+        "a bogus handle must not resolve"
+    );
+}
+
+/// The ring evicts on wraparound, and the packed generation guard rejects a
+/// handle whose slot has since been recycled for a different insert -- the
+/// same "must not silently resolve to the wrong entry" property
+/// `HandleTable`'s generation guard proves for the streaming file table
+/// (`efatfs_core_generation_guard_rejects_stale_commit` above).
+#[test]
+fn locator_table_ring_eviction_rejects_stale_handle() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let efatfs = EFatFs::mount();
+    let loc = any_sample_locator(efatfs.raw());
+
+    let mut table = efatfs_core::LocatorTable::new();
+    let first = table.insert(loc.clone());
+    assert!(
+        table.get(first).is_some(),
+        "first insert must resolve before any wraparound"
+    );
+
+    // Insert MAX_LOCATORS more (same cloned locator each time -- only the ring
+    // slot/generation bookkeeping is under test, not distinct file identities).
+    // This wraps all the way around once, recycling `first`'s slot.
+    let mut last = first;
+    for _ in 0..efatfs_core::MAX_LOCATORS {
+        last = table.insert(loc.clone());
+    }
+
+    assert!(
+        table.get(first).is_none(),
+        "handle from before the wraparound must be rejected once its slot is recycled \
+         (stale generation) -- resolving it would silently open whatever entry now \
+         occupies that ring slot"
+    );
+    assert!(
+        table.get(last).is_some(),
+        "the most recent insert must still resolve"
+    );
+}

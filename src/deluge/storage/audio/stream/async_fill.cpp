@@ -17,6 +17,8 @@
 
 #include "storage/audio/stream/async_fill.h"
 
+#include "libdeluge/file_io.h" // R2 Task 4: deluge_efatfs_file_*/_dir_*/_open_by_locator weak stubs
+
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
@@ -215,6 +217,86 @@ __attribute__((weak)) bool deluge_efatfs_read_at(uint32_t /*handle*/, uint32_t /
 }
 
 __attribute__((weak)) bool deluge_streaming_efatfs_active(void) {
+	return false;
+}
+
+// Weak fallbacks for R2 Task 4's task-context efatfs file/directory C-ABI
+// (`include/libdeluge/file_io.h`). The Rust Embassy BSP provides the real
+// definitions (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it
+// links this crate with the `efatfs_streaming` feature; every other
+// BSP/config resolves these instead. `deluge::io::File`/`Directory`
+// (file.cpp) only ever call these when `deluge_streaming_efatfs_active()` is
+// true, so a BSP without the real symbols never reaches them at runtime --
+// these exist purely so the link succeeds.
+__attribute__((weak)) bool deluge_efatfs_file_open(const char* /*path*/, uint8_t /*mode*/, uint32_t* /*out_handle*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_read(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
+                                                   uint32_t* /*out_read*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_read_exact(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
+                                                         uint32_t* /*out_read*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_write(uint32_t /*handle*/, const void* /*src*/, uint32_t /*count*/,
+                                                    uint32_t* /*out_written*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_seek(uint32_t /*handle*/, uint32_t /*offset*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_size(uint32_t /*handle*/, uint32_t* /*out_size*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_file_truncate(uint32_t /*handle*/, uint32_t /*new_len*/) {
+	return false;
+}
+
+__attribute__((weak)) void deluge_efatfs_file_close(uint32_t /*handle*/) {
+	// No task-context file table on this BSP/config.
+}
+
+__attribute__((weak)) bool deluge_efatfs_dir_open(const char* /*path*/, uint32_t* /*out_handle*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_dir_read(uint32_t /*handle*/, char* /*out_name*/, uint32_t /*out_name_cap*/,
+                                                  bool* /*out_is_dir*/, uint32_t* /*out_size*/,
+                                                  uint32_t* /*out_modified*/, uint8_t* /*out_attrs*/,
+                                                  uint32_t* /*out_locator*/, bool* /*out_has_entry*/) {
+	return false;
+}
+
+__attribute__((weak)) void deluge_efatfs_dir_close(uint32_t /*handle*/) {
+	// No dir-cursor table on this BSP/config.
+}
+
+__attribute__((weak)) bool deluge_efatfs_mkdir(const char* /*path*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_unlink(const char* /*path*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_rename(const char* /*old_path*/, const char* /*new_path*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t /*year*/, uint8_t /*month*/,
+                                                  uint8_t /*day*/, uint8_t /*hour*/, uint8_t /*minute*/,
+                                                  uint8_t /*second*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_open_by_locator(uint32_t /*locator_handle*/, uint32_t* /*out_file_handle*/) {
 	return false;
 }
 

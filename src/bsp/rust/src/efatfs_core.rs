@@ -621,10 +621,21 @@ where
         if name == "." || name == ".." {
             continue;
         }
+        // R2 Task 4 fix: a name that doesn't fit `heapless::String<256>` (FAT LFN is
+        // 255 UTF-16 units, which can exceed 256 UTF-8 bytes) used to fail this
+        // whole snapshot via `?` -- ONE oversized filename anywhere in the
+        // directory took out the ENTIRE listing. Skip just that entry instead: `?`
+        // here would propagate to the function's `Option<DirCursor>` return and
+        // abort the walk with `None`, which the C-ABI (`efatfs_fs.rs`/
+        // `efatfs_host_shim.rs`, Task 4) can't distinguish from "path is not a
+        // directory" / a real FS error.
+        let Ok(name) = heapless::String::try_from(name.as_str()) else {
+            continue;
+        };
         let is_dir = e.is_dir();
         let size = if is_dir { 0 } else { e.len() as u32 };
         let info = DirEntryInfo {
-            name: heapless::String::try_from(name.as_str()).ok()?,
+            name,
             is_dir,
             size,
             modified: pack_fat_datetime(e.modified()),
@@ -696,4 +707,290 @@ where
 {
     let f = File::new_from_context(loc.ctx, fs).await.ok()?;
     f.close().await.ok()
+}
+
+/// Pack a decomposed timestamp into the `(dos_date << 16) | dos_time` convention
+/// [`set_time`] consumes -- the encode-side counterpart of that function's own
+/// decode. Shared here (rather than duplicated in `efatfs_fs.rs` AND
+/// `efatfs_host_shim.rs`) because both C-ABI bridges receive the task-context
+/// `DelugeTimestamp`'s decomposed fields (year/month/day/hour/minute/second, see
+/// `include/libdeluge/types.h`) from `deluge_efatfs_set_time` and need the same
+/// packing before calling [`set_time`]. No range validation here -- `set_time`
+/// already validates the packed result before decoding it back.
+pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> u32 {
+    let dos_date = ((year - 1980) << 9) | (u16::from(month) << 5) | u16::from(day);
+    let dos_time = (u16::from(hour) << 11) | (u16::from(minute) << 5) | u16::from(second / 2);
+    (u32::from(dos_date) << 16) | u32::from(dos_time)
+}
+
+// --- R2 Task 4: task-context file-handle table + dir-cursor table + locator
+// table -------------------------------------------------------------------
+//
+// The streaming-read `HandleTable` above is deliberately NOT reused for
+// task-context file I/O: task-context `deluge::io::File` callers `seek()` then
+// `read()`/`write()` with no explicit byte offset (`file_io.h`'s
+// `deluge_file_seek`/`_read`/`_write` contract), so each handle needs a
+// PERSISTED cursor position threaded through every op -- something the
+// streaming table's `Slot` (generation + `FileContext` only) has no field for
+// and does not need (the streaming read path always passes an explicit
+// absolute `byte_offset`). Extending the streaming `Slot`/`HandleTable` to
+// carry a position would touch the already-proven R1 streaming path for a
+// field it never uses; a separate, small `TaskFileTable` keeps the two
+// concerns apart. `readdir_next`/`readdir_locator` are synchronous (no `.await`,
+// no FS access -- see the module comment above [`DirCursor`]), so
+// [`DirHandleTable`] needs no generation-guarded checkout/commit dance: its
+// slots are claimed/read/freed under one lock, never split across an FS-mutex
+// await.
+
+/// Max concurrent task-context file handles (mirrors [`HandleTable`]'s
+/// `MAX_HANDLES` cap; task-context file I/O is not high-concurrency).
+pub const MAX_TASK_FILES: usize = 16;
+
+struct TaskFileSlot {
+    generation: u32,
+    ctx: Option<FileContext>,
+    /// The handle's current byte position -- `deluge_file_seek` sets it directly
+    /// (no FS access needed); every read/write reattach explicitly seeks the
+    /// underlying `File` to this value before touching it (see `read_context`/
+    /// `write_context`'s absolute-seek discipline), so this is authoritative
+    /// regardless of whatever cursor state the detached `FileContext` itself
+    /// carries.
+    position: u32,
+}
+
+/// A fixed-capacity table of task-context file handles: a detached
+/// [`FileContext`] plus a persisted cursor `position`, keyed by a `u32` handle.
+/// Composed under the SAME checkout/`with_fs`/commit discipline [`HandleTable`]
+/// documents (never held across the FS-mutex await) -- `efatfs_fs.rs`/
+/// `efatfs_host_shim.rs` own one behind an async `Mutex`.
+pub struct TaskFileTable {
+    slots: [TaskFileSlot; MAX_TASK_FILES],
+}
+
+impl Default for TaskFileTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaskFileTable {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const {
+                TaskFileSlot {
+                    generation: 0,
+                    ctx: None,
+                    position: 0,
+                }
+            }; MAX_TASK_FILES],
+        }
+    }
+
+    /// Stash `ctx` in the lowest free slot at position 0. Returns the slot index
+    /// as the handle, or `None` if the table is full.
+    pub fn insert(&mut self, ctx: FileContext) -> Option<u32> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.ctx.is_none() {
+                slot.ctx = Some(ctx);
+                slot.position = 0;
+                slot.generation = slot.generation.wrapping_add(1);
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    /// Clone `handle`'s [`FileContext`] and current position out of the table,
+    /// together with the slot's generation. `None` if out of range or free.
+    pub fn checkout(&self, handle: u32) -> Option<(u32, FileContext, u32)> {
+        let slot = self.slots.get(handle as usize)?;
+        let ctx = slot.ctx.clone()?;
+        Some((slot.generation, ctx, slot.position))
+    }
+
+    /// Write `newctx`/`new_position` back into `handle`'s slot, generation-gated
+    /// exactly like [`HandleTable::commit`] (see its doc for the stale-write-back
+    /// rationale a `remove`+`insert` recycle guards against).
+    pub fn commit(
+        &mut self,
+        handle: u32,
+        captured_generation: u32,
+        newctx: FileContext,
+        new_position: u32,
+    ) {
+        if let Some(slot) = self.slots.get_mut(handle as usize) {
+            if slot.generation == captured_generation && slot.ctx.is_some() {
+                slot.ctx = Some(newctx);
+                slot.position = new_position;
+            }
+        }
+    }
+
+    /// Set `handle`'s cursor position directly -- no FS access needed. `false`
+    /// if the handle is out of range or free.
+    pub fn seek(&mut self, handle: u32, offset: u32) -> bool {
+        match self.slots.get_mut(handle as usize) {
+            Some(slot) if slot.ctx.is_some() => {
+                slot.position = offset;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Free `handle`'s slot. No-op for an out-of-range handle. Bumps the
+    /// generation, same rationale as [`HandleTable::remove`].
+    pub fn remove(&mut self, handle: u32) {
+        if let Some(slot) = self.slots.get_mut(handle as usize) {
+            slot.ctx = None;
+            slot.position = 0;
+            slot.generation = slot.generation.wrapping_add(1);
+        }
+    }
+}
+
+/// Max concurrent open directory browses (small -- task context browses one
+/// folder at a time; headroom for a nested "up one level" during navigation).
+pub const MAX_DIR_HANDLES: usize = 8;
+
+struct DirSlot {
+    cursor: Option<DirCursor>,
+}
+
+/// A fixed-capacity table of open [`DirCursor`] snapshots keyed by a `u32`
+/// handle. Unlike [`TaskFileTable`]/[`HandleTable`], entries need no generation
+/// guard: [`readdir_next`]/[`readdir_locator`] are synchronous and never touch
+/// the FS, so a slot is claimed, read some number of times, and freed all under
+/// one lock -- there is no split checkout/`with_fs`/commit window for a
+/// concurrent `close` to race.
+pub struct DirHandleTable {
+    slots: [DirSlot; MAX_DIR_HANDLES],
+}
+
+impl Default for DirHandleTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DirHandleTable {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { DirSlot { cursor: None } }; MAX_DIR_HANDLES],
+        }
+    }
+
+    /// Stash `cursor` in the lowest free slot. Returns the slot index as the
+    /// handle, or `None` if the table is full.
+    pub fn insert(&mut self, cursor: DirCursor) -> Option<u32> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.cursor.is_none() {
+                slot.cursor = Some(cursor);
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    /// Borrow `handle`'s cursor mutably (for [`readdir_next`]/[`readdir_locator`]).
+    /// `None` if out of range or free.
+    pub fn get_mut(&mut self, handle: u32) -> Option<&mut DirCursor> {
+        self.slots.get_mut(handle as usize)?.cursor.as_mut()
+    }
+
+    /// Free `handle`'s slot. No-op for an out-of-range handle.
+    pub fn remove(&mut self, handle: u32) {
+        if let Some(slot) = self.slots.get_mut(handle as usize) {
+            slot.cursor = None;
+        }
+    }
+}
+
+/// Sentinel returned by [`LocatorTable::insert`]'s caller in
+/// `efatfs_fs.rs`/`efatfs_host_shim.rs` for a directory entry with no locator
+/// (a directory, not a file -- see [`EfatfsLocator`]'s doc) -- "no locator
+/// available", never a value [`LocatorTable::insert`] can itself produce (see
+/// its doc).
+pub const NO_LOCATOR: u32 = u32::MAX;
+
+/// Max live locator handles. A ring buffer (see [`LocatorTable::insert`]), not
+/// a "table full" cap -- this bounds how many of the MOST RECENTLY surfaced
+/// directory entries can still be opened by locator, not how many entries a
+/// browse can enumerate.
+pub const MAX_LOCATORS: usize = 64;
+
+struct LocatorSlot {
+    generation: u32,
+    loc: Option<EfatfsLocator>,
+}
+
+/// A directory-browse-lifetime-independent table of [`EfatfsLocator`]s, keyed
+/// by an opaque `u32` handle that packs a generation into its high 8 bits and
+/// the ring slot index into its low 24 bits (`MAX_LOCATORS` is nowhere near
+/// 2^24, so the two never collide).
+///
+/// Deliberately NOT keyed to any [`DirHandleTable`] entry's lifetime: Task 5's
+/// sample browser snapshots a whole folder's entries to display a scrollable
+/// list (readdir_next never rewinds), which means it may enumerate -- and
+/// close -- the directory handle well before the user picks an entry to open.
+/// A [`LocatorTable`] entry must therefore outlive its originating
+/// [`DirHandleTable`] slot.
+///
+/// [`insert`](Self::insert) never fails: it is a fixed-size RING that always
+/// claims the next slot round-robin, overwriting whatever locator (if any)
+/// was there. This bounds memory without a "table full" degrade path to
+/// handle at the C-ABI layer, at the cost of very old (long-scrolled-past)
+/// locator handles silently no longer resolving once their slot is recycled --
+/// [`get`](Self::get) detects that via the packed generation and returns
+/// `None`, which the browser (Task 5) is expected to treat as "reopen by path
+/// instead," the same graceful degrade a deleted/moved file already forces
+/// via [`open_by_locator`]'s own `None` case.
+pub struct LocatorTable {
+    slots: [LocatorSlot; MAX_LOCATORS],
+    next: usize,
+}
+
+impl Default for LocatorTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LocatorTable {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const {
+                LocatorSlot {
+                    generation: 0,
+                    loc: None,
+                }
+            }; MAX_LOCATORS],
+            next: 0,
+        }
+    }
+
+    /// Claim the ring's next slot for `loc`, overwriting its previous contents.
+    /// Always succeeds. Returns the packed handle (generation << 24 | index).
+    pub fn insert(&mut self, loc: EfatfsLocator) -> u32 {
+        let idx = self.next;
+        self.next = (self.next + 1) % MAX_LOCATORS;
+        let slot = &mut self.slots[idx];
+        slot.generation = (slot.generation + 1) & 0xFF;
+        slot.loc = Some(loc);
+        (slot.generation << 24) | (idx as u32)
+    }
+
+    /// Clone the [`EfatfsLocator`] behind `handle`, iff the slot it names still
+    /// carries the SAME generation `handle` was minted with (i.e. hasn't been
+    /// recycled by the ring for a different entry since). `None` for
+    /// [`NO_LOCATOR`], an out-of-range index, or a stale/recycled generation.
+    pub fn get(&self, handle: u32) -> Option<EfatfsLocator> {
+        let idx = (handle & 0x00FF_FFFF) as usize;
+        let generation = handle >> 24;
+        let slot = self.slots.get(idx)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.loc.clone()
+    }
 }

@@ -25,14 +25,6 @@
 #include "storage/file_item.h"
 #include "util/containers.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-
-FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory object */
-                                  FILINFO* fno, /* Pointer to file information to return */
-                                  FilePointer* filePointer);
-}
-
 class Instrument;
 class FileItem;
 class Song;
@@ -87,7 +79,6 @@ public:
 	Error getUnusedSlot(OutputType outputType, std::string* newName, char const* thingName);
 	bool opened() override;
 	void cullSomeFileItems();
-	bool checkFP();
 
 	void renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) override;
 
@@ -221,7 +212,7 @@ inline void printInstrumentFileList(const char* where) {
 	D_PRINT(where);
 	D_PRINT(" List: \n");
 	for (FileItem const& fileItem : Browser::fileItems) {
-		D_PRINTLN(" - %s (%lu)", fileItem.displayName, fileItem.filePointer.sclust);
+		D_PRINTLN(" - %s", fileItem.displayName);
 	}
 	D_PRINT("\n");
 }

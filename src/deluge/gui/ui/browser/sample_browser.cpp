@@ -16,8 +16,8 @@
  */
 
 #include "definitions_cxx.hpp"
-#include "fatfs.hpp"
 #include "hid/button.h"
+#include "io/file.hpp"
 #include "model/sample/sample.h"
 #include "util/try.h"
 #include <iterator>
@@ -549,7 +549,6 @@ void SampleBrowser::previewIfPossible(int32_t movementDirection) {
 	// selection moves on before it runs (fast cursor-scroll under async dispatch).
 	PreviewTarget target{
 	    .path = getCurrentFilePath(),
-	    .filePointer = currentFileItem->filePointer,
 	    .movementDirection = movementDirection,
 	};
 
@@ -599,9 +598,9 @@ void SampleBrowser::renderPreviewForTarget(const PreviewTarget& target) {
 		}
 	}
 
-	// previewSample takes a non-const FilePointer*; copy the snapshot to a mutable local.
-	FilePointer filePointer = target.filePointer;
-	AudioEngine::previewSample(target.path, &filePointer, shouldActuallySound);
+	// No FilePointer fast-path any more (FileItem no longer carries one) - previewSample always
+	// resolves target.path fresh, same as any other path-based open.
+	AudioEngine::previewSample(target.path, nullptr, shouldActuallySound);
 
 	if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
 		// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
@@ -1221,7 +1220,11 @@ bool SampleBrowser::loadAllSamplesInFolder(bool detectPitch, int32_t* getNumSamp
 		previouslyViewedFilename = currentFileItem->filename.c_str();
 	}
 
-	staticDIR = D_TRY_CATCH(FatFS::Directory::open(dirToLoad.c_str()), error, {
+	// Local RAII handle (not the shared FatFS::Directory staticDIR global) - the port selector picks
+	// efatfs or C-FatFS underneath; the destructor closes it on every return path below (including via
+	// the removeReasonsFromSamplesAndGetOut goto target further down), so there's no manual close() to
+	// forget or double up on.
+	auto dir = D_TRY_CATCH_MOVE(deluge::io::Directory::open(dirToLoad), error, {
 		display->displayError(Error::SD_CARD);
 		return false;
 	});
@@ -1270,23 +1273,22 @@ removeReasonsFromSamplesAndGetOut:
 
 	while (true) {
 		deluge::audio::stream::loader::request_pump();
-		FilePointer thisFilePointer;
 
 		/* Read a directory item */
-		std::tie(staticFNO, thisFilePointer) = D_TRY_CATCH(staticDIR.read_and_get_filepointer(), error, {
+		std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir.read(), error, {
 			break; // break on error
 		});
 
-		if (staticFNO.fname[0] == 0) {
+		if (!entry.has_value()) {
 			break; // Break on end of dir
 		}
-		if (staticFNO.fname[0] == '.') {
+		if (entry->name[0] == '.') {
 			continue; // Ignore dot entry
 		}
-		if (staticFNO.fattrib & AM_DIR) {
+		if (entry->is_directory) {
 			continue; // Ignore folders
 		}
-		if (!isAudioFilename(staticFNO.fname)) {
+		if (!isAudioFilename(entry->name)) {
 			continue; // Ignore anything that's not an audio file
 		}
 
@@ -1298,21 +1300,21 @@ removeReasonsFromSamplesAndGetOut:
 		if (numSamples > 0) {
 
 			for (int32_t i = 0; i < numCharsInPrefixForFolderLoad; i++) {
-				if (!staticFNO.fname[i] || staticFNO.fname[i] != previouslyViewedFilename[i]) {
+				if (!entry->name[i] || entry->name[i] != previouslyViewedFilename[i]) {
 					numCharsInPrefixForFolderLoad = i;
 					break;
 				}
 			}
 		}
 
-		filePath.resize(dirWithSlashLength), filePath.append(staticFNO.fname);
+		filePath.resize(dirWithSlashLength), filePath.append(entry->name);
 
-		// We really want to be able to pass a file pointer in here
+		// No FilePointer fast-path any more (FileItem no longer carries one, and the port's directory
+		// entries don't expose a cluster locator) - resolve fresh by path, same as any other open.
 		auto* newSample = static_cast<Sample*>(
-		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, &thisFilePointer, AudioFileType::SAMPLE));
+		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, nullptr, AudioFileType::SAMPLE));
 		if (error != Error::NONE || newSample == nullptr) {
 			// Clean up any samples we loaded in this folder load attempt
-			staticDIR.close();
 			goto removeReasonsFromSamplesAndGetOut;
 		}
 
@@ -1333,7 +1335,6 @@ removeReasonsFromSamplesAndGetOut:
 
 		numSamples++;
 	}
-	staticDIR.close();
 
 	if (getPrefixAndDirLength) {
 		// If just one file, there's no prefix.
@@ -1909,7 +1910,8 @@ doReturnFalse:
 				range = source->getOrCreateFirstRange();
 				if (!range) {
 getOut:
-					staticDIR.close();
+					// loadAllSamplesInFolder() (called above) already closed its own directory handle via
+					// RAII when it returned - nothing left here to close.
 					display->displayError(Error::INSUFFICIENT_RAM);
 					goto doReturnFalse;
 				}

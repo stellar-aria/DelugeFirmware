@@ -337,8 +337,6 @@ void LoadInstrumentPresetUI::currentFileChanged(int32_t movementDirection) {
 	    .path = currentFileItem != nullptr ? getCurrentFilePath() : std::string{},
 	    .name = enteredText,
 	    .dirPath = currentDir,
-	    .filePointer =
-	        currentFileItem != nullptr ? currentFileItem->filePointer : FilePointer{.sclust = 0, .objsize = 0},
 	};
 	if (loadCoalescer_.request(target)) {
 		if (!deluge::storage::Owner::run(&LoadInstrumentPresetUI::runScrollLoadOp, this)) {
@@ -478,11 +476,11 @@ ActionResult LoadInstrumentPresetUI::timerCallback() {
 			return ActionResult::DEALT_WITH;
 		}
 
-		// We want to open the context menu to choose to reload the original file for the currently selected preset in
-		// some way. So first up, make sure there is a file, and that we've got its pointer
+		// We want to open the context menu to choose to reload the original file for the currently selected
+		// preset in some way. So first up, make sure there is a file at that path.
 		std::string filePath = getCurrentFilePath();
 
-		bool fileExists = StorageManager::fileExists(filePath.c_str(), &currentFileItem->filePointer);
+		bool fileExists = StorageManager::fileExists(filePath.c_str());
 		if (!fileExists) {
 			display->displayError(Error::FILE_NOT_FOUND);
 			return ActionResult::DEALT_WITH;

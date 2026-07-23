@@ -18,7 +18,6 @@
 #include "gui/ui/browser/browser.h"
 #include "definitions_cxx.hpp"
 #include "extern.h"
-#include "fatfs.hpp"
 #include "gui/context_menu/delete_file.h"
 #include "gui/l10n/l10n.h"
 #include "gui/ui/browser/default_name.h"
@@ -167,28 +166,6 @@ bool Browser::opened() {
 	return QwertyUI::opened();
 }
 
-// returns true if the FP for the filepath is correct
-bool Browser::checkFP() {
-	FileItem* currentFileItem = getCurrentFileItem();
-	std::string filePath = getCurrentFilePath();
-
-	FilePointer tempfp;
-	bool fileExists = StorageManager::fileExists(filePath.c_str(), &tempfp);
-	if (!fileExists) {
-		D_PRINTLN("couldn't get filepath");
-		return false;
-	}
-	else if (tempfp.sclust != currentFileItem->filePointer.sclust) {
-		D_PRINTLN("FPs don't match: correct is %lu but the browser has %lu", tempfp.sclust,
-		          currentFileItem->filePointer.sclust);
-#if ALPHA_OR_BETA_VERSION
-		display->freezeWithError("B001");
-#endif
-		return false;
-	}
-	return true;
-}
-
 void Browser::close() {
 	emptyFileItems();
 	favouritesManager.close();
@@ -327,8 +304,11 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 		return error;
 	}
 
-	staticDIR =
-	    D_TRY_CATCH(FatFS::Directory::open(currentDir.c_str()), error, { return fatfsErrorToDelugeError(error); });
+	// Local RAII handle (not the shared FatFS::Directory staticDIR global) — the port selector picks
+	// efatfs or C-FatFS underneath; the destructor closes it on every return path below, so there's no
+	// manual close() to forget or double up on.
+	auto dir = D_TRY_CATCH_MOVE(deluge::io::Directory::open(currentDir), error,
+	                            { return delugeStatusToError(deluge::io::to_deluge_status(error)); });
 
 	numFileItemsDeletedAtStart = 0;
 	numFileItemsDeletedAtEnd = 0;
@@ -342,26 +322,25 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 		AudioEngine::logAction("while loop");
 
 		deluge::audio::stream::loader::request_pump();
-		FilePointer thisFilePointer;
 
-		std::tie(staticFNO, thisFilePointer) = D_TRY_CATCH(staticDIR.read_and_get_filepointer(), error, {
+		std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir.read(), error, {
 			break; // Break on error
 		});
 
-		if (staticFNO.fname[0] == 0) {
+		if (!entry.has_value()) {
 			break; /* Break on end of dir */
 		}
-		if (staticFNO.fname[0] == '.') {
+		if (entry->name[0] == '.') {
 			continue; /* Ignore dot entry */
 		}
-		bool isFolder = staticFNO.fattrib & AM_DIR;
+		bool isFolder = entry->is_directory;
 		if (isFolder) {
 			if (!allowFolders) {
 				continue;
 			}
 		}
 		else {
-			char const* dotPos = strrchr(staticFNO.fname, '.');
+			char const* dotPos = strrchr(entry->name, '.');
 			if (!dotPos) {
 extensionNotSupported:
 				continue;
@@ -381,16 +360,14 @@ extensionNotSupported:
 			error = Error::INSUFFICIENT_RAM;
 			break;
 		}
-		thisItem->filename = staticFNO.fname;
+		thisItem->filename = entry->name;
 		thisItem->isFolder = isFolder;
-		thisItem->filePointer = thisFilePointer;
 
 		// displayName is the sort key, and must equal the real on-card name. The 7SEG short form ("185")
 		// is produced at render time, not stored here - storing it made enteredText display-dependent, which is what
 		// broke default naming on 7SEG (#1069).
 		thisItem->displayName = thisItem->filename.c_str();
 	}
-	staticDIR.close();
 
 	if (error != Error::NONE) {
 		emptyFileItems();
@@ -428,9 +405,6 @@ void Browser::deleteFolderAndDuplicateItems(Availability instrumentAvailabilityR
 				if (!nextItem->instrument && !nextItem->isFolder) {
 					if (!strcasecmp(readItem->displayName, nextItem->displayName)) {
 						// if (readItem->filename.equalsCaseIrrespective(&nextItem->filename)) {
-						if (readItem->maybeExistsOnCard && readItem->filePointer.sclust == 0) {
-							readItem->filePointer = nextItem->filePointer;
-						}
 						readI++; // Skip the next item; it'll be overwritten by compaction or erased below.
 						nextItem = fileItems.data() + (readI + 1);
 						// That may be an out-of-range address, but in that case, it won't get read.
@@ -455,9 +429,6 @@ deleteThisItem: // Just skip it; it'll be overwritten by compaction or erased be
 			// Or if next item has an Instrument, and we're just a file...
 			else if (nextItem->instrument) {
 				if (!strcasecmp(readItem->displayName, nextItem->displayName)) { // And if same name...
-					if (nextItem->maybeExistsOnCard && nextItem->filePointer.sclust == 0) {
-						nextItem->filePointer = readItem->filePointer;
-					}
 					goto deleteThisItem;
 				}
 			}
@@ -493,8 +464,7 @@ Error Browser::setFileByFullPath(OutputType outputType, char const* fullPath) {
 
 Error Browser::setFileByFullPathImpl(char const* fullPath) {
 	arrivedAtFileByTyping = true;
-	FilePointer tempfp;
-	bool fileExists = StorageManager::fileExists(fullPath, &tempfp);
+	bool fileExists = StorageManager::fileExists(fullPath);
 	if (!fileExists) {
 		return Error::FILE_NOT_FOUND;
 	}
@@ -1057,10 +1027,13 @@ bool Browser::predictExtendedText() {
 		}
 	}
 
+	// Captured by value (not the FileItem*, which readFileItemsFromFolderAndMemory()/doNewRead below can
+	// invalidate by reallocating fileItems) so we can tell after the search whether we landed on a
+	// different file - filename is the file's identity now that FileItem no longer carries a FilePointer.
 	FileItem* oldFileItem = getCurrentFileItem();
-	DWORD oldClust = 0;
+	std::string oldFilename;
 	if (oldFileItem) {
-		oldClust = oldFileItem->filePointer.sclust;
+		oldFilename = oldFileItem->filename;
 	}
 
 	std::string searchString;
@@ -1161,7 +1134,7 @@ notFound:
 	displayText();
 
 	// If we're now on a different file than before, preview it
-	if (fileItem->filePointer.sclust != oldClust) {
+	if (fileItem->filename != oldFilename) {
 		currentFileChanged(0);
 	}
 

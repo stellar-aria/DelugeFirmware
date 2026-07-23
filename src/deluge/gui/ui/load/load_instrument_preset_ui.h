@@ -59,7 +59,6 @@ private:
 		std::string path;    // getCurrentFilePath() at dispatch.
 		std::string name;    // enteredText at dispatch - candidate name for the loaded Instrument/Drum.
 		std::string dirPath; // currentDir at dispatch.
-		FilePointer filePointer{.sclust = 0, .objsize = 0};
 	};
 
 public:

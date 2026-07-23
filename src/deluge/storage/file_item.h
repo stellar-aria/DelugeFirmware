@@ -29,11 +29,10 @@ public:
 	[[nodiscard]] std::string getFilenameWithExtension() const;
 	[[nodiscard]] std::string getFilenameWithoutExtension() const;
 
-	char const* displayName{}; // Usually points to filePointer.get(), but for "numeric" files, will cut off the prefix,
+	char const* displayName{}; // Usually points to filename.c_str(), but for "numeric" files, will cut off the prefix,
 	                           // e.g. "SONG". And I think this always includes the file extension...
 
 	std::string filename{}; // May or may not include file extension. (Or actually I think it always does now...)
-	FilePointer filePointer{.sclust = 0, .objsize = 0};
 	Instrument* instrument = nullptr;
 	bool maybeExistsOnCard{true}; // only false when made through setupWithInstrument through an unsaved instrument
 	bool isFolder{};

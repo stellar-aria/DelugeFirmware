@@ -23,15 +23,6 @@
 #include "storage/latest_wins.h"
 #include <string>
 
-extern "C" {
-
-#include "fatfs/ff.h"
-
-FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory object */
-                                  FILINFO* fno, /* Pointer to file information to return */
-                                  FilePointer* filePointer);
-}
-
 class SoundDrum;
 class Source;
 class Sample;
@@ -90,7 +81,6 @@ private:
 	/// (fast cursor-scroll under async dispatch).
 	struct PreviewTarget {
 		std::string path;
-		FilePointer filePointer;
 		int32_t movementDirection;
 	};
 

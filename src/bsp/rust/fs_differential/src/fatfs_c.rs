@@ -62,6 +62,8 @@ extern "C" {
     fn f_unlink(path: *const u8) -> i32;
     fn f_rename(path_old: *const u8, path_new: *const u8) -> i32;
     fn f_sync(fp: *mut FIL) -> i32;
+    // R2 Task 2: `exists`/`mtime`'s oracle probe.
+    fn f_stat(path: *const u8, fno: *mut FILINFO) -> i32;
 }
 
 const FA_READ: u8 = 0x01;
@@ -147,6 +149,41 @@ impl CFatFs {
         }
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v
+    }
+
+    fn zeroed_filinfo() -> FILINFO {
+        FILINFO {
+            fsize: 0,
+            fdate: 0,
+            ftime: 0,
+            fattrib: 0,
+            altname: [0; 13],
+            fname: [0; 256],
+        }
+    }
+
+    /// `f_stat`-backed existence check (R2 Task 2 oracle: whether an
+    /// efatfs-side create/rename/unlink actually landed on the shared disk,
+    /// as seen by the OTHER filesystem implementation). True iff `path`
+    /// names an existing file or directory.
+    pub fn exists(&self, path: &str) -> bool {
+        let c = std::ffi::CString::new(path).unwrap();
+        let mut fno = Self::zeroed_filinfo();
+        unsafe { f_stat(c.as_ptr() as *const u8, &mut fno) == 0 }
+    }
+
+    /// `path`'s packed FAT modified date/time (`(FILINFO::fdate << 16) |
+    /// FILINFO::ftime`) — the oracle for `efatfs_core::set_time`'s same
+    /// packing. Panics if `path` does not exist.
+    pub fn mtime(&self, path: &str) -> u32 {
+        let c = std::ffi::CString::new(path).unwrap();
+        let mut fno = Self::zeroed_filinfo();
+        assert_eq!(
+            unsafe { f_stat(c.as_ptr() as *const u8, &mut fno) },
+            0,
+            "f_stat({path})"
+        );
+        (u32::from(fno.fdate) << 16) | u32::from(fno.ftime)
     }
 
     /// Create a directory. `path`'s parent must already exist.

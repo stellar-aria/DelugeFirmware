@@ -358,7 +358,7 @@ fn fat32_dotdot_cluster_probe() {
     let (c_rec_cluster, c_dotdot_cluster) = raw_fat32::probe_dotdot_cluster(&c_image, &rec_sfn);
 
     let disk = RamDisk::load_bytes(&orig);
-    let mut e = EFatFs::mount();
+    let e = EFatFs::mount();
     e.mkdir("/REC");
     drop(e);
     let e_image = disk.snapshot();

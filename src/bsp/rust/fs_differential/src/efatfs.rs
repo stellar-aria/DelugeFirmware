@@ -60,7 +60,9 @@ use crate::block_dev::FileBlockDevice;
 use crate::ops::Entry;
 use block_device_adapters::BufStream;
 use embassy_futures::block_on;
-use embedded_fatfs::{DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter};
+use embedded_fatfs::{
+    Date, DateTime, DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter, Time,
+};
 use embedded_io_async::{Read, Seek, SeekFrom, Write};
 
 /// A mounted `embedded-fatfs` volume, read + write path. Same public
@@ -138,14 +140,37 @@ impl EFatFs {
         })
     }
 
-    /// R2 Task 1 host analog of `efatfs_core::open_context`, but via
-    /// `Dir::create_file` (open-or-create, empty if newly created) instead of
-    /// `open_file` — the `WRITE_CREATE` case the write-path task-context
-    /// primitives need a fixture for.
-    pub fn create_context(&self, path: &str) -> FileContext {
+    /// R2 Task 1/2 host analog of `efatfs_core::create_context`: `Dir::create_file`
+    /// (open-or-create) then `File::truncate` — WRITE_CREATE semantics
+    /// (`exclusive == false`, starts empty even if `path` already existed) —
+    /// or, with `exclusive == true`, WRITE_CREATE_NEW (fails if `path`
+    /// already exists; embedded-fatfs has no atomic create-if-absent
+    /// primitive, so this checks `Dir::exists` first — safe here because
+    /// task-context file ops are single-threaded, both on host and on
+    /// device under `efatfs_fs::with_fs`'s mutex). Panics on any FS error,
+    /// INCLUDING WRITE_CREATE_NEW's "already exists" — use
+    /// [`try_create_exclusive`](Self::try_create_exclusive) to observe that
+    /// failure without panicking.
+    pub fn create_context(&self, path: &str, exclusive: bool) -> FileContext {
+        self.try_create_context(path, exclusive)
+            .expect("create_context")
+    }
+
+    /// Non-panicking WRITE_CREATE_NEW: `None` if `path` already exists (or
+    /// any other FS error), instead of `create_context(path, true)`'s panic.
+    pub fn try_create_exclusive(&self, path: &str) -> Option<FileContext> {
+        self.try_create_context(path, true)
+    }
+
+    fn try_create_context(&self, path: &str, exclusive: bool) -> Option<FileContext> {
         block_on(async {
-            let f = self.fs.root_dir().create_file(path).await.expect("create_file");
-            f.close().await.expect("close")
+            let root = self.fs.root_dir();
+            if exclusive && root.exists(path).await.ok()? {
+                return None;
+            }
+            let mut f = root.create_file(path).await.ok()?;
+            f.truncate().await.ok()?;
+            f.close().await.ok()
         })
     }
 
@@ -259,7 +284,12 @@ impl EFatFs {
     }
 
     /// Create a directory. `path`'s parent must already exist.
-    pub fn mkdir(&mut self, path: &str) {
+    ///
+    /// `&self`, not `&mut self`: `Dir::create_dir` (like every other
+    /// `Dir` write op this file wraps) only needs `&self` — the actual
+    /// mutable state is the shared `DISK` RAM image behind `self.fs`'s
+    /// storage, not `self` itself.
+    pub fn mkdir(&self, path: &str) {
         block_on(async {
             self.fs.root_dir().create_dir(path).await.expect("create_dir");
         });
@@ -289,8 +319,19 @@ impl EFatFs {
         });
     }
 
-    /// Delete an existing file or (empty) directory.
+    /// Delete an existing file or (empty) directory. `&mut self` to match
+    /// `ops::FsOpsMut::delete`'s trait signature (the differential-fuzzing
+    /// surface both backends implement).
     pub fn delete(&mut self, path: &str) {
+        block_on(async {
+            self.fs.root_dir().remove(path).await.expect("remove");
+        });
+    }
+
+    /// R2 Task 2 host analog of `efatfs_core::unlink` — same operation as
+    /// [`delete`](Self::delete), `&self` to match the path-op suite's
+    /// (mkdir/create_context/rename/unlink) signatures.
+    pub fn unlink(&self, path: &str) {
         block_on(async {
             self.fs.root_dir().remove(path).await.expect("remove");
         });
@@ -308,12 +349,36 @@ impl EFatFs {
     /// fixes"), so a plain `root.rename(from, &root, to)` with a
     /// multi-component `to` now lands in the right directory and this
     /// harness no longer needs to route around it.
-    pub fn rename(&mut self, from: &str, to: &str) {
+    ///
+    /// `&self`, not `&mut self` — see [`mkdir`](Self::mkdir)'s doc comment.
+    pub fn rename(&self, from: &str, to: &str) {
         block_on(async {
             let root = self.fs.root_dir();
             let from = from.trim_start_matches('/');
             let to = to.trim_start_matches('/');
             root.rename(from, &root, to).await.expect("rename");
+        });
+    }
+
+    /// R2 Task 2 host analog of `efatfs_core::set_time`: `timestamp` is the
+    /// same packed FAT date/time (`(dos_date << 16) | dos_time`, matching
+    /// C-FatFS's `get_fattime()`/`FILINFO::fdate,ftime` convention) `efatfs_core::set_time`
+    /// documents. Panics on any FS error or out-of-range date/time
+    /// component.
+    pub fn set_time(&self, path: &str, timestamp: u32) {
+        block_on(async {
+            let dos_date = (timestamp >> 16) as u16;
+            let dos_time = timestamp as u16;
+            let year = (dos_date >> 9) + 1980;
+            let month = (dos_date >> 5) & 0xF;
+            let day = dos_date & 0x1F;
+            let hour = dos_time >> 11;
+            let min = (dos_time >> 5) & 0x3F;
+            let sec = (dos_time & 0x1F) * 2;
+            let mut f = self.fs.root_dir().open_file(path).await.expect("open_file");
+            #[allow(deprecated)]
+            f.set_modified(DateTime::new(Date::new(year, month, day), Time::new(hour, min, sec, 0)));
+            f.close().await.expect("close");
         });
     }
 }

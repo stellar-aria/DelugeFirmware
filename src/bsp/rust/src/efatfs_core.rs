@@ -23,7 +23,10 @@
 
 #![allow(dead_code)]
 
-use embedded_fatfs::{File, FileContext, FileSystem, OemCpConverter, ReadWriteSeek, TimeProvider};
+use embedded_fatfs::{
+    Date, DateTime, File, FileContext, FileSystem, OemCpConverter, ReadWriteSeek, Time,
+    TimeProvider,
+};
 // embedded-fatfs keeps its own `io` traits `pub(crate)`; `File`'s `Read`/`Seek`
 // impls are the public `embedded_io_async` ones, so bring those into scope to
 // drive the fill loop / absolute seek below.
@@ -343,4 +346,134 @@ where
     f.truncate().await.ok()?;
     let newctx = f.close().await.ok()?;
     Some((newctx, ()))
+}
+
+// --- R2 Task 2: path ops (create/unlink/rename/mkdir/set_time) -------------
+//
+// Unlike the handle-based ops above, these operate directly on `fs.root_dir()`
+// plus a `'/'`-separated path -- there is no open `FileContext` to reattach.
+// `create_context` is the one exception: it opens/creates the file, then
+// detaches it to a `FileContext` exactly like `open_context` does, so its
+// caller gets a handle to install into the table. Every crate error maps to
+// `None`; the device layer (`efatfs_fs.rs`, Task 4) decides how to surface
+// that as a task-context result code.
+
+/// Create `path`, returning a detached [`FileContext`] for the new file --
+/// mirrors [`open_context`]'s open→`close()` detach, but via `create_file`
+/// instead of `open_file`.
+///
+/// `exclusive == false` is WRITE_CREATE: open-or-create, then truncate to
+/// empty (embedded-fatfs's own `create_file` opens an existing file
+/// as-is -- see its doc comment -- so the truncate here is what gives
+/// WRITE_CREATE its "starts empty" semantics, matching `EFatFs::write_new`'s
+/// create+truncate pairing).
+///
+/// `exclusive == true` is WRITE_CREATE_NEW: `None` if `path` already exists.
+/// embedded-fatfs has no atomic create-if-absent primitive (`Dir::create_file`
+/// always opens-or-creates), so this checks `Dir::exists` first -- a
+/// check-then-create race is unreachable here: task-context file ops are
+/// single-threaded, both on host (this test binary's single `block_on`) and
+/// on device (one task drives the mounted `FileSystem` at a time under
+/// `efatfs_fs::with_fs`'s mutex).
+pub async fn create_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    path: &str,
+    exclusive: bool,
+) -> Option<FileContext>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let root = fs.root_dir();
+    if exclusive && root.exists(path).await.ok()? {
+        return None;
+    }
+    let mut f = root.create_file(path).await.ok()?;
+    f.truncate().await.ok()?;
+    f.close().await.ok()
+}
+
+/// Delete the file or empty directory at `path`. `None` on any FS error
+/// (including a non-existent path or a non-empty directory).
+pub async fn unlink<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, path: &str) -> Option<()>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    fs.root_dir().remove(path).await.ok()
+}
+
+/// Create the directory at `path`; `path`'s parent must already exist.
+/// `None` on any FS error.
+pub async fn mkdir<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, path: &str) -> Option<()>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    fs.root_dir().create_dir(path).await.ok()?;
+    Some(())
+}
+
+/// Rename/move `old` to `new`, both paths relative to the volume root.
+/// `None` on any FS error, including `new` already existing.
+pub async fn rename<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, old: &str, new: &str) -> Option<()>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let root = fs.root_dir();
+    root.rename(old, &root, new).await.ok()
+}
+
+/// Set `path`'s modified-time directory-entry field from `timestamp`, a
+/// packed 32-bit FAT date/time exactly matching C-FatFS's `get_fattime()` /
+/// `FILINFO::fdate,ftime` convention this codebase already uses elsewhere
+/// (`src/fatfs/ff.c`'s `GET_FATTIME()`): the high 16 bits are the DOS date
+/// (`(year-1980)<<9 | month<<5 | day`), the low 16 bits are the DOS time
+/// (`hour<<11 | min<<5 | sec/2`) -- i.e. the same halves `Date`/`Time` encode,
+/// concatenated as `(date << 16) | time`.
+///
+/// `File::set_modified` only updates the in-memory entry (same caveat as
+/// `write_context`'s doc comment); `close()`'s flush is what persists it.
+/// `None` on any FS error, or if `timestamp` decodes to an out-of-range
+/// date/time component (`Date`/`Time` panic on out-of-range fields, so this
+/// validates by hand instead of decoding blind).
+pub async fn set_time<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    path: &str,
+    timestamp: u32,
+) -> Option<()>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let dos_date = (timestamp >> 16) as u16;
+    let dos_time = timestamp as u16;
+    let year = (dos_date >> 9) + 1980;
+    let month = (dos_date >> 5) & 0xF;
+    let day = dos_date & 0x1F;
+    let hour = dos_time >> 11;
+    let min = (dos_time >> 5) & 0x3F;
+    let sec = (dos_time & 0x1F) * 2;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+
+    let mut f = fs.root_dir().open_file(path).await.ok()?;
+    #[allow(deprecated)]
+    // embedded-fatfs deprecates set_modified in favor of a custom TimeProvider;
+    // task-context callers (deluge's `fileSetTimeDate`/rename-with-timestamp
+    // callers) set an explicit timestamp, not "now", so there is no
+    // `TimeProvider` shaped for this.
+    f.set_modified(DateTime::new(
+        Date::new(year, month, day),
+        Time::new(hour, min, sec, 0),
+    ));
+    f.close().await.ok()?;
+    Some(())
 }

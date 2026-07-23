@@ -698,7 +698,7 @@ fn efatfs_write_then_read_roundtrip_fat32() {
     // Create + write a known pattern, then read it back byte-exact.
     let path = "/R2WRITE.BIN";
     let payload: Vec<u8> = (0..5000u32).map(|i| (i * 7) as u8).collect();
-    let ctx = e.create_context(path); // WRITE_CREATE
+    let ctx = e.create_context(path, false); // WRITE_CREATE
     let (ctx, w) = e.write_at_context(&ctx, 0, &payload);
     assert_eq!(w, payload.len());
     let (ctx, sz) = e.size_context(&ctx);
@@ -718,10 +718,69 @@ fn efatfs_truncate_shrinks_size_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let path = "/R2TRUNC.BIN";
-    let ctx = e.create_context(path);
+    let ctx = e.create_context(path, false);
     let (ctx, _) = e.write_at_context(&ctx, 0, &vec![0xABu8; 4096]);
     let (ctx, _) = e.truncate_context(&ctx, 1000);
     let (_ctx, sz) = e.size_context(&ctx);
     assert_eq!(sz, 1000);
+}
+
+/// R2 Task 2: mkdir + create-in-dir + rename + unlink, each verified via the
+/// C-FatFS oracle (a DIFFERENT filesystem implementation reading the SAME
+/// shared disk) so the check proves the efatfs-side op actually landed on
+/// disk, not just that efatfs's own in-memory view agrees with itself.
+#[test]
+fn efatfs_create_unlink_rename_mkdir_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    // mkdir + create-in-dir + rename + unlink, verifying via C-FatFS oracle that each landed on disk.
+    e.mkdir("/R2DIR");
+    let ctx = e.create_context("/R2DIR/A.BIN", false);
+    let (_ctx, _) = e.write_at_context(&ctx, 0, b"hello");
+    assert!(CFatFs::mount().exists("/R2DIR/A.BIN"), "efatfs create not visible to C-FatFS oracle");
+    e.rename("/R2DIR/A.BIN", "/R2DIR/B.BIN");
+    assert!(CFatFs::mount().exists("/R2DIR/B.BIN") && !CFatFs::mount().exists("/R2DIR/A.BIN"));
+    e.unlink("/R2DIR/B.BIN");
+    assert!(!CFatFs::mount().exists("/R2DIR/B.BIN"));
+}
+
+/// R2 Task 2: WRITE_CREATE_NEW (`exclusive == true`) must fail — not
+/// silently truncate — when the target path already exists.
+#[test]
+fn efatfs_create_new_fails_if_exists_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let _ = e.create_context("/R2EXCL.BIN", false); // create it
+    assert!(e.try_create_exclusive("/R2EXCL.BIN").is_none(), "WRITE_CREATE_NEW must fail on existing");
+}
+
+/// R2 Task 2: `set_time` writes a packed FAT date/time (the same
+/// `(dos_date << 16) | dos_time` convention C-FatFS's `get_fattime()` uses)
+/// that a re-mount of the C-FatFS oracle reads back identically — the same
+/// shared-disk cross-check the create/rename/unlink test above uses.
+#[test]
+fn efatfs_set_time_matches_cfatfs_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R2TIME.BIN";
+    let _ = e.create_context(path, false);
+
+    // 2019-03-04 05:06:08, packed as GET_FATTIME() would: high 16 bits DOS
+    // date ((year-1980)<<9 | month<<5 | day), low 16 bits DOS time
+    // (hour<<11 | min<<5 | sec/2).
+    let dos_date: u32 = ((2019u32 - 1980) << 9) | (3 << 5) | 4;
+    let dos_time: u32 = (5 << 11) | (6 << 5) | (8 / 2);
+    let timestamp = (dos_date << 16) | dos_time;
+
+    e.set_time(path, timestamp);
+
+    assert_eq!(
+        CFatFs::mount().mtime(path),
+        timestamp,
+        "efatfs set_time not visible (or mismatched) via the C-FatFS oracle"
+    );
 }
 

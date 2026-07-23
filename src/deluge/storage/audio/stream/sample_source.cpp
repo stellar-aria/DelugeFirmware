@@ -52,8 +52,11 @@ struct DelugeSampleSource {
 	// deliberately NOT stored in `current` (which must keep pinning whatever the caller is still
 	// reading) — so the background fill keeps progressing and the chunk cannot be stolen while the
 	// caller defers and retries. At most one is outstanding: each acquire supersedes it.
+	//
+	// No `pending_index` field: nothing reads it. `prefetch_state()` reports on `pending` by identity
+	// (is it set, and is it loaded), never by comparing indices, so there has never been a consumer
+	// for the index -- keep it out (YAGNI) until one appears.
 	StreamedChunk* pending = nullptr;
-	uint32_t pending_index = UINT32_MAX;
 };
 
 namespace {
@@ -172,16 +175,25 @@ void release_source_slot(DelugeSampleSource* src) {
 
 /// @brief Drop the retained DELUGE_REGION_LOADING lease, if one is outstanding.
 ///
-/// Every acquire supersedes the previous pending reservation, so this is called on all three
-/// outcome paths. Crucially it runs AFTER the new chunk has been obtained: when the retry lands on
-/// the SAME chunk, get_cluster() has already added its own lease, so the refcount goes 1 -> 2 -> 1
-/// rather than dipping to 0 (which would make the half-filled chunk stealable mid-retry).
+/// Every acquire supersedes the previous pending reservation, so this is called on all three outcome
+/// paths, always AFTER this call's own chunk has already been obtained (fresh from get_cluster, or
+/// promoted from `prefetch`).
+///
+/// The real invariant is narrower than "the count never dips to 0": that only holds when the retry
+/// lands on the SAME chunk as the outgoing pending reservation -- get_cluster() has already added its
+/// own lease before this drops the old one, so that chunk's refcount goes 1 -> 2 -> 1. When the
+/// outgoing pending reservation is for a DIFFERENT chunk than the one this call is resolving (e.g. the
+/// caller jumped to a different index while an earlier LOADING reservation was still outstanding),
+/// dropping it here can legitimately bring THAT chunk's refcount to 0 -- and if the new prefetch
+/// fetched a few lines below (deluge_sample_region_acquire_ex, READY step 5) happens to target the
+/// same chunk, it goes right back to 1. Either way this is safe: acquire_ex runs to completion on one
+/// thread with nothing else able to interpose between the drop and the re-fetch, so a momentary 0
+/// refcount here is never observable as a steal.
 void release_pending(DelugeSampleSource& src) {
 	if (src.pending != nullptr) {
 		deluge::cluster::release_lease(src.pending);
 		src.pending = nullptr;
 	}
-	src.pending_index = UINT32_MAX;
 }
 
 } // namespace
@@ -245,7 +257,6 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 	if (!chunk->loaded) {
 		release_pending(*src);
 		src->pending = chunk;
-		src->pending_index = index;
 		return DELUGE_REGION_LOADING;
 	}
 
@@ -300,13 +311,29 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src) {
 	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). This is
 	// what the direct `!clusters[1] || clusters[1]->loaded` look-ahead read becomes once clusters[]
-	// is gone: "no neighbour held" (none exists in this direction, or it could not be reserved) is
+	// is gone: "nothing held" (none exists in this direction, or it could not be reserved) is
 	// UNAVAILABLE, matching that read's null case, which callers treat as "nothing further to wait
 	// for" rather than as a failure.
-	if (src == nullptr || src->prefetch == nullptr) {
+	//
+	// 8b Task 1 fix: `pending` takes priority over `prefetch`. A LOADING acquire_ex on the standing
+	// prefetch's index PROMOTES it (see acquire_ex step 1) -- src->prefetch goes back to null even
+	// though a fill is very much in flight, now tracked as src->pending. Answering from `prefetch`
+	// alone would then report UNAVAILABLE ("nothing further to wait for") while a fill the caller
+	// itself just scheduled is still running -- exactly the trap a late-start consumer's defer-vs-
+	// give-up decision must not fall into. Checking `pending` first makes the answer truthful for
+	// both callers: one that only ever reads the standing prefetch, and one that just received
+	// DELUGE_REGION_LOADING from acquire_ex and wants to know whether that same reservation is still
+	// alive.
+	if (src == nullptr) {
 		return DELUGE_REGION_UNAVAILABLE;
 	}
-	return src->prefetch->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
+	if (src->pending != nullptr) {
+		return src->pending->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
+	}
+	if (src->prefetch != nullptr) {
+		return src->prefetch->loaded ? DELUGE_REGION_READY : DELUGE_REGION_LOADING;
+	}
+	return DELUGE_REGION_UNAVAILABLE;
 }
 
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease) {

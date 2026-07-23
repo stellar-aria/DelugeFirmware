@@ -309,6 +309,47 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});
 
+	it("8b Task 1 fix: a LOADING acquire that consumes the standing prefetch still reports a truthful "
+	   "prefetch_state (the in-flight pending reservation, not UNAVAILABLE)", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
+		stream.set_cluster_data(1, make_ramp(1, kClusterSize), /*loaded=*/false);
+		stream.set_cluster_data(2, make_ramp(2, kClusterSize));
+		DelugeSampleGeometry geo = make_geometry(48);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		// acquire(0) establishes cluster 1 as the standing prefetch (unloaded).
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(prefetch_state(src)).to_equal(kLoading); // the standing prefetch, not yet landed
+
+		// The caller now asks for exactly that prefetched index. It is not loaded, so this promotes
+		// the prefetch lease into `pending` and returns LOADING -- and, as a side effect, EMPTIES the
+		// prefetch slot (acquire_ex's documented behaviour).
+		DelugeSampleRegion probe = sentinel_region();
+		expect(acquire_state(src, 1, 1, &probe)).to_equal(kLoading);
+		expect(is_untouched(probe)).to_equal(true);
+
+		// THE load-bearing assertion: a fill on cluster 1 is genuinely still in flight (it is held as
+		// `pending`, retained by the LOADING acquire above), so prefetch_state() must say LOADING --
+		// NOT UNAVAILABLE. Reporting UNAVAILABLE here would tell a deferring caller "nothing further
+		// to wait for" while data is actively being loaded, driving it to give up prematurely.
+		expect(prefetch_state(src)).to_equal(kLoading);
+
+		// When the fill lands, the same query reports READY -- still without acquiring anything.
+		stream.set_cluster_loaded(1, true);
+		expect(prefetch_state(src)).to_equal(kReady);
+
+		// And the retry that actually acquires it lands cleanly, folding the pending lease into
+		// `current` with no leak and no duplicate.
+		expect(acquire_state(src, 1, 1, &probe)).to_equal(kReady);
+		expect(probe.region_index).to_equal(1u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
 	it("8b: acquire_ex's READY path is the boolean acquire's true, unchanged", _ {
 		deluge_test_reset_lease_tracking();
 		deluge::audio::stream::SampleStream stream(2);

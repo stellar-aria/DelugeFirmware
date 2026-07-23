@@ -40,21 +40,23 @@ typedef struct DelugeSampleGeometry {
 /// `deluge_sample_region_acquire` collapses into `false`: "not loaded YET" (worth waiting for) and
 /// "could not be reserved at all" (nothing is coming — give up).
 ///
-/// Each state carries a LEASE POLICY, which is part of the contract, not an implementation detail:
+/// Each state carries a LEASE POLICY, which is part of the contract, not an implementation detail.
+/// Numbered from 1 (not 0) so `if (state)` cannot be misread as a boolean — always compare against
+/// a named constant.
 typedef enum DelugeRegionState {
 	/// Resident AND loaded. `out` is filled and the source holds the pin backing it; the caller may
 	/// read `payload_base` until it releases the lease, closes, or acquires a different region.
-	DELUGE_REGION_READY = 0,
+	DELUGE_REGION_READY = 1,
 	/// Reserved, leased and scheduled, but the data has not landed yet. `out` is NOT filled.
 	/// The source RETAINS the lease on the region across the call, so the background fill keeps
 	/// progressing (and the region cannot be stolen) while the caller defers and retries. Retrying
 	/// the same index is idempotent — it does not accumulate leases. The retained lease is dropped
 	/// by the next acquire on this source or by `deluge_sample_source_close`.
-	DELUGE_REGION_LOADING = 1,
+	DELUGE_REGION_LOADING,
 	/// The region could not be reserved or constructed at all (out of RAM / nothing stealable / out
 	/// of range / null source). `out` is NOT filled and NOTHING is left leased for it — no fill is
 	/// in flight, so retrying gains the caller nothing.
-	DELUGE_REGION_UNAVAILABLE = 2,
+	DELUGE_REGION_UNAVAILABLE,
 } DelugeRegionState;
 
 /// One acquired, pinned, borrowed region of resident sample data.
@@ -78,6 +80,11 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 /// leave the standing current region alone — a deferring caller keeps reading what it already has.
 /// See DelugeRegionState for each state's lease policy; in particular DELUGE_REGION_LOADING keeps
 /// the region leased so the fill continues across the caller's defer/retry cycle.
+///
+/// If `index` is exactly the standing prefetched neighbour, that lease is PROMOTED into this call's
+/// result rather than re-fetched — which, on a LOADING outcome, empties the prefetch slot (see
+/// deluge_sample_region_prefetch_state: it reports the promoted reservation instead, so the query
+/// stays truthful).
 DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
                                                   uint32_t priority, DelugeSampleRegion* out);
 
@@ -86,12 +93,19 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out);
 
-/// Residency of the neighbour this source prefetched on its last successful acquire, WITHOUT
-/// acquiring it (no lease taken, no fetch scheduled, no state changed).
+/// Residency of whatever this source is holding a reservation on BEYOND the region it last handed
+/// back READY, WITHOUT acquiring anything (no lease taken, no fetch scheduled, no state changed).
+/// This is normally the standing prefetched neighbour — but if the most recent acquire_ex call on
+/// this source returned DELUGE_REGION_LOADING, it reports that call's retained (`pending`)
+/// reservation instead, since a LOADING acquire on the standing prefetch's index promotes and empties
+/// the prefetch slot (see deluge_sample_region_acquire_ex). Callers get a truthful answer either way:
+/// a fill is in flight iff this returns DELUGE_REGION_LOADING, regardless of which internal slot is
+/// carrying it.
 ///
-/// DELUGE_REGION_UNAVAILABLE means simply "no neighbour is held" — either none exists (the current
-/// region is the last one in the play direction) or it could not be reserved. Those are the same
-/// case to a reader looking ahead: there is nothing further to wait for.
+/// DELUGE_REGION_UNAVAILABLE means simply "nothing is held" — no prefetch, no pending reservation,
+/// either because none exists (the current region is the last one in the play direction) or because
+/// it could not be reserved. That is the case to a reader looking ahead or deciding whether to keep
+/// deferring: there is nothing further to wait for, so give up rather than retry.
 DelugeRegionState deluge_sample_region_prefetch_state(const DelugeSampleSource* src);
 
 /// Drop a pin taken by acquire. Safe to call with a lease of 0 (no-op).

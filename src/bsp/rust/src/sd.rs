@@ -195,6 +195,15 @@ pub async fn boot_init() {
 /// NOT route through this function — so no double-modeling either.
 pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
+    // R3: the common chokepoint for on-fiber block reads regardless of
+    // backend — both the delegating plain-host `deluge_block_read` (below)
+    // and efatfs's `HostSdBlockDevice::read` (efatfs_host_shim.rs) route
+    // through here, so counting once at this call site covers both without
+    // double-counting (the `sim_latency` `deluge_block_read` variant does
+    // its own bespoke transfer and is instrumented separately — see its doc
+    // comment). Host-only, matching `stats`'s own `#[cfg]`.
+    #[cfg(not(target_os = "none"))]
+    stats::note_read(crate::fiber::on_fiber());
     #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
     {
         sim_latency::modeled_read(lba, count, buf).await
@@ -206,9 +215,12 @@ pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result
 }
 
 /// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
-/// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]).
+/// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]),
+/// same R3 on-fiber write instrumentation (see the read sibling's doc comment).
 pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
+    #[cfg(not(target_os = "none"))]
+    stats::note_write(crate::fiber::on_fiber());
     #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
     {
         sim_latency::modeled_write(lba, count, buf).await
@@ -462,6 +474,15 @@ pub extern "C" fn deluge_block_write(
 /// `fiber::worker_poll()`, not just that the dispatch was attempted. Compiled for every
 /// host build (not gated on `host_app`/`sim_latency`) — the counters sit idle (never
 /// read) unless something calls the `on_fiber_*` getters below.
+///
+/// R3: the `note_read`/`note_write` call sites live at [`locked_read_sectors`]/
+/// [`locked_write_sectors`] — the chokepoint both the plain-host `deluge_block_*`
+/// wrappers (which delegate to them) AND efatfs's `HostSdBlockDevice` (which
+/// calls them directly, bypassing the C-ABI `deluge_block_*` entry points
+/// entirely) pass through — plus the `sim_latency` `deluge_block_*` variants,
+/// which do their own bespoke transfer and are instrumented at their own call
+/// site instead (they never reach `locked_*_sectors`). Each on-fiber transfer
+/// is counted at exactly one of those two kinds of site, never both.
 #[cfg(not(target_os = "none"))]
 pub(crate) mod stats {
     use core::sync::atomic::{AtomicU64, Ordering};
@@ -481,14 +502,16 @@ pub(crate) mod stats {
         }
     }
 
-    /// Total SD block reads observed while `fiber::on_fiber()` was true (any host
-    /// `deluge_block_read` variant — plain or `sim_latency`).
+    /// Total SD block reads observed while `fiber::on_fiber()` was true — any
+    /// backend (C-FatFS's plain/`sim_latency` `deluge_block_read`, or
+    /// efatfs's `HostSdBlockDevice::read` via `locked_read_sectors`).
     pub fn on_fiber_reads() -> u64 {
         ON_FIBER_READS.load(Ordering::Relaxed)
     }
 
-    /// Total SD block writes observed while `fiber::on_fiber()` was true (any host
-    /// `deluge_block_write` variant — plain or `sim_latency`).
+    /// Total SD block writes observed while `fiber::on_fiber()` was true — any
+    /// backend (C-FatFS's plain/`sim_latency` `deluge_block_write`, or
+    /// efatfs's `HostSdBlockDevice::write` via `locked_write_sectors`).
     pub fn on_fiber_writes() -> u64 {
         ON_FIBER_WRITES.load(Ordering::Relaxed)
     }
@@ -532,7 +555,9 @@ pub extern "C" fn deluge_block_read(
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
-    stats::note_read(crate::fiber::on_fiber());
+    // R3: `locked_read_sectors` (below) does the on-fiber counting now — this
+    // path delegates straight to it, so instrumenting here too would
+    // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
@@ -582,7 +607,9 @@ pub extern "C" fn deluge_block_write(
     if sd::is_write_protected() {
         return DELUGE_ERR_WRITE_PROTECTED;
     }
-    stats::note_write(crate::fiber::on_fiber());
+    // R3: `locked_write_sectors` (below) does the on-fiber counting now — this
+    // path delegates straight to it, so instrumenting here too would
+    // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };

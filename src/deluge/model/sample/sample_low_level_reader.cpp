@@ -97,7 +97,8 @@ int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlayback
 }
 
 void SampleLowLevelReader::setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuide* guide, Sample* sample,
-                                                              int32_t bytePosWithinNewCluster, int32_t byteDepth) {
+                                                              char* clusterBase, int32_t bytePosWithinNewCluster,
+                                                              [[maybe_unused]] int32_t byteDepth) {
 
 #if ALPHA_OR_BETA_VERSION
 	if (clusters[0] == nullptr) {
@@ -105,8 +106,12 @@ void SampleLowLevelReader::setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuid
 	}
 #endif
 
-	// Ok, now we've just moved the play-pos into a new Cluster, so do some setting up for that
-	currentPlayPos = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinNewCluster;
+	// Ok, now we've just moved the play-pos into a new Cluster, so do some setting up for that.
+	// SR1 Task 5: the resident cluster base is passed in as `clusterBase` -- the region port's
+	// `region.payload_base` for the caller that just acquired through the port (moveOnToNextCluster),
+	// or clusters[0]->payload().data() for the note-start callers. clusters[0] IS the region chunk, so
+	// `clusterBase == clusters[0]->payload().data()` and this is byte-identical to the old direct read.
+	currentPlayPos = clusterBase + bytePosWithinNewCluster;
 
 	setupReassessmentLocation(guide, sample);
 }
@@ -325,7 +330,10 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 
 	int32_t bytePosWithinNewCluster = startPlaybackAtByte - clusterIndex * Cluster::size;
 
-	setupForPlayPosMovedIntoNewCluster(guide, sample, bytePosWithinNewCluster, sample->byteDepth);
+	// clusters[0] was just pinned by assignClusters() from the port's region; its payload IS the region
+	// base (region.payload_base == clusters[0]->payload().data()). SR1 Task 5.
+	setupForPlayPosMovedIntoNewCluster(guide, sample, reinterpret_cast<char*>(clusters[0]->payload().data()),
+	                                   bytePosWithinNewCluster, sample->byteDepth);
 
 	// No check has been made that currentPlayPos is not already later than the new reassessmentLocation.
 	// If caller isn't sure about this, call changeClustersIfNecessary().
@@ -360,26 +368,16 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 
 	// clusters[0] now sources its pinned payload base from the port's region (region.payload_base ==
 	// this chunk's payload().data()). Take an INDEPENDENT clusters[] lease on the same chunk -- the
-	// port holds its own -- so the still-direct moveOnToNextCluster / unassignAllReasons / steal_clusters
-	// lease arithmetic stays byte-for-byte identical this task (ref-counted leases, freed at zero).
+	// port holds its own -- so the still-direct clusters[] consumers / unassignAllReasons /
+	// steal_clusters lease arithmetic stay self-consistent (ref-counted leases, freed at zero).
 	clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
 	deluge::cluster::add_lease(clusters[0]);
 
-	// clusters[1..]: the look-ahead slots moveOnToNextCluster consumes when it crosses a boundary.
-	// Populate them exactly as the old per-slot loop did -- owning get_cluster leases, no loaded-check
-	// past slot 0, stopping at the final cluster -- so a boundary crossing still finds its prefetched
-	// neighbour resident. (The port also prefetches internally; these mirror it for the untouched
-	// consumer, and the two residencies reconcile at the next acquire / close.)
-	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
-	int32_t lookaheadIndex = clusterIndex;
-	for (int32_t l = 1; l < kNumClustersLoadedAhead; l++) {
-		if (lookaheadIndex == finalClusterIndex) {
-			break;
-		}
-		lookaheadIndex += guide->playDirection;
-		clusters[l] = sample->stream().get_cluster(lookaheadIndex, CLUSTER_ENQUEUE, priorityRating);
-	}
-
+	// SR1 Task 5: the region port now owns the look-ahead. acquire() above already prefetched the next
+	// cluster in `playDirection`, and moveOnToNextCluster advances through the port (not a clusters[]
+	// ring shift), so the old clusters[1..] prefetch loop is retired -- it was the redundant half of the
+	// Task 4 ~2x parallel-lease pinning. clusters[1..] stay null; the port holds the single prefetch
+	// lease, matching the pre-SR1 one-lease-per-neighbour residency.
 	return true;
 }
 
@@ -394,27 +392,30 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	int32_t oldClusterIndex = clusters[0]->cluster_index;
 
 	int32_t bytePosWithinOldCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
+
+	// Drop the exhausted current cluster's INDEPENDENT clusters[] lease. The region port holds its own
+	// lease on this same chunk; the acquire() below auto-releases the port's current as it advances, so
+	// this pairs the port's fused old-current release for the clusters[] mirror.
 	deluge::cluster::remove_reason(*clusters[0], "E035");
+	clusters[0] = nullptr;
 
-	for (int32_t l = 0; l < kNumClustersLoadedAhead - 1; l++) {
-		clusters[l] = clusters[l + 1];
-	}
+	// SR1 Task 5: the boundary crossing now advances through the region port. acquire() promotes the
+	// port's standing prefetch (which replaced the old clusters[1] look-ahead) to current and prefetches
+	// the following neighbour. A `false` return is NotReady -- the exact residency state (next chunk
+	// null, or present-but-not-yet-loaded) the old ring shift treated as the underrun drop, made by the
+	// port internally with the same null/!loaded decision. On the drop, mirror the old end-of-waveform
+	// path: no current cluster (clusters[0] stays null), currentPlayPos cleared, return false.
+	int32_t newClusterIndex = oldClusterIndex + guide->playDirection;
 
-	clusters[kNumClustersLoadedAhead - 1] = NULL;
-
-	// First things first - if there is no next Cluster or it's not loaded...
-	if (!clusters[0]) {
-		D_PRINTLN("reached end of waveform. last Cluster was:  %d", oldClusterIndex);
+	DelugeSampleRegion region;
+	if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(newClusterIndex), guide->playDirection,
+	                                  static_cast<uint32_t>(priorityRating), &region)) {
+		D_PRINTLN("late or reached end of waveform. last Cluster was:  %d", oldClusterIndex);
 		currentPlayPos = nullptr;
-		return false;
-	}
-
-	if (!clusters[0]->loaded) {
-		D_PRINTLN("late  %d  p  %d", clusters[0]->sample->filePath.c_str(), clusters[0]->cluster_index);
 
 #ifdef DELUGE_HOST
 		// Streaming-underrun harness, UNASSIGN-class signal: ordinary (non-cache, non-time-stretch)
-		// forward playback just crossed a Cluster boundary and the next Cluster isn't loaded -- the
+		// forward playback just crossed a Cluster boundary and the next Cluster isn't resident -- the
 		// SD loader hasn't kept up with real-time consumption. This is the common-case
 		// sustained-streaming underrun path, complementing `VoiceSample::stopReadingFromCache`'s
 		// sibling site (which only fires for repitch-cache playback): most voices never use that
@@ -422,42 +423,23 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 		// SD-latency-starved sustained streaming. The caller (`VoiceSample::render` ->
 		// `Voice::render`) treats this `false` return as an instant voice unassign (`goto
 		// instantUnassign`), the same severity as the cache-stop site, just reached from the far
-		// more common code path.
+		// more common code path. Fires on the port's NotReady (== the old null-or-!loaded drop).
 		deluge::harness::noteUnderrunUnassign();
 #endif
 		return false;
 	}
 
+	// Pin the newly-resident cluster in clusters[0] with its own INDEPENDENT lease (mirroring the port's
+	// current), so the still-direct clusters[] consumers / steal_clusters lease arithmetic stay
+	// self-consistent until they migrate off clusters[] in a later task.
+	clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
+	deluge::cluster::add_lease(clusters[0]);
+
 	// Remove the compensation we'd done on the play pos relating to the byte depth of samples
 	bytePosWithinOldCluster = bytePosWithinOldCluster + 4 - sample->byteDepth;
 
-	// And for the one at the far end, just grab the next one
-	StreamedChunk* oldLastCluster = clusters[kNumClustersLoadedAhead - 2];
-
-	if (oldLastCluster) {
-		int32_t prevClusterIndex = oldLastCluster->cluster_index;
-
-		int32_t newClusterIndex = prevClusterIndex + guide->playDirection;
-
-		// Check that there actually is a next Cluster. If not...
-		if (newClusterIndex * guide->playDirection
-		    > guide->getFinalClusterIndex(sample, shouldObeyMarkers()) * guide->playDirection) {
-			clusters[kNumClustersLoadedAhead - 1] = NULL;
-		}
-
-		// Or if there is...
-		else {
-
-			// Grab it. Boundary-crossing refill: one stream() hop, once per cluster of playback (we've
-			// just moved on to the next Cluster), NOT per sample.
-			clusters[kNumClustersLoadedAhead - 1] =
-			    sample->stream().get_cluster(newClusterIndex, CLUSTER_ENQUEUE, priorityRating);
-
-			// If that failed (because no free RAM), no damage gets done.
-		}
-	}
-
-	setupForPlayPosMovedIntoNewCluster(guide, sample, bytePosWithinOldCluster - Cluster::size * guide->playDirection,
+	setupForPlayPosMovedIntoNewCluster(guide, sample, reinterpret_cast<char*>(region.payload_base),
+	                                   bytePosWithinOldCluster - Cluster::size * guide->playDirection,
 	                                   sample->byteDepth);
 
 	return true;

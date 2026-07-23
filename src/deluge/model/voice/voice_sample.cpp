@@ -236,7 +236,10 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 		// If there's no second Cluster, or it's fully loaded... we're good to go!
 		if (!clusters[1] || clusters[1]->loaded) {
 goodToGo:
-			setupForPlayPosMovedIntoNewCluster(voiceSource, sample, bytesPosWithinCluster, sample->byteDepth);
+			// clusters[0] holds the just-copied newClusters[0]; its payload IS this region's base. SR1 Task 5.
+			setupForPlayPosMovedIntoNewCluster(voiceSource, sample,
+			                                   reinterpret_cast<char*>(clusters[0]->payload().data()),
+			                                   bytesPosWithinCluster, sample->byteDepth);
 
 			pendingSamplesLate = 0;
 

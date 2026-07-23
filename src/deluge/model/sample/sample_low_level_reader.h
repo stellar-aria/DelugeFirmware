@@ -50,8 +50,8 @@ public:
 	void fillInterpolationBufferRetrospectively(Sample* sample, int32_t bufferSize, int32_t startI,
 	                                            int32_t playDirection);
 	void jumpBackSamples(Sample* sample, int32_t numToJumpBack, int32_t playDirection);
-	void setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuide* guide, Sample* sample, int32_t bytePosWithinNewCluster,
-	                                        int32_t byteDepth);
+	void setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuide* guide, Sample* sample, char* clusterBase,
+	                                        int32_t bytePosWithinNewCluster, int32_t byteDepth);
 	bool setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample, int32_t byteOvershoot = 0,
 	                                bool justLooped = false, int32_t priorityRating = 1);
 	bool moveOnToNextCluster(SamplePlaybackGuide* guide, Sample* sample, int32_t priorityRating = 1);

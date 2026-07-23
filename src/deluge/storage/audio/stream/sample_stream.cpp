@@ -190,9 +190,9 @@ bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] in
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
 	{
-		// Read seam: SampleStream::make_read_source owns source selection (Stream for a loaded
-		// sample, Block for a still-being-written recording). See storage/audio/stream/
-		// sample_stream.h and design §6/§7.
+		// Read seam: SampleStream::make_read_source owns source selection (EfatfsReadSource for a
+		// loaded sample, RecordingReadSource for a still-being-written recording, reading via the
+		// recorder's write context). See storage/audio/stream/sample_stream.h and design §6/§7.
 		auto source = make_read_source();
 		auto readResult = source->read(static_cast<uint32_t>(clusterIndex),
 		                               std::span<std::byte>(reinterpret_cast<std::byte*>(fill.dest), bytesRequested));

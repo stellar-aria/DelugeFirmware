@@ -182,7 +182,7 @@ public:
 	/// @return The resident chunk, or `nullptr` if @p index is not currently resident.
 	[[nodiscard]] StreamedChunk* chunk_at(uint32_t index) const;
 
-	/// @brief Access the raw table entry for @p index (its sector address and waveform min/max cache).
+	/// @brief Access the raw table entry for @p index (its waveform min/max cache).
 	[[nodiscard]] SampleCluster& entry(uint32_t index);
 	/// @copydoc entry(uint32_t)
 	[[nodiscard]] const SampleCluster& entry(uint32_t index) const;

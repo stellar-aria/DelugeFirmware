@@ -1057,3 +1057,82 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
         "bytes after the patched header sector must be byte-identical to the originally written body"
     );
 }
+
+// --- R3 Task 5: alterFile in-place middle-cluster rewrite ---------------------------------
+
+/// R3 Task 5 (brief-verbatim): write a multi-cluster file, then rewrite a MIDDLE cluster IN
+/// PLACE via `write_at(middleIndex << mag, newSpan)` -- mirroring
+/// `SampleRecorder::alterFile`'s two positional-write sites, which rewrite already-recorded
+/// clusters at their own byte offset (`clusterIndex << Cluster::size_magnitude`) through a write
+/// context reopened (`DELUGE_STREAM_WRITE_APPEND` -- `open_context`, no truncation) at the top of
+/// the alteration and held open across every rewrite -- then flush, and read back via an
+/// INDEPENDENT C-FatFS read. Asserts the rewritten cluster holds the new content AND every
+/// surrounding cluster (both before and after it) is byte-identical to what was originally
+/// written -- an in-place rewrite must not disturb its neighbors, and the file's total size must
+/// not change (no truncation happened, unlike `alterFile`'s own end-of-alteration truncate,
+/// which is a separate, already-covered primitive -- `truncate_context`/`Stream::truncate`).
+#[test]
+fn efatfs_write_at_middle_cluster_rewrite_matches_cfatfs_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R3ALTER.BIN";
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the earlier R3 tests)
+    const NUM_CLUSTERS: u32 = 4;
+    const MIDDLE: u32 = 1; // neither the first nor the last cluster
+
+    // Write the original recording: NUM_CLUSTERS distinct-content clusters, no flush between
+    // (SampleRecorder::writeCluster's RT write loop), then flush+close -- the file as it exists
+    // right before alterFile is called.
+    let mut ctx = e.create_context(path, false); // WRITE_CREATE
+    let mut clusters: Vec<Vec<u8>> = Vec::new();
+    for c in 0..NUM_CLUSTERS {
+        let payload: Vec<u8> = (0..CB)
+            .map(|i| ((c as usize * 37 + i) & 0xff) as u8)
+            .collect();
+        let (nc, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
+        assert_eq!(w, CB, "original-recording write must write a whole cluster");
+        ctx = nc;
+        clusters.push(payload);
+    }
+    let _ctx = e.flush_context(&ctx);
+
+    // alterFile's own reopen: DELUGE_STREAM_WRITE_APPEND opens the existing file without
+    // truncating it (`efatfs_fs.rs`'s `stream_open` mode 3 -> `open_context`, same as READ) --
+    // this is the write context alterFile holds open for the whole in-place rewrite pass.
+    let mut alter_ctx = e.open_context(path);
+
+    // Rewrite ONLY the middle cluster, in place, at its own byte offset -- alterFile's mid-loop
+    // `Stream::write_at(currentWriteClusterIndex << Cluster::size_magnitude, span)`.
+    let new_middle: Vec<u8> = (0..CB).map(|i| (0xC3u8 ^ (i as u8)) & 0xff).collect();
+    let (nc, w) = e.write_at_via_context_noflush(&alter_ctx, MIDDLE * CB as u32, &new_middle);
+    assert_eq!(w, CB, "in-place rewrite must write a whole cluster");
+    alter_ctx = nc;
+
+    // Finalize: flush+close, same as alterFile's end-of-alteration `Stream::close` (no truncate
+    // in this test -- the rewrite didn't change the file's size).
+    let _alter_ctx = e.flush_context(&alter_ctx);
+
+    // Independent C-FatFS read: the rewritten cluster must hold the NEW content, and every other
+    // cluster must be untouched.
+    let got = CFatFs::mount().read_file(path);
+    assert_eq!(
+        got.len(),
+        NUM_CLUSTERS as usize * CB,
+        "in-place rewrite must not change the file's total size"
+    );
+    for c in 0..NUM_CLUSTERS {
+        let start = c as usize * CB;
+        let end = start + CB;
+        let want: &[u8] = if c == MIDDLE {
+            &new_middle
+        } else {
+            &clusters[c as usize]
+        };
+        assert_eq!(
+            &got[start..end],
+            want,
+            "cluster {c}'s content diverged from what it should hold after the in-place rewrite"
+        );
+    }
+}

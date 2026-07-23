@@ -7,6 +7,18 @@ implementation cycle; this doc is the sequence, the gates, and the dependencies.
 SP0–SP6 ladder) and `[[async-storage-end-architecture]]`. This roadmap is that ladder re-planned from the
 current mid-point, with the verification model settled.
 
+> **⟶ Superseding direction (Kate, 2026-07-23): the region boundary.**
+> `docs/superpowers/specs/2026-07-23-region-boundary-streaming-relocation-design.md` raises the app-facing
+> boundary **above sample streaming** and relocates the *act of streaming* (clusters, prefetch,
+> cache/eviction, async SD, FAT chain-cache, `convert`/`stitch`) **down into the Rust platform layer**
+> behind a high-level region port (`deluge_sample_source_*`). This **supersedes the streaming half** of
+> the rungs below: the sector-vs-handle dual C-ABI, the `deluge_streaming_efatfs_active()` selector, and
+> `StreamedChunk`-as-an-app-type all become Rust-internal. Consequently the remaining rungs **shrink to
+> the task-context path**: R3.5 (host passthrough) and R4 (delete C-FatFS) become plain path/handle work
+> with no streaming C-ABI to mirror, and R5 (fiber retirement) keeps only the task-context reason. The
+> region arc has its own SR1→SR3 ladder; execute it (or interleave) ahead of the task-context residual.
+> The rung descriptions below stand as the task-context plan; read them through this lens.
+
 ## 1. Where we are
 
 - **B6** (off-worker cold loads) and **B7** (efatfs SD_BUS bypass): **software-complete**, device runtime
@@ -45,7 +57,11 @@ an occasional confidence pass, not a gate between rungs. (Decision: Kate, 2026-0
 
 ## 3. The rungs
 
-### R0 — Harness enablement (the "obviate device gates" foundation) — buildable NOW
+### R0 — Harness enablement — ✅ DONE (2026-07-22)
+
+**Outcome:** R0a (byte-exact streaming differential) + Lens 2 (preemptive-TSan, 0 new races) gate the efatfs read path on host via an isolated shim reusing `efatfs_core`; device build byte-unchanged. **Margin = COMPOSED PROXY** (Lens 1 C-FatFS baseline + fs_differential efatfs overhead 1.03×/1.15× + on-device SP1 parity 3.83 vs 3.84 MB/s) — Lens 1's virtual clock mismodels efatfs single-sector reads (~64× more modeled reads → deterministic wedge; a HARNESS limitation, device showed parity). Fix b40fef579 (shim awaits locked_read_sectors, mirrors device) killed the original sync-block_on deadlock but exposed the deeper single-sector mismatch; chasing it further judged not worth it vs proxy+device parity (Kate). Lens-1-efatfs stays opt-in.
+
+### R0 (original design) — Harness enablement
 - Enable efatfs in `host_app` (it links the Rust BSP; `efatfs_fs.rs` is present — turn on the
   `efatfs_streaming` path in the host_app build).
 - Point **Lens 1** (margin) and **Lens 2** (TSan) at the efatfs read path.
@@ -55,7 +71,17 @@ an occasional confidence pass, not a gate between rungs. (Decision: Kate, 2026-0
   without hardware.
 - **No device gate of its own** (it's harness infrastructure). Independent of the B6/B7 device gate.
 
-### R1 — efatfs read-path migration (finishes SP-stream-read)
+### R1 — efatfs read-path migration (finishes SP-stream-read) — ✅ DONE (2026-07-22)
+
+**Outcome:** streaming sample read is now efatfs-only (sync `read_cluster_data` via new `deluge_efatfs_read_at` FFI + `EfatfsReadSource`; async `ProdOps` efatfs arm the only arm). C-FatFS streaming map (a) — `resolve_read_layout`/`StreamImpl::layout`/`deluge_stream_read_at`/`Stream::read_at`/`StreamReadSource`/`read_stream_`/the seeding loop — **deleted**; selector is `efatfs_handle_ != 0`; `efatfs_streaming` default-**on**; descriptor `.sector` removed (FFI layout guards updated lockstep). R1/R3 boundary held: `sdAddress`/`sd_address_at`/`BlockReadSource`/recorder/`Stream::write_at`+`sector_of` preserved (`sector_of` rewritten to walk the FAT on demand). Regression fix: `cardReinserted()` tolerates a missing (0) sdAddress baseline for efatfs samples.
+
+**KEY BASIS (from the final whole-branch review):** the full C-FatFS deletion is valid **only because the legacy C/C++ RZA1 BSP is now committed for retirement** (Kate, 2026-07-22; see `[[legacy-bsp-retirement-committed]]`) — efatfs is Rust-BSP-only (`deluge-bsp-rust`), and `dbt build Debug` links the RZA1 BSP which has **no** efatfs. So on RZA1 the streaming read is **retired, not migrated**: `deluge_efatfs_open` is the weak no-op → `open_read_stream` fails → streamed samples don't load. This is accepted (RZA1 is being retired); it still LINKS (silent runtime break, not a compile break). Full legacy-BSP retirement is a separate, later, hardware-gated milestone. The verification target for R1 is the **Rust BSP** host harnesses, not RZA1 runtime.
+
+**Two final-review findings, both resolved:** (C1) the RZA1 breakage above — resolved by the BSP-retirement commitment (deletion kept). (C2) efatfs last-cluster sector-rounded read extended past logical EOF and failed (`efatfs_core::fill` returned false on `Ok(0)`) → **fixed** to zero-pad the tail past EOF and return success (matches the retired raw-sector read's tolerance; the past-`audioDataEnd` bytes are unused cluster padding), commit `bfd24e5143`, with a fail→pass over-EOF differential test.
+
+**Gates (Rust BSP / host):** fs_differential **10/10** byte-exact (incl. the new over-EOF test) + Lens 1 proxy (1.03×/1.15×, R0 band) + Rust-BSP/host + `dbt build Debug` link + Lens 2 `scenario=PASSED open_findings=0`; UNCATALOGUED TSan findings full-stack-attributed **0/21 to R1's read surface** (pre-existing TLSF-allocator + playback-transport classes), cataloged with provenance. Base `b40fef579` → head `7e68c8632` (T1 `f0fdb2ddc` · T2 `b5c89191f` · T3 `facd74755`+`818a34192` · T4 `865966036`+`99bdf8a0a` · catalog `5ba74a630` · C2 `bfd24e5143` · comments `7e68c8632`).
+
+### R1 (original design) — efatfs read-path migration
 - Route `read_cluster_data` through efatfs (`block_on_fiber` — safe now that the loads are on-worker,
   B6). Retire `resolve_read_layout` + the `sdAddress` map (the "nothing above the port knows about
   sectors/clusters" exit criterion). Flip `efatfs_streaming` default-on.
@@ -64,20 +90,61 @@ an occasional confidence pass, not a gate between rungs. (Decision: Kate, 2026-0
 - **Depends on:** R0 (for the gate). Does **not** need the B6/B7 device gate to *build* — but the default
   flip should not ship to hardware until B6/B7 are device-confirmed (they underpin it).
 
-### R2 — SP-fileio: re-back `file_io.h` / `stream_io.h` onto efatfs
+### R2 — SP-fileio: re-back `file_io.h` onto efatfs — ✅ DONE (2026-07-22)
+
+**Outcome:** the `deluge::io::File`/`Directory` port routes task-context file I/O + directory
+enumeration to efatfs when active (runtime **selector, not replace** — C-FatFS `file_io.cpp` kept,
+deleted at R4). New `efatfs_core` primitives (write/read_exact-EOF-honest/size/truncate/create/unlink/
+rename/mkdir/set_time/readdir); 16 file/dir C-ABI mirrored device+host, `block_on_fiber`-bridged;
+`File::read`→EOF-honest `read_exact`. The **browser + `fileExists` migrated onto the port**, files
+identified by **PATH** (the UI-held locator was rejected mid-flight — `[[ui-file-identity-paths]]`; its
+machinery was removed). **Coherency (§3.4) intentionally NOT built** — R2 is internally coherent; the
+only cross-FS gap is the recorder, which R3 dissolves. Full whole-branch review: Ready-to-merge, 0
+Critical/Important. **Gates:** fs_differential 17/17 (write/path-ops/readdir set-equivalence vs C-FatFS)
++ whole host suite + Lens 2 `scenario=PASSED UNCATALOGUED=0` (no new races) + `deluge_app` staticlib
+links. efatfs is now the live default **save** path on the Rust BSP (covered by `closeAfterWriting`'s
+reopen-and-verify). Device runtime confirmation on the Rust BSP owed (browser render, save/load on real
+SD). Base `1896f1bbc` → head `87cefd1aa`.
+
+### R2 (original design)
 - Flip task-context byte-I/O + directory enumeration from C FatFS to efatfs, under the port boundary.
   C++ above the port unchanged. The fiber persists as the blocking context (retired later, at R4).
 - **Gate:** `fs_differential` + Lens 2 (task-context ops under preemptive audio).
 - **Depends on:** R1 (streaming read already off C FatFS).
 
-### R3 — SP-recorder: recorder read + write/finalize onto efatfs
-- Contiguous-preallocation write fast path; async recorder-writeback; **power-loss safety**.
-- **Gate:** `fs_differential` + Lens 2 + the **power-loss fault-injection harness** (new). This rung's
-  device confidence pass (real pull-the-plug) is worth doing even under software-first, because power-loss
-  is the highest-stakes device-only behavior — but the *gate* is the fault-injection harness.
+### R3 — SP-recorder: recorder onto efatfs — ✅ DONE (2026-07-23), migrate-only
+
+**Outcome:** the sample recorder — the last C-FatFS consumer — is fully on efatfs (on the efatfs path).
+Its write path holds a **persistent efatfs write context** across a recording (write-many-no-flush,
+flush-at-finalize; crate `File::detach()` + name-bytes reattach for dirty contexts); the finalize
+header-patch and `alterFile` in-place rewrites became efatfs **positional writes**; the mid-write
+read-back (`RecordingReadSource`) reads through the recorder's own write context (in-memory size = the
+written extent while the on-disk dir entry is stale). This **retired `sdAddress`/`sd_address_at`/
+`sector_of`/`BlockReadSource` + the `fileSystem.database/csize` geometry coupling** and **closed the R2
+dual-FS window** (everything is now one efatfs mount). Full whole-branch review: Ready-to-merge; one
+Important corruption window (abort-path deferred flush) found + fixed.
+
+**Scope correction (Kate, 2026-07-23):** the roadmap's "contiguous-preallocation fast path" was obsolete
+(the recorder never used `f_expand`); "power-loss safety + fault-injection harness" is a NEW capability
+the recorder never had (no periodic sync today) — both **deferred to their own rungs**. R3 is a
+behavior-preserving **migrate-only** rung. **Gate:** `fs_differential` 21/21 + whole host suite + Lens 2
+5/5 `scenario=PASSED recorder_writes>0 UNCATALOGUED=0` + `deluge_app` staticlib links. No power-loss
+harness (deferred). Base `87cefd1aa` → head `ec300d4c9`.
+
+**Deferred to R4 / follow-up:** C-FatFS `deluge_stream_*/file_*/dir_*` backings (dead on Rust BSP, R4
+deletes); the recorder abort `f_unlink`/`invalidate_cache` (still C-FatFS, R4); the pre-existing latent
+SD-card-reinsert "samples unloadable under efatfs" bug (needs an efatfs read-mode sector-resolution
+mechanism); contiguous preallocation + power-loss safety (own rungs).
+
+- (original) Contiguous-preallocation write fast path; async recorder-writeback; **power-loss safety**.
+- **Gate:** `fs_differential` + Lens 2 + the **power-loss fault-injection harness** (new; deferred — R3 is migrate-only).
 - **Depends on:** R2.
 
 ### R4 — SP-delete: delete C FatFS, retire the fiber
+> Reframed by the region boundary (see the banner at the top): the streaming C-ABI it once had to handle
+> is gone (Rust-internal behind the region port), so R4 is now **pure task-context** deletion. Depends on
+> R3.5 (`2026-07-23-r3.5-host-passthrough-design.md`) and reshaped by
+> `2026-07-23-r4-delete-cfatfs-design.md`.
 - Once nothing calls `ff.c`: delete chan-fs, retire the worker fiber, move task-context storage onto the
   plain blocking worker context.
 - **Gate:** `fs_differential` (now efatfs-only, regression net) + Lens 2 + **P1 hardware-proven**.

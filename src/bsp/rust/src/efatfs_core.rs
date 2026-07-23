@@ -312,6 +312,90 @@ where
     Some((newctx, written))
 }
 
+/// R3 Task 1: reattach `ctx`, seek to absolute `byte_offset`, write all of
+/// `src` (`write_context`'s loop), then `File::detach()` instead of
+/// `close()` — the in-memory size advances (`update_dir_entry_after_write`,
+/// same as `write_context`) but the on-disk directory entry is NOT touched.
+/// Pairs with [`flush_context`]: a long-lived buffered writer (the sample
+/// recorder) calls this once per chunk and only flushes once, at finalize,
+/// instead of paying a dir-entry flush on every write. `None` on any FS
+/// error (reattach/seek/write).
+pub async fn write_context_noflush<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+    byte_offset: u32,
+    src: &[u8],
+) -> Option<(FileContext, usize)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
+    let mut written = 0;
+    while written < src.len() {
+        match f.write(&src[written..]).await {
+            Ok(0) => break,
+            Ok(n) => written += n,
+            Err(_) => return None,
+        }
+    }
+    Some((f.detach(), written))
+}
+
+/// R3 Task 1: reattach `ctx` and `File::close()` it — flushing the
+/// accumulated in-memory size/mtime edit built up by one or more prior
+/// [`write_context_noflush`] calls to the on-disk directory entry. The
+/// finalize half of the persistent-write-handle pair. `None` on any FS error
+/// (reattach/flush).
+pub async fn flush_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+) -> Option<FileContext>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let f = File::new_from_context(ctx, fs).await.ok()?;
+    f.close().await.ok()
+}
+
+/// R3 Task 1: reattach `ctx`, seek to absolute `byte_offset`, and read —
+/// bounded by the context's IN-MEMORY size (`File::size`'s
+/// `DirEntryEditor.size`, which [`write_context_noflush`] advances even
+/// though it has not been flushed to disk), so this correctly reads back
+/// data written earlier in the same unflushed session even though an
+/// independent open-by-path reader would still see the stale (pre-write)
+/// on-disk size. EOF-honest short count, same loop as
+/// [`read_context_exact`]. Detaches (no flush) on the way out, preserving
+/// the dirty write state for a later [`flush_context`]. `None` on any FS
+/// error (reattach/seek/read).
+pub async fn read_at_via_context<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    ctx: FileContext,
+    byte_offset: u32,
+    dst: &mut [u8],
+) -> Option<(FileContext, usize)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let mut f = File::new_from_context(ctx, fs).await.ok()?;
+    f.seek(SeekFrom::Start(u64::from(byte_offset))).await.ok()?;
+    let mut filled = 0;
+    while filled < dst.len() {
+        match f.read(&mut dst[filled..]).await {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    Some((f.detach(), filled))
+}
+
 /// File length in bytes, via `Seek(End(0))` — `File::size` is private to
 /// embedded-fatfs's own `file` module, so the portable way to read a file's
 /// length from outside the crate is the same trick any `Seek` consumer uses:

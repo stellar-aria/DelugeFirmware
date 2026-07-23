@@ -197,6 +197,68 @@ impl EFatFs {
         })
     }
 
+    /// R3 Task 1 host analog of `efatfs_core::write_context_noflush`:
+    /// reattach, seek to absolute `offset`, loop `Write::write` over `src`,
+    /// then `File::detach()` instead of `close()` — the in-memory size
+    /// advances but the on-disk directory entry is NOT flushed. Pairs with
+    /// [`flush_context`](Self::flush_context). Inlined (not
+    /// `efatfs_core`-delegating), same rationale as
+    /// [`write_at_context`](Self::write_at_context).
+    pub fn write_at_via_context_noflush(&self, ctx: &FileContext, offset: u32, src: &[u8]) -> (FileContext, usize) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            let mut written = 0;
+            while written < src.len() {
+                match f.write(&src[written..]).await.expect("write") {
+                    0 => break,
+                    n => written += n,
+                }
+            }
+            (f.detach(), written)
+        })
+    }
+
+    /// R3 Task 1 host analog of `efatfs_core::read_at_via_context`:
+    /// reattach, seek to absolute `offset`, read bounded by the context's
+    /// IN-MEMORY size (so this sees data from a prior
+    /// [`write_at_via_context_noflush`](Self::write_at_via_context_noflush)
+    /// even before it's been flushed to disk), EOF-honest short count, then
+    /// `File::detach()` (no flush) — preserving the dirty write state for a
+    /// later [`flush_context`](Self::flush_context).
+    pub fn read_at_via_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, usize) {
+        block_on(async {
+            let mut f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            let mut filled = 0;
+            while filled < dst.len() {
+                match f.read(&mut dst[filled..]).await.expect("read") {
+                    0 => break,
+                    n => filled += n,
+                }
+            }
+            (f.detach(), filled)
+        })
+    }
+
+    /// R3 Task 1 host analog of `efatfs_core::flush_context`: reattach `ctx`
+    /// and `File::close()` it, flushing the accumulated in-memory size/mtime
+    /// edit (from one or more prior
+    /// [`write_at_via_context_noflush`](Self::write_at_via_context_noflush)
+    /// calls) to the on-disk directory entry.
+    pub fn flush_context(&self, ctx: &FileContext) -> FileContext {
+        block_on(async {
+            let f = File::new_from_context(ctx.clone(), &self.fs)
+                .await
+                .expect("new_from_context");
+            f.close().await.expect("close")
+        })
+    }
+
     /// Host analog of `efatfs_core::read_context_exact`: EOF-honest — returns
     /// the true accumulated byte count on the first short read, NO
     /// zero-padding (unlike `read_at_context`/`fill`'s streaming-read

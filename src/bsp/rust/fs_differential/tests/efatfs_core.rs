@@ -825,6 +825,45 @@ fn efatfs_readdir_matches_cfatfs_set_fat32() {
     );
 }
 
+/// R3 Task 1: the load-bearing proof for the persistent-write-handle
+/// mechanism the sample recorder needs -- write N clusters through the
+/// no-flush primitives (accumulating ONLY the in-memory size), confirm an
+/// independent C-FatFS open-by-path still sees the stale (pre-write) on-disk
+/// size, confirm a read back THROUGH the write context sees the true
+/// in-memory extent (byte-exact), then flush once and confirm the
+/// independent C-FatFS reader now sees the full size.
+#[test]
+fn efatfs_noflush_write_then_read_via_context_before_flush_fat32() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _disk = RamDisk::load(&fat32());
+    let e = EFatFs::mount();
+    let path = "/R3REC.BIN";
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry)
+    // Create empty, get a write context.
+    let ctx = e.create_context(path, false);
+    // Write 3 clusters with DISTINCT content, NO flush between.
+    let mut ctx = ctx;
+    let mut clusters: Vec<Vec<u8>> = vec![];
+    for c in 0..3u32 {
+        let payload: Vec<u8> = (0..CB).map(|i| ((c as usize + i) & 0xff) as u8).collect();
+        let (nc, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
+        assert_eq!(w, CB);
+        ctx = nc;
+        clusters.push(payload);
+    }
+    // On-disk dir size is STILL STALE (no flush) — an independent open-by-path read sees ~0 bytes.
+    assert_eq!(CFatFs::mount().read_file(path).len(), 0, "precondition: dir size not yet flushed");
+    // But reading cluster 0 back THROUGH THE WRITE CONTEXT succeeds (in-memory size = written extent).
+    let mut buf = vec![0u8; CB];
+    let (nc, n) = e.read_at_via_context(&ctx, 0, &mut buf);
+    ctx = nc;
+    assert_eq!(n, CB);
+    assert_eq!(&buf[..], &clusters[0][..], "mid-write read-back diverged");
+    // Finalize flush persists the size; now an independent reader sees all 3 clusters.
+    let _ctx = e.flush_context(&ctx);
+    assert_eq!(CFatFs::mount().read_file(path).len(), 3 * CB, "flush must persist the full size");
+}
+
 /// R2 Task 3: the REAL `efatfs_core::readdir_open`/`readdir_next` (not the
 /// `EFatFs`/`CFatFs` differential wrappers above) walked directly, matching
 /// C-FatFS's listing as a set. (R2 Task 5a: this used to also round-trip the

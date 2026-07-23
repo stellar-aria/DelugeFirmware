@@ -509,6 +509,14 @@ impl DirEntryEditor {
         self.dirty
     }
 
+    /// Set the dirty flag directly. Used by [`crate::file::File::detach`] to
+    /// silence the local `File`'s `Drop` dirty-file warning/panic when the
+    /// dirtiness is intentionally being carried forward in a returned
+    /// [`crate::file::FileContext`] instead of flushed here.
+    pub(crate) fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
     pub(crate) fn set_first_cluster(&mut self, first_cluster: Option<u32>, fat_type: FatType) {
         if first_cluster != self.data.first_cluster(fat_type) {
             self.data.set_first_cluster(first_cluster, fat_type);

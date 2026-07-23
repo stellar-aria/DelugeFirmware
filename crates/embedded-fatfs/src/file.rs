@@ -73,18 +73,32 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
     /// **WARNING**: Two or more concurrent write accesses to the same file
     /// will corrupt the filesystem. This is a caller invariant — the library
     /// does not track open files.
+    ///
+    /// The on-disk staleness check is skipped when `context.entry` is
+    /// already dirty (`DirEntryEditor::dirty()`). A dirty entry only reaches
+    /// here via [`File::detach`] (`close()`'s only other public exit clears
+    /// dirty by flushing first), which is how a long-lived buffered writer
+    /// (the sample recorder) accumulates several no-flush writes before a
+    /// single finalize flush — the in-memory size/mtime legitimately diverges
+    /// from the still-stale on-disk bytes in that window, and comparing them
+    /// would reject every one of the writer's own reattaches. The check still
+    /// runs (and still guards against concurrent external modification) for
+    /// every other, non-dirty caller — the vast majority of `new_from_context`
+    /// callers, whose contexts always came from a flushing `close()`.
     pub async fn new_from_context(context: FileContext, fs: &'a FileSystem<IO, TP, OCC>) -> Result<Self, Error<IO::Error>> {
         let editor = context.entry.as_ref().ok_or(Error::InvalidInput)?;
 
-        let mut on_disk = [0u8; 32];
-        {
-            let mut disk = fs.disk.borrow_mut();
-            disk.seek(SeekFrom::Start(editor.pos())).await?;
-            disk.read_exact(&mut on_disk).await?;
-        }
+        if !editor.dirty() {
+            let mut on_disk = [0u8; 32];
+            {
+                let mut disk = fs.disk.borrow_mut();
+                disk.seek(SeekFrom::Start(editor.pos())).await?;
+                disk.read_exact(&mut on_disk).await?;
+            }
 
-        if editor.inner().to_bytes() != on_disk {
-            return Err(Error::InvalidInput);
+            if editor.inner().to_bytes() != on_disk {
+                return Err(Error::InvalidInput);
+            }
         }
 
         Ok(File { context, fs })
@@ -291,6 +305,27 @@ impl<IO: ReadWriteSeek, TP: TimeProvider, OCC> File<'_, IO, TP, OCC> {
             offset: self.context.offset,
             entry: self.context.entry.clone(),
         })
+    }
+
+    /// Detach the file into a [`FileContext`] WITHOUT flushing the dir entry.
+    ///
+    /// Unlike [`close`], this does not persist the (possibly dirty) in-memory
+    /// size/mtime edit to disk — the returned context carries it for a later
+    /// reattach+flush. Used by a long-lived buffered writer (the sample
+    /// recorder) that flushes only once at finalize. Clears the local file's
+    /// dirty flag before drop so `Drop`'s dirty-file warning/panic does not fire
+    /// (the dirtiness is intentionally carried in the returned context).
+    pub fn detach(mut self) -> FileContext {
+        let ctx = FileContext {
+            first_cluster: self.context.first_cluster,
+            current_cluster: self.context.current_cluster,
+            offset: self.context.offset,
+            entry: self.context.entry.clone(),
+        };
+        if let Some(ref mut e) = self.context.entry {
+            e.set_dirty(false); // silence Drop; the returned ctx keeps the dirty edit
+        }
+        ctx
     }
 }
 

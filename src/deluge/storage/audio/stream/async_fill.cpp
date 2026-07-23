@@ -17,7 +17,8 @@
 
 #include "storage/audio/stream/async_fill.h"
 
-#include "libdeluge/file_io.h" // R2 Task 4: deluge_efatfs_file_*/_dir_* weak stubs
+#include "libdeluge/file_io.h"   // R2 Task 4: deluge_efatfs_file_*/_dir_* weak stubs
+#include "libdeluge/stream_io.h" // R3 Task 2: deluge_efatfs_stream_* weak stubs
 
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
@@ -294,6 +295,44 @@ __attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t
                                                   uint8_t /*day*/, uint8_t /*hour*/, uint8_t /*minute*/,
                                                   uint8_t /*second*/) {
 	return false;
+}
+
+// Weak fallbacks for R3 Task 2's persistent stream-write efatfs C-ABI
+// (`include/libdeluge/stream_io.h`). The Rust Embassy BSP provides the real definitions
+// (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it links this crate with the
+// `efatfs_streaming` feature; every other BSP/config resolves these instead. `deluge::io::Stream`
+// (stream.cpp) only ever calls these when `deluge_streaming_efatfs_active()` is true, so a BSP
+// without the real symbols never reaches them at runtime -- these exist purely so the link
+// succeeds.
+__attribute__((weak)) bool deluge_efatfs_stream_open(const char* /*path*/, uint8_t /*mode*/, uint32_t* /*out_handle*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_write_at(uint32_t /*handle*/, uint32_t /*byte_offset*/,
+                                                         const void* /*src*/, uint32_t /*count*/,
+                                                         uint32_t* /*out_written*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_read_at_via(uint32_t /*handle*/, uint32_t /*byte_offset*/,
+                                                            void* /*dst*/, uint32_t /*count*/, uint32_t* /*out_read*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_flush(uint32_t /*handle*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_truncate(uint32_t /*handle*/, uint32_t /*new_len*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_size(uint32_t /*handle*/, uint32_t* /*out_size*/) {
+	return false;
+}
+
+__attribute__((weak)) bool deluge_efatfs_stream_close(uint32_t /*handle*/) {
+	return false; // No stream-write context table on this BSP/config.
 }
 
 } // extern "C"

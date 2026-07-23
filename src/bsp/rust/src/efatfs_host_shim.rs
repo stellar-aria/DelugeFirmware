@@ -849,3 +849,270 @@ pub extern "C" fn deluge_efatfs_set_time(
     .flatten()
     .is_some()
 }
+
+// --- Persistent stream-write handle table (R3 Task 2) -----------------------
+//
+// Host sibling of `efatfs_fs.rs`'s persistent stream-write table/bridge -- same rationale (a
+// single `FileContext` held across an entire recording, advanced via `write_context_noflush` and
+// only persisted to the on-disk directory entry on flush/close) and the same `on_fiber`-gated
+// `block_on_fiber`/`block_on` dispatch every function in this module already uses. See that
+// file's doc comments for the design; comments here focus on host-specific differences only.
+
+static STREAM_WRITE_CTX: Mutex<CriticalSectionRawMutex, HandleTable> =
+    Mutex::new(HandleTable::new());
+
+/// `DelugeStreamMode` mode selector matching `stream_io.h`'s C enum's implicit declaration-order
+/// values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW, 3 = WRITE_APPEND.
+async fn stream_open(path: &str, mode: u8) -> Option<u32> {
+    let ctx = with_fs(async |fs| match mode {
+        0 => efatfs_core::open_context(fs, path).await,
+        1 => efatfs_core::create_context(fs, path, false).await,
+        2 => efatfs_core::create_context(fs, path, true).await,
+        3 => efatfs_core::open_context(fs, path).await, // append: open existing, no truncation
+        _ => None,
+    })
+    .await??;
+    STREAM_WRITE_CTX.lock().await.insert(ctx)
+}
+
+/// Write `src` at absolute `byte_offset`, advancing the handle's persisted context WITHOUT
+/// flushing the size/mtime edit to disk (`efatfs_core::write_context_noflush`). Returns the true
+/// byte count written, or `None` on a bad handle or FS error.
+async fn stream_write_at(handle: u32, byte_offset: u32, src: &[u8]) -> Option<usize> {
+    let (generation, ctx) = STREAM_WRITE_CTX.lock().await.checkout(handle)?;
+    let (newctx, n) =
+        with_fs(async |fs| efatfs_core::write_context_noflush(fs, ctx, byte_offset, src).await)
+            .await??;
+    STREAM_WRITE_CTX
+        .lock()
+        .await
+        .commit(handle, generation, newctx);
+    Some(n)
+}
+
+/// EOF-honest read at absolute `byte_offset`, bounded by the handle's IN-MEMORY size
+/// (`efatfs_core::read_at_via_context`) -- can read back data written earlier in the same
+/// unflushed session. Returns the true byte count read, or `None` on a bad handle or FS error.
+async fn stream_read_at_via(handle: u32, byte_offset: u32, dst: &mut [u8]) -> Option<usize> {
+    let (generation, ctx) = STREAM_WRITE_CTX.lock().await.checkout(handle)?;
+    let (newctx, n) =
+        with_fs(async |fs| efatfs_core::read_at_via_context(fs, ctx, byte_offset, dst).await)
+            .await??;
+    STREAM_WRITE_CTX
+        .lock()
+        .await
+        .commit(handle, generation, newctx);
+    Some(n)
+}
+
+/// Persist the handle's accumulated in-memory size/mtime edit to the on-disk directory entry
+/// (`efatfs_core::flush_context`). Leaves the slot occupied -- callers may keep writing after a
+/// flush (e.g. a periodic mid-recording flush).
+async fn stream_flush(handle: u32) -> bool {
+    let Some((generation, ctx)) = STREAM_WRITE_CTX.lock().await.checkout(handle) else {
+        return false;
+    };
+    let result = with_fs(async |fs| efatfs_core::flush_context(fs, ctx).await).await;
+    match result {
+        Some(Some(newctx)) => {
+            STREAM_WRITE_CTX
+                .lock()
+                .await
+                .commit(handle, generation, newctx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Truncate the file behind `handle` to `new_len` bytes.
+async fn stream_truncate(handle: u32, new_len: u32) -> bool {
+    let Some((generation, ctx)) = STREAM_WRITE_CTX.lock().await.checkout(handle) else {
+        return false;
+    };
+    let result = with_fs(async |fs| efatfs_core::truncate_context(fs, ctx, new_len).await).await;
+    match result {
+        Some(Some((newctx, ()))) => {
+            STREAM_WRITE_CTX
+                .lock()
+                .await
+                .commit(handle, generation, newctx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// File length in bytes.
+async fn stream_size(handle: u32) -> Option<u32> {
+    let (generation, ctx) = STREAM_WRITE_CTX.lock().await.checkout(handle)?;
+    let (newctx, size) = with_fs(async |fs| efatfs_core::size_context(fs, ctx).await).await??;
+    STREAM_WRITE_CTX
+        .lock()
+        .await
+        .commit(handle, generation, newctx);
+    Some(size)
+}
+
+/// Flush (see [`stream_flush`]) then free `handle`'s slot. Returns whether the flush succeeded;
+/// the slot is freed either way.
+async fn stream_close(handle: u32) -> bool {
+    let flushed = stream_flush(handle).await;
+    STREAM_WRITE_CTX.lock().await.remove(handle);
+    flushed
+}
+
+// --- Persistent stream-write FFI bridge (R3 Task 2) -------------------------
+//
+// Same `on_fiber`-gated `block_on_fiber`/`block_on` dispatch as [`deluge_efatfs_open`] above. See
+// `include/libdeluge/stream_io.h` for the C-side contract of every function below.
+
+/// C-ABI: open a persistent stream-write handle. `mode` matches `DelugeStreamMode`'s
+/// declaration-order values (0=READ, 1=WRITE_CREATE, 2=WRITE_CREATE_NEW, 3=WRITE_APPEND).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_open(
+    path: *const c_char,
+    mode: u8,
+    out_handle: *mut u32,
+) -> bool {
+    if path.is_null() || out_handle.is_null() {
+        return false;
+    }
+    // SAFETY: `path` is a NUL-terminated C string valid for the duration of this call.
+    let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let opened = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_open(path, mode))
+    } else {
+        embassy_futures::block_on(stream_open(path, mode))
+    };
+    match opened {
+        Some(h) => {
+            // SAFETY: `out_handle` is non-null (checked above), owned by the caller.
+            unsafe {
+                *out_handle = h;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: write at absolute `byte_offset` (no flush -- see [`stream_write_at`]). `*out_written` is
+/// the true byte count written.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_write_at(
+    handle: u32,
+    byte_offset: u32,
+    src: *const u8,
+    count: u32,
+    out_written: *mut u32,
+) -> bool {
+    if src.is_null() || out_written.is_null() {
+        return false;
+    }
+    // SAFETY: `src` points at `count` readable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts(src, count as usize) };
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_write_at(handle, byte_offset, buf))
+    } else {
+        embassy_futures::block_on(stream_write_at(handle, byte_offset, buf))
+    };
+    match result {
+        Some(n) => {
+            // SAFETY: `out_written` is non-null (checked above).
+            unsafe {
+                *out_written = n as u32;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: EOF-honest read at absolute `byte_offset` (see [`stream_read_at_via`]). `*out_read` is
+/// the true byte count read, `<= count`.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_read_at_via(
+    handle: u32,
+    byte_offset: u32,
+    dst: *mut u8,
+    count: u32,
+    out_read: *mut u32,
+) -> bool {
+    if dst.is_null() || out_read.is_null() {
+        return false;
+    }
+    // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_read_at_via(handle, byte_offset, buf))
+    } else {
+        embassy_futures::block_on(stream_read_at_via(handle, byte_offset, buf))
+    };
+    match result {
+        Some(n) => {
+            // SAFETY: `out_read` is non-null (checked above).
+            unsafe {
+                *out_read = n as u32;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: persist the handle's accumulated size/mtime edit to disk.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_flush(handle: u32) -> bool {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_flush(handle))
+    } else {
+        embassy_futures::block_on(stream_flush(handle))
+    }
+}
+
+/// C-ABI: truncate to `new_len` bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_truncate(handle: u32, new_len: u32) -> bool {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_truncate(handle, new_len))
+    } else {
+        embassy_futures::block_on(stream_truncate(handle, new_len))
+    }
+}
+
+/// C-ABI: total size in bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_size(handle: u32, out_size: *mut u32) -> bool {
+    if out_size.is_null() {
+        return false;
+    }
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_size(handle))
+    } else {
+        embassy_futures::block_on(stream_size(handle))
+    };
+    match result {
+        Some(sz) => {
+            // SAFETY: `out_size` is non-null (checked above).
+            unsafe {
+                *out_size = sz;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: flush and close a persistent stream-write handle, freeing its slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stream_close(handle: u32) -> bool {
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(stream_close(handle))
+    } else {
+        embassy_futures::block_on(stream_close(handle))
+    }
+}

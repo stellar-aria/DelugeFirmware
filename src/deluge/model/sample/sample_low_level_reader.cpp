@@ -188,6 +188,20 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 
 	int32_t currentClusterIndex = clusters[0]->cluster_index;
 
+	// SR1 Task 6: the interpolation window's base pointer -- the reassessmentLocation trailing/front slack
+	// reach and the clusterStartLocation look-behind floor below -- sources from the region port's
+	// region_.payload_base, retained at the acquire (assignClusters / moveOnToNextCluster) that just
+	// pinned clusters[0]. By the port contract this IS clusters[0]->payload().data() (the same
+	// StreamedChunk payload whose >=4-byte front slack and >=7-byte trailing slack were stitched at fill),
+	// so every offset computed off it -- and thus the interpolation reads into that slack in both play
+	// directions -- is byte-for-byte identical to the old direct read.
+	char* regionBase = reinterpret_cast<char*>(region_.payload_base);
+#if ALPHA_OR_BETA_VERSION
+	if (regionBase != reinterpret_cast<char*>(clusters[0]->payload().data())) {
+		FREEZE_WITH_ERROR("i023");
+	}
+#endif
+
 	int32_t endPlaybackAtByte;
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers(), &endPlaybackAtByte);
 
@@ -206,7 +220,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 		}
 
-		reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + bytePosWithinClusterToStopAt;
+		reassessmentLocation = regionBase + bytePosWithinClusterToStopAt;
 		reassessmentAction = REASSESSMENT_ACTION_STOP_OR_LOOP;
 	}
 
@@ -231,7 +245,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 				FREEZE_WITH_ERROR("E163");
 			}
 #endif
-			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
+			reassessmentLocation = regionBase + endPosWithinCurrentCluster;
 		}
 
 		// Playing backwards
@@ -246,7 +260,7 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 			}
 
 			int32_t endPosWithinCurrentCluster = -excess;
-			reassessmentLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + endPosWithinCurrentCluster;
+			reassessmentLocation = regionBase + endPosWithinCurrentCluster;
 		}
 	}
 
@@ -255,11 +269,10 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	if (guide->playDirection == 1) {
 		int32_t firstClusterWithData = sample->getFirstClusterIndexWithAudioData();
 		if (currentClusterIndex == firstClusterWithData) {
-			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data())
-			                       + (sample->audioDataStartPosBytes & (Cluster::size - 1));
+			clusterStartLocation = regionBase + (sample->audioDataStartPosBytes & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data());
+			clusterStartLocation = regionBase;
 		}
 	}
 
@@ -272,11 +285,10 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 		int32_t highestClusterIndex = audioDataStopPos >> Cluster::size_magnitude;
 
 		if (currentClusterIndex == highestClusterIndex) {
-			clusterStartLocation =
-			    reinterpret_cast<char*>(clusters[0]->payload().data()) + ((audioDataStopPos - 1) & (Cluster::size - 1));
+			clusterStartLocation = regionBase + ((audioDataStopPos - 1) & (Cluster::size - 1));
 		}
 		else {
-			clusterStartLocation = reinterpret_cast<char*>(clusters[0]->payload().data()) + (Cluster::size - 1);
+			clusterStartLocation = regionBase + (Cluster::size - 1);
 		}
 	}
 
@@ -373,6 +385,11 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
 	deluge::cluster::add_lease(clusters[0]);
 
+	// SR1 Task 6: retain the acquired region so the interpolation window's base pointer
+	// (clusterStartLocation / reassessmentLocation, computed in setupReassessmentLocation) sources from
+	// region.payload_base rather than reaching through the clusters[0] mirror.
+	region_ = region;
+
 	// SR1 Task 5: the region port now owns the look-ahead. acquire() above already prefetched the next
 	// cluster in `playDirection`, and moveOnToNextCluster advances through the port (not a clusters[]
 	// ring shift), so the old clusters[1..] prefetch loop is retired -- it was the redundant half of the
@@ -434,6 +451,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	// self-consistent until they migrate off clusters[] in a later task.
 	clusters[0] = reinterpret_cast<StreamedChunk*>(region.lease);
 	deluge::cluster::add_lease(clusters[0]);
+
+	// SR1 Task 6: retain the newly-current region for setupReassessmentLocation's interpolation-window
+	// base (see assignClusters).
+	region_ = region;
 
 	// Remove the compensation we'd done on the play pos relating to the byte depth of samples
 	bytePosWithinOldCluster = bytePosWithinOldCluster + 4 - sample->byteDepth;
@@ -1297,14 +1318,16 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader& other, bool stealReasons)
     : oscPos{other.oscPos}, currentPlayPos{other.currentPlayPos}, reassessmentLocation{other.reassessmentLocation},
       clusterStartLocation{other.clusterStartLocation}, reassessmentAction{other.reassessmentAction},
-      interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_} {
+      interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_},
+      region_{other.region_} {
 
 	steal_clusters(other, stealReasons);
 }
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader&& other) noexcept
     : oscPos{other.oscPos}, currentPlayPos{other.currentPlayPos}, reassessmentLocation{other.reassessmentLocation},
       clusterStartLocation{other.clusterStartLocation}, reassessmentAction{other.reassessmentAction},
-      interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_} {
+      interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_},
+      region_{other.region_} {
 	steal_clusters(other, true);
 }
 SampleLowLevelReader& SampleLowLevelReader::operator=(SampleLowLevelReader&& other) noexcept {
@@ -1318,6 +1341,7 @@ SampleLowLevelReader& SampleLowLevelReader::operator=(SampleLowLevelReader&& oth
 	reassessmentAction = other.reassessmentAction;
 	interpolationBufferSizeLastTime = other.interpolationBufferSizeLastTime;
 	interpolator_ = other.interpolator_;
+	region_ = other.region_;
 	unassignAllReasons(false);
 	steal_clusters(other, true);
 	return *this;

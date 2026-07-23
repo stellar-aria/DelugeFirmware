@@ -21,6 +21,7 @@
 
 #include "definitions_cxx.hpp"
 #include "dsp/interpolate/interpolate.h"
+#include "libdeluge/sample_source.h"
 #include <array>
 #include <cstdint>
 #define REASSESSMENT_ACTION_STOP_OR_LOOP 0
@@ -114,6 +115,15 @@ private:
 	// DSP consumers stay byte-for-byte identical until they migrate in a later task.
 	DelugeSampleSource* source_ = nullptr;
 	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
+
+	// SR1 Task 6: the last region acquired through the port (assignClusters / moveOnToNextCluster). Its
+	// `payload_base` is the source of the interpolation window's base pointer -- the `clusterStartLocation`
+	// look-behind floor and the `reassessmentLocation` trailing/front slack reach are computed from it in
+	// setupReassessmentLocation(), instead of reaching through the clusters[0] mirror into
+	// StreamedChunk::payload(). By the port contract region_.payload_base == clusters[0]->payload().data()
+	// (asserted there), so the interpolation DSP stays byte-for-byte identical; only the base's *source*
+	// moves onto the region port.
+	DelugeSampleRegion region_{};
 
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
 	void ensureSource(Sample* sample);

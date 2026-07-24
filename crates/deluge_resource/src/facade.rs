@@ -140,6 +140,52 @@ impl<'m> Resource<'m> {
         self.try_acquire(asset, index)
             .map(|c| Lease::adopt(self.mgr as *const Manager, c))
     }
+
+    /// Pack a resident chunk's `{slot, generation}` into the opaque independent-pin
+    /// token the region port hands callers (`DelugeSampleRegion::lease`). `0` if the
+    /// chunk is not resident (no valid handle). Callers never introspect it — they
+    /// only feed it back to `retain_token`/`release_token`.
+    pub fn pin_token(&self, chunk: Chunk) -> u64 {
+        let slot = self.mgr.slot_of(chunk.as_ptr());
+        if slot == crate::manager::NO_SLOT {
+            return 0;
+        }
+        let gen = self.mgr.generation_of_slot(slot);
+        if gen == 0 {
+            return 0;
+        }
+        ((slot as u64) << 32) | (gen as u64)
+    }
+
+    /// Take an independent pin keyed on `token` alone (generation-checked). No-op on
+    /// `token == 0` or a stale token (the slot was evicted+reused since minting). This
+    /// is the deliberately-manual external pin (its owner is the C++ reader across the
+    /// C ABI), distinct from the RAII `Lease` guarding the cursor's own slots.
+    pub fn retain_token(&self, token: u64) {
+        if token == 0 {
+            return;
+        }
+        let slot = (token >> 32) as u32;
+        let gen = token as u32;
+        self.mgr.retain_by_slot_gen(slot, gen);
+    }
+
+    /// Drop an independent pin taken via `retain_token` (generation-checked; no-op on
+    /// 0/stale).
+    pub fn release_token(&self, token: u64) {
+        if token == 0 {
+            return;
+        }
+        let slot = (token >> 32) as u32;
+        let gen = token as u32;
+        self.mgr.release_by_slot_gen(slot, gen);
+    }
+
+    /// Live readiness of a held chunk (the state query needs to see a `Loading` chunk
+    /// that has since landed). `false` if the chunk is no longer resident.
+    pub fn is_ready(&self, chunk: Chunk) -> bool {
+        self.mgr.is_ready_by_ptr(chunk.as_ptr())
+    }
 }
 
 /// A held hard-lease on a resident chunk. `Drop` releases it exactly once — the lease
@@ -295,6 +341,15 @@ mod tests {
         }
         fn lease(&self, chunk: Chunk) -> Lease {
             self.resource().lease(chunk)
+        }
+        fn pin_token(&self, chunk: Chunk) -> u64 {
+            self.resource().pin_token(chunk)
+        }
+        fn retain_token(&self, token: u64) {
+            self.resource().retain_token(token)
+        }
+        fn release_token(&self, token: u64) {
+            self.resource().release_token(token)
         }
     }
 
@@ -499,5 +554,26 @@ mod tests {
             base1,
             "ISR-path release on slot1 decremented only slot1"
         );
+    }
+
+    #[test]
+    fn pin_token_round_trips_retain_release_balance() {
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
+        rsrc.mark_ready(c);
+        let slot = rsrc.slot_of(c);
+        let base = rsrc.lease_count_by_slot(slot);
+        let token = rsrc.pin_token(c);
+        assert_ne!(token, 0, "a resident chunk yields a nonzero token");
+        rsrc.retain_token(token);
+        assert_eq!(rsrc.lease_count_by_slot(slot), base + 1);
+        rsrc.release_token(token);
+        assert_eq!(rsrc.lease_count_by_slot(slot), base);
+        // Zero token is a no-op both ways.
+        rsrc.retain_token(0);
+        rsrc.release_token(0);
+        assert_eq!(rsrc.lease_count_by_slot(slot), base);
     }
 }

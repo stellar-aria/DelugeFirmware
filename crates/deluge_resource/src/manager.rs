@@ -26,8 +26,9 @@ use deluge_alloc::{deluge_alloc, deluge_free, deluge_heap_register_reclaim, Delu
 
 const NONE: u32 = u32::MAX;
 /// Invalid chunk-slot index (the C ABI's `DELUGE_RESOURCE_NO_SLOT`): a C++ object's slot handle before
-/// its chunk is created, or `slot_of` on a non-resident pointer.
-const NO_SLOT: u32 = u32::MAX;
+/// its chunk is created, or `slot_of` on a non-resident pointer. `pub(crate)` so `facade::Resource`
+/// can recognize the same sentinel `slot_of` returns.
+pub(crate) const NO_SLOT: u32 = u32::MAX;
 
 /// Reconstruct chunk `index` of `owner` into `dest[..len]`. Returns false if it
 /// can't be rebuilt right now (e.g. the backing store vanished). The public
@@ -126,6 +127,12 @@ struct ChunkSlot {
     /// function's cost-per-byte term (a big cheap chunk is preferred over a tiny dear one). Set at
     /// alloc: the requested `size` for `acquire`/`request`, the owner-supplied block size for `adopt`.
     size: u32,
+    /// Stamped from `Manager::next_gen()` each time this slot takes a fresh backing
+    /// (free -> occupied, i.e. NOT on a cache-hit lease). Pairs with the slot index into
+    /// a `{slot, generation}` independent-pin token (see `facade::Resource::pin_token`):
+    /// a token minted while this slot held one chunk no longer matches after the slot is
+    /// evicted and reused for another, so a stale retain/release is a checked no-op.
+    generation: u32,
     // The cluster load queue lives *as per-slot state* (no separate heap): `queued` ⇒ this chunk is
     // waiting to be read by the loader, ordered by `queue_priority` (lower = more urgent, the C++
     // Voice::getPriorityRating). `loader_next` picks the lowest-priority queued+leased slot. Eviction
@@ -149,6 +156,7 @@ impl ChunkSlot {
         ready: false,
         recency: 0,
         size: 0,
+        generation: 0,
         queued: false,
         queue_priority: 0,
         cost: 0,
@@ -193,6 +201,8 @@ pub struct Manager {
     protect: Cell<u32>,
     /// Cumulative instrumentation counters (see `Stats`).
     stats: Cell<Stats>,
+    /// Monotonic per-allocation counter feeding `ChunkSlot::generation` (see `next_gen`).
+    alloc_gen: Cell<u32>,
 }
 
 /// Restores `Manager::protect` on drop — so every early return from `request`/`acquire`
@@ -220,6 +230,19 @@ impl Manager {
     /// never gates behaviour; events are chunk-granular so the whole-struct copy is negligible.
     fn stat(&self, f: impl FnOnce(&mut Stats)) {
         m_rmw(&self.stats, |s| f(s));
+    }
+
+    /// Monotonic per-allocation generation. Stamped into a slot each time it takes a
+    /// fresh backing (free -> occupied), so a `{slot, generation}` token minted while
+    /// a chunk was resident no longer matches after that slot is evicted and reused —
+    /// making a stale independent-pin retain/release a checked no-op. Wraps after 2^32
+    /// allocations (astronomically beyond any session).
+    #[inline]
+    fn next_gen(&self) -> u32 {
+        m_rmw(&self.alloc_gen, |g| {
+            *g = g.wrapping_add(1);
+            *g
+        })
     }
 
     /// Masked snapshot of the instrumentation counters (the FFI read path — the audio
@@ -292,6 +315,59 @@ impl Manager {
             return 0;
         }
         s.leases
+    }
+
+    /// The generation stamped on the chunk at `slot` — 0 if out of range or free.
+    /// Pairs with a `{slot, generation}` independent-pin token (see the facade).
+    pub(crate) fn generation_of_slot(&self, slot: u32) -> u32 {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return 0;
+        }
+        let s = m_get(&self.chunks[i]);
+        if s.backing.is_null() {
+            return 0;
+        }
+        s.generation
+    }
+
+    /// Generation-checked +1 hard lease on the chunk at `slot`. Masked, re-validating:
+    /// takes the lease only if the slot is in range, occupied, AND its generation still
+    /// equals `gen` (the slot has not been evicted+reused since the token was minted).
+    /// Returns whether it leased. The independent-pin retain path.
+    pub(crate) fn retain_by_slot_gen(&self, slot: u32, gen: u32) -> bool {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return false;
+        }
+        let r = self.bump();
+        self.rmw_by_ptr_slot(i, |s| {
+            if s.backing.is_null() || s.generation != gen {
+                return false;
+            }
+            s.leases += 1;
+            s.recency = r;
+            true
+        })
+    }
+
+    /// Generation-checked -1 hard lease (the independent-pin release path). Symmetric
+    /// to `retain_by_slot_gen`: a no-op on a stale/out-of-range/free slot. Saturating,
+    /// so a contract-violating double-release cannot underflow. Mirrors `release`
+    /// (which also only decrements the lease count — see its doc) so the two paths stay
+    /// behaviourally identical modulo the generation check.
+    pub(crate) fn release_by_slot_gen(&self, slot: u32, gen: u32) -> bool {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return false;
+        }
+        self.rmw_by_ptr_slot(i, |s| {
+            if s.backing.is_null() || s.generation != gen {
+                return false;
+            }
+            s.leases = s.leases.saturating_sub(1);
+            true
+        })
     }
 
     // ---- cluster load queue (per-slot state; see the `queued`/`queue_priority` fields) ----------
@@ -596,6 +672,7 @@ impl Manager {
                 ready: true, // acquire materializes synchronously below, before anyone else can run
                 recency: self.bump(),
                 size: size as u32,
+                generation: self.next_gen(),
                 ..ChunkSlot::EMPTY
             },
         );
@@ -696,6 +773,7 @@ impl Manager {
                 dirty: false,
                 recency: self.bump(),
                 size: size as u32,
+                generation: self.next_gen(),
                 ..ChunkSlot::EMPTY
             },
         );
@@ -801,6 +879,7 @@ impl Manager {
                 ready: true, // owner-built object, usable immediately
                 recency: self.bump(),
                 size: size as u32,
+                generation: self.next_gen(),
                 cost,
                 adopt_evict: on_evict,
                 adopt_ctx: ctx,
@@ -824,6 +903,18 @@ impl Manager {
     /// completed. No-op if `p` isn't a resident chunk.
     pub(crate) fn mark_ready(&self, p: *mut u8) {
         self.rmw_by_ptr(p, |s| s.ready = true);
+    }
+
+    /// Live readiness of the chunk at `p` — masked read of its `ready` flag,
+    /// re-validated by pointer. `false` if `p` is no longer resident (evicted/never
+    /// resident). The facade's `Resource::is_ready` query.
+    pub(crate) fn is_ready_by_ptr(&self, p: *mut u8) -> bool {
+        let Some(i) = self.find_by_ptr(p) else {
+            return false;
+        };
+        let _m = Masked::enter();
+        let s = self.chunks[i].get();
+        s.backing == p && s.ready
     }
 
     /// RT-safe acquire: take a hard lease + return the backing only if the chunk is resident **and**
@@ -1049,6 +1140,7 @@ unsafe fn create_inner(
             tick: Cell::new(0),
             protect: Cell::new(NONE),
             stats: Cell::new(Stats::default()),
+            alloc_gen: Cell::new(0),
         },
     );
     if register_hook {
@@ -1368,5 +1460,107 @@ pub unsafe extern "C" fn deluge_resource_mark_dirty(
 ) {
     if !handle.is_null() {
         mgr(handle).set_dirty(ptr, dirty);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn mock_construct(
+        _ctx: *mut c_void,
+        _owner: *mut c_void,
+        _index: u32,
+        dest: *mut u8,
+    ) {
+        // SAFETY: `dest` comes from the manager's just-allocated backing.
+        unsafe { *dest = 0xC0 };
+    }
+
+    /// A manager over a throwaway 16-aligned test heap (mirrors the `arena()` harness
+    /// in `lib.rs`'s own `mod tests` / `facade.rs`'s `test_resource()`), sized with a
+    /// **single** chunk slot so a second distinct `request` MUST evict + reuse slot 0
+    /// — the only way to deterministically exercise a generation bump without relying
+    /// on the value function's eviction order across a bigger table.
+    fn test_manager() -> (*mut DelugeResource, std::vec::Vec<u128>) {
+        let words = (256 * 1024usize).div_ceil(16);
+        let mut buf = std::vec![0u128; words];
+        // SAFETY: `buf` is a live, 16-aligned, `words * 16`-byte arena for as long as
+        // the returned tuple (and thus `buf`) is alive.
+        let h =
+            unsafe { deluge_alloc::deluge_heap_create(buf.as_mut_ptr() as *mut u8, words * 16) };
+        // SAFETY: `h` is the live heap handle just created above.
+        let handle = unsafe { deluge_resource_create(h, 4, 1) }; // 1 chunk slot
+        assert!(!handle.is_null());
+        (handle, buf)
+    }
+
+    /// Define a requestable (has a `construct` callback, no I/O) test asset — the
+    /// `request`/prefetch path this task's token is minted from.
+    fn define_requestable_test_asset(handle: *mut DelugeResource) -> u32 {
+        // SAFETY: `handle` is a live handle from `test_manager` for the duration of
+        // this call.
+        let asset = unsafe {
+            deluge_resource_define_asset(
+                handle,
+                ptr::null_mut(),
+                None,
+                None,
+                ptr::null_mut(),
+                1,
+                BACKING_HEAP,
+            )
+        };
+        unsafe { deluge_resource_set_construct(handle, asset, Some(mock_construct)) };
+        asset
+    }
+
+    #[test]
+    fn generation_bumps_on_slot_reuse_and_gates_stale_retain() {
+        let (handle, _buf) = test_manager();
+        let asset = define_requestable_test_asset(handle);
+        // SAFETY: `handle` is live for the whole test (via `_buf`).
+        let m = unsafe { mgr(handle) };
+
+        // Occupy the (only) slot, capture its {slot, generation}.
+        let p0 = m.request(asset, 0, 64);
+        assert!(!p0.is_null());
+        let slot0 = m.slot_of(p0);
+        let gen0 = m.generation_of_slot(slot0);
+        assert!(gen0 >= 1, "a live slot has a nonzero generation");
+
+        // Release + force reuse: with a 1-slot chunk table, a distinct-index request
+        // MUST evict slot0 (now unleased) and reuse the same slot for a new chunk.
+        m.release(p0); // leases -> 0 (evictable)
+        let p1 = m.request(asset, 1, 64);
+        assert!(!p1.is_null());
+        let slot1 = m.slot_of(p1);
+        assert_eq!(
+            slot1, slot0,
+            "single-slot table: reuse must be the same slot"
+        );
+        let gen1 = m.generation_of_slot(slot1);
+        assert!(
+            gen1 > gen0,
+            "reused slot must have a strictly greater generation"
+        );
+
+        // A retain keyed on the STALE (slot0, gen0) must be a checked no-op.
+        let before = m.lease_count_by_slot(slot1);
+        assert!(
+            !m.retain_by_slot_gen(slot0, gen0),
+            "stale generation must not lease"
+        );
+        assert_eq!(
+            m.lease_count_by_slot(slot1),
+            before,
+            "no lease taken on stale handle"
+        );
+
+        // A retain on the CURRENT handle succeeds and balances with release.
+        assert!(m.retain_by_slot_gen(slot1, gen1));
+        assert_eq!(m.lease_count_by_slot(slot1), before + 1);
+        assert!(m.release_by_slot_gen(slot1, gen1));
+        assert_eq!(m.lease_count_by_slot(slot1), before);
     }
 }

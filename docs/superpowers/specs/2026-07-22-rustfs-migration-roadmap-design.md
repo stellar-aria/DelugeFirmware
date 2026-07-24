@@ -158,6 +158,13 @@ mechanism); contiguous preallocation + power-loss safety (own rungs).
   independent HIGH bugs, own tickets, fixable anytime (Lens 2 is the harness for both).
 - **Deferred UI rungs** — pitch-at-load (compute derived sample data at load, store on model) and the
   UI↔storage north-star. Model-ownership work, orthogonal to the FS-backing swap; sequence later.
+- **Note-on deadline elimination (deferred into the region arc)** — research
+  `docs/superpowers/specs/2026-07-24-deadline-elimination-research.md`; decision recorded in the
+  region-boundary design §4.1. The I/O half (attack-cluster residency / "warm hint") is a residency
+  optimization that belongs **below the port in Rust at SR2**, not built in C++ now — attack-pinning
+  already exists in C++ (`clustersForStart`) and moves with residency. Above-the-port / orthogonal pieces
+  (turn the silent note-on voice-DROP into the graceful defer; cost-aware voice admission + bounding the
+  periodic time-stretch `hopEnd` spike) are tracked, low-urgency, schedule on measured evidence.
 
 ## 5. Critical path & dependency summary
 

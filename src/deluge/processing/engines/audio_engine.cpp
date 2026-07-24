@@ -1081,9 +1081,30 @@ void routine() {
 	}
 	else {
 		if (!isSDRoutineActive()) {
-			auto timeNow = getSystemTime();
-			while (getSystemTime() < timeNow + 32 / 44100.) {
-				size_t numSamples = 32;
+			// An offline render is by definition NOT paced by real time, so the work done per
+			// audioRoutine call must never be bounded by the wall clock. This loop used to run
+			// `while (getSystemTime() < timeNow + 32 / 44100.)` - "as many blocks as fit in one
+			// block's worth of real time" - which made the block count per call a function of host
+			// speed, host load, and how long the work inside each iteration happened to take. That
+			// count decides how rendering interleaves with the cluster loader, the SD routine and the
+			// recorder's cluster write-out, which decides eviction and underrun behaviour, which
+			// changes the rendered audio. It was measurably that fragile: the host sat exactly on the
+			// two-blocks-per-call boundary, and adding a bare fprintf to an unrelated translation unit
+			// was enough to tip some calls to one block and flip a fixture's rendered payload.
+			//
+			// So bound the batch by a fixed block count. Do not reintroduce any time-based bound here
+			// (the real-time branch above is the one that legitimately paces off the clock).
+			//
+			// The batch is still a batch - the point of looping is to amortise the surrounding
+			// machinery (the loader pump and the slow/recorder routines run between audioRoutine
+			// calls, see StemExport::renderWait) rather than pay it per 32 frames. The size is one
+			// output-buffer quantum, SSI_TX_BUFFER_NUM_SAMPLES frames: the same amount of audio the
+			// real-time path produces per driver pass, so the offline cadence matches the one the rest
+			// of the engine is built around - and now it is identical on every host and on the device.
+			constexpr size_t kOfflineFramesPerBlock = 32;
+			constexpr int32_t kOfflineBlocksPerRoutine = SSI_TX_BUFFER_NUM_SAMPLES / kOfflineFramesPerBlock;
+			for (int32_t block = 0; block < kOfflineBlocksPerRoutine; ++block) {
+				size_t numSamples = kOfflineFramesPerBlock;
 				tickSongFinalizeWindows(numSamples);
 
 				numSamplesLastTime = numSamples;

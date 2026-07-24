@@ -12,8 +12,12 @@
 //! balance falls out of ownership, never hand-balanced. Every touch of a slot (and
 //! of `prefetch_index`, its tracked-index sidecar) is wrapped in
 //! `deluge_resource::sync::Masked` — the SAME asymmetric critical section the
-//! manager's own tables use — because these slots are touched from both the audio
-//! ISR (`acquire_ex`) and the main thread (`close`).
+//! manager's own tables use — because these slots are touched from more than one
+//! context: `acquire_ex` from the audio ISR, and `close` from either the main
+//! thread (voice teardown) or the render ISR itself (a reader reused via
+//! `ensureSource`). `Masked` adapts to the caller's context via a live
+//! `deluge_in_interrupt()` check, so the discipline is correct regardless of
+//! which thread runs which — it never relies on a fixed thread affinity.
 //!
 //! Invariant (relied on by `state`'s "at most one slot matches" correctness):
 //! `current`, `pending`, and `prefetch` never track the same index simultaneously.

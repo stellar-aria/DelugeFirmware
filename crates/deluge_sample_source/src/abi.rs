@@ -166,21 +166,26 @@ const _: () = assert!(
 //   2. Every touch of `source`'s CONTENTS, once claimed, goes through
 //      `SampleSource`'s own masked-`Cell` discipline (see `cursor.rs`'s module
 //      doc) -- the identical mechanism, not a second one.
-// The correctness model behind (1) is the same asymmetric one the cursor's own
-// slot-mutation SAFETY docs rely on: `open()` (the claim) runs on the audio
-// render thread -- ISR context, where `Masked::enter()` is a no-op -- but the
-// audio ISR is atomic w.r.t. the main thread (nothing preempts it), so its
-// own read-then-set inside `claim_slot` can never be interposed by another
-// claim or by a release. `close()` (the release) runs on the main thread,
-// where `Masked::enter()` genuinely masks the audio ISR for the write, so it
-// can't race a concurrent `open()`'s claim either. Two `open()`s never race
-// each other directly (the audio ISR is single-threaded/non-reentrant), and a
-// concurrent `acquire_ex` (audio ISR) against the SAME already-claimed slot's
-// `source` stays coherent via (2), exactly as it does in the C++ backing.
-// This mirrors `sample_source.cpp`'s own `g_source_pool` doc precisely: it
-// protects POOL SLOT INTEGRITY only -- tearing down a source while something
-// else still actively acquires through the SAME pointer is a pre-existing,
-// out-of-scope hazard on both sides (caller discipline, not this pool's job).
+// The correctness model behind (1) does NOT depend on which thread runs which
+// entry point. `open()` and `close()` can BOTH be invoked from the audio render
+// thread -- a pooled reader reused for a new sample calls `close()` then
+// `open()` on the render path via `SampleLowLevelReader::ensureSource()` -- as
+// well as from the main thread (voice teardown / song swap). Soundness comes
+// instead from `Masked::enter()` adapting to the CALLER's context through a live
+// `deluge_in_interrupt()` check: called from the main thread it masks the audio
+// ISR for the whole masked read-then-set (claim) or flip (release); called from
+// the audio ISR it is a no-op, which is correct precisely because the audio ISR
+// is atomic w.r.t. main (non-reentrant, un-preemptible by main). So a claim's
+// masked read-then-set and a release's masked flip are each indivisible w.r.t.
+// any pool operation in the OTHER context, whichever thread each actually runs
+// on. Two claims never race each other (the audio ISR is single-threaded/
+// non-reentrant, and a main-thread claim masks the ISR); a claim and a release
+// on DIFFERENT slots never touch the same `in_use`; on the SAME slot they are
+// serialized by that flag. A concurrent `acquire_ex` against an already-claimed
+// slot's `source` stays coherent via (2). This protects POOL SLOT INTEGRITY
+// only -- tearing down a source while something else still actively acquires
+// through the SAME pointer is a pre-existing, out-of-scope hazard mirrored from
+// the C++ backing (caller discipline, not this pool's job).
 unsafe impl Sync for Slot {}
 
 /// File-scope static: lives in `.bss`, never touches the heap.
@@ -481,9 +486,11 @@ pub unsafe extern "C" fn deluge_sample_source_close(src: *mut DelugeSampleSource
         source.close();
     }
     *cell = None; // reset the slot's payload to empty, ready for reuse
-                  // Masked release: `close()` runs on the main thread, so this genuinely
-                  // masks the audio ISR for the write, matching `claim_slot`'s own masked
-                  // check-and-set (see `Slot`'s `Sync` doc for the full ISR/main argument).
+                  // Masked release: `Masked::enter` adapts to the caller's context --
+                  // it masks the audio ISR when `close()` is called from main, and is a
+                  // safe no-op when `close()` is itself on the render ISR (e.g. a reader
+                  // reused via `ensureSource`) -- matching `claim_slot`'s own masked
+                  // check-and-set (see `Slot`'s `Sync` doc for the full argument).
     m_set(&slot.in_use, false); // return the slot to the pool
 }
 

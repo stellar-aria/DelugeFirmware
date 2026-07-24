@@ -122,6 +122,9 @@ DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint
 /// Take/drop an INDEPENDENT pin on the region's chunk, keyed on the opaque `lease` token alone (no
 /// cursor). Separate from the cursor's current/prefetch/pending pins (those are managed by acquire/close).
 /// `lease == 0` is a no-op in both directions. The token comes from a READY `DelugeSampleRegion::lease`.
+/// PAIRING: `release` only a token you personally `retain`ed. Bare-releasing a token the cursor still
+/// holds as current/prefetch/pending would drop the cursor's own pin early, exposing that chunk to
+/// eviction while the cursor still believes it is pinned.
 void deluge_sample_region_retain(uint64_t lease);
 void deluge_sample_region_release(uint64_t lease);
 

@@ -108,7 +108,8 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(out.region_index).to_equal(2u);
 		expect(out.resident_bytes).to_equal(8u); // 40 - 32 = 8: the short last cluster
 
-		deluge_sample_region_release(out.lease);
+		// close() releases the cursor's own current/prefetch pins; the caller does not bare-release the
+		// cursor's `current` token (that is not what retain/release are for -- see the header pairing note).
 		deluge_sample_source_close(src);
 	});
 
@@ -137,7 +138,6 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		auto* bytes1 = static_cast<std::byte*>(out.payload_base);
 		expect(std::equal(ramp1.begin(), ramp1.end(), bytes1)).to_equal(true);
 
-		deluge_sample_region_release(out.lease);
 		deluge_sample_source_close(src);
 	});
 
@@ -463,7 +463,7 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});
 
-	it("normal acquire/release then close drops every lease", _ {
+	it("close drops every lease the cursor holds (current + prefetch)", _ {
 		deluge_test_reset_lease_tracking();
 		deluge::audio::stream::SampleStream stream(2);
 		stream.set_cluster_data(0, make_ramp(0, kClusterSize));
@@ -476,9 +476,7 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		// current (cluster 0) + prefetch (cluster 1) both hold a lease at this point.
 		expect(deluge_test_total_lease_count()).to_equal(2u);
 
-		deluge_sample_region_release(out.lease);
-		expect(deluge_test_total_lease_count()).to_equal(1u); // prefetch still held
-
+		// close() drops the cursor's own pins. Independent retain/release is exercised by the next spec.
 		deluge_sample_source_close(src);
 		expect(deluge_test_total_lease_count()).to_equal(0u);
 	});

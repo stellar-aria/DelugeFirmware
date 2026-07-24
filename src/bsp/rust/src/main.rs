@@ -144,6 +144,15 @@ mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
+/// Pure byte-range arithmetic for the native cluster fill (SR2d-4 Task 4): `begin`
+/// reimplements `begin_fill`'s last-cluster short-read sector-count calc from
+/// geometry alone. No FFI/statics, so it needs no `#[cfg]` gate — same tier as
+/// `fiber`/`scheduler` above, compiled everywhere. Not yet wired into
+/// `streaming_loader`'s `ProdOps::begin` (a later task) or called from `main`, so
+/// its host tests run via `tests/fill_logic_host.rs` (same `#[path]` convention as
+/// `tests/fill_sidecar_host.rs`), not a plain `cargo test` of this bin (which is
+/// `test = false` — see `Cargo.toml`).
+mod fill_logic;
 /// Per-chunk convert-state sidecar for the native fill (SR2d-4 Task 3): the
 /// `first_three_bytes`/`start_converted`/`end_converted` state a chunk's convert/stitch tail
 /// reads/writes, keyed by the manager's chunk-table slot + generation. Needs the real

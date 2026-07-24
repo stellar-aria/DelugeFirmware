@@ -60,13 +60,18 @@ std::expected<uint32_t, Status> Stream::write_at(uint32_t byte_offset, std::span
 }
 
 std::expected<uint32_t, Status> Stream::read_at_via(uint32_t byte_offset, std::span<std::byte> dst) {
-	if (!deluge_streaming_efatfs_active()) {
-		return std::unexpected(Status::UNSUPPORTED); // no C-FatFS read_at -- see stream_io.h's doc
-	}
 	uint32_t out_read = 0;
-	if (!deluge_efatfs_stream_read_at_via(unbox_stream_handle(handle_), byte_offset, dst.data(),
-	                                      static_cast<uint32_t>(dst.size()), &out_read)) {
-		return std::unexpected(Status::ERR);
+	if (deluge_streaming_efatfs_active()) {
+		if (!deluge_efatfs_stream_read_at_via(unbox_stream_handle(handle_), byte_offset, dst.data(),
+		                                      static_cast<uint32_t>(dst.size()), &out_read)) {
+			return std::unexpected(Status::ERR);
+		}
+		return out_read;
+	}
+	DelugeStatus status =
+	    deluge_stream_read_at(handle_, byte_offset, dst.data(), static_cast<uint32_t>(dst.size()), &out_read);
+	if (status != DELUGE_OK) {
+		return std::unexpected(to_status(status));
 	}
 	return out_read;
 }

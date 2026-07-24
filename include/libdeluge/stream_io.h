@@ -23,13 +23,15 @@
 /// file API. `WaveTable`/presets/songs stay on `file_io.h`. See
 /// docs/superpowers/specs/2026-07-15-deluge-stream-boundary-design.md.
 ///
-/// `write_at`'s real contract is sequential append, not general random-access
-/// write -- callers write whole clusters in increasing index order, and `count`
-/// may not exceed one cluster per call (checked; violating this desyncs the
+/// `write_at` is positional but never sparse: `byte_offset` may be anywhere at or
+/// below the stream's current end of file, never past it. Callers append whole
+/// clusters in increasing index order, then rewrite already-written bytes in place
+/// (`SampleRecorder`'s finalize header patch and `alterFile`'s cluster rewrites).
+/// `count` may not exceed one cluster per call (checked; violating this desyncs the
 /// write-side "most recently written cluster" bookkeeping `sector_of` relies on).
-/// There is no `read_at` -- the streaming read path goes through embedded-fatfs
-/// (`deluge_efatfs_read_at`); this boundary is write (recording) plus the
-/// cold-path `sector_of` identity check only.
+/// `read_at` is NOT the streaming read path (that goes through embedded-fatfs,
+/// `deluge_efatfs_read_at`) -- it is only the read-BACK of a stream this boundary is
+/// itself writing; plus the cold-path `sector_of` identity check.
 #ifndef LIBDELUGE_STREAM_IO_H
 #define LIBDELUGE_STREAM_IO_H
 
@@ -53,12 +55,23 @@ typedef enum DelugeStreamMode {
 /// `deluge_stream_close`. [task]
 DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeStream** out);
 
-/// Append `count` bytes at `byte_offset` (must equal the stream's current end-of-file --
-/// sequential append only). `count` must not exceed one cluster (`DELUGE_ERR_PARAM` otherwise) --
-/// write_at writes at most one cluster per call, same limit as `read_at`. `*out_written` is the
-/// number of bytes actually written. [task]
+/// Write `count` bytes at `byte_offset`. `byte_offset` may be at the stream's current end-of-file
+/// (an append, extending it) or anywhere below it (an in-place rewrite); past the end is
+/// `DELUGE_ERR_PARAM`, since that would leave a hole. `count` must not exceed one cluster
+/// (`DELUGE_ERR_PARAM` otherwise) -- write_at writes at most one cluster per call, same limit as
+/// `read_at`. `*out_written` is the number of bytes actually written. [task]
 DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, const void* src, uint32_t count,
                                     uint32_t* out_written);
+
+/// Read up to `count` bytes at absolute `byte_offset` into `dst`, bounded by the stream's LIVE size
+/// -- including bytes written earlier through this same still-open handle, whose size the on-disk
+/// directory entry has not caught up with yet. EOF-honest: `*out_read` is the TRUE count read
+/// (`<= count`, 0 at or past EOF), never zero-padded. The C-FatFS counterpart of
+/// `deluge_efatfs_stream_read_at_via`; `SampleRecorder`'s mid-write read-back of an evicted cluster
+/// of the file it is still recording (see storage/audio/stream/read_source.h's
+/// `RecordingReadSource`) is its only caller. [task]
+DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, void* dst, uint32_t count,
+                                   uint32_t* out_read);
 
 /// Truncate (or, if smaller than the current position, no-op) the stream to `new_size` bytes. [task]
 DelugeStatus deluge_stream_truncate(DelugeStream* stream, uint32_t new_size);

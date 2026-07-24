@@ -143,16 +143,21 @@ describe stream_io("stream_io adapter", $ {
 		impl.layout = nullptr;
 	});
 
-	it("write_at rejects a byte_offset that doesn't match the current file size (append-only contract)", _ {
+	it("write_at rejects a byte_offset past the current end of file (no sparse writes)", _ {
+		// write_at is positional: at-EOF appends and below-EOF in-place rewrites are both legal (the
+		// recorder's finalize header patch is the latter, and needs a mounted image to drive, so it
+		// isn't exercised here). Only a byte_offset PAST the end is rejected -- it would leave a hole
+		// of never-written bytes in the middle of the file.
 		FATFS fakeFs{};
 		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
 		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_WRITE_CREATE};
+		impl.cluster_size_bytes = 512;
 		impl.file_size = 512; // pretend 512 bytes are already written
 
 		uint8_t src[64] = {};
 		uint32_t out_written = 999;
 		DelugeStatus status =
-		    deluge_stream_write_at(reinterpret_cast<DelugeStream*>(&impl), 0 /* wrong -- should be 512 */, src, 64,
+		    deluge_stream_write_at(reinterpret_cast<DelugeStream*>(&impl), 1024 /* past EOF (512) */, src, 64,
 		                           &out_written);
 		expect(status).to_equal(DELUGE_ERR_PARAM);
 		expect(out_written).to_equal(0u);
@@ -162,8 +167,8 @@ describe stream_io("stream_io adapter", $ {
 		// Mirrors "read_at rejects a count larger than one cluster" -- without this guard,
 		// last_written_cluster_index (computed from byte_offset) would desync from FatFS's live
 		// current cluster once a write spans more than one cluster, and sector_of() would silently
-		// answer with the wrong sector instead of erroring. Checked before the append-only
-		// byte_offset check, so it applies even when byte_offset happens to be correct.
+		// answer with the wrong sector instead of erroring. Checked before the byte_offset range
+		// check, so it applies even when byte_offset is a legal one.
 		FATFS fakeFs{};
 		FatFS::File file = FatFS::File::open_by_locator(&fakeFs, 1, 100, /*objsize=*/0);
 		deluge::fatfs_adapter::StreamImpl impl{std::move(file), DELUGE_STREAM_WRITE_CREATE};

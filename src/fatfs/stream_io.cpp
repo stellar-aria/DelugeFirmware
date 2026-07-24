@@ -2,6 +2,7 @@
 
 #include "file_io_internal.hpp" // reuses deluge::fatfs_adapter::to_deluge_status(FatFS::Error)
 
+#include <algorithm>
 #include <new>
 #include <span>
 
@@ -23,8 +24,11 @@ DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeS
 		return DELUGE_OK;
 	}
 
-	// DELUGE_STREAM_WRITE_CREATE / _CREATE_NEW / _APPEND
-	FatFS::FileAccessMode fatfsMode = FA_WRITE;
+	// DELUGE_STREAM_WRITE_CREATE / _CREATE_NEW / _APPEND. FA_READ rides along so the write context
+	// can also be read back through -- FatFS rejects f_read on a handle opened without it, and
+	// `deluge_stream_read_at` is exactly that read-back (a still-recording sample's evicted cluster,
+	// see RecordingReadSource). Harmless for a write-only caller.
+	FatFS::FileAccessMode fatfsMode = FA_WRITE | FA_READ;
 	if (mode == DELUGE_STREAM_WRITE_CREATE) {
 		fatfsMode |= FA_CREATE_ALWAYS;
 	}
@@ -79,8 +83,24 @@ DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, 
 		return DELUGE_ERR_PARAM;
 	}
 
-	if (byte_offset != impl->file_size) {
-		return DELUGE_ERR_PARAM; // sequential append only -- see stream_io.h's contract note
+	if (byte_offset > impl->file_size) {
+		// Writes may land anywhere at or before the current end of file, but never past it: a gap
+		// would leave unwritten bytes in the middle of the file (FatFS's lseek-past-EOF would
+		// allocate clusters holding whatever was on the card). See stream_io.h's contract note.
+		return DELUGE_ERR_PARAM;
+	}
+
+	// Position the file pointer. Appends (byte_offset == file_size) are the common case and the
+	// pointer is normally already there, so only seek when it isn't -- but a write BELOW the end of
+	// file (SampleRecorder's finalize header patch rewriting the WAV data length at offset 0, and
+	// alterFile's in-place cluster rewrites) must seek back, otherwise the bytes land at the wrong
+	// place. The efatfs backend behind the same deluge::io::Stream::write_at has always been
+	// positional (`deluge_efatfs_stream_write_at`); this keeps the two backends' contracts identical.
+	if (impl->file.inner().fptr != byte_offset) {
+		auto seeked = impl->file.lseek(byte_offset);
+		if (!seeked) {
+			return deluge::fatfs_adapter::to_deluge_status(seeked.error());
+		}
 	}
 
 	// FatFS owns cluster allocation -- a normal buffered write extends the file and allocates as
@@ -92,9 +112,40 @@ DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, 
 		return DELUGE_ERR_IO;
 	}
 
-	impl->file_size += count;
+	impl->file_size = std::max(impl->file_size, byte_offset + count);
 	impl->last_written_cluster_index = byte_offset / impl->cluster_size_bytes;
 	*out_written = count;
+	return DELUGE_OK;
+}
+
+DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, void* dst, uint32_t count,
+                                   uint32_t* out_read) {
+	auto* impl = reinterpret_cast<deluge::fatfs_adapter::StreamImpl*>(stream);
+	*out_read = 0;
+
+	// FatFS's own live size, which f_write advances in memory as the recording grows (the on-disk
+	// directory entry only catches up at f_sync/f_close) -- so bytes written earlier in this same
+	// still-open session read back fine, matching `deluge_efatfs_stream_read_at_via`.
+	auto file_size = static_cast<uint32_t>(impl->file.inner().obj.objsize);
+	if (byte_offset >= file_size) {
+		return DELUGE_OK; // at/past EOF: zero bytes read, not an error
+	}
+
+	// EOF-honest: never read past the end, and report the true count -- no zero-padding.
+	uint32_t clamped = std::min(count, file_size - byte_offset);
+
+	if (impl->file.inner().fptr != byte_offset) {
+		auto seeked = impl->file.lseek(byte_offset);
+		if (!seeked) {
+			return deluge::fatfs_adapter::to_deluge_status(seeked.error());
+		}
+	}
+
+	auto read = impl->file.read(std::span{static_cast<std::byte*>(dst), static_cast<size_t>(clamped)});
+	if (!read) {
+		return deluge::fatfs_adapter::to_deluge_status(read.error());
+	}
+	*out_read = static_cast<uint32_t>(read->size());
 	return DELUGE_OK;
 }
 

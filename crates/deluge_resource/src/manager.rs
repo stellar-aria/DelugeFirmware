@@ -317,6 +317,20 @@ impl Manager {
         s.leases
     }
 
+    /// The `(asset, index)` identity of the resident chunk backing `p` (the manager's `ChunkSlot`
+    /// holds both), or `None` if `p` isn't resident. `asset == NONE` (`u32::MAX`) for an adopted
+    /// (object-lifecycle) chunk — mirrors `ChunkSlot::asset`'s own sentinel; `index` is meaningless
+    /// for those (see `ChunkSlot`'s field doc). O(n) (`find_by_ptr`), re-validated under one masked
+    /// window after the scan (same "heuristic scan, then re-check" shape as `rmw_by_ptr`) — the scan
+    /// itself releases the mask between slots, so the slot `p` was found at could have been
+    /// evicted+reused by the time this reads it. `pub(crate)` so the safe `facade` module can expose
+    /// it as `Resource::chunk_ident`.
+    pub(crate) fn chunk_ident(&self, p: *mut u8) -> Option<(u32, u32)> {
+        let i = self.find_by_ptr(p)?;
+        let s = m_get(&self.chunks[i]);
+        (s.backing == p).then_some((s.asset, s.index))
+    }
+
     /// The generation stamped on the chunk at `slot` — 0 if out of range or free.
     /// Pairs with a `{slot, generation}` independent-pin token (see the facade).
     pub(crate) fn generation_of_slot(&self, slot: u32) -> u32 {

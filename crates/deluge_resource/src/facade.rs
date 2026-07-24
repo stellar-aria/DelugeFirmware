@@ -94,6 +94,15 @@ impl<'m> Resource<'m> {
         self.mgr.slot_of(chunk.as_ptr())
     }
 
+    /// The `(asset, index)` of a resident chunk backing `chunk` (the manager's `ChunkSlot`
+    /// holds both). `None` if the pointer isn't resident. `asset == NONE` (`u32::MAX`) for
+    /// an adopted chunk. Lets a caller that only has a `Chunk` (e.g. the native streaming
+    /// fill task, working from `loader_next`'s return) recover which asset/cluster it is
+    /// without threading the identity through separately.
+    pub fn chunk_ident(&self, chunk: Chunk) -> Option<(u32, u32)> {
+        self.mgr.chunk_ident(chunk.as_ptr())
+    }
+
     /// Enqueue the chunk at `slot` for loading at `priority` (lower = more urgent;
     /// re-enqueue just updates the priority).
     pub fn loader_enqueue(&self, slot: u32, priority: u32) {
@@ -336,6 +345,9 @@ mod tests {
         fn slot_of(&self, chunk: Chunk) -> u32 {
             self.resource().slot_of(chunk)
         }
+        fn chunk_ident(&self, chunk: Chunk) -> Option<(u32, u32)> {
+            self.resource().chunk_ident(chunk)
+        }
         fn lease_count_by_slot(&self, slot: u32) -> u32 {
             self.resource().lease_count_by_slot(slot)
         }
@@ -554,6 +566,29 @@ mod tests {
             base1,
             "ISR-path release on slot1 decremented only slot1"
         );
+    }
+
+    /// A `request`-ed chunk's `chunk_ident` reports the same `(asset, index)` it was
+    /// requested with — the manager's `ChunkSlot` carries both, so this is a pure
+    /// readback, not a re-derivation.
+    #[test]
+    fn chunk_ident_reports_asset_and_index_for_a_resident_chunk() {
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let req = rsrc.request(asset, 3, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
+        rsrc.mark_ready(c);
+        assert_eq!(rsrc.chunk_ident(c), Some((asset, 3)));
+    }
+
+    /// A pointer the manager never handed out (never resident) reports `None`, not a
+    /// stale/garbage identity.
+    #[test]
+    fn chunk_ident_is_none_for_a_non_resident_pointer() {
+        let rsrc = test_resource();
+        rsrc.define_test_asset(); // manager has at least one asset, but no resident chunks
+        let bogus = Chunk::from_ptr(0x1234_usize as *mut u8).unwrap();
+        assert_eq!(rsrc.chunk_ident(bogus), None);
     }
 
     #[test]

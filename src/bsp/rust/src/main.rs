@@ -144,6 +144,13 @@ mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
+/// Per-chunk convert-state sidecar for the native fill (SR2d-4 Task 3): the
+/// `first_three_bytes`/`start_converted`/`end_converted` state a chunk's convert/stitch tail
+/// reads/writes, keyed by the manager's chunk-table slot + generation. Needs the real
+/// `deluge_resource_slot_of`/`_generation_of_slot` C-ABI, so same tier as [`streaming_loader`]
+/// below: device, or host under `host_app`. Not yet wired into the fill path (see its module doc).
+#[cfg(any(target_os = "none", feature = "host_app"))]
+mod fill_sidecar;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
 mod flash;
 /// Host-only no-op stubs for the peripheral (MIDI/audio/CV-gate/signals) C ABI

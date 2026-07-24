@@ -167,6 +167,10 @@ void deluge_resource_mark_ready(DelugeResource* mgr, void* ptr);
 /// callers cache the result at chunk creation so later lease reads go through lease_count_by_slot.
 uint32_t deluge_resource_slot_of(DelugeResource* mgr, void* ptr);
 
+/// The generation stamped on the chunk at `slot` — 0 if `slot` is NO_SLOT / out of range / free. Pairs
+/// with slot_of so a caller can mint/validate a {slot, generation} token without an O(n) scan.
+uint32_t deluge_resource_generation_of_slot(DelugeResource* mgr, uint32_t slot);
+
 /// O(1) hard-lease count of the chunk at `slot` — 0 if `slot` is NO_SLOT / out of range / free. The
 /// single source of truth for a cluster's reason count, read via the C++ slot handle (no scan).
 uint32_t deluge_resource_lease_count_by_slot(DelugeResource* mgr, uint32_t slot);

@@ -1323,6 +1323,22 @@ pub unsafe extern "C" fn deluge_resource_slot_of(handle: *mut DelugeResource, pt
     mgr(handle).slot_of(ptr)
 }
 
+/// The generation stamped on the chunk at `slot` — 0 if `slot` is `NO_SLOT` / out of range / free.
+/// Pairs with `slot_of` so a caller can mint/validate a `{slot, generation}` token without an O(n)
+/// scan — e.g. the native fill's per-chunk convert-state sidecar (SR2d-4 Task 3), which uses a
+/// mismatch against the slot's CURRENT generation to auto-invalidate a stale entry left behind by
+/// a since-evicted-and-reused slot.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_generation_of_slot(
+    handle: *mut DelugeResource,
+    slot: u32,
+) -> u32 {
+    if handle.is_null() {
+        return 0;
+    }
+    mgr(handle).generation_of_slot(slot)
+}
+
 /// O(1) hard-lease count of the chunk at `slot` — 0 if `slot` is `NO_SLOT` / out of range / free. The
 /// single source of truth for "how many reasons does this cluster have", read via the C++ slot handle.
 #[no_mangle]

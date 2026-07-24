@@ -98,9 +98,9 @@ pub extern "C" fn deluge_streaming_signal_fill() {
 
 // ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────
 // Registered by C++ at sample-load (`SampleStream::ensure_resource_asset()`/`open_read_stream()`,
-// see `sample_stream.cpp`); read by the native fill task once a later task wires that read in
-// (`fill_context_for` has no caller yet outside tests). See `include/libdeluge/streaming_fill.h`'s
-// doc for the C-side contract.
+// see `sample_stream.cpp`, and `SampleRecorder::setup()`/`finalizeRecordedFile()` — SR2d-4 Task 5);
+// read by the native fill task via [`fill_context_for`] (`prod::ProdOps::begin`/`finish`, SR2d-4
+// Task 5). See `include/libdeluge/streaming_fill.h`'s doc for the C-side contract.
 
 /// Fixed capacity for the per-asset fill-context table, keyed by asset id. Mirrors `kAssetCap`
 /// (`general_memory_allocator.cpp`) — the resource manager's asset-table capacity — so every asset
@@ -121,8 +121,8 @@ const FILL_CONTEXT_CAP: usize = 4096;
 
 /// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeStreamingFillContext` exactly (verbatim
 /// field order/types) — the per-asset geometry `deluge_streaming_set_fill_context` registers at
-/// sample-load and the native fill task will read via [`fill_context_for`], once a later task wires
-/// that in. See that header's doc for what each field means; `raw_data_format` mirrors
+/// sample-load and the native fill task reads via [`fill_context_for`]. See that header's doc for
+/// what each field means; `raw_data_format` mirrors
 /// `RawDataFormat` (`audio_file_format.h`) as its `u8` underlying representation, not re-exposed as a
 /// Rust enum here (nothing on this side interprets it yet).
 #[repr(C)]
@@ -174,8 +174,8 @@ const _: () = {
 
 /// The per-asset fill-context table: written on the main/load thread
 /// (`deluge_streaming_set_fill_context`, called from `SampleStream::ensure_resource_asset()`/
-/// `open_read_stream()` at sample-load) and read by [`streaming_fill_task`] once a later task wires
-/// that read in. Neither side ever runs on the audio render ISR — asset definition happens at
+/// `open_read_stream()` at sample-load) and read by [`streaming_fill_task`] (`prod::ProdOps::begin`/
+/// `finish`, via [`fill_context_for`]). Neither side ever runs on the audio render ISR — asset definition happens at
 /// sample-load, and the fill task runs on the same thread-mode Embassy executor the C++ enqueue path
 /// does (see the module doc's "Concurrency" section) — so this table doesn't need the resource
 /// manager's asymmetric ISR-skipping `Masked` critical section (`deluge_resource::sync`). Using it
@@ -215,8 +215,14 @@ pub extern "C" fn deluge_streaming_set_fill_context(
 }
 
 /// Look up `asset`'s registered fill-context, or `None` if it was never registered (or `asset` is out
-/// of range). Read side of [`deluge_streaming_set_fill_context`]; wired into `ProdOps::begin`/`finish`
-/// by a later task (SR2d-4) — nothing calls this yet outside tests.
+/// of range). Read side of [`deluge_streaming_set_fill_context`]; wired into `prod::ProdOps::begin`/
+/// `finish` (SR2d-4 Task 5, its real, non-test caller). `#[allow(dead_code)]`: `mod prod` only
+/// compiles on the device or under `host_app` (see the module doc's "Two compilation tiers"), so a
+/// PLAIN host build/clippy of this file (no `--target`, no `host_app` — including
+/// `tests/streaming_fill_host.rs`'s own `#[path]` recompilation, which needs `async_streaming_loader`
+/// but deliberately not `host_app`) still never reaches this call site outside `#[cfg(test)]`
+/// elsewhere (`tests/streaming_fill_context_host.rs`, which recompiles this same file WITHOUT
+/// `mod prod` either and calls this directly).
 #[allow(dead_code)]
 pub fn fill_context_for(asset: u32) -> Option<FillContext> {
     if asset as usize >= FILL_CONTEXT_CAP {
@@ -390,17 +396,10 @@ mod prod {
     unsafe extern "C" {
         fn deluge_streaming_resource_manager() -> *mut c_void;
         fn deluge_streaming_chunk_unloadable(chunk_backing: *mut c_void) -> bool;
-        fn deluge_streaming_begin_fill(chunk: *mut c_void) -> StreamingFillDescriptor;
-        fn deluge_streaming_finish_fill(chunk: *mut c_void, read_ok: bool) -> bool;
-        // The two StreamedChunk field-touch accessors the native fill will use (SR2d-4 Task 2):
-        // payload pointer + set-loaded. Declared here so the FFI boundary exists ahead of the
-        // native fill path that calls them (a later task) -- not called yet, so `begin`/`finish`
-        // above still go through `deluge_streaming_begin_fill`/`deluge_streaming_finish_fill`.
-        // Same "declared ahead of its caller" shape as `fill_context_for` above -- `#[allow(dead_code)]`
-        // to match.
-        #[allow(dead_code)]
+        // The two StreamedChunk field-touch accessors the native fill uses (SR2d-4 Task 2): payload
+        // pointer (read/DMA destination, and the base of the `cluster_size + 7`-byte
+        // `payload_with_trailing_slack()` span `finish_convert_stitch` needs) + set-loaded.
         fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
-        #[allow(dead_code)]
         fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
@@ -412,6 +411,98 @@ mod prod {
         // symbol) -- see `ProdOps::new()` below, which is this guard's one call site.
         fn deluge_resource_chunk_cap(mgr: *mut c_void) -> u32;
         fn freezeWithError(errmsg: *const c_char);
+        // SR2d-4 Task 5: the native `begin`/`finish` wiring, replacing the
+        // `deluge_streaming_begin_fill`/`_finish_fill` upcalls (whose C++ DEFINITIONS stay --
+        // `sample_stream.cpp`'s legacy sync-fiber `read_cluster_data` path still calls them; this is
+        // just their last Rust caller going away).
+        //
+        // `deluge_resource_chunk_ident`: recovers a loader-queue chunk's `(asset, index)` identity
+        // (out-params; `false` on a miss) so `begin`/`finish` can look up its per-asset fill-context
+        // (`fill_context_for`) -- mirrors `deluge_resource_slot_of` just above.
+        fn deluge_resource_chunk_ident(
+            mgr: *mut c_void,
+            ptr: *mut c_void,
+            out_asset: *mut u32,
+            out_index: *mut u32,
+        ) -> bool;
+        // `deluge_resource_try_acquire`/`_release`: the neighbour-lease safety mechanism `finish`
+        // uses to gather a stitch neighbour (see its doc) -- `try_acquire` is the SAME "resident AND
+        // ready" check `prevCluster && prevCluster->loaded` performs in the C++, but atomically also
+        // takes a hard lease on a hit (so the neighbour can't be evicted out from under the stitch);
+        // `release` drops that lease again once the stitch is done.
+        fn deluge_resource_try_acquire(mgr: *mut c_void, asset: u32, index: u32) -> *mut u8;
+        fn deluge_resource_release(mgr: *mut c_void, ptr: *mut u8);
+        fn deluge_resource_mark_ready(mgr: *mut c_void, ptr: *mut c_void);
+    }
+
+    /// The "geometry error / not resolvable" `StreamingFillDescriptor` -- mirrors `begin_fill`'s own
+    /// early-return literally (`dest: nullptr, num_sectors: 0, ok: false, handle: 0, byte_offset: 0`,
+    /// `async_fill.cpp:89-90`). `ProdOps::begin` returns this whenever a chunk's identity or
+    /// fill-context can't be resolved -- should not happen in practice (every chunk on the loader
+    /// queue is a resident, still-leased `StreamedChunk` whose asset registered its context at
+    /// `ensure_resource_asset()` before it could ever be enqueued -- see the module doc), but failing
+    /// closed here is strictly safer than dereferencing a geometry that isn't there. `fill_once`
+    /// already treats `!d.ok` as "skip this chunk, don't read, don't call finish" (the same path an
+    /// unloadable/geometry-error chunk already takes), so this degrades exactly like that existing,
+    /// tested case.
+    const fn geometry_error() -> StreamingFillDescriptor {
+        StreamingFillDescriptor {
+            dest: core::ptr::null_mut(),
+            num_sectors: 0,
+            ok: false,
+            handle: 0,
+            byte_offset: 0,
+        }
+    }
+
+    /// Resolve `chunk`'s `(asset, index)` identity and its asset's registered fill-context, or
+    /// `None` if either lookup misses (see [`geometry_error`]'s doc for why that "shouldn't really
+    /// still happen" but is handled anyway).
+    fn resolve(mgr: *mut c_void, chunk: *mut c_void) -> Option<(u32, u32, super::FillContext)> {
+        let mut asset = 0u32;
+        let mut index = 0u32;
+        // SAFETY: `mgr` is the live singleton resource manager; `chunk` is a still-leased
+        // `StreamedChunk*` the caller is already treating as valid for this call.
+        if !unsafe { deluge_resource_chunk_ident(mgr, chunk, &mut asset, &mut index) } {
+            return None;
+        }
+        let ctx = super::fill_context_for(asset)?;
+        Some((asset, index, ctx))
+    }
+
+    /// `fill_sidecar::ConvertState` -> `fill_logic::ConvertState`: the two are separate types with
+    /// the identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the
+    /// same type) -- a trivial field-for-field copy at the one tier where both exist.
+    fn to_logic_state(s: crate::fill_sidecar::ConvertState) -> crate::fill_logic::ConvertState {
+        crate::fill_logic::ConvertState {
+            first_three_bytes: s.first_three_bytes,
+            start_converted: s.start_converted,
+            end_converted: s.end_converted,
+        }
+    }
+
+    /// The inverse of [`to_logic_state`], for writing `finish_convert_stitch`'s (possibly updated)
+    /// output back to the sidecar.
+    fn to_sidecar_state(s: crate::fill_logic::ConvertState) -> crate::fill_sidecar::ConvertState {
+        crate::fill_sidecar::ConvertState {
+            first_three_bytes: s.first_three_bytes,
+            start_converted: s.start_converted,
+            end_converted: s.end_converted,
+        }
+    }
+
+    /// `FillContext` (the C-ABI-mirroring registration record) -> `FillGeometry` (`fill_logic`'s
+    /// pure-arithmetic input) -- a plain field subset (drops `efatfs_handle`, which `begin` threads
+    /// through separately into the descriptor's own `handle` field, not through the geometry).
+    fn to_fill_geometry(ctx: &super::FillContext) -> crate::fill_logic::FillGeometry {
+        crate::fill_logic::FillGeometry {
+            audio_data_start_pos_bytes: ctx.audio_data_start_pos_bytes,
+            audio_data_length_bytes: ctx.audio_data_length_bytes,
+            first_cluster_index_with_no_audio_data: ctx.first_cluster_index_with_no_audio_data,
+            cluster_size: ctx.cluster_size,
+            cluster_size_magnitude: ctx.cluster_size_magnitude,
+            raw_data_format: ctx.raw_data_format,
+        }
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
@@ -477,9 +568,26 @@ mod prod {
         }
 
         fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {
-            // SAFETY: `chunk` was just returned by `next()` (a queued, still-
-            // leased `StreamedChunk*`).
-            unsafe { deluge_streaming_begin_fill(chunk) }
+            // SR2d-4 Task 5: native `begin`, replacing the `deluge_streaming_begin_fill` upcall.
+            // `chunk` was just returned by `next()` (a queued, still-leased `StreamedChunk*`).
+            let Some((_asset, index, ctx)) = resolve(self.mgr, chunk) else {
+                return geometry_error();
+            };
+            let geo = to_fill_geometry(&ctx);
+            let r = crate::fill_logic::begin(index, &geo);
+            if !r.ok {
+                return geometry_error();
+            }
+            // SAFETY: `chunk` is the same resident, leased `StreamedChunk*` `resolve` just
+            // validated has a registered fill-context.
+            let dest = unsafe { deluge_streaming_chunk_payload(chunk) };
+            StreamingFillDescriptor {
+                dest,
+                num_sectors: r.num_sectors,
+                ok: true,
+                handle: ctx.efatfs_handle,
+                byte_offset: r.byte_offset,
+            }
         }
 
         async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
@@ -501,8 +609,111 @@ mod prod {
         }
 
         fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool {
-            // SAFETY: `chunk` is the same pointer `begin` was just called with.
-            unsafe { deluge_streaming_finish_fill(chunk, read_ok) }
+            if !read_ok {
+                // Mirrors `finish_fill`'s own `if (!read_ok) { return false; }` early-out
+                // (`async_fill.cpp:107-110`) -- dead in practice under `fill_once`'s current
+                // calling convention (it only ever calls `finish` after `read` succeeds; see
+                // `fill_once`'s doc), kept for parity with the upcall's contract this replaces.
+                return false;
+            }
+
+            // SR2d-4 Task 5: native `finish` -- convert + stitch + publish, replacing the
+            // `deluge_streaming_finish_fill` upcall. `chunk` is the same pointer `begin` was just
+            // called with, whose data has just been successfully read into its payload buffer.
+            let Some((asset, index, ctx)) = resolve(self.mgr, chunk) else {
+                return false;
+            };
+            let geo = to_fill_geometry(&ctx);
+            let payload_len = ctx.cluster_size as usize + 7;
+
+            // SAFETY: `chunk` is a resident, still-leased `StreamedChunk*`; its payload buffer is
+            // `payload_with_trailing_slack()` -- `cluster_size + 7` bytes, matching `payload_len`.
+            let self_payload = unsafe {
+                core::slice::from_raw_parts_mut(deluge_streaming_chunk_payload(chunk), payload_len)
+            };
+            let mut self_state = to_logic_state(crate::fill_sidecar::get(self.mgr, chunk));
+
+            // Gather each neighbour, mirroring `async_fill.cpp:116-157`'s "present AND loaded" gate
+            // in one step: `try_acquire` reports resident-and-ready (the manager's `Loading` state
+            // is exactly the not-yet-`loaded` case the C++ checks) AND atomically takes a hard lease
+            // on a hit, so the neighbour can't be evicted out from under the stitch below the way a
+            // separate check-then-touch could race against an eviction between the two. The lease is
+            // released again right after the stitch (see the bottom of this function) -- it exists
+            // purely to pin the neighbour's payload buffer alive for this call's duration, not to
+            // hold it any longer than that (mirroring the C++'s use-then-forget borrow of
+            // `prevCluster`/`nextCluster`, just made eviction-safe under the manager's real
+            // lease/evict machinery, which the synchronous C++ path never had to contend with).
+            let mut prev_lease: Option<*mut u8> = None;
+            let mut prev_state = crate::fill_logic::ConvertState::default();
+            if let Some(prev_index) = index.checked_sub(1) {
+                // SAFETY: `mgr` is the live manager; `asset`/`prev_index` are a plain lookup.
+                let p = unsafe { deluge_resource_try_acquire(self.mgr, asset, prev_index) };
+                if !p.is_null() {
+                    prev_state =
+                        to_logic_state(crate::fill_sidecar::get(self.mgr, p as *mut c_void));
+                    prev_lease = Some(p);
+                }
+            }
+            let prev_view = prev_lease.map(|p| crate::fill_logic::NeighbourView {
+                // SAFETY: `p` was just leased+validated resident by `try_acquire` above; its
+                // payload is `cluster_size + 7` bytes, matching `payload_len`.
+                payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+                unconverted_head: &prev_state.first_three_bytes,
+                start_converted: &mut prev_state.start_converted,
+                end_converted: &mut prev_state.end_converted,
+            });
+
+            let mut next_lease: Option<*mut u8> = None;
+            let mut next_state = crate::fill_logic::ConvertState::default();
+            if let Some(next_index) = index.checked_add(1) {
+                // SAFETY: `mgr` is the live manager; `asset`/`next_index` are a plain lookup.
+                let p = unsafe { deluge_resource_try_acquire(self.mgr, asset, next_index) };
+                if !p.is_null() {
+                    next_state =
+                        to_logic_state(crate::fill_sidecar::get(self.mgr, p as *mut c_void));
+                    next_lease = Some(p);
+                }
+            }
+            let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
+                // SAFETY: same as the prev branch above.
+                payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+                unconverted_head: &next_state.first_three_bytes,
+                start_converted: &mut next_state.start_converted,
+                end_converted: &mut next_state.end_converted,
+            });
+
+            crate::fill_logic::finish_convert_stitch(
+                self_payload,
+                index,
+                &geo,
+                &mut self_state,
+                prev_view,
+                next_view,
+            );
+
+            // Write back the (possibly updated) convert-state -- self, and each neighbour actually
+            // visited -- then release the neighbour leases taken above.
+            crate::fill_sidecar::set(self.mgr, chunk, to_sidecar_state(self_state));
+            if let Some(p) = prev_lease {
+                crate::fill_sidecar::set(self.mgr, p as *mut c_void, to_sidecar_state(prev_state));
+                // SAFETY: `p` was leased by `deluge_resource_try_acquire` above; released exactly
+                // once, now that the stitch that needed it pinned alive is done.
+                unsafe { deluge_resource_release(self.mgr, p) };
+            }
+            if let Some(p) = next_lease {
+                crate::fill_sidecar::set(self.mgr, p as *mut c_void, to_sidecar_state(next_state));
+                // SAFETY: same as the prev release above.
+                unsafe { deluge_resource_release(self.mgr, p) };
+            }
+
+            // SAFETY: `chunk` is still the valid, leased `StreamedChunk*` from `next()`.
+            unsafe { deluge_streaming_chunk_set_loaded(chunk) };
+            // Manager-owned readiness: mirrors `finish_fill`'s own `deluge_resource_mark_ready`
+            // call (`async_fill.cpp:169-173`) so the async/RT `try_acquire` path sees this chunk
+            // ready.
+            // SAFETY: `mgr`/`chunk` are both still valid.
+            unsafe { deluge_resource_mark_ready(self.mgr, chunk) };
+            true
         }
 
         fn lease_count(&self, chunk: *mut c_void) -> u32 {

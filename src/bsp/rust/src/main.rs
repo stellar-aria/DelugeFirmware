@@ -144,20 +144,20 @@ mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
-/// Pure byte-range arithmetic for the native cluster fill (SR2d-4 Task 4): `begin`
-/// reimplements `begin_fill`'s last-cluster short-read sector-count calc from
-/// geometry alone. No FFI/statics, so it needs no `#[cfg]` gate — same tier as
-/// `fiber`/`scheduler` above, compiled everywhere. Not yet wired into
-/// `streaming_loader`'s `ProdOps::begin` (a later task) or called from `main`, so
-/// its host tests run via `tests/fill_logic_host.rs` (same `#[path]` convention as
-/// `tests/fill_sidecar_host.rs`), not a plain `cargo test` of this bin (which is
-/// `test = false` — see `Cargo.toml`).
+/// Pure cluster-fill logic for the native fill (SR2d-4 Task 4 + Task 5): `begin` reimplements
+/// `begin_fill`'s last-cluster short-read sector-count calc, `finish_convert_stitch` reimplements
+/// `finish_fill`'s convert + stitch tail (over `deluge_sample_convert`), both from geometry/buffers
+/// alone. No FFI/statics, so it needs no `#[cfg]` gate — same tier as `fiber`/`scheduler` above,
+/// compiled everywhere. Wired into `streaming_loader::prod::ProdOps::begin`/`finish`. Its host tests
+/// run via `tests/fill_logic_host.rs` (same `#[path]` convention as `tests/fill_sidecar_host.rs`),
+/// not a plain `cargo test` of this bin (which is `test = false` — see `Cargo.toml`).
 mod fill_logic;
 /// Per-chunk convert-state sidecar for the native fill (SR2d-4 Task 3): the
 /// `first_three_bytes`/`start_converted`/`end_converted` state a chunk's convert/stitch tail
 /// reads/writes, keyed by the manager's chunk-table slot + generation. Needs the real
 /// `deluge_resource_slot_of`/`_generation_of_slot` C-ABI, so same tier as [`streaming_loader`]
-/// below: device, or host under `host_app`. Not yet wired into the fill path (see its module doc).
+/// below: device, or host under `host_app`. Wired into `streaming_loader::prod::ProdOps::finish`
+/// (SR2d-4 Task 5) — the fill task is this sidecar's single owner; see its module doc.
 #[cfg(any(target_os = "none", feature = "host_app"))]
 mod fill_sidecar;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.

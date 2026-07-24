@@ -177,6 +177,14 @@ gotError:
 	sample->sampleRate = kSampleRate;
 	sample->workOutBitMask();
 
+	// SR2d-4 Task 5: re-register this asset's fill-context now that audioDataStartPosBytes/
+	// audioDataLengthBytes (the still-recording length sentinel, just above) are actually set.
+	// get_cluster() above already ran ensure_resource_asset() -> register_fill_context() once, but
+	// BEFORE these fields were assigned -- that first registration captured stale/default geometry
+	// (zeroed start-pos, zero length, a wrong getFirstClusterIndexWithNoAudioData()). Re-registering
+	// here closes that gap for as long as this sample is still recording.
+	sample->stream().register_fill_context();
+
 	currentRecordCluster->loaded =
 	    true; // I think this is ok - mark it as loaded even though we're yet to record into it
 
@@ -888,6 +896,12 @@ Error SampleRecorder::finalizeRecordedFile() {
 	    sample->lengthInSamples
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
+
+	// SR2d-4 Task 5: audioDataLengthBytes just reached its FINAL, definitive value -- re-register the
+	// fill-context so a later streamed playback of this (still resource-manager-resident) Sample
+	// consumes the real, finalized geometry rather than the still-recording sentinel/interim value any
+	// earlier registration captured. See SampleStream::register_fill_context()'s doc.
+	sample->stream().register_fill_context();
 
 	if (sample->tempFilePathForRecording.empty()) {
 		sampleBrowser.lastFilePathLoaded = sample->filePath;

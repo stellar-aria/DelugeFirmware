@@ -11,6 +11,14 @@
 //! armv7a-NEON compile/verify check (stamped by build.rs) succeeded.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+// SR2d-4 Task 5: this crate now has a real consumer -- the native fill task
+// (`deluge-bsp-rust`'s `fill_logic::finish_convert_stitch`) -- which links it on the actual
+// armv7a-none-eabihf device target, not just the x86 host test binary. `no_std` there only
+// (mirrors `deluge_resource`'s `#![cfg_attr(target_os = "none", no_std)]`): every non-test item here
+// is already plain `&mut [u8]`/pointer FFI over `core` primitives, so this costs nothing on host,
+// where the `#[cfg(test)]` module keeps using `std` (`Vec`, `vec!`) freely -- `target_os` on host is
+// never `"none"`, so `no_std` never applies there.
+#![cfg_attr(target_os = "none", no_std)]
 
 /// On-disk raw sample data format. Mirrors `RawDataFormat` in
 /// `src/deluge/storage/audio/audio_file_format.h` (a `uint8_t`-backed enum).

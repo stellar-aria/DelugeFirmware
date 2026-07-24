@@ -32,6 +32,14 @@ rtt-target = { version = "0.6", features = ["log"], optional = true }
 # fixed-capacity type is a better fit than a heap allocation either way.
 heapless = { version = "0.8", default-features = false }
 
+# SR2d-4 Task 5: the native cluster fill's convert/stitch step (`fill_logic::finish_convert_stitch`)
+# calls this crate's safe wrappers over the app's own convert.cpp/stitch.cpp rather than
+# re-transliterating them. Unconditional (not target/feature-gated), like the deps just above:
+# `fill_logic` compiles on every tier this crate builds (device, host_app, plain host) -- see that
+# module's doc. Its own build.rs is target-aware (device vs host; SR2d-4 Task 5), so this resolves
+# correctly on all three.
+deluge_sample_convert = { path = "sample_convert" }
+
 # Sibling deluge-sdk BSP + HAL (DelugeFirmware and deluge-sdk cloned side by
 # side). Both are dual-target as of deluge-sdk's feat/deluge-bsp-host: `sd`
 # (block_device.h's backing store) has the SAME async `Result<_, SdError>` API

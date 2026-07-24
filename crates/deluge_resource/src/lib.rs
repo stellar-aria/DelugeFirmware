@@ -625,6 +625,50 @@ mod tests {
     }
 
     #[test]
+    fn chunk_ident_c_abi_reports_asset_and_index_and_false_on_a_miss() {
+        let (_buf, h) = arena(256 * 1024);
+        let mgr = unsafe { deluge_resource_create(h, 16, 64) };
+        let a = unsafe {
+            deluge_resource_define_asset(
+                mgr,
+                owner(13),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let p = unsafe { deluge_resource_acquire(mgr, a, 3, 64 * 1024) };
+        assert!(!p.is_null());
+
+        let (mut out_asset, mut out_index) = (u32::MAX, u32::MAX);
+        let hit = unsafe { deluge_resource_chunk_ident(mgr, p, &mut out_asset, &mut out_index) };
+        assert!(hit);
+        assert_eq!(out_asset, a);
+        assert_eq!(out_index, 3);
+
+        // A pointer the manager never handed out reports false, leaving the out-params untouched.
+        let (mut miss_asset, mut miss_index) = (0xAAAA_AAAAu32, 0xBBBB_BBBBu32);
+        let miss = unsafe {
+            deluge_resource_chunk_ident(
+                mgr,
+                0xdead_beef as *mut u8,
+                &mut miss_asset,
+                &mut miss_index,
+            )
+        };
+        assert!(!miss);
+        assert_eq!(miss_asset, 0xAAAA_AAAA, "out-param untouched on a miss");
+        assert_eq!(miss_index, 0xBBBB_BBBB, "out-param untouched on a miss");
+
+        // A null handle also reports false rather than dereferencing anything.
+        assert!(!unsafe {
+            deluge_resource_chunk_ident(core::ptr::null_mut(), p, &mut out_asset, &mut out_index)
+        });
+    }
+
+    #[test]
     fn loader_queue_orders_by_priority_skips_unleased_and_de_queues() {
         let (_buf, h) = arena(256 * 1024);
         let mgr = unsafe { deluge_resource_create(h, 16, 64) };

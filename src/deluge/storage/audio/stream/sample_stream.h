@@ -213,6 +213,23 @@ public:
 
 	/// @}
 
+	/// @brief Register (or refresh) this asset's streaming fill-context with the resource manager.
+	///
+	/// A no-op if the Asset isn't defined yet (`resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET`) or
+	/// there is no manager. Called from ensure_resource_asset() right after the Asset is defined, and
+	/// again from open_read_stream() in case the efatfs handle becomes known only afterwards (see
+	/// their call sites for why both are needed). Public (not just an internal detail) so
+	/// `SampleRecorder` can also re-register once it has finalized this sample's geometry --
+	/// `audioDataStartPosBytes`/`audioDataLengthBytes` (+ the still-recording length sentinel) are set
+	/// well AFTER `ensure_resource_asset()`'s own first registration (`SampleRecorder::setup()`,
+	/// `sample_recorder.cpp`), and again finalized to their real value only at the end of recording
+	/// (`SampleRecorder::finalizeRecordedFile()`) -- both call sites re-register so the native fill's
+	/// consumed geometry (SR2d-4) matches the sample's actual state rather than the stale/default
+	/// values captured by that first, premature registration. Read/write this table back yet or not,
+	/// this call is always additive bookkeeping only -- it does not affect read_cluster_data() or any
+	/// existing behaviour.
+	void register_fill_context();
+
 private:
 	/// @name Resource-manager Source callbacks (SAMPLE clusters)
 	/// The manager invokes these to reconstruct or drop a cluster. A Chunk's backing is a uniform slab
@@ -235,16 +252,6 @@ private:
 	static void cluster_evict(void* ctx, void* owner, uint32_t index);
 
 	/// @}
-
-	/// @brief Register (or refresh) this asset's streaming fill-context with the resource manager.
-	///
-	/// A no-op if the Asset isn't defined yet (`resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET`) or
-	/// there is no manager. Called from ensure_resource_asset() right after the Asset is defined, and
-	/// again from open_read_stream() in case the efatfs handle becomes known only afterwards (see
-	/// their call sites for why both are needed). Additive bookkeeping only -- nothing reads this
-	/// table back yet (SR2d-4 Task 1); it does not affect read_cluster_data() or any existing
-	/// behaviour.
-	void register_fill_context();
 
 	Sample& sample_;
 

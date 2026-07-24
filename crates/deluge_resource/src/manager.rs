@@ -1332,6 +1332,34 @@ pub unsafe extern "C" fn deluge_resource_slot_of(handle: *mut DelugeResource, pt
     mgr(handle).slot_of(ptr)
 }
 
+/// The `(asset, index)` identity of the resident chunk backing `ptr`, written to `*out_asset`/
+/// `*out_index` — `true` on a hit, `false` (leaving the out-params untouched) if `ptr` isn't resident
+/// or either pointer is null. C-ABI mirror of `slot_of` just above (same `find_by_ptr` lookup), out-
+/// param shaped like `deluge_resource_stats` (a Rust `(u32, u32)` has no direct C-ABI return shape).
+/// Exposes the facade's `Resource::chunk_ident` (`facade.rs`) — added for the native fill task
+/// (SR2d-4 Task 5, `streaming_loader.rs`), which recovers a loader-queue chunk's `(asset, index)` to
+/// look up its per-asset fill-context (`fill_context_for`).
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_chunk_ident(
+    handle: *mut DelugeResource,
+    ptr: *mut u8,
+    out_asset: *mut u32,
+    out_index: *mut u32,
+) -> bool {
+    if handle.is_null() || out_asset.is_null() || out_index.is_null() {
+        return false;
+    }
+    let Some((asset, index)) = mgr(handle).chunk_ident(ptr) else {
+        return false;
+    };
+    // SAFETY: `out_asset`/`out_index` are caller-provided non-null `u32` out-params (checked above).
+    unsafe {
+        *out_asset = asset;
+        *out_index = index;
+    }
+    true
+}
+
 /// The fixed capacity of `handle`'s chunk table (its `chunk_cap` at `deluge_resource_create`) — 0
 /// if `handle` is null. Lets a caller size/validate a slot-indexed side table against the manager's
 /// real, runtime-determined geometry instead of a compile-time guess — e.g. the native fill's

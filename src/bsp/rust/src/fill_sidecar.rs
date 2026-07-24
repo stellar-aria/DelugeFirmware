@@ -1,15 +1,15 @@
 //! Per-chunk convert-state sidecar for the native fill (SR2d-4 Task 3).
 //!
-//! `finish`'s post-read convert/stitch tail (`deluge_streaming_finish_fill`/`stitch_boundaries` today,
-//! its native-Rust successor later) reads and writes a small piece of state per chunk: the
-//! pre-conversion `first_three_bytes[3]` a NEIGHBOUR chunk's boundary stitch reads, plus two
-//! `{start,end}_converted` idempotency guards so a boundary is never converted twice. Today those
-//! fields live directly on the C++ `StreamedChunk`; this module moves them into a Rust-owned store
-//! instead, keyed by the manager's own chunk-table slot.
+//! `finish`'s post-read convert/stitch tail (`fill_logic::finish_convert_stitch`, wired into
+//! `streaming_loader::prod::ProdOps::finish` — SR2d-4 Task 5) reads and writes a small piece of state
+//! per chunk: the pre-conversion `first_three_bytes[3]` a NEIGHBOUR chunk's boundary stitch reads,
+//! plus two `{start,end}_converted` idempotency guards so a boundary is never converted twice. Today
+//! those fields ALSO live directly on the C++ `StreamedChunk` (the legacy sync-fiber `finish_fill`
+//! path still reads/writes them there); this module is the Rust-owned mirror the native fill path
+//! reads/writes instead, keyed by the manager's own chunk-table slot.
 //!
-//! This module ONLY builds and tests the sidecar (see `tests/fill_sidecar_host.rs`) — verified
-//! fill-only (nothing but the fill path reads/writes this state, see the task brief), it is not yet
-//! wired into `ProdOps`/`fill_once` (`streaming_loader.rs`); that's a later task.
+//! `get`/`set` are touched ONLY by `ProdOps::finish` (single-owner — see the "Synchronization"
+//! section below); nothing else in this crate calls them.
 //!
 //! ## Overflow: a loud failure, not silent corruption
 //!
@@ -209,10 +209,6 @@ fn resolve_slot(mgr: *mut c_void, chunk: *mut c_void) -> Option<(usize, u32)> {
 /// [`set`] it, or the slot has since been evicted and reused for a different chunk (a generation
 /// mismatch — see the module doc's "Keying + auto-invalidation" section). The mismatch case lazily
 /// overwrites the stale entry with the fresh default at the slot's current generation.
-///
-/// Not called anywhere yet outside tests — wiring this into the native fill's `finish` tail is a
-/// later task (see the module doc).
-#[allow(dead_code)]
 pub fn get(mgr: *mut c_void, chunk: *mut c_void) -> ConvertState {
     let Some((slot, generation)) = resolve_slot(mgr, chunk) else {
         return ConvertState::default();
@@ -236,9 +232,6 @@ pub fn get(mgr: *mut c_void, chunk: *mut c_void) -> ConvertState {
 /// range (see [`SIDECAR_CAP`] — that path should be unreachable in practice, since the
 /// `chunk_cap`-vs-`SIDECAR_CAP` startup guard in `streaming_loader::prod::ProdOps::new()` halts the
 /// device first; this is the closed-off degrade path, not a live hazard, now that guard exists).
-///
-/// Not called anywhere yet outside tests — see [`get`]'s doc.
-#[allow(dead_code)]
 pub fn set(mgr: *mut c_void, chunk: *mut c_void, state: ConvertState) {
     let Some((slot, generation)) = resolve_slot(mgr, chunk) else {
         return;

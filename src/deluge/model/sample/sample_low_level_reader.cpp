@@ -54,17 +54,33 @@ void SampleLowLevelReader::ensureSource(Sample* sample) {
 		source_backing_ = nullptr;
 	}
 	if (source_ == nullptr) {
-		DelugeSampleGeometry geometry{
-		    .audio_data_start_bytes = sample->audioDataStartPosBytes,
-		    .audio_data_length_bytes = sample->audioDataLengthBytes,
-		    .cluster_size_bytes = static_cast<uint32_t>(Cluster::size),
-		    .byte_depth = static_cast<uint8_t>(sample->byteDepth),
-		    .num_channels = static_cast<uint8_t>(sample->numChannels),
-		    .raw_data_format = static_cast<uint8_t>(sample->rawDataFormat),
-		};
-		source_ = deluge_sample_source_open(backing, geometry);
+		source_ = deluge_sample_source_open(backing, geometryFor(*sample));
 		source_backing_ = backing;
 	}
+}
+
+DelugeSampleGeometry SampleLowLevelReader::geometryFor(const Sample& sample) {
+	return DelugeSampleGeometry{
+	    .audio_data_start_bytes = sample.audioDataStartPosBytes,
+	    .audio_data_length_bytes = sample.audioDataLengthBytes,
+	    .cluster_size_bytes = static_cast<uint32_t>(Cluster::size),
+	    .byte_depth = static_cast<uint8_t>(sample.byteDepth),
+	    .num_channels = static_cast<uint8_t>(sample.numChannels),
+	    .raw_data_format = static_cast<uint8_t>(sample.rawDataFormat),
+	};
+}
+
+void SampleLowLevelReader::mirrorRegionOnPinnedCluster(const Sample& sample) {
+	if (clusters[0] == nullptr) {
+		region_ = {};
+		return;
+	}
+	region_ = DelugeSampleRegion{
+	    .payload_base = clusters[0]->payload().data(),
+	    .region_index = clusters[0]->cluster_index,
+	    .resident_bytes = deluge_sample_region_resident_bytes(geometryFor(sample), clusters[0]->cluster_index),
+	    .lease = reinterpret_cast<uint64_t>(clusters[0]),
+	};
 }
 
 void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {
@@ -1330,12 +1346,23 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 		other.source_backing_ = nullptr;
 	}
 	else {
-		// SR1 Task 8: `region_` was copied from `other` by the caller's initializer list, but this
-		// reader's own `source_` is left null (re-opened lazily above) -- so `region_` is a snapshot from
-		// a cursor this reader doesn't own and can't keep coherent (`other`'s cursor may advance/release
-		// the chunk it points at independently of this copy's own clusters[] lease). Clear it so nothing
-		// reads it before this reader's own assignClusters() repopulates it.
-		region_ = {};
+		// `region_` was copied from `other` by the caller's initializer list. This reader's own `source_`
+		// is left null (re-opened lazily above), so the copied region is a snapshot from a cursor this
+		// reader doesn't own -- but the add_lease above means this reader now holds its OWN pin on the
+		// very chunk that snapshot describes, so the chunk cannot be reclaimed under it while
+		// `clusters[0]` is set, and the descriptor stays true of that chunk however `other`'s cursor
+		// moves on. Keeping it is what preserves the reader-wide invariant "`clusters[0] != nullptr`
+		// implies `region_` describes that same chunk" across a non-stealing copy; previously this branch
+		// cleared `region_` unconditionally and left the copy pinned-but-unmirrored.
+		//
+		// The mirror is dropped only when it does NOT describe the `clusters[0]` we just took (or there
+		// is none): then it really is a snapshot of a chunk this reader neither pins nor can keep
+		// coherent. `lease` is the port's chunk-pointer encoding (see deluge_sample_region_acquire_ex),
+		// so the identity test is exact -- and `region_ == {}` with a null `clusters[0]` compares equal,
+		// i.e. an already-empty mirror stays empty.
+		if (region_.lease != reinterpret_cast<uint64_t>(clusters[0])) {
+			region_ = {};
+		}
 	}
 }
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader& other, bool stealReasons)

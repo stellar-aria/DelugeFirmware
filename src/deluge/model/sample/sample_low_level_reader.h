@@ -115,7 +115,8 @@ public:
 	//   * attemptLateSampleStart's WAIT-probe -- the FAILURE-vs-WAIT-vs-defer decision reads
 	//     clusters[0]/[1] + ->loaded directly (the port's bool acquire cannot express it) and holds the
 	//     probe leases across a WAIT. Golden-UNVALIDATED (the deterministic sim has no SD latency), so
-	//     deliberately left on clusters[].
+	//     deliberately left on clusters[] -- but it now calls mirrorRegionOnPinnedCluster() on the chunks
+	//     it pins, so even a deferring probe leaves region_ describing clusters[0] rather than empty.
 	//   * VoiceSample::render's cache-resync tracking + stopReadingFromCache -- while replaying a
 	//     repitch/time-stretch cache the reader tracks the uncached resume cluster here. 8b Task 2
 	//     moved the resync's ACQUIRE onto the port (voice_sample.cpp ~900), so `region_` now tracks the
@@ -156,7 +157,26 @@ protected:
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
 	void ensureSource(Sample* sample);
 
+	/// @brief Point `region_` at the chunk currently pinned in `clusters[0]`, for the paths that pin a
+	///        chunk BELOW the port and so have no acquired `DelugeSampleRegion` to assign.
+	///
+	/// The port only ever hands a region out for a chunk that is resident AND loaded, so a path that
+	/// deliberately holds a not-yet-loaded chunk leased (attemptLateSampleStart's defer) cannot obtain
+	/// its mirror from an acquire without changing which clusters get pinned. This builds the very
+	/// descriptor the port would have built for that chunk: `payload_base` / `region_index` read straight
+	/// off it, `resident_bytes` from the port's own `deluge_sample_region_resident_bytes`, and `lease` in
+	/// the port's encoding (the chunk pointer — see `deluge_sample_region_acquire_ex`), so
+	/// `region_.lease == (uint64_t)clusters[0]` identifies the mirror exactly as it does after an acquire.
+	///
+	/// This is what keeps the reader's standing invariant — *`clusters[0] != nullptr` implies `region_`
+	/// describes that same chunk* — true on those paths too. A null `clusters[0]` clears the mirror.
+	/// @param sample the sample `clusters[0]` belongs to; supplies the geometry for `resident_bytes`.
+	void mirrorRegionOnPinnedCluster(const Sample& sample);
+
 private:
+	/// @brief The port geometry for @p sample — the immutable per-sample fields parsed above the port.
+	[[nodiscard]] static DelugeSampleGeometry geometryFor(const Sample& sample);
+
 	bool assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex, int32_t priorityRating);
 	bool fillInterpolationBufferForward(SamplePlaybackGuide* guide, Sample* sample, int32_t interpolationBufferSize,
 	                                    bool loopingAtLowLevel, int32_t numSpacesToFill, int32_t priorityRating);

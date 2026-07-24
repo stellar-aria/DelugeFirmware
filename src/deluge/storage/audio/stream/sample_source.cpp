@@ -343,6 +343,13 @@ DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint
 	return DELUGE_REGION_UNAVAILABLE;
 }
 
+uint32_t deluge_sample_region_resident_bytes(DelugeSampleGeometry geometry, uint32_t index) {
+	// The public spelling of the same arithmetic acquire_ex uses to fill DelugeSampleRegion::
+	// resident_bytes, so a caller mirroring a chunk it pinned itself gets the identical value instead
+	// of restating the short-last-cluster clamp.
+	return resident_bytes_for(index, geometry);
+}
+
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease) {
 	if (lease == 0 || src == nullptr) {
 		return;

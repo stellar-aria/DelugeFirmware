@@ -226,6 +226,19 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 	// Copy in the new reasons we just made
 	std::ranges::copy(newClusters, clusters.begin());
 
+	// The probe pins its clusters BELOW the port (get_cluster above), and unassignAllReasons() just
+	// cleared the region mirror along with the old leases -- so without this the reader would sit with
+	// clusters[0] pinned and region_ == {} for as long as the defer below lasts, breaking the invariant
+	// that region_ describes the pinned clusters[0]. Re-establish the mirror on the chunk we just pinned.
+	// It cannot come from an acquire: the whole point of the defer is that this chunk may not be loaded
+	// yet, and the port only hands out a region for a loaded one -- acquiring here would also change
+	// which clusters are pinned/prefetched, which the residency DECISION below must not do.
+	//
+	// On the goodToGo path this mirror is immediately superseded: unassignAllReasons() clears it again
+	// and setupClustersForPlayFromByte() -> assignClusters() repopulates it from the port's own acquire.
+	// So the only state this changes is the state left behind by a WAIT.
+	mirrorRegionOnPinnedCluster(*sample);
+
 	// TODO: lots of this code is kinda tied to there being just two clusters looked-ahead (wait, not any more right?)
 
 	// If the first Cluster has loaded...

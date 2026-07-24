@@ -152,6 +152,10 @@ impl<R: Residency> SampleSource<R> {
     /// (any state is fine — it just isn't ready yet); `Unavailable` leaves
     /// `prefetch` empty.
     fn prefetch_neighbour(&self, index: u32, direction: i8, priority: u32) {
+        debug_assert!(
+            direction == 1 || direction == -1,
+            "prefetch direction must be ±1; direction 0 would self-prefetch and violate the never-same-index invariant"
+        );
         let next_signed = index as i64 + direction as i64;
         if next_signed < 0 {
             return;

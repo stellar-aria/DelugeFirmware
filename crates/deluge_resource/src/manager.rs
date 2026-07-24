@@ -1511,6 +1511,7 @@ mod tests {
                 BACKING_HEAP,
             )
         };
+        // SAFETY: handle and asset are live and valid for this call.
         unsafe { deluge_resource_set_construct(handle, asset, Some(mock_construct)) };
         asset
     }

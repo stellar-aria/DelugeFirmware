@@ -15,8 +15,10 @@ pub struct Geometry {
 }
 
 /// "Still recording, length unknown" sentinel (see `sample_recorder.cpp`); leave the
-/// full cluster resident.
-const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
+/// full cluster resident. `pub(crate)`: also referenced by `abi.rs`'s
+/// `num_clusters_for`, which needs the identical zero/sentinel guard this module's
+/// own `resident_bytes_for` applies.
+pub(crate) const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
 
 /// Valid payload bytes for cluster `index`, clamping the last cluster to the
 /// geometry's audio-data end (bytes, not sectors). Full cluster for a full cluster,

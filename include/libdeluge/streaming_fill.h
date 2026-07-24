@@ -81,6 +81,26 @@ DelugeResource* deluge_streaming_resource_manager(void);
 /// @return true if the chunk is currently marked unloadable.
 bool deluge_streaming_chunk_unloadable(void* chunk_backing);
 
+/// @brief The chunk's payload buffer base — where its cluster data lives once read.
+///
+/// The ONLY other `StreamedChunk` field-touch the native Rust fill task needs, alongside
+/// deluge_streaming_chunk_set_loaded: `StreamedChunk::payload().data()`, reinterpreted as a
+/// `uint8_t*` DMA/read destination (mirrors the `dest` field deluge_streaming_begin_fill resolves
+/// today).
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+/// @return The chunk's payload buffer base.
+uint8_t* deluge_streaming_chunk_payload(void* chunk_backing);
+
+/// @brief Mark the chunk's payload as loaded/ready.
+///
+/// Sets `StreamedChunk::loaded = true` — the flag the C++ region cursor reads to see a chunk is
+/// ready. The ONLY other `StreamedChunk` field-touch the native Rust fill task needs, alongside
+/// deluge_streaming_chunk_payload.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+void deluge_streaming_chunk_set_loaded(void* chunk_backing);
+
 /// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
 ///        `async_streaming_loader`) owns the loader queue on this build/BSP.
 ///

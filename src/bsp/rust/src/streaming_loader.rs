@@ -392,6 +392,16 @@ mod prod {
         fn deluge_streaming_chunk_unloadable(chunk_backing: *mut c_void) -> bool;
         fn deluge_streaming_begin_fill(chunk: *mut c_void) -> StreamingFillDescriptor;
         fn deluge_streaming_finish_fill(chunk: *mut c_void, read_ok: bool) -> bool;
+        // The two StreamedChunk field-touch accessors the native fill will use (SR2d-4 Task 2):
+        // payload pointer + set-loaded. Declared here so the FFI boundary exists ahead of the
+        // native fill path that calls them (a later task) -- not called yet, so `begin`/`finish`
+        // above still go through `deluge_streaming_begin_fill`/`deluge_streaming_finish_fill`.
+        // Same "declared ahead of its caller" shape as `fill_context_for` above -- `#[allow(dead_code)]`
+        // to match.
+        #[allow(dead_code)]
+        fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
+        #[allow(dead_code)]
+        fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;

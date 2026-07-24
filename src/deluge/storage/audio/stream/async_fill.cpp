@@ -196,6 +196,19 @@ bool deluge_streaming_chunk_unloadable(void* chunk_backing) {
 	return reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable;
 }
 
+// The two StreamedChunk field-touch accessors the native Rust fill task needs (SR2d-4 Task 2):
+// payload pointer (read/DMA destination) and the loaded flag the C++ region cursor polls for
+// readiness. Same shape as deluge_streaming_chunk_unloadable just above -- real bodies only, no
+// weak fallback, because this TU (async_fill.cpp) is part of the shared deluge_SOURCES glob and so
+// always compiles and links into every BSP, not just the Rust/Embassy one.
+uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {
+	return reinterpret_cast<uint8_t*>(reinterpret_cast<StreamedChunk*>(chunk_backing)->payload().data());
+}
+
+void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
+	reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;
+}
+
 // Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP
 // provides the real definitions (streaming_loader.rs) whenever it links this crate —
 // unconditionally, so `deluge_streaming_async_active()` always resolves there regardless of

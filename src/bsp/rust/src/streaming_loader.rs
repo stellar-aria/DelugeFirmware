@@ -107,6 +107,16 @@ pub extern "C" fn deluge_streaming_signal_fill() {
 /// id the manager can ever hand out has a slot here. A plain literal, not read from the C++ side (the
 /// two are kept in sync by hand); if `kAssetCap` is ever raised, raise this too. A `DELUGE_RESOURCE_NO_ASSET`
 /// (`u32::MAX`) id is naturally rejected by the same bounds check as any other out-of-range id.
+///
+/// At this size (4096 × 32 bytes = 128 KiB) the table does NOT fit in on-chip SRAM at debug
+/// opt-levels — measured: `cargo device`'s `dev`-profile link failed with the SRAM region
+/// overflowing (a `.bss` placement here pushed `.ARM.exidx` past the RTT reservation), while the
+/// SAME table built clean under `--release` (see `linker/memory_rtt.x`'s own "a large live feature
+/// ... needs [release-like density] to fit at debug opt-levels" caveat — this table just measurably
+/// hit that ceiling too). Rather than shrink the table below a size that would make it useless for
+/// real per-asset coverage, [`FILL_CONTEXTS`] is placed in SDRAM instead (`.sdram_bss`, 64 MiB, a
+/// rounding error at this size) on device — the same fix already used for `fiber::WORKER_STACK`,
+/// `audio::RENDER_BLOCK`/`INPUT_BLOCK`, and `ffi_extra::NEWLIB_HEAP`.
 const FILL_CONTEXT_CAP: usize = 4096;
 
 /// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeStreamingFillContext` exactly (verbatim
@@ -116,7 +126,8 @@ const FILL_CONTEXT_CAP: usize = 4096;
 /// `RawDataFormat` (`audio_file_format.h`) as its `u8` underlying representation, not re-exposed as a
 /// Rust enum here (nothing on this side interprets it yet).
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq, Debug))]
+#[derive(Clone, Copy)]
 pub struct FillContext {
     pub efatfs_handle: u32,
     pub audio_data_start_pos_bytes: u32,
@@ -125,6 +136,24 @@ pub struct FillContext {
     pub cluster_size: u32,
     pub cluster_size_magnitude: u32,
     pub raw_data_format: u8,
+}
+
+impl FillContext {
+    /// The table's "unregistered" sentinel: `cluster_size == 0` never occurs in a real registration
+    /// (`Cluster::size` is always a nonzero power of two — see `sample_stream.cpp`'s
+    /// `register_fill_context`), so it's used in place of `Option<FillContext>`'s discriminant. That
+    /// saves the tag's padding (`Option<FillContext>` is 40 bytes vs. this struct's own 32 — see the
+    /// FFI layout guard below) across [`FILL_CONTEXT_CAP`] entries, which matters here: see that
+    /// constant's doc for why this table is on a tight SRAM budget.
+    const UNREGISTERED: FillContext = FillContext {
+        efatfs_handle: 0,
+        audio_data_start_pos_bytes: 0,
+        audio_data_length_bytes: 0,
+        first_cluster_index_with_no_audio_data: 0,
+        cluster_size: 0,
+        cluster_size_magnitude: 0,
+        raw_data_format: 0,
+    };
 }
 
 /// FFI layout guard, mirroring the `static_assert`s in `async_fill.cpp` — see that file's comment
@@ -156,28 +185,33 @@ const _: () = {
 /// `Mutex<CriticalSectionRawMutex, _>` — the exact primitives [`FILL_WAKE`] above already uses —
 /// needs no new mechanism and no new dependency, and is available in every context this file compiles
 /// in (device, `host_app`, and the plain-host test recompile alike).
-static FILL_CONTEXTS: Mutex<
-    CriticalSectionRawMutex,
-    RefCell<[Option<FillContext>; FILL_CONTEXT_CAP]>,
-> = Mutex::new(RefCell::new([None; FILL_CONTEXT_CAP]));
+///
+/// `.sdram_bss` on device only (see [`FILL_CONTEXT_CAP`]'s doc for why): that section is zeroed by
+/// `boot_mem::init_sdram_memory()` before any app code runs (including this table's first possible
+/// writer/reader), so the all-zero initializer below — every entry `FillContext::UNREGISTERED` — is
+/// exactly what's already there; the explicit initializer just keeps `host_app`/host-test behaviour
+/// (plain `.bss`, zeroed by the normal C runtime/process image) identical in substance.
+#[cfg_attr(target_os = "none", unsafe(link_section = ".sdram_bss"))]
+static FILL_CONTEXTS: Mutex<CriticalSectionRawMutex, RefCell<[FillContext; FILL_CONTEXT_CAP]>> =
+    Mutex::new(RefCell::new([FillContext::UNREGISTERED; FILL_CONTEXT_CAP]));
 
 /// Register (or replace) asset `asset`'s streaming fill-context. See
 /// `include/libdeluge/streaming_fill.h`'s doc for the C-side contract; `mgr` is unused today (there
 /// is exactly one process-wide resource manager) but kept in the signature for parity with the rest
 /// of the manager-scoped C ABI. Out-of-range asset ids (`>= FILL_CONTEXT_CAP`, which also catches
-/// `DELUGE_RESOURCE_NO_ASSET`) are silently ignored — the real manager's asset table is capped at
-/// `kAssetCap` (see [`FILL_CONTEXT_CAP`]'s doc) so this can't happen in production, but a caller
-/// under test may probe one.
+/// `DELUGE_RESOURCE_NO_ASSET`) are silently ignored, as is the pathological `ctx.cluster_size == 0`
+/// (indistinguishable from [`FillContext::UNREGISTERED`] — see its doc; never occurs from the real
+/// C++ caller).
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_streaming_set_fill_context(
     _mgr: *mut c_void,
     asset: u32,
     ctx: FillContext,
 ) {
-    if asset as usize >= FILL_CONTEXT_CAP {
+    if asset as usize >= FILL_CONTEXT_CAP || ctx.cluster_size == 0 {
         return;
     }
-    FILL_CONTEXTS.lock(|table| table.borrow_mut()[asset as usize] = Some(ctx));
+    FILL_CONTEXTS.lock(|table| table.borrow_mut()[asset as usize] = ctx);
 }
 
 /// Look up `asset`'s registered fill-context, or `None` if it was never registered (or `asset` is out
@@ -188,7 +222,8 @@ pub fn fill_context_for(asset: u32) -> Option<FillContext> {
     if asset as usize >= FILL_CONTEXT_CAP {
         return None;
     }
-    FILL_CONTEXTS.lock(|table| table.borrow()[asset as usize])
+    let ctx = FILL_CONTEXTS.lock(|table| table.borrow()[asset as usize]);
+    (ctx.cluster_size != 0).then_some(ctx)
 }
 
 /// Mirrors `include/libdeluge/streaming_fill.h`'s `StreamingFillDescriptor`

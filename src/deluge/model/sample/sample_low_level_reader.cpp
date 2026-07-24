@@ -359,6 +359,14 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 // Unassign the old ones before you call this.
 bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
                                           int32_t priorityRating) {
+#if ALPHA_OR_BETA_VERSION
+	// Precondition: callers unassign first, so `region_` is empty on entry. If it isn't, the add_lease
+	// below overwrites an un-released independent lease -- a silent leak (the pre-port `clusters[0] = ...`
+	// had the same trap). Catch the violation in dev builds instead of leaking; mirrors i019/i021/i022.
+	if (hasCurrentRegion()) {
+		FREEZE_WITH_ERROR("i024");
+	}
+#endif
 	ensureSource(sample);
 
 	// ensureSource() can leave source_ null when the source pool is exhausted: open() freezes with

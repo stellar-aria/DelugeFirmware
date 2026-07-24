@@ -1,10 +1,10 @@
 //! A safe Rust facade over the residency manager: a typed chunk handle plus the
 //! query/schedule operations, composing the SAME private `Manager` methods the
 //! `unsafe extern "C"` wrappers in `manager.rs` call (exposed here via `pub(crate)`,
-//! bodies unchanged). This is the query/schedule half only — no lease guard yet (a
-//! later task adds the RAII `Lease`), so `try_acquire`/`request` here still return a
-//! bare (but typed, non-null) `Chunk`; the manager-side lease they take is not yet
-//! tied to the handle's lifetime.
+//! bodies unchanged). `try_acquire`/`request` return a bare (but typed, non-null)
+//! `Chunk` — the manager-side lease they take is not tied to the handle's lifetime by
+//! the type system, so most callers should immediately turn it into a `Lease` (see
+//! `Resource::lease`/`acquire_leased`) so `Drop` closes the balance automatically.
 //!
 //! One `unsafe` fn at the edge (`Resource::from_handle`, mirroring the C ABI's
 //! `mgr()`); everything past it is safe, `Option`-returning Rust.
@@ -96,6 +96,89 @@ impl<'m> Resource<'m> {
     /// `None` if the load queue is empty.
     pub fn loader_next(&self) -> Option<Chunk> {
         Chunk::from_ptr(self.mgr.loader_next())
+    }
+
+    /// O(1) hard-lease count of the chunk at `slot` (see `slot_of`) — 0 if `slot` is
+    /// out of range or free. Exposed mainly for tests / invariant checks that want to
+    /// observe lease balance directly (`Lease`'s whole point is that callers normally
+    /// don't need to).
+    pub fn lease_count_by_slot(&self, slot: u32) -> u32 {
+        self.mgr.lease_count_by_slot(slot)
+    }
+
+    /// Take a hard-lease on `chunk`, returning the RAII guard. Exactly one
+    /// `add_lease` per `Lease` returned — `Drop` releases it exactly once (see
+    /// `Lease`).
+    pub fn lease(&self, chunk: Chunk) -> Lease {
+        self.mgr.add_lease(chunk.as_ptr());
+        // SAFETY-of-soundness (not an `unsafe` block, just documenting the pointer):
+        // `self.mgr` is a live `&Manager` right here, so casting it to a raw pointer
+        // for `Lease` to carry is sound — see the `Lease` doc for why the pointer
+        // stays valid for the guard's whole (possibly much longer than `'m`) lifetime.
+        Lease::adopt(self.mgr as *const Manager, chunk)
+    }
+
+    /// Convenience: `try_acquire` + wrap the lease it already took into the RAII guard,
+    /// in one step (the common "acquire a resident region" call). `try_acquire` itself
+    /// takes exactly one hard lease on a hit (see its doc) — this does NOT call `lease`
+    /// on top (that would double-lease the chunk while the guard only releases once,
+    /// leaking a lease on every call). `None` on a miss (nothing was leased).
+    pub fn acquire_leased(&self, asset: u32, index: u32) -> Option<Lease> {
+        self.try_acquire(asset, index)
+            .map(|c| Lease::adopt(self.mgr as *const Manager, c))
+    }
+}
+
+/// A held hard-lease on a resident chunk. `Drop` releases it exactly once — the lease
+/// balance is enforced by ownership, not by hand (in place of the C++ side's paired
+/// `addReason`/`removeReason` calls, whose imbalance was a real, expensive-to-review
+/// bug class; RAII makes that class impossible here). Non-`Copy`, non-`Clone`: only
+/// the guard that took the lease may release it.
+///
+/// Holds the manager as a raw `*const Manager`, not `&'m Manager` — so `Lease` carries
+/// NO lifetime parameter and is freely storable in a `Cell<Option<Lease>>` (SR2d-3's
+/// per-slot cursor state, which lives far longer than any single `Resource<'m>`
+/// borrow used to create the lease). This is sound because the manager is a
+/// boot-singleton: `deluge_resource_create`/`_unhooked` allocates it once from the
+/// heap and it is never freed or moved for the remaining life of the program (see
+/// `create_inner`), so the pointer stays valid for as long as any `Lease` can exist —
+/// exactly the same "process-lifetime, no dereference needed to check" argument
+/// `Chunk` already relies on for its own pointer.
+pub struct Lease {
+    mgr: *const Manager,
+    chunk: Chunk,
+}
+
+impl Lease {
+    /// Wrap an already-taken manager-side lease on `chunk` into the RAII guard,
+    /// without calling `add_lease` again. Private: the only callers are
+    /// `Resource::lease` (right after its own `add_lease`) and
+    /// `Resource::acquire_leased` (right after `try_acquire`'s own lease) — each site
+    /// is responsible for having taken exactly the one lease this guard will release.
+    fn adopt(mgr: *const Manager, chunk: Chunk) -> Self {
+        debug_assert!(!mgr.is_null(), "Lease over a null manager pointer");
+        Lease { mgr, chunk }
+    }
+
+    /// The leased chunk's handle (e.g. to hand its pointer to a materialize callback,
+    /// or to look up its slot for the loader queue).
+    pub fn chunk(&self) -> Chunk {
+        self.chunk
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // SAFETY: `self.mgr` was derived from a live `&Manager` at construction
+        // (`Resource::lease`/`acquire_leased`, both called through a live `Resource<'m>`)
+        // and the manager is a boot-singleton that outlives every `Lease` (see the
+        // struct doc) — so the pointer is still valid here, however long this guard
+        // lived. `Manager::release` already enters its own masked critical section
+        // (`rmw_by_ptr` -> `Masked::enter`), so this is ISR/main-thread safe with no
+        // extra locking added here; `no_std` aborts on panic, so there is no unwind
+        // path that could run this drop a second time or interleave a partial one.
+        let mgr = unsafe { &*self.mgr };
+        mgr.release(self.chunk.as_ptr());
     }
 }
 
@@ -191,6 +274,15 @@ mod tests {
         fn mark_ready(&self, chunk: Chunk) {
             self.resource().mark_ready(chunk)
         }
+        fn slot_of(&self, chunk: Chunk) -> u32 {
+            self.resource().slot_of(chunk)
+        }
+        fn lease_count_by_slot(&self, slot: u32) -> u32 {
+            self.resource().lease_count_by_slot(slot)
+        }
+        fn lease(&self, chunk: Chunk) -> Lease {
+            self.resource().lease(chunk)
+        }
     }
 
     #[test]
@@ -202,5 +294,70 @@ mod tests {
         rsrc.mark_ready(c);
         let got = rsrc.try_acquire(asset, 0).expect("now ready");
         assert_eq!(got, c); // same chunk identity
+    }
+
+    #[test]
+    fn lease_drop_releases_exactly_once() {
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        rsrc.mark_ready(c);
+        let slot = rsrc.slot_of(c);
+        let base = rsrc.lease_count_by_slot(slot); // pre-existing lease count
+        {
+            let _l = rsrc.lease(c);
+            assert_eq!(rsrc.lease_count_by_slot(slot), base + 1); // took one
+        } // _l drops here
+        assert_eq!(rsrc.lease_count_by_slot(slot), base); // released exactly one
+    }
+
+    #[test]
+    fn acquire_leased_takes_exactly_one_lease_and_drop_releases_it() {
+        // Regression for the double-lease trap: `acquire_leased` must NOT call
+        // `try_acquire` (which already leases on a hit) and then `lease()` (which
+        // would lease a second time while the guard only ever releases once).
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        rsrc.mark_ready(c);
+        let slot = rsrc.slot_of(c);
+        let base = rsrc.lease_count_by_slot(slot);
+        {
+            let l = rsrc
+                .resource()
+                .acquire_leased(asset, 0)
+                .expect("resident+ready");
+            assert_eq!(l.chunk(), c);
+            assert_eq!(rsrc.lease_count_by_slot(slot), base + 1);
+        }
+        assert_eq!(rsrc.lease_count_by_slot(slot), base);
+    }
+
+    /// Compile-check (and a real drop-cycle exercise): `Lease` carries no lifetime, so
+    /// it must be storable in a `Cell<Option<Lease>>` — SR2d-3's per-slot cursor state,
+    /// which lives far longer than any single `Resource<'m>` borrow used to create the
+    /// lease. `Cell::take` moves the guard out (leaving `None`); dropping the taken
+    /// value releases the lease, exactly like the cursor's state-transition `take`s will.
+    #[test]
+    fn lease_is_storable_in_cell_option_and_take_drops_it() {
+        use core::cell::Cell;
+
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        rsrc.mark_ready(c);
+        let slot = rsrc.slot_of(c);
+        let base = rsrc.lease_count_by_slot(slot);
+
+        let cell: Cell<Option<Lease>> = Cell::new(Some(rsrc.lease(c)));
+        assert_eq!(rsrc.lease_count_by_slot(slot), base + 1);
+
+        let taken = cell.take();
+        assert!(cell.take().is_none()); // cell is empty after the take
+        assert!(taken.is_some());
+        assert_eq!(rsrc.lease_count_by_slot(slot), base + 1); // still held by `taken`
+
+        drop(taken); // releases
+        assert_eq!(rsrc.lease_count_by_slot(slot), base);
     }
 }

@@ -280,8 +280,9 @@ impl Manager {
 
     /// O(1) hard-lease count of the chunk at `slot` — 0 if `slot` is out of range or the slot is free.
     /// The C++ object holds its slot index (a handle), so the loading queue / invariant checks read the
-    /// lease count without an O(n) `find_by_ptr` scan.
-    fn lease_count_by_slot(&self, slot: u32) -> u32 {
+    /// lease count without an O(n) `find_by_ptr` scan. `pub(crate)` so the safe `facade` module (and its
+    /// tests) can observe lease-balance without an O(n) scan.
+    pub(crate) fn lease_count_by_slot(&self, slot: u32) -> u32 {
         let i = slot as usize;
         if i >= self.chunks.len() {
             return 0;
@@ -619,8 +620,9 @@ impl Manager {
     /// Add a hard lease to an already-resident chunk by its backing pointer (no
     /// materialize). The pointer-keyed counterpart to a cache-hit `acquire`, for callers
     /// that already hold the chunk and just want to pin it harder (C++ `Cluster::addReason`).
-    /// No-op if the pointer isn't a resident chunk.
-    fn add_lease(&self, p: *mut u8) {
+    /// No-op if the pointer isn't a resident chunk. `pub(crate)` so the safe `facade::Lease`
+    /// RAII guard can take its one lease through the same path the C ABI wrapper uses.
+    pub(crate) fn add_lease(&self, p: *mut u8) {
         let r = self.bump();
         self.rmw_by_ptr(p, |s| {
             s.leases += 1;
@@ -748,7 +750,11 @@ impl Manager {
         self.free_backing(s.backing, s.asset); // unmasked (no mask across free)
     }
 
-    fn release(&self, p: *mut u8) {
+    /// Drop one hard lease on the chunk at `p` (it stays resident/cached until evicted).
+    /// `pub(crate)` so `facade::Lease::drop` can release exactly the lease it took — already
+    /// masked-safe (via `rmw_by_ptr`'s `Masked::enter`), so it may run from an ISR or the
+    /// main thread with no extra locking.
+    pub(crate) fn release(&self, p: *mut u8) {
         self.rmw_by_ptr(p, |s| {
             if s.leases > 0 {
                 s.leases -= 1;

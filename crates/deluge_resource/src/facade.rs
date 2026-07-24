@@ -1,10 +1,11 @@
 //! A safe Rust facade over the residency manager: a typed chunk handle plus the
 //! query/schedule operations, composing the SAME private `Manager` methods the
 //! `unsafe extern "C"` wrappers in `manager.rs` call (exposed here via `pub(crate)`,
-//! bodies unchanged). `try_acquire`/`request` return a bare (but typed, non-null)
-//! `Chunk` — the manager-side lease they take is not tied to the handle's lifetime by
-//! the type system, so most callers should immediately turn it into a `Lease` (see
-//! `Resource::lease`/`acquire_leased`) so `Drop` closes the balance automatically.
+//! bodies unchanged). Every facade op that takes a manager-side lease returns the
+//! RAII `Lease` guard, never a bare `Chunk` — so a leak requires deliberately
+//! forgetting to drop the guard, not just forgetting to wrap one. The internal
+//! `try_acquire` helper (private) still returns a bare `Chunk`, but its only callers
+//! are `acquire_leased` here, which wraps it immediately.
 //!
 //! One `unsafe` fn at the edge (`Resource::from_handle`, mirroring the C ABI's
 //! `mgr()`); everything past it is safe, `Option`-returning Rust.
@@ -61,16 +62,23 @@ impl<'m> Resource<'m> {
     /// RT-safe, non-blocking: is chunk `index` of `asset` resident AND ready? Never
     /// allocates, materializes, or blocks. `None` on a miss (not resident, or resident
     /// but still `Loading` — see `mark_ready`). Takes a hard lease on a hit (mirrors
-    /// `deluge_resource_try_acquire`); no RAII guard yet, see the module doc.
-    pub fn try_acquire(&self, asset: u32, index: u32) -> Option<Chunk> {
+    /// `deluge_resource_try_acquire`). Private: returns a bare, non-RAII `Chunk`, so the
+    /// only caller is `acquire_leased`, which wraps the lease it just took into a
+    /// `Lease` before handing anything back. Public callers want `acquire_leased`.
+    fn try_acquire(&self, asset: u32, index: u32) -> Option<Chunk> {
         Chunk::from_ptr(self.mgr.try_acquire(asset, index))
     }
 
     /// Reserve + construct (no I/O; `ready = false`) chunk `index` of `asset`, so an
-    /// external loader can fill it and call `mark_ready`. `None` on OOM, a full table
-    /// with nothing evictable, or an asset with no `construct` callback attached.
-    pub fn request(&self, asset: u32, index: u32, size: usize) -> Option<Chunk> {
+    /// external loader can fill it and call `mark_ready`, wrapping the one lease this
+    /// takes into the RAII `Lease` guard. `None` on OOM, a full table with nothing
+    /// evictable, or an asset with no `construct` callback attached (nothing was
+    /// leased in that case). The returned `Lease` is the caller's owned pin on the
+    /// reserved-but-not-yet-ready chunk — e.g. what SR2d's cursor stores as its
+    /// `pending` slot while the loader fills it; dropping it releases the reservation.
+    pub fn request(&self, asset: u32, index: u32, size: usize) -> Option<Lease> {
         Chunk::from_ptr(self.mgr.request(asset, index, size))
+            .map(|c| Lease::adopt(self.mgr as *const Manager, c))
     }
 
     /// Publish readiness on a `request`-ed chunk after its data has been filled — the
@@ -93,7 +101,12 @@ impl<'m> Resource<'m> {
     }
 
     /// Pop the most-urgent queued + still-leased chunk (clearing its queued flag), or
-    /// `None` if the load queue is empty.
+    /// `None` if the load queue is empty. The returned `Chunk` is a NON-OWNING borrow
+    /// of an already-leased chunk (`loader_next` never leases — see `Manager::loader_next`,
+    /// which only ever picks a `queued + still-leased` slot): the requester (whoever
+    /// called `request`/`acquire_leased`) already owns the lease and its `Lease` guard,
+    /// so the loader must use this handle to fill/`mark_ready` the chunk but must NOT
+    /// wrap it in a `Lease` of its own — that would double-release on drop.
     pub fn loader_next(&self) -> Option<Chunk> {
         Chunk::from_ptr(self.mgr.loader_next())
     }
@@ -265,10 +278,10 @@ mod tests {
             asset
         }
 
-        fn try_acquire(&self, asset: u32, index: u32) -> Option<Chunk> {
-            self.resource().try_acquire(asset, index)
+        fn acquire_leased(&self, asset: u32, index: u32) -> Option<Lease> {
+            self.resource().acquire_leased(asset, index)
         }
-        fn request(&self, asset: u32, index: u32, size: usize) -> Option<Chunk> {
+        fn request(&self, asset: u32, index: u32, size: usize) -> Option<Lease> {
             self.resource().request(asset, index, size)
         }
         fn mark_ready(&self, chunk: Chunk) {
@@ -289,21 +302,24 @@ mod tests {
     fn try_acquire_reports_resident_ready_and_none_on_miss() {
         let rsrc = test_resource(); // build a manager over a test heap (mirror testing.rs)
         let asset = rsrc.define_test_asset();
-        assert!(rsrc.try_acquire(asset, 0).is_none()); // not resident yet
-        let c = rsrc.request(asset, 0, CHUNK_SIZE).expect("request");
+        assert!(rsrc.acquire_leased(asset, 0).is_none()); // not resident yet
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).expect("request");
+        let c = req.chunk();
         rsrc.mark_ready(c);
-        let got = rsrc.try_acquire(asset, 0).expect("now ready");
-        assert_eq!(got, c); // same chunk identity
+        let got = rsrc.acquire_leased(asset, 0).expect("now ready");
+        assert_eq!(got.chunk(), c); // same chunk identity
+                                    // `req` and `got` each hold their own lease; both release on drop below.
     }
 
     #[test]
     fn lease_drop_releases_exactly_once() {
         let rsrc = test_resource();
         let asset = rsrc.define_test_asset();
-        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
         rsrc.mark_ready(c);
         let slot = rsrc.slot_of(c);
-        let base = rsrc.lease_count_by_slot(slot); // pre-existing lease count
+        let base = rsrc.lease_count_by_slot(slot); // pre-existing lease count (incl. `req`'s)
         {
             let _l = rsrc.lease(c);
             assert_eq!(rsrc.lease_count_by_slot(slot), base + 1); // took one
@@ -318,7 +334,8 @@ mod tests {
         // would lease a second time while the guard only ever releases once).
         let rsrc = test_resource();
         let asset = rsrc.define_test_asset();
-        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
         rsrc.mark_ready(c);
         let slot = rsrc.slot_of(c);
         let base = rsrc.lease_count_by_slot(slot);
@@ -344,7 +361,8 @@ mod tests {
 
         let rsrc = test_resource();
         let asset = rsrc.define_test_asset();
-        let c = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
         rsrc.mark_ready(c);
         let slot = rsrc.slot_of(c);
         let base = rsrc.lease_count_by_slot(slot);

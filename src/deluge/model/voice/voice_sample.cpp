@@ -194,78 +194,68 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 
 	int32_t finalClusterIndex = voiceSource->getFinalClusterIndex(sample, cache); // Think this is right...
 
-	int32_t clusterIndex = startAtClusterIndex;
-
-	// We load our new Clusters into a secondary array first, to preserve the reason-holding power of whatever is
-	// already in our main one until we unassign them below
-	std::array<StreamedChunk*, kNumClustersLoadedAhead> newClusters{};
-
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-
-		// Grab it. Boundary-crossing refill (late sample-start attempt): one stream() hop per
-		// lookahead slot, not per sample.
-		newClusters[l] = sample->stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE);
-
-		// If failure (would only happen in insanely rare case where there's no free RAM)
-		if (l == 0 && !newClusters[l]) {
-			return LateStartAttemptStatus::FAILURE;
-		}
-
-		// If that was the final Cluster, that's all we need to do
-		if (clusterIndex == finalClusterIndex) {
-			break;
-		}
-
-		clusterIndex += voiceSource->playDirection;
-	}
-
-	// Remove all old reasons - there might be some if this function has been called multiple times while we wait for
-	// Clusters to load
+	// Release any residency left by a previous (re)start attempt before probing afresh -- the old probe
+	// did this same unassignAllReasons() before copying its freshly-fetched clusters in. The port cursor
+	// (source_->current/pending/prefetch), not clusters[], now carries the leases across a defer.
 	unassignAllReasons(false);
 
-	// Copy in the new reasons we just made
-	std::ranges::copy(newClusters, clusters.begin());
+	// Open the region-port cursor if this is the first residency op for the sample. The old probe hit
+	// sample->stream().get_cluster() directly, so it never needed source_; the port DECISION does, and
+	// late-start can be the very first residency op (before any assignClusters), so source_ would be null
+	// -> acquire_ex returns UNAVAILABLE -> a spurious FAILURE. assignClusters opens it the same way.
+	ensureSource(sample);
 
-	// The probe pins its clusters BELOW the port (get_cluster above), and unassignAllReasons() just
-	// cleared the region mirror along with the old leases -- so without this the reader would sit with
-	// clusters[0] pinned and region_ == {} for as long as the defer below lasts, breaking the invariant
-	// that region_ describes the pinned clusters[0]. Re-establish the mirror on the chunk we just pinned.
-	// It cannot come from an acquire: the whole point of the defer is that this chunk may not be loaded
-	// yet, and the port only hands out a region for a loaded one -- acquiring here would also change
-	// which clusters are pinned/prefetched, which the residency DECISION below must not do.
-	//
-	// On the goodToGo path this mirror is immediately superseded: unassignAllReasons() clears it again
-	// and setupClustersForPlayFromByte() -> assignClusters() repopulates it from the port's own acquire.
-	// So the only state this changes is the state left behind by a WAIT.
-	mirrorRegionOnPinnedCluster(*sample);
+	// Residency DECISION through the region port (8b Task 5). Full mapping + the golden-unreachable
+	// divergences: docs/superpowers/specs/2026-07-24-task5-latestart-tristate-mapping.md. acquire_ex
+	// fetches the start cluster, RETAINS its lease as `pending` while LOADING (so the fill survives the
+	// defer/retry -- the pre-8b probe held clusters[0]'s reason for exactly this reason), and on READY
+	// pins it as `current` and prefetches the neighbour (what the old clusters[1] look-ahead did).
+	// Priority 0xFFFFFFFF == the probe's get_cluster() default and the goodToGo re-acquire below.
+	DelugeSampleRegion region{};
+	DelugeRegionState state0 = deluge_sample_region_acquire_ex(source_, startAtClusterIndex, voiceSource->playDirection,
+	                                                           static_cast<uint32_t>(0xFFFFFFFFU), &region);
 
-	// TODO: lots of this code is kinda tied to there being just two clusters looked-ahead (wait, not any more right?)
+	// UNAVAILABLE: neither found nor constructed a chunk (no free RAM, or out of range) -- the old
+	// `l == 0 && !newClusters[0]` FAILURE.
+	if (state0 == DELUGE_REGION_UNAVAILABLE) {
+		return LateStartAttemptStatus::FAILURE;
+	}
 
-	// If the first Cluster has loaded...
-	if (clusters[0]->loaded) {
+	// LOADING falls through to the single WAIT site below (the old `clusters[0]->loaded` == false); its
+	// lease is retained by the port as `pending`. READY means the start cluster is loaded -- decide on
+	// the neighbour exactly as the old code did.
+	if (state0 == DELUGE_REGION_READY) {
 
 		uint32_t bytesPosWithinCluster = startAtByte & (Cluster::size - 1);
 
-		// If there's no second Cluster, or it's fully loaded... we're good to go!
-		if (!clusters[1] || clusters[1]->loaded) {
+		// The neighbour the old probe looked ahead to (clusters[1]), unless the start cluster IS the final
+		// one -- then the old probe broke, leaving clusters[1] null. A pure indexed query: acquire_ex
+		// already prefetched the neighbour on the READY path above, so this just reads its state.
+		bool hasNeighbour = (static_cast<int32_t>(startAtClusterIndex) != finalClusterIndex);
+		DelugeRegionState stateN =
+		    hasNeighbour
+		        ? deluge_sample_region_state(source_, static_cast<uint32_t>(static_cast<int32_t>(startAtClusterIndex)
+		                                                                    + voiceSource->playDirection))
+		        : DELUGE_REGION_UNAVAILABLE;
+
+		// No neighbour, neighbour READY, or neighbour UNAVAILABLE (out of range / RAM-failed prefetch) --
+		// the old `!clusters[1] || clusters[1]->loaded` good-to-go, which treated a null clusters[1] from
+		// any cause as good-to-go. Only a LOADING neighbour gives the old code pause.
+		if (stateN != DELUGE_REGION_LOADING) {
 goodToGo:
-			// SR1 Task 7: commit the note-start by (re-)establishing the reader's region-port cursor for the
-			// start cluster, instead of pointing currentPlayPos straight at the probe's clusters[0]->payload().
-			// The residency DECISION above stays the pre-port probe (the port's acquire cannot express the
-			// FAILURE-vs-WAIT split, the clusters[1] sub-check, or the defer path's keep-leased-while-loading
-			// semantics), but the SUCCESS commit now flows through the port: unassignAllReasons() drops the
-			// probe leases (clusters[0], and clusters[1] if held); the still-resident start cluster is
-			// immediately re-pinned by setupClustersForPlayFromByte() -> assignClusters() through
-			// deluge_sample_region_acquire(), which sets source_->current + the clusters[0] mirror + region_
-			// (so setupReassessmentLocation's Task-6 interpolation-window base sources from a fresh, matching
-			// region_.payload_base rather than a stale one) and prefetches the neighbour. This mirrors the
-			// accepted unassign-then-setup idiom in TimeStretcher::setupNewPlayHead. startAtByte >>
-			// Cluster::size_magnitude == startAtClusterIndex and startAtByte & (Cluster::size-1) == the
-			// byte-within-cluster, so the resulting setupForPlayPosMovedIntoNewCluster() is byte-identical to
-			// the old direct clusters[0] setup.
-			unassignAllReasons(false);
-			// Priority == get_cluster()'s default (0xFFFFFFFF) — the exact value the probe loop above used, so
-			// the re-acquire's clusters[0] fetch and neighbour prefetch match the probe byte-for-byte.
+			// Commit the note-start by establishing the reader's steady-state residency for the start
+			// cluster through setupClustersForPlayFromByte() -> assignClusters(), which sets the clusters[0]
+			// mirror + region_ (so setupReassessmentLocation's interpolation-window base sources from a
+			// matching region_.payload_base) and takes the independent clusters[] lease the steady-state
+			// consumers expect. The DECISION above already acquired the start region through the port
+			// (source_->current is pinned, neighbour prefetched); this re-acquires the SAME index, which the
+			// port makes idempotent -- acquire_ex drops the duplicate lease get_cluster adds when src->current
+			// already holds the chunk (see sample_source.cpp step 4), so the two acquires net one lease, and
+			// the standing prefetch is already the neighbour so it is not re-fetched. Same priority
+			// (0xFFFFFFFF) as the decision acquire so nothing about residency changes on the re-acquire.
+			// startAtByte >> Cluster::size_magnitude == startAtClusterIndex and startAtByte &
+			// (Cluster::size-1) == the byte-within-cluster, so setupForPlayPosMovedIntoNewCluster() lands on
+			// the same position as the old direct clusters[0] setup.
 			if (!setupClustersForPlayFromByte(voiceSource, sample, static_cast<int32_t>(startAtByte),
 			                                  static_cast<int32_t>(0xFFFFFFFFU))) {
 				// The start cluster was resident-and-loaded a few statements ago (checked above), so a false

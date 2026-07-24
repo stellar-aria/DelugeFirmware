@@ -567,7 +567,7 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 			beamBackEdge = waveformStartSample;
 		}
 
-		if (!olderPartReader.clusters[0]) {
+		if (!olderPartReader.hasCurrentRegion()) {
 			D_PRINTLN("No cluster!!!");
 		}
 
@@ -877,7 +877,7 @@ skipSearch:
 	if (bufferFillingMode != BUFFER_FILLING_OFF // If not OFF, it can only be OLDER or NEITHER - it gets changed above
 	    && phaseIncrement != kMaxSampleValue) {
 
-		if (!olderPartReader.clusters[0]) {
+		if (!olderPartReader.hasCurrentRegion()) {
 			D_PRINTLN("aaa");
 		}
 
@@ -1012,7 +1012,7 @@ bool TimeStretcher::setupNewPlayHead(Sample* sample, VoiceSample* voiceSample, S
 
 	voiceSample->interpolationBufferSizeLastTime = 0;
 	voiceSample->oscPos = additionalOscPos;
-	if (!voiceSample->clusters[0]) {
+	if (!voiceSample->hasCurrentRegion()) {
 		playHeadStillActive[PLAY_HEAD_NEWER] = false;
 		D_PRINTLN("new no longer active");
 	}

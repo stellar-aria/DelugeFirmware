@@ -96,6 +96,11 @@ public:
 	void bufferIndividualSampleForInterpolation(int32_t numChannels, int32_t byteDepth, char* playPosNow);
 	void bufferZeroForInterpolation(int32_t numChannels);
 
+	/// @brief Does the reader currently hold a resident cluster? The external presence query that replaces
+	///        reaching into `clusters[0]` — true exactly when `clusters[0]` is set, since the reader-wide
+	///        invariant keeps `region_` and `clusters[0]` populated (and emptied) together.
+	[[nodiscard]] bool hasCurrentRegion() const { return region_.payload_base != nullptr; }
+
 	uint32_t oscPos{};
 	char* currentPlayPos{};
 	char* reassessmentLocation{};
@@ -123,12 +128,10 @@ public:
 	//     cache position too and is no longer stale during cache replay; clusters[0] is written from
 	//     that same acquire and the two move together. stopReadingFromCache still reads
 	//     clusters[0]->loaded directly (the port's bool acquire cannot express "held but not loaded").
-	//   * external presence consumers -- reads made by code outside this class hierarchy (VoiceSample's
-	//     own clusters[] reads, covered by the bullets above, are internal): TimeStretcher's
-	//     olderPartReader.clusters[0]/voiceSample->clusters[0] presence checks (time_stretcher.cpp
-	//     ~570, ~880, ~1015) and SamplePlaybackGuide::adjustPitchToCorrectDriftFromSync's
-	//     voiceSample->clusters[0] "clusters not set up yet" guard (sample_playback_guide.cpp ~131).
-	//     voice.cpp itself no longer reads clusters[] at all (SR1 Task 8 removed its last read).
+	//   No longer read by any external presence consumer: TimeStretcher (time_stretcher.cpp ~570, ~880,
+	//   ~1015) and SamplePlaybackGuide::adjustPitchToCorrectDriftFromSync (~131) now query
+	//   hasCurrentRegion() (region_-backed) instead of reaching into clusters[0], and voice.cpp stopped
+	//   reading clusters[] at SR1 Task 8. The remaining reads are all internal to this class hierarchy.
 	// Fully retiring clusters[] would require routing those port-uncovered paths through the port so
 	// region_ becomes authoritative during cache/probe too -- deferred (see SR1 Task 8 report).
 	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};

@@ -1,0 +1,67 @@
+//! The region-port residency state machine: a native Rust reimplementation of the
+//! `deluge_sample_source_*` cursor contract, byte-identical to the C++ backing.
+#![no_std]
+
+pub mod abi;
+pub mod cursor;
+pub mod geometry;
+pub mod manager_residency;
+pub mod residency;
+
+// `deluge_resource::sync` calls out to three C-ABI critical-section primitives that,
+// in the real firmware/host-sim link, the BSP (`src/bsp/rust/src/services.rs`)
+// provides. `deluge_resource`'s own `cargo test` binary supplies host stubs for
+// them internally (`sync::stubs`, `#[cfg(test)]`-gated and crate-private), but that
+// module isn't visible to downstream crates — so this crate's own test binary,
+// which links `deluge_resource` as a plain (non-test) rlib, must provide the same
+// three symbols itself or every test here fails to link. Single-threaded-per-test
+// critical section backed by the `critical-section` host `std` impl, mirroring
+// `deluge_resource::sync::stubs` (minus its enter/exit counters, which nothing here
+// asserts on).
+#[cfg(test)]
+mod host_critical_section_stubs {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
+        static TOKEN: Cell<Option<critical_section::RestoreState>> = const { Cell::new(None) };
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn ENTER_CRITICAL_SECTION() {
+        DEPTH.with(|d| {
+            if d.get() == 0 {
+                // SAFETY: released by the matching EXIT once this thread's depth hits 0.
+                let t = unsafe { critical_section::acquire() };
+                TOKEN.with(|tok| tok.set(Some(t)));
+            }
+            d.set(d.get() + 1);
+        });
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn EXIT_CRITICAL_SECTION() {
+        let closed = DEPTH.with(|d| {
+            let n = d.get().saturating_sub(1);
+            d.set(n);
+            n == 0
+        });
+        if closed {
+            TOKEN.with(|tok| {
+                if let Some(t) = tok.take() {
+                    // SAFETY: stashed by this thread's outermost ENTER, above.
+                    unsafe { critical_section::release(t) };
+                }
+            });
+        }
+    }
+
+    // This crate's tests are single-threaded and never model the audio-ISR context
+    // (that asymmetry is `deluge_resource`'s own concern, proved in its crate) — so
+    // "never in an interrupt" is the right constant answer here.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_in_interrupt() -> bool {
+        false
+    }
+}

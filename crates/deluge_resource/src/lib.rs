@@ -14,7 +14,7 @@
 
 pub mod facade;
 pub mod manager;
-mod sync;
+pub mod sync;
 pub mod value;
 
 #[cfg(any(test, feature = "fuzzing"))]

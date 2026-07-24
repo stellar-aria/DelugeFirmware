@@ -378,4 +378,126 @@ mod tests {
         drop(taken); // releases
         assert_eq!(rsrc.lease_count_by_slot(slot), base);
     }
+
+    /// SR2d-3's cornerstone: the RAII cursor will store `Cell<Option<Lease>>` per
+    /// slot and drop a `Lease` (via `take`/`replace`) from BOTH the audio-ISR path
+    /// (`acquire`) and the main path (`close`). This proves `Lease::drop ->
+    /// Manager::release` composes with the manager's asymmetric masked discipline
+    /// (`sync::Masked`) exactly right in each context — it decrements exactly once
+    /// either way, and only the main path takes the critical section (the ISR path
+    /// is lock-free by the manager's own atomic-vs-fiber guarantee). Uses the same
+    /// `sync::stubs` two-context model (`deluge_in_interrupt_set`) + critical-section
+    /// counters that `sync.rs`'s own `fiber_masks_rmw` / `audio_skips_mask` tests use.
+    ///
+    /// `cargo test`'s critical-section counters are thread-local (see `sync::stubs`),
+    /// so this single-threaded test — flipping the in-interrupt flag to model the two
+    /// contexts, the established in-crate pattern — reads only its own thread's counts.
+    #[test]
+    fn lease_drop_is_masked_from_main_and_lockfree_from_isr() {
+        use crate::sync::stubs;
+
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+        let req = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c = req.chunk();
+        rsrc.mark_ready(c);
+        let slot = rsrc.slot_of(c);
+        let base = rsrc.lease_count_by_slot(slot); // includes `req`'s own lease
+
+        // (a) MAIN context: dropping a Lease enters the masked critical section
+        // (release goes through `rmw_by_ptr` -> `Masked::enter`) and decrements once.
+        stubs::deluge_in_interrupt_set(false);
+        let l = rsrc.lease(c);
+        assert_eq!(rsrc.lease_count_by_slot(slot), base + 1, "lease took one");
+        stubs::cs_reset_counts();
+        drop(l); // Lease::drop -> Manager::release, masked
+        let entered = stubs::cs_enter_count();
+        assert!(
+            entered >= 1,
+            "main-context Lease drop must enter the critical section on release"
+        );
+        assert_eq!(
+            stubs::cs_exit_count(),
+            entered,
+            "every masked enter is balanced by an exit"
+        );
+        assert_eq!(
+            rsrc.lease_count_by_slot(slot),
+            base,
+            "masked release decremented exactly one lease"
+        );
+
+        // (b) AUDIO-ISR context: dropping a Lease must NOT mask (the audio path is
+        // already atomic w.r.t. the fiber, so the manager skips the lock) yet must
+        // still decrement exactly once.
+        stubs::deluge_in_interrupt_set(true);
+        let l = rsrc.lease(c); // add_lease here is itself lock-free (ISR context)
+        stubs::cs_reset_counts();
+        drop(l); // Lease::drop -> Manager::release, lock-free on the ISR path
+        assert_eq!(
+            stubs::cs_enter_count(),
+            0,
+            "ISR-context Lease drop must not take the critical section"
+        );
+        assert_eq!(stubs::cs_exit_count(), 0);
+        // Read still in ISR context (also lock-free) so the count assertion above holds.
+        assert_eq!(
+            rsrc.lease_count_by_slot(slot),
+            base,
+            "lock-free ISR release decremented exactly one lease"
+        );
+
+        stubs::deluge_in_interrupt_set(false); // restore for other tests on this thread
+    }
+
+    /// The cross-slot non-corruption fact: SR2d-3 drops leases from the main path
+    /// and the ISR path on DIFFERENT cursor slots. Interleaving a main-context
+    /// lease/drop on slot0 with an ISR-context lease/drop on slot1 must leave EACH
+    /// slot's count decremented by exactly its own lease — a masked release on one
+    /// slot never corrupts the lock-free release on another (and vice versa).
+    #[test]
+    fn interleaved_main_and_isr_lease_drops_on_different_slots_never_cross_corrupt() {
+        use crate::sync::stubs;
+
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+
+        // Two distinct resident+ready chunks -> two distinct chunk-table slots.
+        let req0 = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c0 = req0.chunk();
+        rsrc.mark_ready(c0);
+        let req1 = rsrc.request(asset, 1, CHUNK_SIZE).unwrap();
+        let c1 = req1.chunk();
+        rsrc.mark_ready(c1);
+        let s0 = rsrc.slot_of(c0);
+        let s1 = rsrc.slot_of(c1);
+        assert_ne!(s0, s1, "the two chunks must occupy distinct slots");
+        let base0 = rsrc.lease_count_by_slot(s0);
+        let base1 = rsrc.lease_count_by_slot(s1);
+
+        // Take a main-context lease on slot0 and an ISR-context lease on slot1.
+        stubs::deluge_in_interrupt_set(false);
+        let lm = rsrc.lease(c0); // main, slot0
+        stubs::deluge_in_interrupt_set(true);
+        let li = rsrc.lease(c1); // ISR, slot1
+        assert_eq!(rsrc.lease_count_by_slot(s0), base0 + 1);
+        assert_eq!(rsrc.lease_count_by_slot(s1), base1 + 1);
+
+        // Interleave the drops: ISR release (lock-free) first, then main release (masked).
+        drop(li); // still in ISR context
+        stubs::deluge_in_interrupt_set(false);
+        drop(lm); // main context
+
+        // Each slot decremented exactly its own lease; no cross-slot leakage either way.
+        assert_eq!(
+            rsrc.lease_count_by_slot(s0),
+            base0,
+            "main-path release on slot0 decremented only slot0"
+        );
+        assert_eq!(
+            rsrc.lease_count_by_slot(s1),
+            base1,
+            "ISR-path release on slot1 decremented only slot1"
+        );
+    }
 }

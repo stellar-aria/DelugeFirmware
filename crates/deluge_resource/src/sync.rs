@@ -88,8 +88,12 @@ pub fn m_rmw<T: Copy, R>(c: &Cell<T>, f: impl FnOnce(&mut T) -> R) -> R {
 // would let one test's m_rmw calls pollute another concurrently-running test's
 // enter/exit-count assertions. Thread-local counters make each test's counts
 // depend only on that test's own thread, matching IN_ISR/DEPTH/TOKEN below.
+// `pub(crate)` (not private) so sibling modules' tests — notably `facade`'s
+// `Lease::drop` ISR-safety proof — can drive the same two-context model
+// (`deluge_in_interrupt_set`) and read the same critical-section counters this
+// module's own tests use, rather than re-deriving a second harness.
 #[cfg(test)]
-mod stubs {
+pub(crate) mod stubs {
     use core::cell::Cell;
 
     std::thread_local! {

@@ -32,7 +32,7 @@ use deluge_resource::{
 #[path = "../src/fill_sidecar.rs"]
 mod fill_sidecar;
 
-use fill_sidecar::{ConvertState, get, set};
+use fill_sidecar::{ConvertState, chunk_cap_fits, get, set};
 
 // `deluge_resource`'s `Masked` critical section (`sync.rs`) calls these three C-ABI symbols; in the
 // real device/host_app link they're `services.rs`'s real interrupt-mask primitives, and inside
@@ -202,4 +202,58 @@ fn get_set_and_generation_invalidation() {
 
     // chunk1's entry is untouched by any of the above (different slot throughout).
     assert_eq!(get(m.mgr(), chunk1), state1);
+}
+
+/// Guard-logic coverage for the SIDECAR_CAP overflow fix (SR2d-4 Task 3 review finding): a session
+/// whose manager was built with a `chunk_cap` exceeding this sidecar's fixed `SIDECAR_CAP` must not
+/// silently degrade — `fill_sidecar::set` used to be a silent no-op for any out-of-range slot,
+/// dropping a chunk's convert-state with no signal, which a neighbour's boundary stitch would then
+/// read as a stale default and corrupt stitched audio.
+///
+/// `chunk_cap_fits` is the pure boundary predicate `streaming_loader::prod::ProdOps::new()`'s
+/// startup guard calls before `FREEZE_WITH_ERROR("SDC1")`-ing on an oversized session (see
+/// `fill_sidecar.rs`'s `SIDECAR_CAP` doc for the full sizing chain / the honest worst-case numbers).
+/// Constructing a real manager with `SIDECAR_CAP`-or-more RESIDENT chunks (the only way to make
+/// `resolve_slot`'s own `debug_assert!` actually fire, as opposed to the expected `NO_SLOT` case) is
+/// not cheap in a host test — it would mean `SIDECAR_CAP` (32768) real `request()` calls against a
+/// correspondingly huge test heap — so this test instead exercises the guard's decision logic
+/// directly, at and around the real boundary, plus the two numbers `SIDECAR_CAP`'s doc claims (a
+/// normal card's `chunk_cap` fits comfortably; a pathological small-cluster card's doesn't). The
+/// on-device guard itself (`ProdOps::new`) is exercised by device bring-up, not a host test: on a
+/// session where `chunk_cap_fits` is false, it calls the app's `freezeWithError("SDC1")` — the same
+/// fatal-error convention `sample_stream.cpp`'s `RSA1` / `sample_source.cpp`'s `SSP1` use for their
+/// own fixed-table exhaustion — turning what would otherwise be silent stitched-audio corruption
+/// into a loud, diagnosable halt.
+#[test]
+fn chunk_cap_guard_boundary() {
+    let cap = fill_sidecar::SIDECAR_CAP as u32;
+
+    // Trivially small caps (including the "no chunks at all" degenerate case) fit.
+    assert!(chunk_cap_fits(0));
+    assert!(chunk_cap_fits(1));
+
+    // The exact boundary: == SIDECAR_CAP fits (an index space of `cap` slots, valid indices
+    // `0..cap`, is exactly what a `SIDECAR_CAP`-sized table holds); one slot past it does not.
+    assert!(chunk_cap_fits(cap), "chunk_cap == SIDECAR_CAP must fit");
+    assert!(
+        !chunk_cap_fits(cap + 1),
+        "chunk_cap == SIDECAR_CAP + 1 must NOT fit"
+    );
+    assert!(
+        !chunk_cap_fits(u32::MAX),
+        "a wildly oversized cap must not fit"
+    );
+
+    // The two concrete geometries `SIDECAR_CAP`'s doc reasons about (see its derivation from
+    // `general_memory_allocator.cpp` + `Cluster::size`): a normal 32 KiB-cluster card's chunk_cap
+    // sits far under the cap with headroom to spare, while a pathological small-cluster card's
+    // exceeds it — exactly the case the guard exists to catch.
+    assert!(
+        chunk_cap_fits(6_138),
+        "a normal 32 KiB-cluster card's chunk_cap must fit comfortably"
+    );
+    assert!(
+        !chunk_cap_fits(35_309),
+        "a pathological small-cluster card's chunk_cap must trip the guard"
+    );
 }

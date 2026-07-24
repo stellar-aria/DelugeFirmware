@@ -167,6 +167,11 @@ void deluge_resource_mark_ready(DelugeResource* mgr, void* ptr);
 /// callers cache the result at chunk creation so later lease reads go through lease_count_by_slot.
 uint32_t deluge_resource_slot_of(DelugeResource* mgr, void* ptr);
 
+/// The fixed capacity of `mgr`'s chunk table (its `chunk_cap` at deluge_resource_create) — 0 if `mgr`
+/// is NULL. Lets a caller size/validate a slot-indexed side table against the manager's real,
+/// runtime-determined geometry instead of a compile-time guess.
+uint32_t deluge_resource_chunk_cap(DelugeResource* mgr);
+
 /// The generation stamped on the chunk at `slot` — 0 if `slot` is NO_SLOT / out of range / free. Pairs
 /// with slot_of so a caller can mint/validate a {slot, generation} token without an O(n) scan.
 uint32_t deluge_resource_generation_of_slot(DelugeResource* mgr, uint32_t slot);

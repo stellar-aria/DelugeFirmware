@@ -11,6 +11,17 @@
 //! fill-only (nothing but the fill path reads/writes this state, see the task brief), it is not yet
 //! wired into `ProdOps`/`fill_once` (`streaming_loader.rs`); that's a later task.
 //!
+//! ## Overflow: a loud failure, not silent corruption
+//!
+//! [`SIDECAR_CAP`] is a fixed, chosen capacity — see its doc for why it can't be a *proven* bound on
+//! the manager's runtime `chunk_cap`, and how [`chunk_cap_fits`] plus
+//! `streaming_loader::prod::ProdOps::new()`'s startup guard turn an oversized session into an
+//! explicit `FREEZE_WITH_ERROR("SDC1")` halt rather than a slot silently falling off the edge of this
+//! table (which used to make [`set`] a silent no-op — dropping a chunk's convert-state with no
+//! signal, so a neighbour's boundary stitch would read a stale default and corrupt stitched audio).
+//! This guard is independent of the "not wired into the fill path yet" note above — it protects the
+//! table itself, ahead of whenever [`get`]/[`set`] do get wired in.
+//!
 //! ## Keying + auto-invalidation via generation
 //!
 //! Keyed by the manager's chunk-table SLOT (`deluge_resource_slot_of`), not `(asset, index)`, so
@@ -55,21 +66,54 @@ unsafe extern "C" {
     fn deluge_resource_generation_of_slot(mgr: *mut c_void, slot: u32) -> u32;
 }
 
-/// Fixed capacity for the sidecar table, indexed 1:1 by the manager's chunk-table slot. The manager's
-/// own `chunk_cap` (`general_memory_allocator.cpp`'s `slabCapacity + kAssetCap`) is sized at runtime
-/// from the SDRAM size and the session's `Cluster::size` (a smaller cluster size — a card formatted
-/// with small FAT clusters — yields MORE slab slots, not fewer), so unlike `streaming_loader::FILL_CONTEXT_CAP`
-/// (mirroring the fixed `kAssetCap`) there is no single compile-time number
-/// that is exactly right. This is deliberately generous instead: even a pathologically small
-/// (`4 KiB`) session cluster size against the 64 MiB SDRAM region tops out in the high tens of
-/// thousands of slab slots, plus `kAssetCap` (4096) adopted-object slots; `32768` covers every
-/// realistic geometry with headroom. A slot at or beyond this cap degrades SAFELY, not incorrectly:
+/// Fixed capacity for the sidecar table, indexed 1:1 by the manager's chunk-table slot.
+///
+/// This is a CHOSEN bound backstopped by a runtime guard (below) — NOT a proven maximum on the
+/// manager's own `chunk_cap`. `chunk_cap` (`general_memory_allocator.cpp`'s
+/// `slabCapacity + kAssetCap`) is sized at runtime from the SDRAM size and the session's
+/// `Cluster::size` (a smaller cluster size — a card formatted with small FAT clusters — yields MORE
+/// slab slots, not fewer), and FAT places no minimum on cluster size (`fatfs/ff.c` allows `csize`
+/// down to 1 sector — 512 bytes — and FAT16 is still supported). At that pathological 512-byte-cluster
+/// floor against a 64 MiB SDRAM region, `chunk_cap` runs to roughly 110-120K slots — there is no
+/// single compile-time number that is exactly right for every legal card geometry, and this constant
+/// does NOT claim to be one (an earlier version of this doc overclaimed "high tens of thousands"
+/// covers every realistic geometry, which the pathological-card math above contradicts). A typical
+/// card instead lands `chunk_cap` far lower — 32 KiB clusters, a common real-world default, gives
+/// `chunk_cap` around 6K — so `32768` is picked generously above that NORMAL case (~5x headroom)
+/// rather than sized to the true worst case: reserving the true-worst-case table
+/// (~1.3 MiB of permanently-resident `.sdram_bss`, vs. ~384 KiB at this cap) is not worth paying on
+/// every boot for a geometry no shipped card actually reaches.
+///
+/// Because this cap CAN be exceeded by a genuinely pathological small-cluster format, a slot at or
+/// beyond it must not degrade SILENTLY — that was the bug (see git history / SR2d-4 Task 3 review):
 /// [`resolve_slot`] bounds-checks against it and reports "unresolvable" for an out-of-range slot,
-/// which makes [`get`] behave as if the chunk had never been seen (a fresh default every time) and
-/// makes [`set`] a silent no-op — never an out-of-bounds access. If on-device measurement ever shows
-/// the real `chunk_cap` exceeding this, raise it here (same hand-synced-constant caveat
-/// `streaming_loader::FILL_CONTEXT_CAP`'s own doc gives for its own asset-table cap).
-const SIDECAR_CAP: usize = 32768;
+/// which used to make [`get`]/[`set`] quietly behave as if the chunk had never been seen, dropping
+/// real convert-state with no signal. The actual safety net is now the loud runtime guard in
+/// `streaming_loader::prod::ProdOps::new()`: it reads the manager's ACTUAL `chunk_cap` via the
+/// `deluge_resource_chunk_cap` C ABI once at fill-task startup and `FREEZE_WITH_ERROR("SDC1")`s if it
+/// exceeds this constant, so an oversized session halts loudly and diagnosably instead of silently
+/// corrupting stitched audio. [`resolve_slot`] also `debug_assert!`s if it ever sees a RESIDENT slot
+/// beyond this cap, so the same degrade is loud in host/debug builds too, not just on device (that
+/// guard should never fire in practice — the startup check is supposed to catch it first). If
+/// on-device measurement ever shows the real `chunk_cap` exceeding this on a card worth supporting,
+/// raise it here (same hand-synced-constant caveat `streaming_loader::FILL_CONTEXT_CAP`'s own doc
+/// gives for its own asset-table cap).
+///
+/// `pub(crate)` (not private) solely so `tests/fill_sidecar_host.rs` can assert the guard's boundary
+/// against the real value instead of duplicating the magic number.
+pub(crate) const SIDECAR_CAP: usize = 32768;
+
+/// Pure guard-logic check: does a manager whose chunk table holds `chunk_cap` slots fit inside this
+/// sidecar's [`SIDECAR_CAP`]? Split out from the actual guard (`streaming_loader::prod::ProdOps::new`)
+/// so it has direct host/unit coverage (see `tests/fill_sidecar_host.rs`) without needing a live
+/// manager actually built with `SIDECAR_CAP`-or-more resident slots, which is impractical to construct
+/// cheaply in a test. `#[allow(dead_code)]` here on a plain host build of this module alone (e.g. this
+/// crate's own `cargo test`/`cargo clippy` without `host_app`) — the real caller is gated behind
+/// `target_os = "none"` / `host_app` in `streaming_loader.rs`.
+#[allow(dead_code)]
+pub const fn chunk_cap_fits(chunk_cap: u32) -> bool {
+    (chunk_cap as usize) <= SIDECAR_CAP
+}
 
 /// The per-chunk convert-state `finish`'s convert/stitch tail reads/writes for a chunk and its
 /// neighbours. `first_three_bytes` is the PRE-conversion first 3 bytes of the chunk's raw data (read
@@ -140,8 +184,19 @@ fn resolve_slot(mgr: *mut c_void, chunk: *mut c_void) -> Option<(usize, u32)> {
     // `streaming_loader::ProdOps::lease_count`'s identical `slot_of` call).
     let slot = unsafe { deluge_resource_slot_of(mgr, chunk) };
     if slot as usize >= SIDECAR_CAP {
-        // Covers both `DELUGE_RESOURCE_NO_SLOT` (`u32::MAX`, always out of range for any sane cap)
-        // and a real slot beyond this table's bound.
+        // Covers both `DELUGE_RESOURCE_NO_SLOT` (`u32::MAX`, always out of range for any sane cap —
+        // the expected, silent "not resident" case) and a REAL resident slot beyond this table's
+        // bound. The latter means `SIDECAR_CAP` is undersized for this session's actual `chunk_cap`
+        // — `streaming_loader::prod::ProdOps::new()`'s startup guard (`deluge_resource_chunk_cap` vs
+        // `SIDECAR_CAP`, `FREEZE_WITH_ERROR("SDC1")`) should have halted the device before any fill
+        // ever reached here, so tripping this assert in a debug/host build means that guard didn't
+        // run (or has a bug) — not a normal degrade path anymore. See `SIDECAR_CAP`'s doc.
+        debug_assert_eq!(
+            slot,
+            u32::MAX,
+            "resident slot {slot} >= SIDECAR_CAP ({SIDECAR_CAP}): the chunk_cap startup guard \
+             (SDC1) should have frozen before this could happen"
+        );
         return None;
     }
     // SAFETY: same `mgr`, `slot` just resolved from it above.
@@ -176,8 +231,11 @@ pub fn get(mgr: *mut c_void, chunk: *mut c_void) -> ConvertState {
     entry.state
 }
 
-/// Record `state` for `chunk` under `mgr`, stamped at the slot's CURRENT generation. A silent no-op
-/// if `chunk` isn't resident or its slot is out of range (see [`SIDECAR_CAP`]).
+/// Record `state` for `chunk` under `mgr`, stamped at the slot's CURRENT generation. A no-op if
+/// `chunk` isn't resident (the expected case for `DELUGE_RESOURCE_NO_SLOT`) or its slot is out of
+/// range (see [`SIDECAR_CAP`] — that path should be unreachable in practice, since the
+/// `chunk_cap`-vs-`SIDECAR_CAP` startup guard in `streaming_loader::prod::ProdOps::new()` halts the
+/// device first; this is the closed-off degrade path, not a live hazard, now that guard exists).
 ///
 /// Not called anywhere yet outside tests — see [`get`]'s doc.
 #[allow(dead_code)]

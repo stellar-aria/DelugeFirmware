@@ -331,6 +331,15 @@ impl Manager {
         (s.backing == p).then_some((s.asset, s.index))
     }
 
+    /// The fixed capacity of the chunk table itself (the `chunk_cap` this `Manager` was built
+    /// with — see `deluge_resource_create`), NOT how many slots are currently occupied. Lets a
+    /// caller with only the opaque handle (e.g. the native fill's convert-state sidecar,
+    /// `fill_sidecar.rs`) size/validate its own slot-indexed side table against the manager's
+    /// real geometry instead of a compile-time guess.
+    pub(crate) fn chunk_cap(&self) -> u32 {
+        self.chunks.len() as u32
+    }
+
     /// The generation stamped on the chunk at `slot` — 0 if out of range or free.
     /// Pairs with a `{slot, generation}` independent-pin token (see the facade).
     pub(crate) fn generation_of_slot(&self, slot: u32) -> u32 {
@@ -1323,6 +1332,20 @@ pub unsafe extern "C" fn deluge_resource_slot_of(handle: *mut DelugeResource, pt
     mgr(handle).slot_of(ptr)
 }
 
+/// The fixed capacity of `handle`'s chunk table (its `chunk_cap` at `deluge_resource_create`) — 0
+/// if `handle` is null. Lets a caller size/validate a slot-indexed side table against the manager's
+/// real, runtime-determined geometry instead of a compile-time guess — e.g. the native fill's
+/// per-chunk convert-state sidecar (SR2d-4 Task 3, `fill_sidecar.rs`), which is a fixed-capacity
+/// table indexed by chunk-table slot and needs to know whether its own compile-time cap can ever
+/// be exceeded by THIS session's manager.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_chunk_cap(handle: *mut DelugeResource) -> u32 {
+    if handle.is_null() {
+        return 0;
+    }
+    mgr(handle).chunk_cap()
+}
+
 /// The generation stamped on the chunk at `slot` — 0 if `slot` is `NO_SLOT` / out of range / free.
 /// Pairs with `slot_of` so a caller can mint/validate a `{slot, generation}` token without an O(n)
 /// scan — e.g. the native fill's per-chunk convert-state sidecar (SR2d-4 Task 3), which uses a
@@ -1593,5 +1616,19 @@ mod tests {
         assert_eq!(m.lease_count_by_slot(slot1), before + 1);
         assert!(m.release_by_slot_gen(slot1, gen1));
         assert_eq!(m.lease_count_by_slot(slot1), before);
+    }
+
+    #[test]
+    fn chunk_cap_reports_the_cap_the_manager_was_built_with() {
+        let (handle, _buf) = test_manager();
+        // SAFETY: `handle` is live for the whole test (via `_buf`).
+        let m = unsafe { mgr(handle) };
+        // `test_manager()` builds with a single chunk slot (see its doc).
+        assert_eq!(m.chunk_cap(), 1);
+        // SAFETY: `handle` is a live handle for the duration of this call.
+        assert_eq!(unsafe { deluge_resource_chunk_cap(handle) }, 1);
+        // Null handle degrades to 0, like every other `handle.is_null()` C-ABI wrapper here.
+        // SAFETY: passing null is exactly what's under test — every wrapper here checks it first.
+        assert_eq!(unsafe { deluge_resource_chunk_cap(ptr::null_mut()) }, 0);
     }
 }

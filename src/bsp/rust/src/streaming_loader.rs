@@ -385,7 +385,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
 ))]
 mod prod {
     use super::{FillOps, LOWEST_PRIORITY, StreamingFillDescriptor};
-    use core::ffi::c_void;
+    use core::ffi::{c_char, c_void};
 
     unsafe extern "C" {
         fn deluge_streaming_resource_manager() -> *mut c_void;
@@ -406,6 +406,12 @@ mod prod {
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
         fn deluge_resource_lease_count_by_slot(mgr: *mut c_void, slot: u32) -> u32;
+        // The sidecar-overflow guard's two ingredients (SR2d-4 Task 3 review fix): the manager's
+        // ACTUAL chunk-table capacity, and the app's fatal-error primitive
+        // (`foundation/panic.h`'s `FREEZE_WITH_ERROR` macro calls this same `freezeWithError` C
+        // symbol) -- see `ProdOps::new()` below, which is this guard's one call site.
+        fn deluge_resource_chunk_cap(mgr: *mut c_void) -> u32;
+        fn freezeWithError(errmsg: *const c_char);
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
@@ -426,6 +432,35 @@ mod prod {
             // resource manager; no aliasing/ownership concern, it's a stable
             // singleton pointer.
             let mgr = unsafe { deluge_streaming_resource_manager() };
+
+            // Sidecar-overflow guard (SR2d-4 Task 3 review fix): the per-chunk convert-state
+            // sidecar (`fill_sidecar.rs`) is a fixed-capacity table indexed by this manager's
+            // chunk-table slot, sized generously (`fill_sidecar::SIDECAR_CAP`) for a NORMAL card
+            // but not provably large enough for every legal FAT geometry (see that constant's
+            // doc). A session whose actual `chunk_cap` exceeds it would otherwise let a slot fall
+            // off the edge of the sidecar table SILENTLY -- `fill_sidecar::set` would quietly drop
+            // that chunk's convert-state, and a neighbour's boundary stitch would read a stale
+            // default and corrupt stitched audio with no signal at all. Checked once here, at fill
+            // task startup, ahead of any fill this session ever runs (this is `ProdOps`'s one
+            // construction site -- see `streaming_fill_task` below): turn that silent corruption
+            // into a loud, diagnosable halt instead, the same way a fixed-table exhaustion
+            // anywhere else in this codebase is fatal (see `sample_stream.cpp`'s `RSA1` /
+            // `sample_source.cpp`'s `SSP1`). "SDC1" ("SiDeCar 1") is a fresh, previously-unused
+            // freeze code.
+            //
+            // SAFETY: `mgr` is the live singleton resource manager returned just above.
+            let chunk_cap = unsafe { deluge_resource_chunk_cap(mgr) };
+            if !crate::fill_sidecar::chunk_cap_fits(chunk_cap) {
+                // SAFETY: `c"SDC1"` is a valid NUL-terminated string literal, live for `'static`.
+                // `freezeWithError` blocks (see `foundation/panic.h`) but is not guaranteed to be a
+                // hard hardware halt (the OLED freeze screen can resume on user input, same caveat
+                // `sample_low_level_reader.cpp` documents for its own `SSP1` freeze) -- if it does
+                // return, fall through and construct `Self` anyway; there is no better fallback
+                // than "keep the fill task alive, degraded", and the sidecar's own `resolve_slot`
+                // bounds-check still prevents any actual out-of-bounds access either way.
+                unsafe { freezeWithError(c"SDC1".as_ptr()) };
+            }
+
             Self { mgr }
         }
     }

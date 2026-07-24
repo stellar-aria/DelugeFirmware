@@ -103,8 +103,9 @@ int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlayback
 	if (clusters[0] != nullptr) {
 		// clusters[0] gates presence; the base/index come from the held region, which the reader-wide
 		// invariant keeps describing that same chunk (region_.payload_base == clusters[0]->payload().data(),
-		// region_.region_index == clusters[0]->cluster_index — the i023 guard asserts the first on every
-		// setupReassessmentLocation). Pure change of provenance; the arithmetic is byte-identical.
+		// region_.region_index == clusters[0]->cluster_index). The invariant holds by construction — every
+		// write of clusters[0] is paired with the matching region_ — and in alpha/beta the i023 guard
+		// additionally checks the base equality. Pure change of provenance; the arithmetic is byte-identical.
 		uint32_t withinCluster = (currentPlayPos - reinterpret_cast<char*>(region_.payload_base)) + 4
 		                         - sample->byteDepth; // Remove deliberate misalignment
 
@@ -1362,8 +1363,8 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 		// The mirror is dropped only when it does NOT describe the `clusters[0]` we just took (or there
 		// is none): then it really is a snapshot of a chunk this reader neither pins nor can keep
 		// coherent. `lease` is the port's chunk-pointer encoding (see deluge_sample_region_acquire_ex),
-		// so the identity test is exact -- and `region_ == {}` with a null `clusters[0]` compares equal,
-		// i.e. an already-empty mirror stays empty.
+		// so the identity test is exact -- and an already-empty mirror (`region_.lease == 0`) with a null
+		// `clusters[0]` tests equal too (`0 == (uint64_t)nullptr`), so it stays empty.
 		if (region_.lease != reinterpret_cast<uint64_t>(clusters[0])) {
 			region_ = {};
 		}

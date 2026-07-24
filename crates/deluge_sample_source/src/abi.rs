@@ -30,13 +30,13 @@
 //! header's exact signature (no added parameter). Flagged here for whoever
 //! revisits a hypothetical multi-manager future.
 
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use crate::cursor::{RegionState, SampleSource};
-use crate::geometry::Geometry;
+use crate::geometry::{Geometry, UNKNOWN_LENGTH_SENTINEL};
 use crate::manager_residency::ManagerResidency;
+use deluge_resource::sync::{m_get, m_set, Masked};
 use deluge_resource::{DelugeResource, Resource};
 
 // ---------------------------------------------------------------------------
@@ -110,13 +110,13 @@ pub struct SampleSourceDescriptor {
 // Static, allocation-free source pool
 // ---------------------------------------------------------------------------
 
-/// Fixed source pool -- `open()` claims a slot by CAS (allocation-free,
-/// ISR-safe), never the heap: `open` fires at note-start on the audio render
-/// thread, so it must not route through a heap that can walk/lock/throw.
-/// Sized like the C++ pool: `16 * kMaxNumVoicesUnison * kNumSources == 256`
-/// (see `sample_source.cpp`'s derivation -- a 96-reader concurrent-open
-/// ceiling at default pool sizing, ~2.6x headroom for a same-tick note-on
-/// burst before the CPU culler reclaims voices).
+/// Fixed source pool -- `open()` claims a slot under a masked check-and-set
+/// (allocation-free, ISR-safe), never the heap: `open` fires at note-start on
+/// the audio render thread, so it must not route through a heap that can
+/// walk/lock/throw. Sized like the C++ pool: `16 * kMaxNumVoicesUnison *
+/// kNumSources == 256` (see `sample_source.cpp`'s derivation -- a 96-reader
+/// concurrent-open ceiling at default pool sizing, ~2.6x headroom for a
+/// same-tick note-on burst before the CPU culler reclaims voices).
 const POOL_SIZE: usize = 256;
 
 /// One pooled cursor plus its claimed/free marker. `source` is `Slot`'s FIRST
@@ -124,18 +124,22 @@ const POOL_SIZE: usize = 256;
 /// `*mut DelugeSampleSource` `open()` hands out -- a pointer straight at
 /// `source` -- casts back to its enclosing `Slot` in O(1), no scan, mirroring
 /// `sample_source.cpp`'s `SampleSourceSlot` (`source` first,
-/// `static_assert(offsetof(..., source) == 0)`).
+/// `static_assert(offsetof(..., source) == 0)`). `in_use` is a plain,
+/// non-atomic `Cell<bool>` -- its claim/release are guarded by
+/// `deluge_resource::sync::Masked`, the SAME primitive `SampleSource`'s own
+/// slots and the manager's tables use (see `claim_slot`/`deluge_sample_source_close`
+/// and this type's `Sync` doc below), not a separate atomic mechanism.
 #[repr(C)]
 struct Slot {
     source: UnsafeCell<Option<SampleSource<ManagerResidency>>>,
-    in_use: AtomicBool,
+    in_use: Cell<bool>,
 }
 
 impl Slot {
     const fn new() -> Self {
         Slot {
             source: UnsafeCell::new(None),
-            in_use: AtomicBool::new(false),
+            in_use: Cell::new(false),
         }
     }
 }
@@ -147,22 +151,32 @@ const _: () = assert!(
      must stay Slot's first (offset-0) field for that cast to be sound"
 );
 
-// SAFETY: `Slot`'s only non-`Sync` field is `source: UnsafeCell<...>` (the
-// `SampleSource<ManagerResidency>` it holds is otherwise plain data plus a raw
-// `*mut DelugeResource` handle -- Send/Sync-agnostic bytes on their own). Two
-// invariants make sharing `&Slot` across threads sound without a `Mutex`:
+// SAFETY: `Slot`'s two fields, `source: UnsafeCell<...>` and
+// `in_use: Cell<bool>`, are both interior-mutable and neither is `Sync` on its
+// own; sharing `&Slot` across threads is sound because EVERY touch of EITHER
+// field goes through the crate-wide masked-`Cell` discipline
+// (`deluge_resource::sync::Masked`), never a separate atomic:
 //   1. Slot INTEGRITY (which caller, if any, owns this slot's `source` right
-//      now) is guarded by the CAS on `in_use` in `claim_slot`: the CAS winner
-//      is the only caller ever permitted to read/write `source` between its
-//      claim and the matching `close()`'s release, so two callers never alias
-//      the same slot's `source`.
+//      now) is guarded by `in_use`, claimed/released only under a
+//      `Masked::enter()` window (`claim_slot`, `deluge_sample_source_close`).
+//      Whichever caller's masked read-then-set observes `in_use == false` and
+//      flips it to `true` is the only caller ever permitted to read/write
+//      `source` between its claim and the matching `close()`'s release, so two
+//      callers never alias the same slot's `source`.
 //   2. Every touch of `source`'s CONTENTS, once claimed, goes through
-//      `SampleSource`'s own masked-`Cell` discipline
-//      (`deluge_resource::sync::Masked`, see `cursor.rs`'s module doc) -- the
-//      SAME asymmetric audio-ISR-vs-main critical section the manager's own
-//      tables use, so a concurrent `acquire_ex` (audio ISR) and `close` (main)
-//      on the SAME live slot stay coherent exactly as they do in the C++
-//      backing.
+//      `SampleSource`'s own masked-`Cell` discipline (see `cursor.rs`'s module
+//      doc) -- the identical mechanism, not a second one.
+// The correctness model behind (1) is the same asymmetric one the cursor's own
+// slot-mutation SAFETY docs rely on: `open()` (the claim) runs on the audio
+// render thread -- ISR context, where `Masked::enter()` is a no-op -- but the
+// audio ISR is atomic w.r.t. the main thread (nothing preempts it), so its
+// own read-then-set inside `claim_slot` can never be interposed by another
+// claim or by a release. `close()` (the release) runs on the main thread,
+// where `Masked::enter()` genuinely masks the audio ISR for the write, so it
+// can't race a concurrent `open()`'s claim either. Two `open()`s never race
+// each other directly (the audio ISR is single-threaded/non-reentrant), and a
+// concurrent `acquire_ex` (audio ISR) against the SAME already-claimed slot's
+// `source` stays coherent via (2), exactly as it does in the C++ backing.
 // This mirrors `sample_source.cpp`'s own `g_source_pool` doc precisely: it
 // protects POOL SLOT INTEGRITY only -- tearing down a source while something
 // else still actively acquires through the SAME pointer is a pre-existing,
@@ -174,21 +188,40 @@ static POOL: [Slot; POOL_SIZE] = [const { Slot::new() }; POOL_SIZE];
 
 /// The single boot-singleton `deluge_resource` handle, cached from the most
 /// recent successful `open()` -- see the module doc's `retain`/`release`
-/// section for why the lease-only ABI needs this.
-static ACTIVE_MANAGER: AtomicPtr<DelugeResource> = AtomicPtr::new(core::ptr::null_mut());
+/// section for why the lease-only ABI needs this. A masked `Cell` (via
+/// [`m_get`]/[`m_set`]), the SAME discipline [`Slot`]'s own `in_use` and
+/// `SampleSource`'s slots use -- ONE concurrency mechanism for the whole
+/// crate, not a second atomic just for this handle.
+struct ActiveManagerCell(Cell<*mut DelugeResource>);
 
-/// Claim a free pool slot by CAS (`false` -> `true`), or `None` if every slot
-/// is in use. Lock-free; safe against a concurrent claim/release racing on a
-/// DIFFERENT slot (each slot's flip is independent). Mirrors
-/// `sample_source.cpp`'s `claim_source_slot`.
+// SAFETY: the sole field is an interior-mutable `Cell<*mut DelugeResource>`,
+// not `Sync` on its own; every touch (`open`'s writer, `retain`/`release`'s
+// readers) goes through `deluge_resource::sync::m_get`/`m_set`, which wrap the
+// access in the same masked critical section `Slot`'s `in_use` and
+// `SampleSource`'s slots use, so concurrent access from the audio ISR and the
+// main thread stays coherent by the same argument as `Slot`'s `Sync` doc
+// above.
+unsafe impl Sync for ActiveManagerCell {}
+
+static ACTIVE_MANAGER: ActiveManagerCell = ActiveManagerCell(Cell::new(core::ptr::null_mut()));
+
+/// Claim a free pool slot under a masked check-and-set, or `None` if every
+/// slot is in use. Mirrors `sample_source.cpp`'s `claim_source_slot`.
+///
+/// Each slot's read-then-set runs in its OWN `Masked::enter()` window (not one
+/// window over the whole scan), matching `SampleSource`'s own per-cell masking
+/// granularity (see `cursor.rs`'s `set_slot`/`slot_index`) -- a scan that held
+/// the mask for its entire length would mask the audio ISR far longer than any
+/// single slot's critical section needs to.
 fn claim_slot() -> Option<&'static Slot> {
-    // acquire on success so the payload write that follows in `open` is
-    // ordered after the claim becomes visible -- mirrors the C++ pool's own
-    // `compare_exchange_strong(..., memory_order_acquire, memory_order_relaxed)`.
     POOL.iter().find(|slot| {
-        slot.in_use
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+        let _m = Masked::enter();
+        if slot.in_use.get() {
+            false
+        } else {
+            slot.in_use.set(true);
+            true
+        }
     })
 }
 
@@ -213,14 +246,6 @@ unsafe fn source_ref(
     let cell = unsafe { &*(src as *const Option<SampleSource<ManagerResidency>>) };
     cell.as_ref()
 }
-
-/// "Still recording, length unknown" sentinel -- mirrors
-/// `geometry::UNKNOWN_LENGTH_SENTINEL` (private there; same value, see
-/// `sample_recorder.cpp`). `num_clusters_for` needs the identical zero/
-/// sentinel guard `resident_bytes_for` applies, for the same reason: a source
-/// built while a sample is still recording must not clamp `acquire`'s
-/// range check to a size computed from a not-yet-final length.
-const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
 
 /// Total cluster count for `geo` (`ceil(audio_data_length_bytes /
 /// cluster_size_bytes)`), used only to size `ManagerResidency`'s
@@ -298,9 +323,9 @@ pub unsafe extern "C" fn deluge_sample_source_open(
         // caller-visible outcome (null), just reached differently.
         return core::ptr::null_mut();
     };
-    // SAFETY: `slot` was just uniquely claimed via the CAS in `claim_slot`, so
-    // no other caller can be concurrently reading/writing `slot.source` --
-    // this initializing write is exclusive.
+    // SAFETY: `slot` was just uniquely claimed via the masked check-and-set in
+    // `claim_slot`, so no other caller can be concurrently reading/writing
+    // `slot.source` -- this initializing write is exclusive.
     unsafe {
         *slot.source.get() = Some(source);
     }
@@ -308,7 +333,7 @@ pub unsafe extern "C" fn deluge_sample_source_open(
     // ABI (see the module doc): production runs exactly one boot-singleton
     // `deluge_resource` handle, so every `open()` stores the same value here
     // in practice.
-    ACTIVE_MANAGER.store(desc.handle, Ordering::Release);
+    m_set(&ACTIVE_MANAGER.0, desc.handle);
     slot.source.get() as *mut DelugeSampleSource
 }
 
@@ -396,7 +421,7 @@ pub unsafe extern "C" fn deluge_sample_region_state(
 /// ever been opened (nothing cached in [`ACTIVE_MANAGER`] to route through).
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_sample_region_retain(lease: u64) {
-    let handle = ACTIVE_MANAGER.load(Ordering::Acquire);
+    let handle = m_get(&ACTIVE_MANAGER.0);
     if handle.is_null() {
         return;
     }
@@ -414,7 +439,7 @@ pub extern "C" fn deluge_sample_region_retain(lease: u64) {
 /// no-op cases.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_sample_region_release(lease: u64) {
-    let handle = ACTIVE_MANAGER.load(Ordering::Acquire);
+    let handle = m_get(&ACTIVE_MANAGER.0);
     if handle.is_null() {
         return;
     }
@@ -456,7 +481,10 @@ pub unsafe extern "C" fn deluge_sample_source_close(src: *mut DelugeSampleSource
         source.close();
     }
     *cell = None; // reset the slot's payload to empty, ready for reuse
-    slot.in_use.store(false, Ordering::Release); // return the slot to the pool
+                  // Masked release: `close()` runs on the main thread, so this genuinely
+                  // masks the audio ISR for the write, matching `claim_slot`'s own masked
+                  // check-and-set (see `Slot`'s `Sync` doc for the full ISR/main argument).
+    m_set(&slot.in_use, false); // return the slot to the pool
 }
 
 #[cfg(test)]
@@ -465,9 +493,17 @@ mod tests {
     extern crate std;
 
     use deluge_resource::value::COST_IO;
+    use std::sync::Mutex;
     use std::vec::Vec;
 
     const CLUSTER_SIZE: usize = 16;
+
+    /// Both tests below mutate the process-wide [`POOL`] and [`ACTIVE_MANAGER`]
+    /// statics; under the default parallel test runner two tests running at once
+    /// would race that shared state. Every test takes this lock for its whole run
+    /// -- mirrors `region_differential`'s own `tests/differential.rs::TEST_LOCK`
+    /// (same process-wide-singleton problem, same fix).
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// `construct` seeds a per-index ramp: `dest[b] = index as u8 + b as u8`.
     /// Same fixture as `cursor.rs`'s / `manager_residency.rs`'s own test
@@ -578,6 +614,7 @@ mod tests {
 
     #[test]
     fn open_close_pool_is_alloc_free_and_balanced() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = test_manager_handle();
         let asset = define_ramp_asset(h);
         let geo = test_geo(4);
@@ -589,8 +626,8 @@ mod tests {
         assert!(!src1.is_null(), "first open must succeed");
 
         // A second open() -- alloc-free BY CONSTRUCTION (claim_slot only ever
-        // flips an in_use AtomicBool via CAS, never touches the heap) -- gets
-        // a DIFFERENT slot than the first, still-live one.
+        // flips an in_use Cell<bool> under a masked check-and-set, never
+        // touches the heap) -- gets a DIFFERENT slot than the first, still-live one.
         let src2 = unsafe { deluge_sample_source_open(desc_ptr, geo) };
         assert!(!src2.is_null(), "second open must succeed");
         assert_ne!(
@@ -621,6 +658,7 @@ mod tests {
 
     #[test]
     fn abi_acquire_ex_matches_cursor_over_ready_index() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = test_manager_handle();
         let asset = define_ramp_asset(h);
         mark_index_ready(h, asset, 0);
@@ -663,6 +701,7 @@ mod tests {
 
     #[test]
     fn acquire_ex_with_null_src_is_unavailable_and_does_not_deref() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = DelugeSampleRegion {
             payload_base: core::ptr::null_mut(),
             region_index: 0,
@@ -682,6 +721,7 @@ mod tests {
 
     #[test]
     fn null_and_zero_tolerant_everywhere_else() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // state() on a null src -> UNAVAILABLE, no deref.
         // SAFETY: `src` is null (the case under test).
         assert_eq!(

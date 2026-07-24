@@ -351,16 +351,18 @@ DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint
 	return DELUGE_REGION_UNAVAILABLE;
 }
 
-void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease) {
-	if (lease == 0 || src == nullptr) {
+void deluge_sample_region_retain(uint64_t lease) {
+	if (lease == 0) {
 		return;
 	}
-	if (reinterpret_cast<uint64_t>(src->current) == lease) {
-		deluge::cluster::release_lease(src->current);
-		src->current = nullptr;
+	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(lease));
+}
+
+void deluge_sample_region_release(uint64_t lease) {
+	if (lease == 0) {
+		return;
 	}
-	// Any other lease value (a stale/prefetch lease, or one already released) is a no-op --
-	// prefetch leases are released by close() or when superseded in acquire().
+	deluge::cluster::release_lease(reinterpret_cast<StreamedChunk*>(lease));
 }
 
 void deluge_sample_source_close(DelugeSampleSource* src) {

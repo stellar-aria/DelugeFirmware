@@ -64,7 +64,7 @@ typedef struct DelugeSampleRegion {
 	void* payload_base;      ///< StreamedChunk payload().data() for the resident cluster (pinned)
 	uint32_t region_index;   ///< cluster index this region corresponds to
 	uint32_t resident_bytes; ///< valid payload bytes in this region (Cluster::size, or short for the last)
-	uint64_t lease;          ///< opaque pin token; pass to deluge_sample_region_release
+	uint64_t lease;          ///< opaque pin token; retain/release the independent pin with it
 } DelugeSampleRegion;
 
 /// Open a per-reader cursor. `stream_backing` identifies the sample's residency (currently a
@@ -119,8 +119,11 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 ///                              also reports UNAVAILABLE.
 DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index);
 
-/// Drop a pin taken by acquire. Safe to call with a lease of 0 (no-op).
-void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease);
+/// Take/drop an INDEPENDENT pin on the region's chunk, keyed on the opaque `lease` token alone (no
+/// cursor). Separate from the cursor's current/prefetch/pending pins (those are managed by acquire/close).
+/// `lease == 0` is a no-op in both directions. The token comes from a READY `DelugeSampleRegion::lease`.
+void deluge_sample_region_retain(uint64_t lease);
+void deluge_sample_region_release(uint64_t lease);
 
 /// Close the cursor, releasing any leases it still holds (current + prefetch).
 void deluge_sample_source_close(DelugeSampleSource* src);

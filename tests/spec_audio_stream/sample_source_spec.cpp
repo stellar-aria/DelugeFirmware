@@ -108,7 +108,7 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		expect(out.region_index).to_equal(2u);
 		expect(out.resident_bytes).to_equal(8u); // 40 - 32 = 8: the short last cluster
 
-		deluge_sample_region_release(src, out.lease);
+		deluge_sample_region_release(out.lease);
 		deluge_sample_source_close(src);
 	});
 
@@ -137,7 +137,7 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		auto* bytes1 = static_cast<std::byte*>(out.payload_base);
 		expect(std::equal(ramp1.begin(), ramp1.end(), bytes1)).to_equal(true);
 
-		deluge_sample_region_release(src, out.lease);
+		deluge_sample_region_release(out.lease);
 		deluge_sample_source_close(src);
 	});
 
@@ -476,8 +476,36 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		// current (cluster 0) + prefetch (cluster 1) both hold a lease at this point.
 		expect(deluge_test_total_lease_count()).to_equal(2u);
 
-		deluge_sample_region_release(src, out.lease);
+		deluge_sample_region_release(out.lease);
 		expect(deluge_test_total_lease_count()).to_equal(1u); // prefetch still held
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
+	it("retain/release adjust the independent pin on a region's chunk by its lease token alone", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		for (uint32_t i = 0; i < 3; ++i) {
+			stream.set_cluster_data(i, make_ramp(i, kClusterSize));
+		}
+		DelugeSampleGeometry geo = make_geometry(48);
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(deluge_test_total_lease_count()).to_equal(2u); // current(0) + prefetch(1)
+
+		// An independent retain on the SAME token adds one lease, cursor-independent...
+		deluge_sample_region_retain(out.lease);
+		expect(deluge_test_total_lease_count()).to_equal(3u);
+		// ...and release drops exactly it.
+		deluge_sample_region_release(out.lease);
+		expect(deluge_test_total_lease_count()).to_equal(2u);
+		// lease == 0 is a no-op (both directions).
+		deluge_sample_region_retain(0);
+		deluge_sample_region_release(0);
+		expect(deluge_test_total_lease_count()).to_equal(2u);
 
 		deluge_sample_source_close(src);
 		expect(deluge_test_total_lease_count()).to_equal(0u);

@@ -76,7 +76,7 @@ void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAg
 	// here. It may be the last lease on that chunk, so `region_.payload_base` can dangle afterwards —
 	// clear `region_` so nothing reads a stale region before the next acquire repopulates it.
 	if (region_.lease != 0) {
-		deluge::cluster::remove_reason(*reinterpret_cast<StreamedChunk*>(region_.lease), "E027");
+		deluge_sample_region_release(region_.lease);
 	}
 	region_ = {};
 }
@@ -359,7 +359,7 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
                                           int32_t priorityRating) {
 #if ALPHA_OR_BETA_VERSION
-	// Precondition: callers unassign first, so `region_` is empty on entry. If it isn't, the add_lease
+	// Precondition: callers unassign first, so `region_` is empty on entry. If it isn't, the retain
 	// below overwrites an un-released independent lease -- a silent leak. Catch the violation in dev
 	// builds instead of leaking; mirrors i019/i021/i022.
 	if (hasCurrentRegion()) {
@@ -391,7 +391,7 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	// `source_->current`; this one is what pins the chunk for the reader's own residency lifetime,
 	// released uniformly in unassignAllReasons. Precondition: `region_` is empty on entry (callers
 	// unassign first), so this add is not overwriting an un-released lease.
-	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region.lease));
+	deluge_sample_region_retain(region.lease);
 
 	// Retain the acquired region so the interpolation window's base pointer (clusterStartLocation /
 	// reassessmentLocation, computed in setupReassessmentLocation) sources from region.payload_base, and
@@ -420,7 +420,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	// Drop the exhausted current cluster's INDEPENDENT lease (tracked through region_.lease). The region
 	// port holds its own lease on this same chunk; the acquire() below auto-releases the port's current as
 	// it advances, so this pairs the port's fused old-current release for the reader's own lease.
-	deluge::cluster::remove_reason(*reinterpret_cast<StreamedChunk*>(region_.lease), "E035");
+	deluge_sample_region_release(region_.lease);
 
 	// The boundary crossing advances through the region port: acquire() promotes the port's standing
 	// prefetch to current and prefetches the following neighbour. A `false` return is NotReady -- the
@@ -458,7 +458,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	// Pin the newly-resident cluster with the reader's own INDEPENDENT lease (mirroring the port's
 	// current), tracked through region_.lease. The old current's lease was released above, so this is a
 	// clean single-lease handover.
-	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region.lease));
+	deluge_sample_region_retain(region.lease);
 
 	// Retain the newly-current region for setupReassessmentLocation's interpolation-window base (see
 	// assignClusters), and so region_.lease tracks the lease just taken.
@@ -1321,7 +1321,7 @@ void SampleLowLevelReader::adoptResidencyFrom(SampleLowLevelReader& other, bool 
 		// has no `source_`), so without it the chunk could be reclaimed under the older head while the newer
 		// head advances -> use-after-free.
 		if (region_.lease != 0) {
-			deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region_.lease));
+			deluge_sample_region_retain(region_.lease);
 		}
 	}
 }

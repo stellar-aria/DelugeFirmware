@@ -921,7 +921,7 @@ readCachedWindow:
 						// Retain the acquired region and take the reader's own INDEPENDENT lease on it (via
 						// region_.lease), as assignClusters/moveOnToNextCluster do, so unassignAllReasons's
 						// uniform release stays self-consistent.
-						deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region.lease));
+						deluge_sample_region_retain(region.lease);
 						region_ = region;
 					}
 					// Not READY: region_ stays empty and currentPlayPos is cleared below. The old code

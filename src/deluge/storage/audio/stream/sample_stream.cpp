@@ -106,7 +106,35 @@ uint32_t SampleStream::ensure_resource_asset() {
 	if (sample_.isProjectReferenced()) {
 		deluge_resource_reference(mgr, resource_asset_id_);
 	}
+	// Register this asset's fill-context (SR2d-4 Task 1). Ordering: open_read_stream() is always
+	// called before this point on the only path that ever assigns an efatfs handle
+	// (AudioFileManager::buildAudioFileFromCard opens the stream, then loadFile()'s cluster reads
+	// trigger this method on first use) — so efatfs_handle_ is already whatever it will be for this
+	// stream's life (a real handle for a card-loaded sample, still 0 for a sample under construction
+	// by the recorder, which never opens one). register_fill_context() is called again from
+	// open_read_stream() as a defensive re-registration, in case that ordering ever changes.
+	register_fill_context();
 	return resource_asset_id_;
+}
+
+void SampleStream::register_fill_context() {
+	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
+		return;
+	}
+	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
+	if (mgr == nullptr) {
+		return;
+	}
+	DelugeStreamingFillContext ctx{
+	    .efatfs_handle = efatfs_handle_,
+	    .audio_data_start_pos_bytes = sample_.audioDataStartPosBytes,
+	    .audio_data_length_bytes = sample_.audioDataLengthBytes,
+	    .first_cluster_index_with_no_audio_data = sample_.getFirstClusterIndexWithNoAudioData(),
+	    .cluster_size = static_cast<uint32_t>(Cluster::size),
+	    .cluster_size_magnitude = static_cast<uint32_t>(Cluster::size_magnitude),
+	    .raw_data_format = static_cast<uint8_t>(sample_.rawDataFormat),
+	};
+	deluge_streaming_set_fill_context(mgr, resource_asset_id_, ctx);
 }
 
 void SampleStream::release_asset() {
@@ -138,6 +166,11 @@ bool SampleStream::open_read_stream(std::string_view path) {
 		return false;
 	}
 	efatfs_handle_ = handle;
+	// Re-register the fill-context now the handle is known (SR2d-4 Task 1): a no-op today on every
+	// known call site (open_read_stream() always runs before ensure_resource_asset()'s first call —
+	// see that method's comment — so the handle is already registered there), but keeps the table
+	// correct if a future caller ever opens the stream after the asset was already defined.
+	register_fill_context();
 	return true;
 }
 

@@ -1,0 +1,67 @@
+//! Host round-trip test for the per-asset streaming fill-context table (SR2d-4 Task 1):
+//! `deluge_streaming_set_fill_context` (the main/load-thread write, called from C++ at sample-load)
+//! → `fill_context_for` (the read side a later task wires into the native fill task). Always-compiled
+//! tier (see `src/streaming_loader.rs`'s module doc "Two compilation tiers") — unlike
+//! `tests/streaming_fill_host.rs`, this does NOT need `async_streaming_loader` (the fill-context table
+//! isn't gated on it) or `host_app` (it doesn't touch `deluge_resource` — see the table's own doc in
+//! `streaming_loader.rs`).
+//!
+//! `deluge-bsp-rust` is bin-only (no `[lib]` target — see `Cargo.toml`), so this recompiles
+//! `src/streaming_loader.rs` unmodified into this test binary via `#[path]`, same convention as
+//! `tests/streaming_fill_host.rs`.
+#![cfg(not(target_os = "none"))]
+
+use core::ptr;
+
+#[path = "../src/streaming_loader.rs"]
+mod streaming_loader;
+
+use streaming_loader::{FillContext, deluge_streaming_set_fill_context, fill_context_for};
+
+fn sample_ctx() -> FillContext {
+    FillContext {
+        efatfs_handle: 7,
+        audio_data_start_pos_bytes: 44,
+        audio_data_length_bytes: 123_456,
+        first_cluster_index_with_no_audio_data: 30,
+        cluster_size: 4096,
+        cluster_size_magnitude: 12,
+        raw_data_format: 0,
+    }
+}
+
+/// A fill-context set for asset A round-trips through `fill_context_for` unchanged.
+#[test]
+fn registered_asset_round_trips() {
+    let ctx = sample_ctx();
+    deluge_streaming_set_fill_context(ptr::null_mut(), 3, ctx);
+    assert_eq!(fill_context_for(3), Some(ctx));
+}
+
+/// An asset id nothing has ever registered reports `None`, not a stale/zeroed context.
+#[test]
+fn unset_asset_is_none() {
+    assert_eq!(fill_context_for(4000), None);
+}
+
+/// Re-registering the same asset replaces (not accumulates behind) the prior context — mirrors
+/// `open_read_stream()`'s defensive re-registration once the efatfs handle becomes known.
+#[test]
+fn re_registering_replaces_the_prior_context() {
+    let first = sample_ctx();
+    deluge_streaming_set_fill_context(ptr::null_mut(), 5, first);
+    assert_eq!(fill_context_for(5), Some(first));
+
+    let mut second = first;
+    second.efatfs_handle = 99;
+    deluge_streaming_set_fill_context(ptr::null_mut(), 5, second);
+    assert_eq!(fill_context_for(5), Some(second));
+}
+
+/// Out-of-range asset ids (including `DELUGE_RESOURCE_NO_ASSET == u32::MAX`) are silently ignored by
+/// the write side and always report `None` on the read side — no out-of-bounds panic either way.
+#[test]
+fn out_of_range_asset_ids_are_ignored_not_panicking() {
+    deluge_streaming_set_fill_context(ptr::null_mut(), u32::MAX, sample_ctx());
+    assert_eq!(fill_context_for(u32::MAX), None);
+}

@@ -14,12 +14,15 @@
 //!
 //! - Always compiled whenever this module is (i.e. on the Embassy BSP, device
 //!   or `host_app` — see the `mod streaming_loader;` cfg in `main.rs`), no
-//!   matter the `async_streaming_loader` feature: [`FILL_WAKE`] and the two
+//!   matter the `async_streaming_loader` feature: [`FILL_WAKE`], the two
 //!   `extern "C"` selector/wakeup functions just below it
-//!   (`deluge_streaming_async_active`, `deluge_streaming_signal_fill`). Every
-//!   other BSP/config (legacy/host-cooperative sim, rza1) never links this
-//!   crate at all; the `__attribute__((weak))` C++ fallbacks in `async_fill.cpp`
-//!   resolve there instead.
+//!   (`deluge_streaming_async_active`, `deluge_streaming_signal_fill`), and the
+//!   per-asset fill-context table (`deluge_streaming_set_fill_context`,
+//!   [`fill_context_for`]) — asset definition, which registers it, happens on
+//!   every BSP at sample-load, not just the ones with the async fill task
+//!   built in. Every other BSP/config (legacy/host-cooperative sim, rza1)
+//!   never links this crate at all; the `__attribute__((weak))` C++ fallbacks
+//!   in `async_fill.cpp` resolve there instead.
 //! - Feature-gated behind `async_streaming_loader`: the actual drain machinery
 //!   ([`FillOps`], [`fill_once`], [`ProdOps`], [`streaming_fill_task`]). Spawned
 //!   in `main.rs` (device `main` + host `host_app`) only under that feature.
@@ -46,9 +49,10 @@
 //! only. [`streaming_fill_task`] and the C++ enqueue path (`loader.cpp`) both run
 //! on the one thread-mode Embassy executor the whole app runs on, so the raw
 //! pointer never needs to (and must never) cross threads.
-#[cfg(feature = "async_streaming_loader")]
+use core::cell::RefCell;
 use core::ffi::c_void;
 
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
@@ -90,6 +94,101 @@ pub extern "C" fn deluge_streaming_efatfs_active() -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_streaming_signal_fill() {
     FILL_WAKE.signal(());
+}
+
+// ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────
+// Registered by C++ at sample-load (`SampleStream::ensure_resource_asset()`/`open_read_stream()`,
+// see `sample_stream.cpp`); read by the native fill task once a later task wires that read in
+// (`fill_context_for` has no caller yet outside tests). See `include/libdeluge/streaming_fill.h`'s
+// doc for the C-side contract.
+
+/// Fixed capacity for the per-asset fill-context table, keyed by asset id. Mirrors `kAssetCap`
+/// (`general_memory_allocator.cpp`) — the resource manager's asset-table capacity — so every asset
+/// id the manager can ever hand out has a slot here. A plain literal, not read from the C++ side (the
+/// two are kept in sync by hand); if `kAssetCap` is ever raised, raise this too. A `DELUGE_RESOURCE_NO_ASSET`
+/// (`u32::MAX`) id is naturally rejected by the same bounds check as any other out-of-range id.
+const FILL_CONTEXT_CAP: usize = 4096;
+
+/// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeStreamingFillContext` exactly (verbatim
+/// field order/types) — the per-asset geometry `deluge_streaming_set_fill_context` registers at
+/// sample-load and the native fill task will read via [`fill_context_for`], once a later task wires
+/// that in. See that header's doc for what each field means; `raw_data_format` mirrors
+/// `RawDataFormat` (`audio_file_format.h`) as its `u8` underlying representation, not re-exposed as a
+/// Rust enum here (nothing on this side interprets it yet).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FillContext {
+    pub efatfs_handle: u32,
+    pub audio_data_start_pos_bytes: u32,
+    pub audio_data_length_bytes: u64,
+    pub first_cluster_index_with_no_audio_data: i32,
+    pub cluster_size: u32,
+    pub cluster_size_magnitude: u32,
+    pub raw_data_format: u8,
+}
+
+/// FFI layout guard, mirroring the `static_assert`s in `async_fill.cpp` — see that file's comment
+/// for the byte-offset derivation. Unlike [`StreamingFillDescriptor`], this struct holds no pointer,
+/// so the layout is identical on the 32-bit device and the 64-bit host_app build: two leading `u32`s,
+/// then the `u64` (already 8-aligned), then `i32`/`u32`/`u32`, then the trailing `u8`, padded up to
+/// the `u64` member's 8-byte alignment.
+const _: () = {
+    assert!(core::mem::offset_of!(FillContext, efatfs_handle) == 0);
+    assert!(core::mem::offset_of!(FillContext, audio_data_start_pos_bytes) == 4);
+    assert!(core::mem::offset_of!(FillContext, audio_data_length_bytes) == 8);
+    assert!(core::mem::offset_of!(FillContext, first_cluster_index_with_no_audio_data) == 16);
+    assert!(core::mem::offset_of!(FillContext, cluster_size) == 20);
+    assert!(core::mem::offset_of!(FillContext, cluster_size_magnitude) == 24);
+    assert!(core::mem::offset_of!(FillContext, raw_data_format) == 28);
+    assert!(size_of::<FillContext>() == 32);
+};
+
+/// The per-asset fill-context table: written on the main/load thread
+/// (`deluge_streaming_set_fill_context`, called from `SampleStream::ensure_resource_asset()`/
+/// `open_read_stream()` at sample-load) and read by [`streaming_fill_task`] once a later task wires
+/// that read in. Neither side ever runs on the audio render ISR — asset definition happens at
+/// sample-load, and the fill task runs on the same thread-mode Embassy executor the C++ enqueue path
+/// does (see the module doc's "Concurrency" section) — so this table doesn't need the resource
+/// manager's asymmetric ISR-skipping `Masked` critical section (`deluge_resource::sync`). Using it
+/// here would also be the wrong dependency: this file compiles standalone (via `#[path]`) in the
+/// plain host unit test (`tests/streaming_fill_context_host.rs`), which does NOT link `deluge_resource`
+/// — only `host_app` pulls that crate in (see `Cargo.toml`). A plain `embassy_sync` blocking
+/// `Mutex<CriticalSectionRawMutex, _>` — the exact primitives [`FILL_WAKE`] above already uses —
+/// needs no new mechanism and no new dependency, and is available in every context this file compiles
+/// in (device, `host_app`, and the plain-host test recompile alike).
+static FILL_CONTEXTS: Mutex<
+    CriticalSectionRawMutex,
+    RefCell<[Option<FillContext>; FILL_CONTEXT_CAP]>,
+> = Mutex::new(RefCell::new([None; FILL_CONTEXT_CAP]));
+
+/// Register (or replace) asset `asset`'s streaming fill-context. See
+/// `include/libdeluge/streaming_fill.h`'s doc for the C-side contract; `mgr` is unused today (there
+/// is exactly one process-wide resource manager) but kept in the signature for parity with the rest
+/// of the manager-scoped C ABI. Out-of-range asset ids (`>= FILL_CONTEXT_CAP`, which also catches
+/// `DELUGE_RESOURCE_NO_ASSET`) are silently ignored — the real manager's asset table is capped at
+/// `kAssetCap` (see [`FILL_CONTEXT_CAP`]'s doc) so this can't happen in production, but a caller
+/// under test may probe one.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_streaming_set_fill_context(
+    _mgr: *mut c_void,
+    asset: u32,
+    ctx: FillContext,
+) {
+    if asset as usize >= FILL_CONTEXT_CAP {
+        return;
+    }
+    FILL_CONTEXTS.lock(|table| table.borrow_mut()[asset as usize] = Some(ctx));
+}
+
+/// Look up `asset`'s registered fill-context, or `None` if it was never registered (or `asset` is out
+/// of range). Read side of [`deluge_streaming_set_fill_context`]; wired into `ProdOps::begin`/`finish`
+/// by a later task (SR2d-4) — nothing calls this yet outside tests.
+#[allow(dead_code)]
+pub fn fill_context_for(asset: u32) -> Option<FillContext> {
+    if asset as usize >= FILL_CONTEXT_CAP {
+        return None;
+    }
+    FILL_CONTEXTS.lock(|table| table.borrow()[asset as usize])
 }
 
 /// Mirrors `include/libdeluge/streaming_fill.h`'s `StreamingFillDescriptor`

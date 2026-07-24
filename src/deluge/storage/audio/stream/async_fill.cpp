@@ -51,6 +51,21 @@ static_assert(offsetof(StreamingFillDescriptor, handle) == sizeof(uint8_t*) + 8)
 static_assert(offsetof(StreamingFillDescriptor, byte_offset) == sizeof(uint8_t*) + 12);
 static_assert(sizeof(StreamingFillDescriptor) == sizeof(uint8_t*) + 16);
 
+// FFI layout guard for DelugeStreamingFillContext (SR2d-4 Task 1), mirroring FillContext's own
+// `core::mem::offset_of!` guard in streaming_loader.rs. Unlike StreamingFillDescriptor, this struct
+// holds no pointer, so its layout is identical on the 32-bit device and the 64-bit host_app build:
+// two leading u32s (0, 4), then the u64 realigned at its natural 8-byte boundary (already aligned,
+// at 8), then i32/u32/u32 (16, 20, 24), then the trailing u8 (28), padded up to the u64 member's
+// 8-byte alignment (32 total).
+static_assert(offsetof(DelugeStreamingFillContext, efatfs_handle) == 0);
+static_assert(offsetof(DelugeStreamingFillContext, audio_data_start_pos_bytes) == 4);
+static_assert(offsetof(DelugeStreamingFillContext, audio_data_length_bytes) == 8);
+static_assert(offsetof(DelugeStreamingFillContext, first_cluster_index_with_no_audio_data) == 16);
+static_assert(offsetof(DelugeStreamingFillContext, cluster_size) == 20);
+static_assert(offsetof(DelugeStreamingFillContext, cluster_size_magnitude) == 24);
+static_assert(offsetof(DelugeStreamingFillContext, raw_data_format) == 28);
+static_assert(sizeof(DelugeStreamingFillContext) == 32);
+
 // begin_fill() mirrors read_cluster_data's "resolve where/how much" step (the last-cluster
 // short-read sector-count calc and the cluster's byte offset within the file); finish_fill()
 // mirrors its post-read "convert + stitch + publish" step.
@@ -194,6 +209,15 @@ __attribute__((weak)) bool deluge_streaming_async_active(void) {
 
 __attribute__((weak)) void deluge_streaming_signal_fill(void) {
 	// No async task to wake on this BSP/config.
+}
+
+// Weak fallback for the per-asset streaming fill-context registration (SR2d-4 Task 1). The Rust
+// Embassy BSP provides the real definition (streaming_loader.rs), unconditionally, same tier as
+// deluge_streaming_async_active/deluge_streaming_signal_fill above. Every other BSP/config -- which
+// has no native fill task to ever read this table back -- resolves this no-op instead.
+__attribute__((weak)) void deluge_streaming_set_fill_context(DelugeResource* /*mgr*/, uint32_t /*asset*/,
+                                                             DelugeStreamingFillContext /*ctx*/) {
+	// No fill-context table on this BSP/config.
 }
 
 // Weak fallbacks for the embedded-fatfs streaming READ symbols. The Rust Embassy BSP provides the

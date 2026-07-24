@@ -236,6 +236,16 @@ private:
 
 	/// @}
 
+	/// @brief Register (or refresh) this asset's streaming fill-context with the resource manager.
+	///
+	/// A no-op if the Asset isn't defined yet (`resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET`) or
+	/// there is no manager. Called from ensure_resource_asset() right after the Asset is defined, and
+	/// again from open_read_stream() in case the efatfs handle becomes known only afterwards (see
+	/// their call sites for why both are needed). Additive bookkeeping only -- nothing reads this
+	/// table back yet (SR2d-4 Task 1); it does not affect read_cluster_data() or any existing
+	/// behaviour.
+	void register_fill_context();
+
 	Sample& sample_;
 
 	/// This sample's Asset id, DELUGE_RESOURCE_NO_ASSET until defined on first use. The sentinel is a

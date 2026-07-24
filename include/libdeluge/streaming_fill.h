@@ -148,6 +148,39 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 /// @return true if the efatfs streaming read path is active on this build/BSP.
 bool deluge_streaming_efatfs_active(void);
 
+/// @brief Per-asset geometry the native Rust fill task will read directly, once it exists.
+///
+/// Registered by `deluge_streaming_set_fill_context` at sample-load; today nothing reads it back —
+/// this struct and its setter only ADD the storage, ahead of the task that will consume it (a later
+/// step rewrites `ProdOps::begin`/`finish`, in `streaming_loader.rs`, to resolve a queued chunk's
+/// fill descriptor from this table natively instead of round-tripping through
+/// `deluge_streaming_begin_fill`/`deluge_streaming_finish_fill`). Mirrors the fields
+/// `deluge::audio::stream::begin_fill` (async_fill.cpp) itself reads off `Sample`/`Cluster` today.
+typedef struct DelugeStreamingFillContext {
+	uint32_t efatfs_handle;              ///< This sample's open embedded-fatfs read handle (0 = none yet).
+	uint32_t audio_data_start_pos_bytes; ///< Offset from the start of the file to the first audio byte.
+	uint64_t audio_data_length_bytes;    ///< Audio payload length in bytes; 0x8FFFFFFFFFFFFFFF = still recording.
+	int32_t first_cluster_index_with_no_audio_data; ///< First cluster index past the end of the audio data.
+	uint32_t cluster_size;                          ///< Cluster::size — bytes per (non-final) cluster.
+	uint32_t cluster_size_magnitude;                ///< Cluster::size_magnitude — log2(cluster_size).
+	uint8_t raw_data_format;                        ///< Sample::rawDataFormat (RawDataFormat's uint8_t representation).
+} DelugeStreamingFillContext;
+
+/// @brief Register (or replace) asset @p asset's streaming fill-context.
+///
+/// Called unconditionally from `SampleStream::ensure_resource_asset()` once the asset is defined
+/// (and again from `open_read_stream()` if the efatfs handle becomes known afterwards) —
+/// see `sample_stream.cpp`. Always compiled on the Rust/Embassy BSP regardless of the
+/// `async_streaming_loader` cargo feature (asset definition happens on every BSP, not just the ones
+/// with the native fill task built in); every other BSP/config links the `__attribute__((weak))`
+/// no-op fallback in `async_fill.cpp`.
+/// @param mgr   The resource manager instance (see deluge_streaming_resource_manager). Unused by the
+///              Rust implementation today (there is exactly one process-wide manager); kept in the
+///              signature for parity with the rest of the manager-scoped C ABI.
+/// @param asset The asset id (`SampleStream::resource_asset_id()`).
+/// @param ctx   The geometry to register for @p asset.
+void deluge_streaming_set_fill_context(DelugeResource* mgr, uint32_t asset, DelugeStreamingFillContext ctx);
+
 #ifdef __cplusplus
 }
 #endif

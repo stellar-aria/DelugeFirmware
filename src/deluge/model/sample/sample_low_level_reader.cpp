@@ -42,10 +42,9 @@ SampleLowLevelReader::~SampleLowLevelReader() {
 	}
 }
 
-// SR1 Task 4: open the per-reader region-port cursor once, lazily, at the first assignClusters() for
-// this sample. Geometry is parsed here (above the port) from the immutable per-sample fields. A reader
-// object can be reused for a different sample (voices are pooled), so re-open if the backing stream
-// changed.
+// Open the per-reader region-port cursor once, lazily, at the first assignClusters() for this sample.
+// Geometry is parsed here (above the port) from the immutable per-sample fields. A reader object can be
+// reused for a different sample (voices are pooled), so re-open if the backing stream changed.
 void SampleLowLevelReader::ensureSource(Sample* sample) {
 	void* backing = &sample->stream();
 	if (source_ != nullptr && source_backing_ != backing) {
@@ -114,8 +113,8 @@ void SampleLowLevelReader::setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuid
 #endif
 
 	// Ok, now we've just moved the play-pos into a new Cluster, so do some setting up for that.
-	// SR1 Task 5: the resident cluster base is passed in as `clusterBase` -- the region port's
-	// `region.payload_base`, which every caller sources from the region it just acquired.
+	// The resident cluster base is passed in as `clusterBase` -- the region port's `region.payload_base`,
+	// which every caller sources from the region it just acquired.
 	currentPlayPos = clusterBase + bytePosWithinNewCluster;
 
 	setupReassessmentLocation(guide, sample);
@@ -195,8 +194,8 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	// this region (assignClusters / moveOnToNextCluster).
 	int32_t currentClusterIndex = region_.region_index;
 
-	// SR1 Task 6: the interpolation window's base pointer -- the reassessmentLocation trailing/front slack
-	// reach and the clusterStartLocation look-behind floor below -- sources from the region port's
+	// The interpolation window's base pointer -- the reassessmentLocation trailing/front slack reach and
+	// the clusterStartLocation look-behind floor below -- sources from the region port's
 	// region_.payload_base, retained at the acquire (assignClusters / moveOnToNextCluster) that just
 	// pinned this region. It is the resident chunk's payload().data() (the same payload whose >=4-byte
 	// front slack and >=7-byte trailing slack were stitched at fill), so every offset computed off it --
@@ -345,7 +344,7 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 
 	// assignClusters() just acquired the start region through the port; source the play-pos base from
 	// region_.payload_base (the resident chunk's payload().data()), matching moveOnToNextCluster's
-	// region.payload_base base. SR1 Task 5.
+	// region.payload_base base.
 	setupForPlayPosMovedIntoNewCluster(guide, sample, reinterpret_cast<char*>(region_.payload_base),
 	                                   bytePosWithinNewCluster, sample->byteDepth);
 
@@ -361,8 +360,8 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
                                           int32_t priorityRating) {
 #if ALPHA_OR_BETA_VERSION
 	// Precondition: callers unassign first, so `region_` is empty on entry. If it isn't, the add_lease
-	// below overwrites an un-released independent lease -- a silent leak (the pre-port `clusters[0] = ...`
-	// had the same trap). Catch the violation in dev builds instead of leaking; mirrors i019/i021/i022.
+	// below overwrites an un-released independent lease -- a silent leak. Catch the violation in dev
+	// builds instead of leaking; mirrors i019/i021/i022.
 	if (hasCurrentRegion()) {
 		FREEZE_WITH_ERROR("i024");
 	}
@@ -378,10 +377,9 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 		return false;
 	}
 
-	// SR1 Task 4: acquire the current region's residency through the region port instead of a direct
-	// get_cluster(). A `false` return is NotReady -- the exact residency state the old loop treated as
-	// failure (slot-0 chunk null, or present-but-not-yet-loaded): the port makes the same null/!loaded
-	// decision internally and leaves `out` untouched on false.
+	// Acquire the current region's residency through the region port. A `false` return is NotReady --
+	// the port could neither find nor load the chunk (null, or present-but-not-yet-loaded) -- and leaves
+	// `out` untouched.
 	DelugeSampleRegion region;
 	if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
 	                                  static_cast<uint32_t>(priorityRating), &region)) {
@@ -395,15 +393,14 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	// unassign first), so this add is not overwriting an un-released lease.
 	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region.lease));
 
-	// SR1 Task 6: retain the acquired region so the interpolation window's base pointer
-	// (clusterStartLocation / reassessmentLocation, computed in setupReassessmentLocation) sources from
-	// region.payload_base, and so `region_.lease` tracks the independent lease just taken.
+	// Retain the acquired region so the interpolation window's base pointer (clusterStartLocation /
+	// reassessmentLocation, computed in setupReassessmentLocation) sources from region.payload_base, and
+	// so `region_.lease` tracks the independent lease just taken.
 	region_ = region;
 
-	// SR1 Task 5: the region port now owns the look-ahead. acquire() above already prefetched the next
-	// cluster in `playDirection`, and moveOnToNextCluster advances through the port, so the old
-	// prefetch loop is retired -- the port holds the single prefetch lease, matching the pre-SR1
-	// one-lease-per-neighbour residency.
+	// The region port owns the look-ahead: acquire() above already prefetched the next cluster in
+	// `playDirection`, and moveOnToNextCluster advances through the port, so the port holds the single
+	// prefetch lease (one lease per neighbour).
 	return true;
 }
 
@@ -425,11 +422,10 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	// it advances, so this pairs the port's fused old-current release for the reader's own lease.
 	deluge::cluster::remove_reason(*reinterpret_cast<StreamedChunk*>(region_.lease), "E035");
 
-	// SR1 Task 5: the boundary crossing now advances through the region port. acquire() promotes the
-	// port's standing prefetch to current and prefetches the following neighbour. A `false` return is
-	// NotReady -- the exact residency state (next chunk null, or present-but-not-yet-loaded) the old ring
-	// shift treated as the underrun drop, made by the port internally with the same null/!loaded decision.
-	// On the drop, mirror the old end-of-waveform path: no current region, currentPlayPos cleared, false.
+	// The boundary crossing advances through the region port: acquire() promotes the port's standing
+	// prefetch to current and prefetches the following neighbour. A `false` return is NotReady -- the
+	// next chunk is null or present-but-not-yet-loaded, the underrun drop. On the drop: no current
+	// region, currentPlayPos cleared, false.
 	int32_t newClusterIndex = oldClusterIndex + guide->playDirection;
 
 	DelugeSampleRegion region;
@@ -453,7 +449,7 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 		// SD-latency-starved sustained streaming. The caller (`VoiceSample::render` ->
 		// `Voice::render`) treats this `false` return as an instant voice unassign (`goto
 		// instantUnassign`), the same severity as the cache-stop site, just reached from the far
-		// more common code path. Fires on the port's NotReady (== the old null-or-!loaded drop).
+		// more common code path. Fires on the port's NotReady.
 		deluge::harness::noteUnderrunUnassign();
 #endif
 		return false;
@@ -464,8 +460,8 @@ bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sampl
 	// clean single-lease handover.
 	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(region.lease));
 
-	// SR1 Task 6: retain the newly-current region for setupReassessmentLocation's interpolation-window
-	// base (see assignClusters), and so region_.lease tracks the lease just taken.
+	// Retain the newly-current region for setupReassessmentLocation's interpolation-window base (see
+	// assignClusters), and so region_.lease tracks the lease just taken.
 	region_ = region;
 
 	// Remove the compensation we'd done on the play pos relating to the byte depth of samples
@@ -1295,7 +1291,7 @@ bool SampleLowLevelReader::readSamplesForTimeStretching(
 	return true;
 }
 
-void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stealReasons) {
+void SampleLowLevelReader::adoptResidencyFrom(SampleLowLevelReader& other, bool stealReasons) {
 	// `region_` (this reader's residency, including its independent lease via `region_.lease`) has already
 	// been set from `other` by the caller: the copy/move ctors copy it in their initializer list, and the
 	// move-assignment operator assigns it just before calling here. This function only reconciles the
@@ -1306,7 +1302,7 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 		// `this`. The reader's own INDEPENDENT region lease transfers too: `region_.lease` was copied from
 		// `other`, so `this` now owns that lease; clear `other.region_` so `other` (its destructor / next
 		// unassign) won't release the lease `this` now owns. Exactly one of {this, other} owns it after:
-		// `this` (mirror of the old per-slot `other`-slot nulling).
+		// `this`.
 		if (source_ != nullptr) {
 			deluge_sample_source_close(source_);
 		}
@@ -1319,8 +1315,8 @@ void SampleLowLevelReader::steal_clusters(SampleLowLevelReader& other, bool stea
 	else {
 		// Non-stealing copy (TimeStretcher::olderPartReader): `this` gets its OWN independent hard lease on
 		// the chunk `region_` describes (copied from `other`). `other` keeps its own lease, so both readers
-		// now pin the shared chunk -- the refcount rises by one, exactly as the old per-slot copy did. This
-		// reader's `source_` is left null; it re-opens its own cursor lazily on the next assignClusters().
+		// now pin the shared chunk -- the refcount rises by one. This reader's `source_` is left null; it
+		// re-opens its own cursor lazily on the next assignClusters().
 		// This independent lease is load-bearing: it is the older head's ONLY pin on the shared chunk (it
 		// has no `source_`), so without it the chunk could be reclaimed under the older head while the newer
 		// head advances -> use-after-free.
@@ -1335,14 +1331,14 @@ SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader& other, bool ste
       interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_},
       region_{other.region_} {
 
-	steal_clusters(other, stealReasons);
+	adoptResidencyFrom(other, stealReasons);
 }
 SampleLowLevelReader::SampleLowLevelReader(SampleLowLevelReader&& other) noexcept
     : oscPos{other.oscPos}, currentPlayPos{other.currentPlayPos}, reassessmentLocation{other.reassessmentLocation},
       clusterStartLocation{other.clusterStartLocation}, reassessmentAction{other.reassessmentAction},
       interpolationBufferSizeLastTime{other.interpolationBufferSizeLastTime}, interpolator_{other.interpolator_},
       region_{other.region_} {
-	steal_clusters(other, true);
+	adoptResidencyFrom(other, true);
 }
 SampleLowLevelReader& SampleLowLevelReader::operator=(SampleLowLevelReader&& other) noexcept {
 	if (this == &other) {
@@ -1356,12 +1352,13 @@ SampleLowLevelReader& SampleLowLevelReader::operator=(SampleLowLevelReader&& oth
 	interpolationBufferSizeLastTime = other.interpolationBufferSizeLastTime;
 	interpolator_ = other.interpolator_;
 	// Release this reader's OWN current region + its independent lease first (unassignAllReasons clears
-	// region_). Then move `other`'s region in BEFORE steal_clusters, because the stealing steal_clusters
-	// now clears `other.region_` (so `other` won't release the lease `this` takes over) -- doing the
+	// region_). Then move `other`'s region in BEFORE adoptResidencyFrom, because the stealing
+	// adoptResidencyFrom now clears `other.region_` (so `other` won't release the lease `this` takes
+	// over) -- doing the
 	// assignment after it would copy an already-emptied region. After this, `this` owns the region + its
 	// single lease and `other` is emptied: exactly one owner, no leak, no double-free.
 	unassignAllReasons(false);
 	region_ = other.region_;
-	steal_clusters(other, true);
+	adoptResidencyFrom(other, true);
 	return *this;
 }

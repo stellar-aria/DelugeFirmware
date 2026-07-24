@@ -15,11 +15,11 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-// SR1 Task 2: the region port (include/libdeluge/sample_source.h) backed by the existing C++
-// `deluge::audio::stream::SampleStream` / `StreamedChunk` residency machinery. A seam, not a
-// behaviour change -- this mirrors get_cluster()'s residency semantics exactly (SampleLowLevelReader's
+// The region port (include/libdeluge/sample_source.h) backed by the C++
+// `deluge::audio::stream::SampleStream` / `StreamedChunk` residency machinery. It mirrors
+// get_cluster()'s residency semantics exactly (SampleLowLevelReader's
 // assignClusters()/moveOnToNextCluster() do the same null/!loaded checks and CLUSTER_ENQUEUE dispatch
-// this file performs). SR2 later swaps the backing to Rust without touching callers of the C ABI.
+// this file performs). The C ABI lets the backing move to Rust later without touching callers.
 
 #include "libdeluge/sample_source.h"
 
@@ -34,20 +34,18 @@
 #include <cstdint>
 
 // The reader's residency for one region-port cursor: the current pinned chunk plus one prefetched
-// neighbour -- the same two leases that used to live in SampleLowLevelReader::clusters[0] and
-// clusters[kNumClustersLoadedAhead - 1]. Defined here (not in the public header) since the header
-// only forward-declares this as an opaque type.
+// neighbour. Defined here (not in the public header) since the header only forward-declares this as an
+// opaque type.
 struct DelugeSampleSource {
 	deluge::audio::stream::SampleStream* stream;
 	DelugeSampleGeometry geo;
 
-	// The reader's residency: the current pinned chunk + one prefetched neighbour. These are the
-	// leases that used to live in SampleLowLevelReader::clusters[].
+	// The reader's residency: the current pinned chunk + one prefetched neighbour.
 	StreamedChunk* current = nullptr;  ///< == the lease handed out (lease == reinterpret_cast<uint64_t>(current))
 	StreamedChunk* prefetch = nullptr; ///< held so the next acquire is a resident hit
 	uint32_t prefetch_index = UINT32_MAX;
 
-	// 8b Task 1: the region a caller asked for that was reserved+scheduled but not yet loaded
+	// The region a caller asked for that was reserved+scheduled but not yet loaded
 	// (DELUGE_REGION_LOADING). Its lease is RETAINED here — deliberately NOT released, and
 	// deliberately NOT stored in `current` (which must keep pinning whatever the caller is still
 	// reading) — so the background fill keeps progressing and the chunk cannot be stolen while the
@@ -63,13 +61,12 @@ struct DelugeSampleSource {
 
 namespace {
 
-// SR1 Task 4 (render-thread alloc-freeness): `deluge_sample_source_open` used to `new DelugeSampleSource`,
-// which routes through deluge::memory::alloc_external (the SDRAM heap — it can walk/lock the heap and throw
-// BAD_ALLOC). That `new` fires at note-start (the first assignClusters() for a sample) on the audio render
-// thread, violating "no allocation on the render thread". The pre-migration get_cluster() residency path was
-// pool/steal (allocation-free), so this cursor must be too. We back the opaque `DelugeSampleSource*` with a
-// fixed static pool instead — claim/release is a bare in-use-flag flip, no heap ops. The C ABI is unchanged:
-// `open` still returns an opaque `DelugeSampleSource*` (now a pointer into the pool), `close` frees the slot.
+// Render-thread alloc-freeness: `open` must not allocate. A plain `new DelugeSampleSource` would route
+// through deluge::memory::alloc_external (the SDRAM heap — it can walk/lock the heap and throw BAD_ALLOC),
+// and `open` fires at note-start (the first assignClusters() for a sample) on the audio render thread,
+// violating "no allocation on the render thread". So we back the opaque `DelugeSampleSource*` with a fixed
+// static pool — claim/release is a bare in-use-flag flip, no heap ops. `open` returns an opaque
+// `DelugeSampleSource*` (a pointer into the pool), `close` frees the slot.
 //
 // Sizing — the pool must cover every SampleLowLevelReader that can hold an open source concurrently. There are
 // exactly two value-instance sites of SampleLowLevelReader in the tree, and each owns at most one `source_`:
@@ -95,7 +92,7 @@ struct SampleSourceSlot {
 	std::atomic<bool> in_use{false};
 };
 
-// SR1 Task 4 (review fix — preemption safety). open() and close() do NOT both run on the render thread, so the
+// Preemption safety. open() and close() do NOT both run on the render thread, so the
 // slot-integrity flip MUST be atomic:
 //   * open() (claim)   is reached via SampleLowLevelReader::ensureSource() → assignClusters() at note-start —
 //     on the AUDIO RENDER path, which runs as a preemptive interrupt-executor (see stack_guard.cpp).
@@ -103,13 +100,13 @@ struct SampleSourceSlot {
 //     Sound::killAllVoices() → Voice::unassignStuff (UI/menu handlers, song-swap in deluge.cpp, playback-stop
 //     in playback_handler.cpp, card-reinsert) — on the MAIN executor, OFF the audio path.
 // The render interrupt-executor can preempt the main executor mid-flip, so a render-thread claim can race a
-// main-thread release, or two claims can collide. A bare non-atomic scan/flip (the prior code) could then hand
+// main-thread release, or two claims can collide. A bare non-atomic scan/flip could then hand
 // the same slot to two readers or lose a release. We make each slot's in_use an atomic and claim it with a
 // CAS (false→true): the winner of the CAS owns the slot, so slot integrity holds under arbitrary preemption
 // without any lock the audio ISR could not take. This mirrors the reentrancy-tolerant Cell<Slot> discipline in
 // crates/deluge_resource/src/manager.rs (interior mutation, no &mut, safe against the audio-ISR-vs-main race).
 // NOTE: this protects only POOL SLOT INTEGRITY. The separate "a reader is torn down while audio still renders
-// that same voice" hazard is pre-existing (clusters[] has it too) and out of scope here.
+// that same voice" hazard is pre-existing and out of scope here.
 //
 // File-scope static: lives in .bss, never touches the heap. The atomic must be genuinely lock-free (an ISR must
 // never fall back into a libatomic lock), which the static_assert below guarantees on this target.
@@ -248,14 +245,13 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 		return DELUGE_REGION_UNAVAILABLE;
 	}
 
-	// 3. LOADING: reserved, leased and scheduled, but the data hasn't landed. This is the half the
-	//    old boolean `false` conflated with the UNAVAILABLE case above. RETAIN the lease taken here
-	//    (fresh from get_cluster, or promoted from the standing prefetch) as `pending` so the fill
-	//    keeps progressing and the chunk can't be stolen while the caller defers and retries;
-	//    releasing it — as the pre-8b code did — could let the just-scheduled chunk be reclaimed
-	//    before the retry, so the caller could spin forever. `current` is deliberately left alone:
-	//    the caller may still be reading the region it already has. release_pending() runs AFTER the
-	//    new lease is in hand, so a retry on the same chunk nets exactly one lease (see its doc).
+	// 3. LOADING: reserved, leased and scheduled, but the data hasn't landed — distinct from the
+	//    UNAVAILABLE case above. RETAIN the lease taken here (fresh from get_cluster, or promoted from
+	//    the standing prefetch) as `pending` so the fill keeps progressing and the chunk can't be stolen
+	//    while the caller defers and retries; releasing it could let the just-scheduled chunk be
+	//    reclaimed before the retry, so the caller could spin forever. `current` is deliberately left
+	//    alone: the caller may still be reading the region it already has. release_pending() runs AFTER
+	//    the new lease is in hand, so a retry on the same chunk nets exactly one lease (see its doc).
 	if (!chunk->loaded) {
 		release_pending(*src);
 		src->pending = chunk;
@@ -317,8 +313,8 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out) {
-	// The pre-8b boolean, expressed in terms of the tri-state: everything that is not READY is the
-	// single "NotReady" the SR1 call sites act on, so they are unchanged by the split.
+	// Boolean form, expressed in terms of the tri-state: everything that is not READY is the single
+	// "NotReady" that callers using this form act on.
 	return deluge_sample_region_acquire_ex(src, index, direction, priority, out) == DELUGE_REGION_READY;
 }
 
@@ -326,7 +322,7 @@ DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint
 	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). Resolves
 	// `index` by matching it against each tracked chunk's OWN `cluster_index`, never by assuming
 	// `index` is "the standing prefetch" or "whatever the last acquire_ex call was about" -- that
-	// assumption is exactly the 8b review bug this indexed form replaces (an unindexed query could
+	// assumption is exactly the bug this indexed form avoids (an unindexed query could
 	// not tell "the current region is still loading" from "the neighbour is still loading" once a
 	// caller jumped ahead of the standing prefetch; see the file header / spec for the failing
 	// sequence). By construction (see acquire_ex) `current`, `pending`, and `prefetch` never track the
@@ -379,7 +375,7 @@ void deluge_sample_source_close(DelugeSampleSource* src) {
 		deluge::cluster::release_lease(src->prefetch);
 		src->prefetch = nullptr;
 	}
-	// 8b Task 1: the retained DELUGE_REGION_LOADING lease. A caller that gives up mid-wait (voice
+	// The retained DELUGE_REGION_LOADING lease. A caller that gives up mid-wait (voice
 	// unassigned, note killed) closes without ever seeing the region become READY, so this is the
 	// backstop that keeps "retain across the retry cycle" from becoming "retain forever".
 	release_pending(*src);

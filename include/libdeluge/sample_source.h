@@ -67,8 +67,8 @@ typedef struct DelugeSampleRegion {
 	uint64_t lease;          ///< opaque pin token; pass to deluge_sample_region_release
 } DelugeSampleRegion;
 
-/// Open a per-reader cursor. `stream_backing` identifies the sample's residency
-/// (SR1: a `deluge::audio::stream::SampleStream*`; SR2: an opaque source id).
+/// Open a per-reader cursor. `stream_backing` identifies the sample's residency (currently a
+/// `deluge::audio::stream::SampleStream*`; an opaque source id once the backend moves to Rust).
 DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSampleGeometry geometry);
 
 /// Make the region containing cluster `index` resident-or-scheduled, pin it, and report which.

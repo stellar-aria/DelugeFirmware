@@ -910,6 +910,9 @@ skipSearch:
 
 		if (!samplesBehindOnRepitchedWaveform) {
 			// D_PRINTLN("new head reading non-buffered and writing to buffer");
+			// STALE: SampleLowLevelReader::cloneFrom no longer exists (replaced by the copy ctor /
+			// adoptResidencyFrom). This whole TIME_STRETCH_ENABLE_BUFFER block is never compiled and is
+			// pending removal; do not treat this call as live.
 			voiceSample->cloneFrom(&olderPartReader, false);
 			newerHeadReadingFromBuffer = false;
 			olderHeadReadingFromBuffer = true;

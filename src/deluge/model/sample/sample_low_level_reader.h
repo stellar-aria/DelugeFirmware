@@ -91,7 +91,7 @@ public:
 	                                  bool loopingAtLowLevel, int32_t jumpAmount, int32_t bufferSize,
 	                                  TimeStretcher* timeStretcher, bool bufferingToTimeStretcher,
 	                                  int32_t whichPlayHead, int32_t whichKernel, int32_t priorityRating);
-	void steal_clusters(SampleLowLevelReader& other, bool stealReasons);
+	void adoptResidencyFrom(SampleLowLevelReader& other, bool stealReasons);
 
 	void bufferIndividualSampleForInterpolation(int32_t numChannels, int32_t byteDepth, char* playPosNow);
 	void bufferZeroForInterpolation(int32_t numChannels);
@@ -111,14 +111,14 @@ public:
 	deluge::dsp::Interpolator interpolator_{};
 
 protected:
-	// 8b Task 2: the cursor + its retained region are `protected`, not `private`, because the
-	// cache-replay resync in VoiceSample::render (the subclass) acquires the uncached resume cluster
-	// through this same cursor -- that is what keeps `region_` tracking the CACHE position instead of
-	// the stale pre-cache one. Everything else about them is unchanged; no other class can reach them.
+	// The cursor + its retained region are `protected`, not `private`, because the cache-replay resync
+	// in VoiceSample::render (the subclass) acquires the uncached resume cluster through this same
+	// cursor -- that is what keeps `region_` tracking the CACHE position instead of the stale pre-cache
+	// one. No other class can reach them.
 	//
-	// SR1 Task 4: residency acquisition goes through the region port (libdeluge/sample_source.h)
-	// instead of a per-slot SampleStream::get_cluster() loop. `source_` is a per-reader cursor opened
-	// lazily against the sample's `stream()` (see ensureSource); it holds the current + prefetch pins.
+	// Residency acquisition goes through the region port (libdeluge/sample_source.h). `source_` is a
+	// per-reader cursor opened lazily against the sample's `stream()` (see ensureSource); it holds the
+	// current + prefetch pins.
 	DelugeSampleSource* source_ = nullptr;
 	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
 

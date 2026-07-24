@@ -18,10 +18,10 @@
 #pragma once
 
 /// Host-only instrumentation for the streaming-underrun harness's PRIMARY signal: the audio
-/// thread reaching a `clusters[0]->loaded == false` (or `clusters[1]`) check on a play-needed
-/// path and either deferring (WAIT) or dropping (UNASSIGN) the voice as a result. Not a
-/// fault, not a blocking wait — just the exact moment playback discovers the cluster it needs
-/// isn't ready yet.
+/// thread reaching a region-port NotReady residency check (`!hasCurrentRegion()`, or
+/// `deluge_sample_region_state` returning LOADING) on a play-needed path and either deferring
+/// (WAIT) or dropping (UNASSIGN) the voice as a result. Not a fault, not a blocking wait — just
+/// the exact moment playback discovers the region it needs isn't ready yet.
 ///
 /// `DELUGE_HOST`-only (see `sim/CMakeLists.txt`'s `add_compile_definitions(DELUGE_HOST)`,
 /// same guard `harness/streaming_scenario.h` uses): compiled into every x86 build off this
@@ -37,11 +37,11 @@ namespace deluge::harness {
 
 /// @brief Count one WAIT-class underrun miss.
 ///
-/// `VoiceSample::attemptLateSampleStart` found `clusters[0]` (or, having found `clusters[0]`
-/// loaded, `clusters[1]`) not yet loaded on a play-needed path and is about to return
+/// `VoiceSample::attemptLateSampleStart` found the start region still LOADING (or, with the start
+/// region ready, its neighbour still LOADING) on a play-needed path and is about to return
 /// `LateStartAttemptStatus::WAIT` (defer, come back later) rather than starting playback.
 /// Called from exactly one place — the shared fall-through just above the `WAIT` return —
-/// since both of the function's `loaded` checks converge there.
+/// since both residency misses converge there.
 void noteUnderrunWait();
 
 /// @brief Count one UNASSIGN-class underrun miss.

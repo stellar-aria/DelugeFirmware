@@ -54,7 +54,14 @@ pub struct DelugeSampleSource {
 /// Residency outcome of a region query, mirroring `DelugeRegionState`.
 /// Numbered from 1 (never 0), matching the header, so `if (state)` can't be
 /// misread as a boolean.
-#[repr(C)]
+///
+/// `#[repr(u8)]`, NOT plain `#[repr(C)]`: the real C++ builds (both
+/// arm-none-eabi and host_app, see `build.rs`'s `run_bindgen`) compile the
+/// header's `enum DelugeRegionState` under `-fshort-enums`, which sizes a
+/// 1..=3-valued enum as `unsigned char` -- 1 byte. A bare `#[repr(C)]` enum
+/// is Rust's C `int` (4 bytes), so it would mismatch the production ABI's
+/// return width. Pinning to `u8` matches the short-enum layout byte-for-byte.
+#[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DelugeRegionState {
     Ready = 1,
@@ -118,6 +125,7 @@ const POOL_SIZE: usize = 256;
 /// `source` -- casts back to its enclosing `Slot` in O(1), no scan, mirroring
 /// `sample_source.cpp`'s `SampleSourceSlot` (`source` first,
 /// `static_assert(offsetof(..., source) == 0)`).
+#[repr(C)]
 struct Slot {
     source: UnsafeCell<Option<SampleSource<ManagerResidency>>>,
     in_use: AtomicBool,

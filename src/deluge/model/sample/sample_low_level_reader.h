@@ -96,9 +96,9 @@ public:
 	void bufferIndividualSampleForInterpolation(int32_t numChannels, int32_t byteDepth, char* playPosNow);
 	void bufferZeroForInterpolation(int32_t numChannels);
 
-	/// @brief Does the reader currently hold a resident cluster? The external presence query that replaces
-	///        reaching into `clusters[0]` — true exactly when `clusters[0]` is set, since the reader-wide
-	///        invariant keeps `region_` and `clusters[0]` populated (and emptied) together.
+	/// @brief Does the reader currently hold a resident region? The reader's sole presence query — true
+	///        exactly when `region_` is populated (and thus the reader holds its one independent hard
+	///        lease on that chunk, via `region_.lease`).
 	[[nodiscard]] bool hasCurrentRegion() const { return region_.payload_base != nullptr; }
 
 	uint32_t oscPos{};
@@ -109,32 +109,6 @@ public:
 	int8_t interpolationBufferSizeLastTime{}; // 0 if was previously switched off
 
 	deluge::dsp::Interpolator interpolator_{};
-
-	// SR1 Task 8: the region port (source_/region_ below) is the reader's residency seam for
-	// steady-state uncached playback -- where region_ mirrors clusters[0] exactly (i023) -- and the
-	// reader's own interpolation-window logic (setupReassessmentLocation / setup*ForPlay*) now sources
-	// its base + cluster index from region_, not this array. `clusters[]` is NOT retired, though: it
-	// stays as the reader's *authoritative* current-cluster residency for the paths the port does not
-	// own, and its leases (add_lease at each port acquire; remove_reason in unassignAllReasons) remain
-	// the single uniform release those paths depend on. It is still read/populated by:
-	//   * attemptLateSampleStart's WAIT-probe -- the FAILURE-vs-WAIT-vs-defer decision reads
-	//     clusters[0]/[1] + ->loaded directly (the port's bool acquire cannot express it) and holds the
-	//     probe leases across a WAIT. Golden-UNVALIDATED (the deterministic sim has no SD latency), so
-	//     deliberately left on clusters[] -- but it now calls mirrorRegionOnPinnedCluster() on the chunks
-	//     it pins, so even a deferring probe leaves region_ describing clusters[0] rather than empty.
-	//   * VoiceSample::render's cache-resync tracking + stopReadingFromCache -- while replaying a
-	//     repitch/time-stretch cache the reader tracks the uncached resume cluster here. 8b Task 2
-	//     moved the resync's ACQUIRE onto the port (voice_sample.cpp ~900), so `region_` now tracks the
-	//     cache position too and is no longer stale during cache replay; clusters[0] is written from
-	//     that same acquire and the two move together. stopReadingFromCache still reads
-	//     clusters[0]->loaded directly (the port's bool acquire cannot express "held but not loaded").
-	//   No longer read by any external presence consumer: TimeStretcher (time_stretcher.cpp ~570, ~880,
-	//   ~1015) and SamplePlaybackGuide::adjustPitchToCorrectDriftFromSync (~131) now query
-	//   hasCurrentRegion() (region_-backed) instead of reaching into clusters[0], and voice.cpp stopped
-	//   reading clusters[] at SR1 Task 8. The remaining reads are all internal to this class hierarchy.
-	// Fully retiring clusters[] would require routing those port-uncovered paths through the port so
-	// region_ becomes authoritative during cache/probe too -- deferred (see SR1 Task 8 report).
-	std::array<StreamedChunk*, kNumClustersLoadedAhead> clusters = {nullptr, nullptr};
 
 protected:
 	// 8b Task 2: the cursor + its retained region are `protected`, not `private`, because the
@@ -148,13 +122,16 @@ protected:
 	DelugeSampleSource* source_ = nullptr;
 	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
 
-	// SR1 Task 6: the last region acquired through the port (assignClusters / moveOnToNextCluster). Its
-	// `payload_base` is the source of the interpolation window's base pointer -- the `clusterStartLocation`
-	// look-behind floor and the `reassessmentLocation` trailing/front slack reach are computed from it in
-	// setupReassessmentLocation(), instead of reaching through the clusters[0] mirror into
-	// StreamedChunk::payload(). By the port contract region_.payload_base == clusters[0]->payload().data()
-	// (asserted there), so the interpolation DSP stays byte-for-byte identical; only the base's *source*
-	// moves onto the region port.
+	// The reader's SOLE residency representation: the last region acquired through the port (assignClusters
+	// / moveOnToNextCluster / the cache-resync). Its `payload_base` is the source of the interpolation
+	// window's base pointer -- the `clusterStartLocation` look-behind floor and the `reassessmentLocation`
+	// trailing/front slack reach are computed from it in setupReassessmentLocation(). `region_.payload_base`
+	// gates presence (hasCurrentRegion()), `region_.region_index` supplies the current cluster index, and
+	// `region_.lease` IS the resident chunk pointer -- the reader holds exactly ONE independent hard lease
+	// on it while `region_` is populated (taken at each acquire, released in unassignAllReasons). The port
+	// cursor `source_` holds its own separate current/prefetch leases; this independent lease is what keeps
+	// the chunk pinned for the reader's residency lifetime, including the non-stealing copy
+	// (TimeStretcher::olderPartReader) which has no `source_` of its own.
 	DelugeSampleRegion region_{};
 
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).

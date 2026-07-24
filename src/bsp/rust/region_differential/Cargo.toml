@@ -10,6 +10,10 @@ license = "GPL-3.0-or-later"
 # binary and must not perturb the firmware/BSP Cargo graph.
 
 [dependencies]
+deluge_sample_source = { path = "../../../../crates/deluge_sample_source" }
+
+[dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
 
 [build-dependencies]
 cc = "1"

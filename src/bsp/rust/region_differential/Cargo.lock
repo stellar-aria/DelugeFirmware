@@ -13,6 +13,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "deluge_alloc"
+version = "0.1.0"
+
+[[package]]
+name = "deluge_resource"
+version = "0.1.0"
+dependencies = [
+ "deluge_alloc",
+]
+
+[[package]]
+name = "deluge_sample_source"
+version = "0.1.0"
+dependencies = [
+ "deluge_resource",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23,6 +47,8 @@ name = "region-differential"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "critical-section",
+ "deluge_sample_source",
 ]
 
 [[package]]

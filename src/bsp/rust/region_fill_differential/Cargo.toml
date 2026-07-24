@@ -1,0 +1,36 @@
+[package]
+name = "region-fill-differential"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+# SR2d-4 Task 6: the rung's gate. Standalone harness crate (NOT a workspace member — mirrors
+# `region_differential`/`sample_convert`): it `cc`-compiles a slice of the app's C++ into its own test
+# binary and must not perturb the firmware/BSP Cargo graph.
+#
+# `edition = "2024"` (not the sibling harnesses' "2021"): unlike `region_differential` (which only
+# depends on OTHER crates normally), this crate's test files pull `deluge-bsp-rust`'s own
+# `src/fill_logic.rs`/`src/fill_sidecar.rs` in unmodified via `#[path]` (that crate is bin-only, no
+# `[lib]` target — see its own Cargo.toml doc). `#[path]`-included source is parsed under the
+# INCLUDING crate's edition, and `deluge-bsp-rust` itself is `edition = "2024"` (its files use
+# `unsafe extern "C"` blocks / `#[unsafe(no_mangle)]`) — so this crate must match to parse them
+# identically, the same way `tests/fill_logic_host.rs` does from inside that crate.
+
+[dependencies]
+# `fill_logic::finish_convert_stitch` (pulled in via `#[path]` in the test files) calls
+# `deluge_sample_convert::{convert_cluster,stitch_boundaries}` unqualified — this dependency is what
+# resolves that when the module is recompiled into THIS crate. Also supplies the already-`cc`-compiled
+# `convert_word`/`stitch_boundaries` object code the C++ reference slice (`cpp/harness_shim.cpp`) links
+# against — see build.rs's doc for why this crate deliberately does NOT recompile convert.cpp/stitch.cpp
+# itself.
+deluge_sample_convert = { path = "../sample_convert" }
+
+[dev-dependencies]
+# Host end-to-end test only: a real `deluge_resource` manager over a test heap (mirrors
+# `tests/fill_sidecar_host.rs`'s `TestManager`), and the heap it's built over.
+deluge_resource = { path = "../../../../crates/deluge_resource" }
+fs_alloc = { package = "deluge_alloc", path = "../../../../crates/deluge_alloc" }
+
+[build-dependencies]
+cc = "1"

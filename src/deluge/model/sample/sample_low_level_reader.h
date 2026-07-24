@@ -160,22 +160,6 @@ protected:
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
 	void ensureSource(Sample* sample);
 
-	/// @brief Point `region_` at the chunk currently pinned in `clusters[0]`, for the paths that pin a
-	///        chunk BELOW the port and so have no acquired `DelugeSampleRegion` to assign.
-	///
-	/// The port only ever hands a region out for a chunk that is resident AND loaded, so a path that
-	/// deliberately holds a not-yet-loaded chunk leased (attemptLateSampleStart's defer) cannot obtain
-	/// its mirror from an acquire without changing which clusters get pinned. This builds the very
-	/// descriptor the port would have built for that chunk: `payload_base` / `region_index` read straight
-	/// off it, `resident_bytes` from the port's own `deluge_sample_region_resident_bytes`, and `lease` in
-	/// the port's encoding (the chunk pointer — see `deluge_sample_region_acquire_ex`), so
-	/// `region_.lease == (uint64_t)clusters[0]` identifies the mirror exactly as it does after an acquire.
-	///
-	/// This is what keeps the reader's standing invariant — *`clusters[0] != nullptr` implies `region_`
-	/// describes that same chunk* — true on those paths too. A null `clusters[0]` clears the mirror.
-	/// @param sample the sample `clusters[0]` belongs to; supplies the geometry for `resident_bytes`.
-	void mirrorRegionOnPinnedCluster(const Sample& sample);
-
 private:
 	/// @brief The port geometry for @p sample — the immutable per-sample fields parsed above the port.
 	[[nodiscard]] static DelugeSampleGeometry geometryFor(const Sample& sample);

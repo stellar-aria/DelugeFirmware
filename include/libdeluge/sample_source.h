@@ -119,15 +119,6 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 ///                              also reports UNAVAILABLE.
 DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index);
 
-/// Valid payload bytes for cluster `index` under `geometry` — exactly the value
-/// `deluge_sample_region_acquire_ex` reports as `DelugeSampleRegion::resident_bytes` for that index.
-/// Pure: no cursor, no lease, no fetch, no state — it is the geometry arithmetic on its own.
-///
-/// Exists so a caller that has a chunk pinned by means other than an acquire can fill a
-/// `DelugeSampleRegion` describing it that agrees, field for field, with what the port would have
-/// handed out — rather than restating the short-last-cluster clamp for itself.
-uint32_t deluge_sample_region_resident_bytes(DelugeSampleGeometry geometry, uint32_t index);
-
 /// Drop a pin taken by acquire. Safe to call with a lease of 0 (no-op).
 void deluge_sample_region_release(DelugeSampleSource* src, uint64_t lease);
 

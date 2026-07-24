@@ -70,19 +70,6 @@ DelugeSampleGeometry SampleLowLevelReader::geometryFor(const Sample& sample) {
 	};
 }
 
-void SampleLowLevelReader::mirrorRegionOnPinnedCluster(const Sample& sample) {
-	if (clusters[0] == nullptr) {
-		region_ = {};
-		return;
-	}
-	region_ = DelugeSampleRegion{
-	    .payload_base = clusters[0]->payload().data(),
-	    .region_index = clusters[0]->cluster_index,
-	    .resident_bytes = deluge_sample_region_resident_bytes(geometryFor(sample), clusters[0]->cluster_index),
-	    .lease = reinterpret_cast<uint64_t>(clusters[0]),
-	};
-}
-
 void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAgain) {
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 		if (clusters[l] != nullptr) {

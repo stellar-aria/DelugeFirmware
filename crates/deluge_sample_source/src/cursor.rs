@@ -1,20 +1,30 @@
-//! The region-port cursor's tri-state `acquire_ex` core: `current` (the pinned,
-//! loaded region the caller reads) and `pending` (a retained LOADING reservation
-//! from a prior acquire, so its fill keeps progressing across defer/retry).
-//! Reimplements `sample_source.cpp:217-292` steps 2-4 natively (prefetch/promotion
-//! is a later task — this cursor has no `prefetch` slot yet).
+//! The region-port cursor's full tri-state `acquire_ex` state machine: `current`
+//! (the pinned, loaded region the caller reads), `pending` (a retained LOADING
+//! reservation from a prior acquire, so its fill keeps progressing across
+//! defer/retry), and `prefetch` (a standing reservation for the neighbouring
+//! region in the caller's playback direction, so the next acquire of it is a
+//! resident hit). Reimplements `sample_source.cpp:217-366` natively: steps 2-4
+//! (current/pending), step 1 (promotion off a prefetch hit), step 5 (neighbour
+//! prefetch on the READY path), `deluge_sample_region_state`, and retain/release.
 //!
 //! Slots hold RAII pins (`Cell<Option<R::Pin>>`); a transition `take`s the outgoing
 //! pin (dropping it releases exactly one lease) and `set`s the new one — lease
-//! balance falls out of ownership, never hand-balanced. Every touch of a slot is
-//! wrapped in `deluge_resource::sync::Masked` — the SAME asymmetric critical
-//! section the manager's own tables use — because these slots are touched from
-//! both the audio ISR (`acquire_ex`) and the main thread (`close`).
+//! balance falls out of ownership, never hand-balanced. Every touch of a slot (and
+//! of `prefetch_index`, its tracked-index sidecar) is wrapped in
+//! `deluge_resource::sync::Masked` — the SAME asymmetric critical section the
+//! manager's own tables use — because these slots are touched from both the audio
+//! ISR (`acquire_ex`) and the main thread (`close`).
+//!
+//! Invariant (relied on by `state`'s "at most one slot matches" correctness):
+//! `current`, `pending`, and `prefetch` never track the same index simultaneously.
+//! The promotion path (which consumes the standing prefetch for the index it
+//! matches) and the READY-path prefetch's own dedupe (`prefetch_index != next`)
+//! together maintain it.
 
 use crate::geometry::{resident_bytes_for, Geometry};
 use crate::residency::{Get, RegionPin, Residency};
 use core::cell::Cell;
-use deluge_resource::sync::Masked;
+use deluge_resource::sync::{m_get, Masked};
 
 /// Mirrors `DelugeRegionState`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,15 +45,17 @@ pub struct RegionOut {
 
 /// One region-port cursor: `current` (the pinned, loaded region the caller reads),
 /// `pending` (a retained LOADING reservation from a prior acquire, so its fill
-/// keeps progressing across defer/retry), and — added in the prefetch task —
-/// `prefetch`. Slots hold RAII pins; a transition drops the outgoing pin
-/// (releasing its lease).
+/// keeps progressing across defer/retry), and `prefetch` (a standing reservation
+/// for the neighbouring region in the caller's playback direction, tracked by
+/// `prefetch_index`, `u32::MAX` = empty). Slots hold RAII pins; a transition drops
+/// the outgoing pin (releasing its lease).
 pub struct SampleSource<R: Residency> {
     residency: R,
     geo: Geometry,
     current: Cell<Option<R::Pin>>,
     pending: Cell<Option<R::Pin>>,
-    // prefetch + prefetch_index added in Task 4.
+    prefetch: Cell<Option<R::Pin>>,
+    prefetch_index: Cell<u32>,
 }
 
 impl<R: Residency> SampleSource<R> {
@@ -53,6 +65,8 @@ impl<R: Residency> SampleSource<R> {
             geo,
             current: Cell::new(None),
             pending: Cell::new(None),
+            prefetch: Cell::new(None),
+            prefetch_index: Cell::new(u32::MAX),
         }
     }
 
@@ -74,32 +88,116 @@ impl<R: Residency> SampleSource<R> {
         Self::set_slot(&self.pending, None); // drops the Option's pin -> releases its lease
     }
 
-    /// The index `current` is pinned to, if any. `take`+inspect+`set` under ONE
-    /// masked window (not two `m_get`/`m_set`-style calls) — a window split in two
-    /// would let a concurrent `close()` observe `current` as transiently `None` and
-    /// clear it as a no-op, only for this call's restore to silently revive the pin
+    /// The index `slot`'s pin tracks, if any. `take`+inspect+`set` under ONE masked
+    /// window (not two `m_get`/`m_set`-style calls) — a window split in two would
+    /// let a concurrent `close()` observe the slot as transiently `None` and clear
+    /// it as a no-op, only for this call's restore to silently revive the pin
     /// `close()` meant to release. Mirrors the manager's own multi-statement
     /// `Masked::enter()` sections (e.g. `manager.rs`'s `evict_lowest`), used
-    /// whenever a read must stay coherent with the write that follows it.
-    fn current_index(&self) -> Option<u32> {
+    /// whenever a read must stay coherent with the write that follows it. The
+    /// shared primitive behind `current_index` and `state`'s `pending`/`prefetch`
+    /// resolution.
+    fn slot_index(slot: &Cell<Option<R::Pin>>) -> Option<u32> {
         let _m = Masked::enter();
-        let cur = self.current.take();
-        let idx = cur.as_ref().map(RegionPin::index);
-        self.current.set(cur);
+        let v = slot.take();
+        let idx = v.as_ref().map(RegionPin::index);
+        slot.set(v);
         idx
     }
 
+    /// The index `current` is pinned to, if any.
+    fn current_index(&self) -> Option<u32> {
+        Self::slot_index(&self.current)
+    }
+
+    /// Masked read of the standing prefetch's tracked index (`u32::MAX` = empty).
+    /// A plain `Cell<u32>` read, so this reuses `deluge_resource::sync::m_get`
+    /// rather than a bespoke take/set window — the same primitive `manager.rs`
+    /// uses for its own `Copy` cells.
+    fn prefetch_index(&self) -> u32 {
+        m_get(&self.prefetch_index)
+    }
+
+    /// Masked swap of the prefetch slot AND its tracked index TOGETHER, so the two
+    /// never observably diverge across a window seam (a reader between two
+    /// separately-masked writes could otherwise see a pin with a stale/absent
+    /// index, or vice versa).
+    fn set_prefetch(&self, pin: Option<R::Pin>, idx: u32) {
+        let _m = Masked::enter();
+        self.prefetch.set(pin); // drops the outgoing pin -> releases its lease
+        self.prefetch_index.set(idx);
+    }
+
+    /// Step 1 (`sample_source.cpp:229-238`): if the standing prefetch tracks
+    /// `index`, take it out and clear `prefetch_index` — the lease transfers from
+    /// `prefetch` to this call, so the caller skips a fresh `residency.acquire`.
+    /// `None` if there is no hit (leaves `prefetch`/`prefetch_index` untouched).
+    /// One masked window over both cells: a read-then-conditionally-take that
+    /// `set_prefetch` (a plain swap) can't express.
+    fn take_promoted(&self, index: u32) -> Option<R::Pin> {
+        let _m = Masked::enter();
+        if self.prefetch_index.get() != index {
+            return None;
+        }
+        let pin = self.prefetch.take();
+        if pin.is_some() {
+            self.prefetch_index.set(u32::MAX);
+        }
+        pin
+    }
+
+    /// Step 5 (`sample_source.cpp:294-309`), READY-path only, called AFTER
+    /// `current` is pinned: prefetch the neighbour in `direction`, if in range and
+    /// not already the standing prefetch. A `Loading` neighbour is stored as-is
+    /// (any state is fine — it just isn't ready yet); `Unavailable` leaves
+    /// `prefetch` empty.
+    fn prefetch_neighbour(&self, index: u32, direction: i8, priority: u32) {
+        let next_signed = index as i64 + direction as i64;
+        if next_signed < 0 {
+            return;
+        }
+        let next = next_signed as u32;
+        if next >= self.residency.num_clusters() {
+            return;
+        }
+        if self.prefetch_index() == next {
+            return; // already the standing prefetch -- nothing to do
+        }
+        // Drop any standing prefetch (a different index) BEFORE acquiring the new
+        // one, mirroring the C++ contract's ordering.
+        self.set_prefetch(None, u32::MAX);
+        match self.residency.acquire(next, priority) {
+            Get::Unavailable => {
+                // Nothing came back; prefetch stays empty (already cleared above).
+            }
+            Get::Loading(pin) | Get::Ready(pin) => self.set_prefetch(Some(pin), next),
+        }
+    }
+
     /// Non-blocking, synchronous: schedules a fill if needed but never waits for
-    /// one. `_direction` is accepted for signature parity with the prefetch task
-    /// but unused here (no prefetch slot yet).
+    /// one. `direction` steers the neighbour prefetched on the READY path.
     pub fn acquire_ex(
         &self,
         index: u32,
-        _direction: i8,
+        direction: i8,
         priority: u32,
     ) -> (RegionState, Option<RegionOut>) {
-        // (Task 4 inserts the prefetch-promotion shortcut here.)
-        match self.residency.acquire(index, priority) {
+        // Step 1: a hit on the standing prefetch promotes it in place of a fresh
+        // acquire -- same tri-state logic runs on the promoted pin below, keyed by
+        // its LIVE readiness (a promoted-but-not-yet-loaded prefetch falls through
+        // to the Loading arm, which moves it to `pending` -- exactly the "promotion
+        // empties prefetch, moves the reservation to pending" contract).
+        let get = match self.take_promoted(index) {
+            Some(pin) => {
+                if pin.is_ready() {
+                    Get::Ready(pin)
+                } else {
+                    Get::Loading(pin)
+                }
+            }
+            None => self.residency.acquire(index, priority),
+        };
+        match get {
             Get::Unavailable => {
                 // Nothing was leased for this region — there is no fill in flight —
                 // and any earlier pending reservation is moot, so drop that too.
@@ -145,14 +243,90 @@ impl<R: Residency> SampleSource<R> {
                     resident_bytes: resident_bytes_for(index, &self.geo),
                     lease: token,
                 };
+                // Step 5: prefetch the forward/backward neighbour now that
+                // `current` holds its new pin.
+                self.prefetch_neighbour(index, direction, priority);
                 (RegionState::Ready, Some(out))
             }
         }
     }
 
+    /// Masked take/inspect/restore: true iff `slot`'s pin tracks `index` (matched
+    /// by `RegionPin::index`, the pin's OWN tracked index — never a side-channel
+    /// copy). Leaves the slot untouched.
+    fn slot_matches(slot: &Cell<Option<R::Pin>>, index: u32) -> bool {
+        let _m = Masked::enter();
+        let v = slot.take();
+        let m = matches!(&v, Some(p) if p.index() == index);
+        slot.set(v);
+        m
+    }
+
+    /// Masked take/inspect/restore: `Some(Ready|Loading)` iff `slot`'s pin tracks
+    /// `index`, resolved by re-reading LIVE `is_ready()` (a pin taken as Loading
+    /// may have since landed); `None` if the slot is empty or tracks a different
+    /// index. Leaves the slot untouched.
+    fn slot_state_if_index(slot: &Cell<Option<R::Pin>>, index: u32) -> Option<RegionState> {
+        let _m = Masked::enter();
+        let v = slot.take();
+        let result = match &v {
+            Some(p) if p.index() == index => Some(if p.is_ready() {
+                RegionState::Ready
+            } else {
+                RegionState::Loading
+            }),
+            _ => None,
+        };
+        slot.set(v);
+        result
+    }
+
+    /// Reimplements `deluge_sample_region_state` (`sample_source.cpp:321-352`):
+    /// pure observation (no acquire, no lease, no mutation) that resolves `index`
+    /// against each slot's OWN tracked index, `current` -> `pending` -> `prefetch`,
+    /// with LIVE readiness. `current` is checked first: whenever it is set it is,
+    /// by invariant, already loaded (only a ready pin is ever pinned as `current`
+    /// -- see `acquire_ex`'s READY arm), so a match there is always `Ready`. By
+    /// the cursor's own never-same-index invariant (see the module doc), at most
+    /// one of the three checks below can match.
+    pub fn state(&self, index: u32) -> RegionState {
+        if Self::slot_matches(&self.current, index) {
+            return RegionState::Ready;
+        }
+        if let Some(s) = Self::slot_state_if_index(&self.pending, index) {
+            return s;
+        }
+        if let Some(s) = Self::slot_state_if_index(&self.prefetch, index) {
+            return s;
+        }
+        RegionState::Unavailable
+    }
+
+    /// Independent-pin retain/release — forwards the opaque token to the provider
+    /// (generation-checked; no-op on 0/stale). Cursor-independent, matching the C
+    /// ABI's `deluge_sample_region_retain`/`_release`.
+    pub fn retain(&self, token: u64) {
+        self.residency.retain_token(token);
+    }
+
+    /// See [`Self::retain`].
+    pub fn release(&self, token: u64) {
+        self.residency.release_token(token);
+    }
+
     pub fn close(&self) {
         Self::set_slot(&self.current, None);
         Self::set_slot(&self.pending, None);
+        self.set_prefetch(None, u32::MAX);
+    }
+
+    /// The index `pending` is retained for, if any. Test-only peek (used to assert
+    /// the never-same-index invariant); production code never needs `pending`'s
+    /// index in isolation — `state`'s own resolution goes through
+    /// `slot_state_if_index` instead.
+    #[cfg(test)]
+    fn pending_index(&self) -> Option<u32> {
+        Self::slot_index(&self.pending)
     }
 }
 
@@ -323,10 +497,15 @@ mod tests {
 
     #[test]
     fn acquire_ready_pins_current_fills_out_and_fuses_old_current() {
+        // direction=1 (a realistic forward-playback caller — real callers never
+        // pass 0, see voice_sample.cpp/sample_low_level_reader.cpp's playDirection)
+        // so each READY acquire also prefetches its forward neighbour (step 5);
+        // the lease-count assertions below account for that extra standing lease
+        // alongside the original current/fuse/dedupe assertions.
         let (src, h, asset) = new_source(4);
         mark_index_ready(h, asset, 0);
 
-        let (state, out) = src.acquire_ex(0, 0, 0);
+        let (state, out) = src.acquire_ex(0, 1, 0);
         assert_eq!(state, RegionState::Ready);
         let out0 = out.expect("ready must fill out");
         assert_eq!(out0.region_index, 0);
@@ -339,30 +518,40 @@ mod tests {
             let byte = unsafe { *out0.payload_base.add(b) };
             assert_eq!(byte, b as u8, "ramp byte {b} of cluster 0");
         }
-        assert_eq!(total_leases(h), 1, "one current lease after first Ready");
+        // current(0) + the neighbour prefetch of index 1 the READY path just
+        // scheduled (not yet marked ready, so it sits as a Loading prefetch).
+        assert_eq!(
+            total_leases(h),
+            2,
+            "one current lease + one standing prefetch lease after first Ready"
+        );
 
-        // Advance to index 1 (ready): index 0's lease is fused (released); still
-        // exactly one current lease.
+        // Advance to index 1: the standing prefetch from above already tracks it,
+        // so this is a PROMOTE (no fresh acquire) once it's marked ready — the fuse
+        // of the old current(0) is the only lease this step drops; the prefetch of
+        // the NEW neighbour (index 2) it schedules next is the only lease it adds.
         mark_index_ready(h, asset, 1);
-        let (state1, out1) = src.acquire_ex(1, 0, 0);
+        let (state1, out1) = src.acquire_ex(1, 1, 0);
         assert_eq!(state1, RegionState::Ready);
         let out1 = out1.expect("ready must fill out");
         assert_eq!(out1.region_index, 1);
         assert_eq!(
             total_leases(h),
-            1,
-            "advancing current must fuse the old lease, not add one"
+            2,
+            "advancing current promotes+fuses net zero; prefetching index 2 adds one"
         );
 
-        // Re-acquire index 1 (already current): idempotent dedupe, still exactly
-        // one lease, and out.lease/payload equal the standing current's.
-        let (state1b, out1b) = src.acquire_ex(1, 0, 0);
+        // Re-acquire index 1 (already current): idempotent dedupe (the fresh
+        // cache-hit lease taken to resolve it is dropped immediately), and
+        // out.lease/payload equal the standing current's. The standing prefetch of
+        // index 2 is untouched (already the standing prefetch — step 5 no-ops).
+        let (state1b, out1b) = src.acquire_ex(1, 1, 0);
         assert_eq!(state1b, RegionState::Ready);
         let out1b = out1b.expect("ready must fill out");
         assert_eq!(
             total_leases(h),
-            1,
-            "re-acquiring the current index must stay a single lease"
+            2,
+            "re-acquiring the current index is net zero; the standing prefetch is untouched"
         );
         assert_eq!(
             out1b.lease, out1.lease,
@@ -372,5 +561,230 @@ mod tests {
             out1b.payload_base, out1.payload_base,
             "dedupe: same payload as standing current"
         );
+    }
+
+    /// A READY acquire prefetches its forward neighbour (step 5); the NEXT acquire
+    /// of that neighbour is a PROMOTE — no fresh `residency.acquire` — and stays
+    /// lease-balanced (the lease simply transfers from `prefetch` to `current`).
+    #[test]
+    fn ready_prefetches_forward_neighbour_and_next_acquire_promotes_it() {
+        // num_clusters=2 so index 1's own forward neighbour (index 2) is out of
+        // range: after the promote below, no further prefetch fires, keeping the
+        // final lease count a clean, unambiguous 1.
+        let (src, h, asset) = new_source(2);
+        mark_index_ready(h, asset, 0);
+        mark_index_ready(h, asset, 1);
+
+        let (state0, _out0) = src.acquire_ex(0, 1, 0);
+        assert_eq!(state0, RegionState::Ready);
+        assert_eq!(
+            total_leases(h),
+            2,
+            "current(0) + the prefetched neighbour(1)"
+        );
+        assert_eq!(
+            src.state(1),
+            RegionState::Ready,
+            "neighbour 1 is prefetched and already ready"
+        );
+
+        // Promote: index 1 is the standing prefetch, so this must NOT take a fresh
+        // lease -- if it mistakenly did (a fresh cache-hit acquire, then fused),
+        // the net lease count after would be identical (a fresh Ready acquire nets
+        // the same 2->1 via its own fuse+dedupe), so the real tell is the
+        // never-same-index invariant: a buggy non-promoting path would leave the
+        // OLD prefetch(1) still standing alongside the new current(1), i.e. total
+        // would stay 2 with current and prefetch both tracking index 1. Promotion
+        // instead transfers the lease, so current(0) is fused away and nothing
+        // remains to prefetch (index 2 is out of range) -- total drops to 1.
+        let (state1, out1) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state1, RegionState::Ready);
+        let out1 = out1.expect("ready must fill out");
+        assert_eq!(out1.region_index, 1);
+        assert_eq!(
+            total_leases(h),
+            1,
+            "promotion transfers the prefetch lease into current -- no new reservation"
+        );
+        assert_eq!(
+            src.state(0),
+            RegionState::Unavailable,
+            "old current(0) was fused away"
+        );
+        assert_eq!(src.state(1), RegionState::Ready, "current(1), promoted");
+    }
+
+    /// The discriminating truthfulness case: an indexed `state` query must resolve
+    /// by each slot's OWN tracked index, never by assuming "the standing prefetch
+    /// is always index+1 of the last acquire". After a jump ahead of the standing
+    /// prefetch, `state` of the prefetch's neighbour must report what is ACTUALLY
+    /// tracked (nothing, here -- LOADING never triggers step 5), not the jumped-to
+    /// index's own Loading state.
+    #[test]
+    fn indexed_state_is_truthful_after_jump_ahead_of_prefetch() {
+        let (src, h, asset) = new_source(8);
+        mark_index_ready(h, asset, 0);
+
+        // acquire(0) -> READY, prefetches neighbour 1 (not marked ready -> Loading).
+        let (state0, _out0) = src.acquire_ex(0, 1, 0);
+        assert_eq!(state0, RegionState::Ready);
+
+        // acquire(5) jumps past the standing prefetch: LOADING (pending=5). The
+        // LOADING path never runs step 5, so the standing prefetch(1) is untouched
+        // -- nothing this cursor tracks ever becomes 6.
+        let (state5, out5) = src.acquire_ex(5, 1, 0);
+        assert_eq!(state5, RegionState::Loading);
+        assert!(out5.is_none());
+
+        assert_eq!(src.state(0), RegionState::Ready, "current");
+        assert_eq!(
+            src.state(5),
+            RegionState::Loading,
+            "pending, the jumped-to index"
+        );
+        assert_eq!(
+            src.state(1),
+            RegionState::Loading,
+            "the ORIGINAL prefetch neighbour, still standing and untouched by the jump"
+        );
+        assert_eq!(
+            src.state(6),
+            RegionState::Unavailable,
+            "the TRUE neighbour of 5 -- nothing tracks it, since acquire(5) was LOADING \
+             (step 5 never ran) and must NOT be conflated with index 5's own Loading state"
+        );
+    }
+
+    /// The three-slot resolution order (`current` -> `pending` -> `prefetch`) with
+    /// LIVE readiness: a slot's match is re-queried at `state()` time, not cached
+    /// from whenever it was last touched.
+    #[test]
+    fn state_matches_current_pending_prefetch_by_tracked_index() {
+        let (src, h, asset) = new_source(4);
+        mark_index_ready(h, asset, 0);
+
+        let (state0, _out0) = src.acquire_ex(0, 1, 0); // Ready(current=0), prefetch(1)=Loading
+        assert_eq!(state0, RegionState::Ready);
+        let (state2, _out2) = src.acquire_ex(2, 1, 0); // Loading(pending=2); prefetch(1) untouched
+        assert_eq!(state2, RegionState::Loading);
+
+        assert_eq!(src.state(0), RegionState::Ready, "current");
+        assert_eq!(src.state(2), RegionState::Loading, "pending");
+        assert_eq!(
+            src.state(1),
+            RegionState::Loading,
+            "prefetch, not yet landed"
+        );
+        assert_eq!(src.state(3), RegionState::Unavailable, "tracked by no slot");
+
+        // Land the prefetch's chunk (simulating the loader) without touching the
+        // cursor at all -- `state` must re-observe it live, not report a cached
+        // Loading.
+        mark_index_ready(h, asset, 1);
+        assert_eq!(
+            src.state(1),
+            RegionState::Ready,
+            "prefetch's readiness is a LIVE re-check, not cached at acquire time"
+        );
+    }
+
+    /// `retain`/`release` forward the opaque lease token to the provider
+    /// (balance +1/-1); `close` drops current+pending+prefetch, returning the
+    /// manager's total lease count to its pre-acquire baseline.
+    #[test]
+    fn retain_release_balance_and_close_drops_all_slots() {
+        let (src, h, asset) = new_source(2);
+        assert_eq!(total_leases(h), 0, "baseline");
+        mark_index_ready(h, asset, 0);
+
+        let (state, out) = src.acquire_ex(0, 1, 0); // Ready(current=0), prefetch(1)=Loading
+        assert_eq!(state, RegionState::Ready);
+        let out = out.expect("ready must fill out");
+        assert_eq!(total_leases(h), 2, "current + standing prefetch");
+
+        src.retain(out.lease);
+        assert_eq!(total_leases(h), 3, "retain adds an independent lease");
+        src.release(out.lease);
+        assert_eq!(total_leases(h), 2, "release drops it back");
+
+        src.close();
+        assert_eq!(
+            total_leases(h),
+            0,
+            "close drops current+pending+prefetch back to baseline"
+        );
+    }
+
+    /// A caller jumping to a different index while an earlier LOADING reservation
+    /// is still outstanding supersedes it without leaking: the old pending is
+    /// dropped, the new one leased, net one pending lease throughout.
+    #[test]
+    fn jump_ahead_supersedes_pending_without_leak() {
+        let (src, h, _asset) = new_source(8);
+
+        let (state3, out3) = src.acquire_ex(3, 1, 0); // not resident -> Loading, pending=3
+        assert_eq!(state3, RegionState::Loading);
+        assert!(out3.is_none());
+        assert_eq!(total_leases(h), 1, "one pending lease");
+
+        let (state7, out7) = src.acquire_ex(7, 1, 0); // jump ahead -> Loading, pending=7
+        assert_eq!(state7, RegionState::Loading);
+        assert!(out7.is_none());
+        assert_eq!(
+            total_leases(h),
+            1,
+            "the old pending(3) is released, the new pending(7) leased -- net one"
+        );
+        assert_eq!(
+            src.state(3),
+            RegionState::Unavailable,
+            "superseded, no longer tracked"
+        );
+        assert_eq!(src.state(7), RegionState::Loading, "the new pending");
+    }
+
+    /// `current`, `pending`, and `prefetch` must never track the same index at
+    /// once (the invariant `state`'s "at most one slot matches" correctness relies
+    /// on) -- exercised across a representative sequence covering a Ready-path
+    /// prefetch, a jump past it, a promote-to-Ready, and a promote-to-Loading
+    /// (moved into `pending`, per the "promotion empties prefetch, moves the
+    /// reservation to pending" contract).
+    #[test]
+    fn slots_never_track_the_same_index() {
+        fn assert_distinct(src: &SampleSource<ManagerResidency>) {
+            let cur = src.current_index();
+            let pending = src.pending_index();
+            let pre = src.prefetch_index();
+            let pre = (pre != u32::MAX).then_some(pre);
+            let tracked: Vec<u32> = [cur, pending, pre].into_iter().flatten().collect();
+            let mut sorted = tracked.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                tracked.len(),
+                "slots must track pairwise-distinct indices: current={cur:?} pending={pending:?} prefetch={pre:?}"
+            );
+        }
+
+        let (src, h, asset) = new_source(8);
+        mark_index_ready(h, asset, 0);
+
+        src.acquire_ex(0, 1, 0); // Ready(current=0), prefetch(1)=Loading
+        assert_distinct(&src);
+
+        src.acquire_ex(5, 1, 0); // jump ahead -> Loading(pending=5); prefetch(1) untouched
+        assert_distinct(&src);
+
+        mark_index_ready(h, asset, 1);
+        src.acquire_ex(1, 1, 0); // promote(1) -> Ready: fuses pending(5) away, fuses current(0),
+        assert_distinct(&src); // prefetches(2)=Loading
+
+        src.acquire_ex(2, 1, 0); // promote(2), not ready -> Loading: moves into pending, empties prefetch
+        assert_distinct(&src);
+
+        mark_index_ready(h, asset, 2);
+        src.acquire_ex(2, 1, 0); // fresh acquire (prefetch is empty) -> Ready: fuses pending(2) away,
+        assert_distinct(&src); // prefetches(3)=Loading
     }
 }

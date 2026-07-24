@@ -101,7 +101,11 @@ void SampleLowLevelReader::unassignAllReasons([[maybe_unused]] bool wontBeUsedAg
 int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlaybackGuide* guide,
                                                   bool compensateForInterpolationBuffer) {
 	if (clusters[0] != nullptr) {
-		uint32_t withinCluster = (currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data())) + 4
+		// clusters[0] gates presence; the base/index come from the held region, which the reader-wide
+		// invariant keeps describing that same chunk (region_.payload_base == clusters[0]->payload().data(),
+		// region_.region_index == clusters[0]->cluster_index — the i023 guard asserts the first on every
+		// setupReassessmentLocation). Pure change of provenance; the arithmetic is byte-identical.
+		uint32_t withinCluster = (currentPlayPos - reinterpret_cast<char*>(region_.payload_base)) + 4
 		                         - sample->byteDepth; // Remove deliberate misalignment
 
 		if (compensateForInterpolationBuffer && interpolationBufferSizeLastTime) {
@@ -110,7 +114,7 @@ int32_t SampleLowLevelReader::getPlayByteLowLevel(Sample* sample, SamplePlayback
 			// the new hop, in time stretching
 			withinCluster += extraSamples * sample->numChannels * sample->byteDepth * guide->playDirection;
 		}
-		return (clusters[0]->cluster_index << Cluster::size_magnitude) + withinCluster;
+		return (static_cast<int32_t>(region_.region_index) << Cluster::size_magnitude) + withinCluster;
 	}
 	// Hopefully this won't go negative, cos we're returning as unsigned...
 	return (int32_t)guide->endPlaybackAtByte + (int32_t)(uintptr_t)currentPlayPos * guide->playDirection;
@@ -161,7 +165,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 
 	realignPlaybackParameters(sample);
 
-	int32_t clusterIndex = clusters[0]->cluster_index;
+	int32_t clusterIndex = static_cast<int32_t>(region_.region_index); // same value as clusters[0]->cluster_index
 
 	// We may have ended up past the finalClusterIndex if we've just switched from using a cache.
 	// This needs correcting, so "looping" can occur at next render. Must happen before setupReassessmentLocation() is
@@ -174,7 +178,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 			return false;
 		}
 
-		int32_t bytePosWithinCluster = currentPlayPos - reinterpret_cast<char*>(clusters[0]->payload().data());
+		int32_t bytePosWithinCluster = currentPlayPos - reinterpret_cast<char*>(region_.payload_base);
 		bytePosWithinCluster += (clusterIndex - finalClusterIndex) * Cluster::size;
 
 		currentPlayPos = reinterpret_cast<char*>(finalCluster->payload().data()) + bytePosWithinCluster;

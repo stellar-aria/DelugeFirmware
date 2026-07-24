@@ -269,10 +269,22 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 
 	// 4. Pin it as current and fill the region descriptor. If a different chunk was already pinned as
 	//    `current`, its lease is fused into this advance -- mirrors moveOnToNextCluster's fused
-	//    old-cluster remove_reason (sample_low_level_reader.cpp:343). This makes acquire self-
-	//    releasing: the caller need not release before re-acquiring. Re-acquiring the SAME resident
-	//    chunk (src->current == chunk) must NOT release the pin we are about to hand back out.
-	if (src->current != nullptr && src->current != chunk) {
+	//    old-cluster remove_reason (sample_low_level_reader.cpp:343). This makes acquire self-releasing:
+	//    the caller need not release before re-acquiring.
+	if (src->current == chunk) {
+		// Re-acquiring the chunk ALREADY pinned as `current`. The get_cluster() in step 1 added a
+		// duplicate lease (step 1 only skips get_cluster on a prefetch hit, and by invariant `current`
+		// and `prefetch` never track the same index -- see deluge_sample_region_state -- so a
+		// `current == chunk` match here always came through get_cluster, never a promote). Drop that
+		// duplicate so the pin stays a single lease: that is what makes re-acquiring the same chunk truly
+		// idempotent (the "need not release before re-acquiring" contract above), symmetric to
+		// release_pending()'s dedupe of a retry that lands on the pending chunk. Without it a caller that
+		// acquires the same index twice in a row -- the late-start residency DECISION and then its
+		// goodToGo commit re-acquire (voice_sample.cpp attemptLateSampleStart) -- would leak one lease
+		// per note-start.
+		deluge::cluster::release_lease(chunk);
+	}
+	else if (src->current != nullptr) {
 		deluge::cluster::release_lease(src->current);
 	}
 	src->current = chunk;

@@ -141,6 +141,33 @@ describe sample_source("deluge_sample_source_* (region port)", $ {
 		deluge_sample_source_close(src);
 	});
 
+	it("8b: re-acquiring the chunk already pinned as `current` nets one lease (idempotent, no leak)", _ {
+		deluge_test_reset_lease_tracking();
+		deluge::audio::stream::SampleStream stream(3);
+		for (uint32_t i = 0; i < 3; ++i) {
+			stream.set_cluster_data(i, make_ramp(i, kClusterSize));
+		}
+		DelugeSampleGeometry geo = make_geometry(48); // 3 full clusters
+		auto* src = deluge_sample_source_open(&stream, geo);
+
+		DelugeSampleRegion out{};
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(deluge_test_total_lease_count()).to_equal(2u); // current(0) + prefetch(1)
+
+		// Re-acquire the SAME index the cursor already holds as `current` -- the shape of the late-start
+		// goodToGo commit re-acquiring what its own residency decision already pinned. get_cluster() runs
+		// again (a real backing call, so this counts)...
+		expect(acquire_state(src, 0, 1, &out)).to_equal(kReady);
+		expect(stream.get_cluster_calls(0)).to_equal(2);
+		// ...but the duplicate lease it took is dropped, so the pin stays a single lease: still
+		// current(0) + prefetch(1), NOT three. Without the dedupe this leaks one lease per re-acquire.
+		expect(deluge_test_total_lease_count()).to_equal(2u);
+		expect(out.region_index).to_equal(0u);
+
+		deluge_sample_source_close(src);
+		expect(deluge_test_total_lease_count()).to_equal(0u);
+	});
+
 	it("acquire on a not-yet-loaded cluster returns false and leaves `out` untouched", _ {
 		deluge_test_reset_lease_tracking();
 		deluge::audio::stream::SampleStream stream(2);

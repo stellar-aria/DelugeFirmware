@@ -139,58 +139,67 @@ fn some_state(tag: u8) -> ConvertState {
     }
 }
 
-/// An unseen chunk — nothing has ever `set` it — reports the zeroed default.
+/// All three sidecar behaviours in ONE test, against ONE shared manager — deliberately, not three
+/// independent `#[test]` functions. `fill_sidecar`'s sidecar table is a genuine process-wide `static`: it
+/// is shared by every `#[test]` in this binary regardless of how many independent `TestManager`s they
+/// each construct. A `deluge_resource::Manager`'s generation counter and slot indices both start
+/// fresh (generation 1, first free slot) on EVERY manager instance, so two INDEPENDENT managers'
+/// first allocations collide on the exact same `(slot, generation)` key — indistinguishable to the
+/// sidecar, which (correctly, per its design — see its module doc) never keys on the manager pointer,
+/// only ever assuming the one real, process-wide singleton manager. Splitting these scenarios into
+/// separate `#[test]` fns each with their own fresh manager reproduces that exact collision (verified
+/// while writing this test — `cargo test`'s default parallel/interleaved execution made one test
+/// observe a different test's leftover entry). Using a single shared manager here matches the real
+/// one-manager-per-process invariant the sidecar actually relies on, and keeps every `(slot,
+/// generation)` pair used below genuinely unique.
 #[test]
-fn unseen_chunk_is_default() {
-    let m = TestManager::new(16);
-    let chunk = m.request(0);
-    assert!(!chunk.is_null());
+fn get_set_and_generation_invalidation() {
+    // 2 chunk slots: enough for two simultaneously-resident chunks (scenarios 1+2 below), while
+    // still letting scenario 3 force a deterministic single-slot reuse (see its own comment).
+    let m = TestManager::new(2);
 
-    assert_eq!(get(m.mgr(), chunk), ConvertState::default());
-}
-
-/// A written entry persists across a `get` (and a second `get` doesn't disturb it).
-#[test]
-fn written_entry_persists() {
-    let m = TestManager::new(16);
-    let chunk = m.request(0);
-    assert!(!chunk.is_null());
-
-    let state = some_state(7);
-    set(m.mgr(), chunk, state);
-    assert_eq!(get(m.mgr(), chunk), state);
-    assert_eq!(get(m.mgr(), chunk), state);
-}
-
-/// After the slot is evicted and reused for a DIFFERENT chunk, `get` returns a FRESH default — the
-/// stale entry is gone. Forces the generation bump with a single-chunk-slot table: releasing chunk0
-/// (dropping it to 0 leases, evictable) and then requesting a DIFFERENT index MUST evict slot 0 and
-/// reuse the very same slot for the new chunk (asserted below), which is exactly the scenario
-/// `fill_sidecar`'s generation check exists for. Proves the invalidation path actually fires, not an
-/// incidental pass: the reused chunk lands at the same slot yet still reads back default, not
-/// chunk0's leftover state.
-#[test]
-fn slot_reuse_bumps_generation_and_invalidates_stale_entry() {
-    let m = TestManager::new(1); // single chunk slot: forces eviction + reuse below
-
+    // 1) An unseen chunk — nothing has ever `set` it — reports the zeroed default.
     let chunk0 = m.request(0);
     assert!(!chunk0.is_null());
     let slot0 = m.slot_of(chunk0);
+    assert_eq!(get(m.mgr(), chunk0), ConvertState::default());
 
-    let state = some_state(0xAB);
-    set(m.mgr(), chunk0, state);
-    assert_eq!(get(m.mgr(), chunk0), state);
-
-    m.release(chunk0); // leases -> 0, evictable
-    let chunk1 = m.request(1); // distinct index: must evict + reuse slot0
+    // 2) A DIFFERENT, simultaneously-resident chunk: a written entry persists across a `get` (and a
+    //    second `get` doesn't disturb it), without touching chunk0's (still-default) entry.
+    let chunk1 = m.request(1);
     assert!(!chunk1.is_null());
-    let slot1 = m.slot_of(chunk1);
+    let state1 = some_state(7);
+    set(m.mgr(), chunk1, state1);
+    assert_eq!(get(m.mgr(), chunk1), state1);
+    assert_eq!(get(m.mgr(), chunk1), state1);
     assert_eq!(
-        slot1, slot0,
-        "single-slot table: reuse must be the same slot"
+        get(m.mgr(), chunk0),
+        ConvertState::default(),
+        "writing chunk1's entry must not disturb chunk0's"
     );
 
-    // The new occupant reads back a FRESH default, not chunk0's stale state — the generation
-    // mismatch invalidated it.
-    assert_eq!(get(m.mgr(), chunk1), ConvertState::default());
+    // 3) Give chunk0 a REAL entry, then force its slot to be evicted and reused by a different
+    //    chunk: with both of this 2-slot table's slots occupied (chunk0, chunk1) and chunk1 still
+    //    leased (never evictable), releasing chunk0 makes it the ONLY evictable slot — a third,
+    //    distinct-index `request` has no free slot left to take (`find_free_chunk` fails first), so
+    //    the manager MUST evict + reuse chunk0's slot. The reused chunk lands at the SAME slot
+    //    (asserted below) yet reads back a FRESH default, not chunk0's leftover state — the
+    //    generation mismatch invalidated it. This is the whole point of keying by generation, not
+    //    just slot: proves the invalidation path actually fires, not an incidental pass.
+    let state0 = some_state(0xAB);
+    set(m.mgr(), chunk0, state0);
+    assert_eq!(get(m.mgr(), chunk0), state0);
+
+    m.release(chunk0); // leases -> 0, evictable; slot still occupied until actually evicted
+    let chunk2 = m.request(2); // distinct index, table full: must evict + reuse chunk0's slot
+    assert!(!chunk2.is_null());
+    let slot2 = m.slot_of(chunk2);
+    assert_eq!(
+        slot2, slot0,
+        "2-slot table with the other slot leased: reuse must be chunk0's slot"
+    );
+    assert_eq!(get(m.mgr(), chunk2), ConvertState::default());
+
+    // chunk1's entry is untouched by any of the above (different slot throughout).
+    assert_eq!(get(m.mgr(), chunk1), state1);
 }

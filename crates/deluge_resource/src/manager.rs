@@ -271,7 +271,7 @@ impl Manager {
 
     /// The chunk-table slot index backing `p`, or `NO_SLOT` if `p` isn't resident. O(n); the C++ side
     /// caches the result at chunk creation so subsequent lease reads go through `lease_count_by_slot`.
-    fn slot_of(&self, p: *mut u8) -> u32 {
+    pub(crate) fn slot_of(&self, p: *mut u8) -> u32 {
         match self.find_by_ptr(p) {
             Some(i) => i as u32,
             None => NO_SLOT,
@@ -297,7 +297,7 @@ impl Manager {
 
     /// Enqueue the chunk at `slot` for loading at `priority` (lower = more urgent). Re-enqueue just
     /// updates the priority. No-op if `slot` is out of range / free.
-    fn loader_enqueue(&self, slot: u32, priority: u32) {
+    pub(crate) fn loader_enqueue(&self, slot: u32, priority: u32) {
         let i = slot as usize;
         if i >= self.chunks.len() {
             return;
@@ -329,7 +329,7 @@ impl Manager {
     /// de-queued and left resident (the manager evicts them normally — they are NOT destroyed here, so
     /// the owner pointer is only ever nulled via the proper on_evict path). Returns null if none.
     /// O(n) scan, consistent with `evict_lowest`.
-    fn loader_next(&self) -> *mut u8 {
+    pub(crate) fn loader_next(&self) -> *mut u8 {
         // Scan unmasked (coherent per-slot m_get, mask released between slots) for the
         // most-urgent queued + still-leased chunk. The pick is a heuristic; the commit
         // re-validates under the mask.
@@ -634,7 +634,7 @@ impl Manager {
     /// `acquire` — for prefetch, so the audio thread never blocks on I/O. A cache hit
     /// just leases (like `acquire`). Returns the backing pointer, or null on OOM, a
     /// full table with nothing evictable, or no `construct` callback on the asset.
-    fn request(&self, asset: u32, index: u32, size: usize) -> *mut u8 {
+    pub(crate) fn request(&self, asset: u32, index: u32, size: usize) -> *mut u8 {
         let ai = asset as usize;
         if ai >= self.assets.len() || !m_get(&self.assets[ai]).in_use {
             return ptr::null_mut();
@@ -816,14 +816,14 @@ impl Manager {
 
     /// Mark a `request`ed (Loading) chunk ready — the loader / embassy storage task signals the read
     /// completed. No-op if `p` isn't a resident chunk.
-    fn mark_ready(&self, p: *mut u8) {
+    pub(crate) fn mark_ready(&self, p: *mut u8) {
         self.rmw_by_ptr(p, |s| s.ready = true);
     }
 
     /// RT-safe acquire: take a hard lease + return the backing only if the chunk is resident **and**
     /// ready (never allocates, never materializes, never blocks). Returns null otherwise — the caller
     /// (RT render / embassy path) must cope with a miss. Touches recency on a hit.
-    fn try_acquire(&self, asset: u32, index: u32) -> *mut u8 {
+    pub(crate) fn try_acquire(&self, asset: u32, index: u32) -> *mut u8 {
         let Some(c) = self.find_resident(asset, index) else {
             return ptr::null_mut();
         };
@@ -950,8 +950,10 @@ pub struct DelugeResource {
 }
 
 /// SAFETY: turn a non-null handle into a shared `&Manager` (see resource_reclaim).
+/// `pub(crate)` so the safe `facade` module can build a `Resource` over the same
+/// opaque handle the C ABI wrappers below use — same cast, same safety contract.
 #[inline]
-unsafe fn mgr<'a>(h: *mut DelugeResource) -> &'a Manager {
+pub(crate) unsafe fn mgr<'a>(h: *mut DelugeResource) -> &'a Manager {
     &*(h as *mut Manager)
 }
 

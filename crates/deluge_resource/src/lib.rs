@@ -12,6 +12,7 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![allow(clippy::missing_safety_doc)]
 
+pub mod facade;
 pub mod manager;
 mod sync;
 pub mod value;
@@ -19,6 +20,7 @@ pub mod value;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod testing;
 
+pub use facade::{Chunk, Resource};
 pub use manager::*;
 pub use value::{COST_CPU, COST_CPU_PERC, COST_FREE, COST_IO, COST_IO_CONVERTED, COST_OBJECT};
 

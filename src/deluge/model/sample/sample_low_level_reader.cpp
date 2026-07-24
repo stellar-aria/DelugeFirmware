@@ -153,15 +153,26 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers());
 	if ((clusterIndex - finalClusterIndex) * guide->playDirection > 0) {
 		D_PRINTLN("saving from being past finalCluster");
-		StreamedChunk* finalCluster = sample->stream().chunk_at(finalClusterIndex);
-		if (!finalCluster) {
-			return false;
-		}
-
+		// The play position overshot the final cluster during cache playback; the reader is moving to it.
+		// Acquire the final region through the port (instead of reaching directly into the sample's raw
+		// residency lookup, which a Rust backing would not mediate). A NotReady acquire is the old
+		// "!finalCluster" give-up.
 		int32_t bytePosWithinCluster = currentPlayPos - reinterpret_cast<char*>(region_.payload_base);
 		bytePosWithinCluster += (clusterIndex - finalClusterIndex) * Cluster::size;
 
-		currentPlayPos = reinterpret_cast<char*>(finalCluster->payload().data()) + bytePosWithinCluster;
+		DelugeSampleRegion finalRegion;
+		if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(finalClusterIndex), guide->playDirection,
+		                                  static_cast<uint32_t>(1), &finalRegion)) {
+			return false;
+		}
+		// The acquire fuse-released the overshot current and pinned the final region; take the reader's
+		// own independent pin on it and adopt it as region_ (mirrors assignClusters), so region_ and
+		// currentPlayPos now describe the SAME chunk — closing the inconsistency the bypass left.
+		deluge_sample_region_release(region_.lease);
+		region_ = finalRegion;
+		deluge_sample_region_retain(region_.lease);
+
+		currentPlayPos = reinterpret_cast<char*>(region_.payload_base) + bytePosWithinCluster;
 		clusterIndex = finalClusterIndex;
 	}
 

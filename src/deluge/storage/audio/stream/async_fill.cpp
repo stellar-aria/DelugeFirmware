@@ -187,7 +187,12 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 
 extern "C" {
 
-StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing) {
+// Weak fallback (SR2d-4 Task 4): the legacy synchronous body above (deluge::audio::stream::begin_fill)
+// stays the fallback for BSPs that don't link the Rust crate. The Rust Embassy BSP provides a strong
+// override (streaming_loader.rs) that routes SampleStream::read_cluster_data's synchronous call through
+// the SAME native_begin arithmetic the async fill task already uses -- same treatment as
+// deluge_streaming_finish_fill just below (made weak in Task 3).
+__attribute__((weak)) StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing) {
 	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
 	return deluge::audio::stream::begin_fill(*cluster);
 }
@@ -196,7 +201,7 @@ StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing) {
 // stays the fallback for BSPs that don't link the Rust crate. The Rust Embassy BSP provides a strong
 // override (streaming_loader.rs) that routes SampleStream::read_cluster_data's synchronous call through
 // the SAME native_finish tail (and StreamedChunk convert-state store) the async fill task already uses --
-// same tier as deluge_streaming_async_active etc. just below. begin_fill stays strong for now (Task 4).
+// same tier as deluge_streaming_async_active etc. just below.
 __attribute__((weak)) bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok) {
 	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
 	return deluge::audio::stream::finish_fill(*cluster, read_ok);

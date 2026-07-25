@@ -762,6 +762,28 @@ mod prod {
         true
     }
 
+    /// Strong override of `deluge_streaming_begin_fill` (SR2d-4 Task 4). This is the
+    /// app→BSP down-call `SampleStream::read_cluster_data`'s SYNCHRONOUS fill path
+    /// (`sample_stream.cpp`) makes to resolve where/how much to read; `async_fill.cpp`'s
+    /// `deluge_streaming_begin_fill` body is now `__attribute__((weak))`, so on the Rust BSP
+    /// this strong definition wins the link and the sync path runs through the exact same
+    /// [`native_begin`] arithmetic (`fill_logic::begin` — SR2d-4 Task 4 proved byte-identical to
+    /// the C++ `begin_fill` math) as the async fill task ([`ProdOps::begin`], just below) already
+    /// does. `begin` has no shared store to unify (unlike `finish`'s convert-state) — this exists
+    /// purely for "one fill impl" symmetry with the `finish_fill` override above. Only compiled
+    /// where [`native_begin`] itself is (this module's `async_streaming_loader` +
+    /// device-or-`host_app` gate); a build without that feature falls back to the weak legacy C++
+    /// body, same as before this task.
+    ///
+    /// The async task is unaffected: [`ProdOps::begin`] below still calls [`native_begin`]
+    /// directly as a plain fn call, not through this symbol.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn deluge_streaming_begin_fill(
+        chunk_backing: *mut c_void,
+    ) -> StreamingFillDescriptor {
+        native_begin(chunk_backing)
+    }
+
     /// Strong override of `deluge_streaming_finish_fill` (SR2d-4 Task 3). This is the
     /// app→BSP down-call `SampleStream::read_cluster_data`'s SYNCHRONOUS fill path
     /// (`sample_stream.cpp`) makes after its own blocking read completes; `async_fill.cpp`'s

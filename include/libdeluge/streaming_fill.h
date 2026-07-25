@@ -47,6 +47,12 @@ extern "C" {
 
 /// @brief Resolve the destination buffer and physical sector range for a queued chunk fill.
 ///
+/// Called from both fill paths: the synchronous fiber pump (`SampleStream::read_cluster_data`)
+/// and (indirectly, via its own native arithmetic rather than this symbol) the Rust async fill
+/// task. The definition is `__attribute__((weak))` in `async_fill.cpp` — the legacy fallback for
+/// BSPs that don't link the Rust crate. On the Rust/Embassy BSP a strong override
+/// (`streaming_loader.rs`) wins the link instead, routing the synchronous caller through the SAME
+/// native arithmetic the async task already uses.
 /// @note Pure lookup and arithmetic — touches no SD hardware and no FatFS.
 /// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
 ///                       deluge_resource_loader_next.

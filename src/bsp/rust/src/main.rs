@@ -175,6 +175,11 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
+/// SR3b Task 3: does a FINALIZED multi-cluster recording's residency table get sized correctly,
+/// and does region index 1+ read back correctly through the region port on THIS target? See its
+/// module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod recorder_finalize_probe;
 /// SR3b Task 2 Step 4: does a still-recording sample's live read-back resolve on THIS target
 /// (`async_streaming_loader` on)? See its module doc. `host_app`-only.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
@@ -905,6 +910,25 @@ fn main() {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5_000);
 
+        // --- SR3b Task 3: opt-in finalized multi-cluster regression probe ---
+        // Off by default. Set DELUGE_RECORDER_FINALIZE_PROBE=1 to switch this run into the
+        // regression gate: construct a real SampleRecorder, drive it to RecorderStatus::COMPLETE,
+        // and confirm the residency table was sized correctly + region index 1 reads back
+        // correctly through the region port on THIS target — see recorder_finalize_probe.rs's
+        // module doc. Mutually exclusive with the other opt-in probes/scenarios in practice.
+        let recorder_finalize_probe_requested =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE").as_deref() == Ok("1");
+        let recorder_finalize_probe_step_timeout_ms: u64 =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE_STEP_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20_000);
+        let recorder_finalize_probe_poll_window_ms: u64 =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE_POLL_WINDOW_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5_000);
+
         // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
@@ -1008,6 +1032,15 @@ fn main() {
                             crate::recorder_probe::recorder_probe_task(
                                 recorder_probe_step_timeout_ms,
                                 recorder_probe_poll_window_ms,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    if recorder_finalize_probe_requested {
+                        spawner.spawn(
+                            crate::recorder_finalize_probe::recorder_finalize_probe_task(
+                                recorder_finalize_probe_step_timeout_ms,
+                                recorder_finalize_probe_poll_window_ms,
                             )
                             .unwrap(),
                         );
@@ -1200,6 +1233,72 @@ fn main() {
                 );
             }
             hard_exit(0);
+        }
+
+        // SR3b Task 3: if the finalized multi-cluster regression probe was requested, wait for it
+        // (spawned above, on the host-app executor) to finish, report the finding, and exit. This
+        // one IS a normative gate (unlike the live-readback probe above): a finalized recording's
+        // residency table MUST be sized correctly and region index 1+ MUST read back correctly, on
+        // every target, or this is the SR3b Task 3 Critical regression.
+        if recorder_finalize_probe_requested {
+            let watchdog = Duration::from_millis(
+                recorder_finalize_probe_step_timeout_ms
+                    + recorder_finalize_probe_poll_window_ms
+                    + 10_000,
+            );
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::recorder_finalize_probe::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP recorder finalize probe TIMED OUT after \
+                         {watchdog:?} with no result (recorder_finalize_probe_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP recorder finalize probe result: boot_ready={} \
+                 initial_state={} final_state={} poll_iterations={} table_clusters={} \
+                 expected_clusters={} bytes_ok={} passed={} \
+                 (state: 0=harness-error 1=READY 2=LOADING 3=UNAVAILABLE)",
+                result.boot_ready,
+                result.initial_state,
+                result.final_state,
+                result.poll_iterations,
+                result.table_clusters,
+                result.expected_clusters,
+                result.bytes_ok,
+                result.passed,
+            );
+            if !result.boot_ready
+                || result.initial_state == crate::recorder_finalize_probe::STATE_HARNESS_ERROR
+            {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe HARNESS FAILURE (see fields above)"
+                );
+                hard_exit(1);
+            }
+            if result.passed {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe PASSED — finalized \
+                     multi-cluster recording's residency table sized correctly \
+                     (table_clusters={} >= expected_clusters={}), region 1 read back READY with \
+                     correct bytes.",
+                    result.table_clusters,
+                    result.expected_clusters,
+                );
+                hard_exit(0);
+            } else {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe FAILED — SR3b Task 3 \
+                     regression present (see fields above)"
+                );
+                hard_exit(1);
+            }
         }
 
         // --- Widen the concurrent window before exit ------------------------

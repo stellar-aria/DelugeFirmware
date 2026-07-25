@@ -63,11 +63,23 @@ extern TaskHandle startupConditionalTask;
 extern "C" {
 uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, uint32_t pumpDrainTicks);
 void deluge_harness_recorder_probe_end();
+
+// SR3b Task 3's regression gate (see harness/recorder_readback_probe.h): "shared
+// SampleStream::table_ left under-sized after a normal recording finishes" -- a real,
+// FINALIZED (not still-recording) multi-cluster recording, read back through the exact
+// deluge_sample_source_* region port real playback uses.
+uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels, uint32_t numFrames,
+                                                             uint32_t regionIndex);
+uint32_t deluge_harness_recorder_finalized_multicluster_probe_table_clusters();
+uint32_t deluge_harness_recorder_finalized_multicluster_probe_expected_clusters();
+uint8_t deluge_harness_recorder_finalized_multicluster_probe_bytes_ok();
+void deluge_harness_recorder_finalized_multicluster_probe_end();
 }
 
 namespace {
 
 char g_temp_image[512] = {0};
+char g_sd_root[512] = {0};
 int g_failures = 0;
 int g_cases = 0;
 
@@ -76,6 +88,34 @@ void cleanup_temp_image() {
 		unlink(g_temp_image);
 		g_temp_image[0] = '\0';
 	}
+}
+
+void cleanup_sd_root() {
+	if (g_sd_root[0] != '\0') {
+		char cmd[600];
+		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_sd_root);
+		if (system(cmd) != 0) {
+			// Best-effort cleanup; not a test failure.
+		}
+		g_sd_root[0] = '\0';
+	}
+}
+
+// SR3b Task 3's regression gate (see recorder_readback_probe.cpp's mirrorFinalizedFileToSdRoot()):
+// this binary's streaming read path (open_read_stream(), via host_efatfs_passthrough.cpp) is
+// backed by a plain POSIX DELUGE_SD_ROOT directory, separate from the mounted FAT image
+// (DELUGE_SD_IMAGE) the recorder writes into -- set one up so
+// deluge_harness_recorder_finalized_multicluster_probe() can mirror a finalized file there and
+// open a genuine streaming-read cursor on it.
+bool make_sd_root(char* out_path, size_t out_size) {
+	char tmpl[] = "/tmp/deluge_recorder_roundtrip_sdroot_XXXXXX";
+	char* dir = mkdtemp(tmpl);
+	if (dir == nullptr) {
+		perror("[recorder_roundtrip] mkdtemp");
+		return false;
+	}
+	snprintf(out_path, out_size, "%s", dir);
+	return true;
 }
 
 bool format_empty_image(char* out_path, size_t out_size) {
@@ -391,6 +431,34 @@ void deluge_recorder_roundtrip_driver() {
 		g_failures++;
 	}
 
+	// SR3b Task 3 regression gate: a real, FINALIZED (COMPLETE) multi-cluster mono recording --
+	// finalizeRecordedFile()'s no-alteration else-branch, the only branch AudioClip recording ever
+	// takes -- must leave SampleStream::table_ sized to the real cluster count, and region index 1+
+	// must resolve READY with correct bytes through the same port real playback uses. On the
+	// unfixed commit 5bb397c2b, table_ stays at its Sample::initialize(1) default (tableClusters==1
+	// while expectedClusters is several), demonstrating the regression this gate exists to catch.
+	g_cases++;
+	uint32_t regressionFrames = framesForBytes(44, 3, 3 * clusterSize) + 400;
+	printf("CASE finalized_multicluster_regression (channels=1 margins=0 frames=%u regionIndex=1)\n", regressionFrames);
+	uint8_t regressionState =
+	    deluge_harness_recorder_finalized_multicluster_probe(/*numChannels=*/1, regressionFrames, /*regionIndex=*/1);
+	uint32_t tableClusters = deluge_harness_recorder_finalized_multicluster_probe_table_clusters();
+	uint32_t expectedClusters = deluge_harness_recorder_finalized_multicluster_probe_expected_clusters();
+	uint8_t bytesOk = deluge_harness_recorder_finalized_multicluster_probe_bytes_ok();
+	printf("  table_clusters()=%u expected_clusters()=%u acquire_state=%u (1=READY) bytes_ok=%u\n", tableClusters,
+	       expectedClusters, regressionState, bytesOk);
+	deluge_harness_recorder_finalized_multicluster_probe_end();
+	bool regressionOk =
+	    (tableClusters != 0) && (tableClusters >= expectedClusters) && (regressionState == 1) && (bytesOk == 1);
+	if (!regressionOk) {
+		fprintf(stderr,
+		        "  FAIL: finalized multi-cluster regression gate -- table_clusters=%u expected_clusters=%u "
+		        "acquire_state=%u bytes_ok=%u\n",
+		        tableClusters, expectedClusters, regressionState, bytesOk);
+		g_failures++;
+	}
+	printf("  %s\n", regressionOk ? "PASS" : "FAIL");
+
 	fflush(nullptr);
 	quick_exit(g_failures == 0 ? 0 : 1);
 }
@@ -405,6 +473,13 @@ int main(int, char**) {
 	atexit(cleanup_temp_image);
 	setenv("DELUGE_SD_IMAGE", g_temp_image, 1);
 
+	if (!make_sd_root(g_sd_root, sizeof g_sd_root)) {
+		return 1;
+	}
+	at_quick_exit(cleanup_sd_root);
+	atexit(cleanup_sd_root);
+	setenv("DELUGE_SD_ROOT", g_sd_root, 1);
+
 	if (getenv("DELUGE_HOST_DETERMINISTIC") == nullptr) {
 		setenv("DELUGE_HOST_DETERMINISTIC", "1", 1);
 	}
@@ -418,5 +493,6 @@ int main(int, char**) {
 	deluge_main(); // never returns; deluge_recorder_roundtrip_driver quick_exit()s
 
 	cleanup_temp_image();
+	cleanup_sd_root();
 	return 0;
 }

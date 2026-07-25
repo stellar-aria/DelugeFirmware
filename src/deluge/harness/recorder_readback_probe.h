@@ -67,6 +67,64 @@ uint8_t deluge_harness_recorder_probe_poll();
 ///        call even if no probe is open.
 void deluge_harness_recorder_probe_end();
 
+/// @brief SR3b Task 3 regression probe: "shared SampleStream::table_ left under-sized after a
+///        normal recording finishes" (the Critical bug commit 5bb397c2b introduced -- see
+///        finalizeRecordedFile()'s SR3b Task 3 comment in sample_recorder.cpp).
+///
+/// Builds a real `SampleRecorder`, feeds it `numFrames` of deterministic mono ramp audio spanning
+/// several `Cluster::size` clusters, and drives it through `endSyncedRecording()` +
+/// `cardRoutine()` all the way to `RecorderStatus::COMPLETE` -- i.e. `finalizeRecordedFile()` runs
+/// for real. `allowFileAlterationAfter` is never set on a harness-built recorder (it defaults
+/// false and only a caller like `AudioClip` opts a recorder into it), so this ALWAYS takes
+/// finalizeRecordedFile()'s no-alteration else-branch -- the one branch the regression left
+/// completely unresized, and the only branch AudioClip recording itself ever takes.
+///
+/// After finalize, opens a FRESH efatfs read handle on the finalized file (mirroring how a real
+/// reload/playback reaches a just-recorded sample -- the recorder's own write context is already
+/// closed by then) and acquires @p regionIndex through the exact `deluge_sample_source_*` region
+/// port real playback uses.
+///
+/// @param numChannels Recording channel count (1 or 2); mono (1) guarantees the no-alteration
+///                    branch independent of the `allowFileAlterationAfter` reasoning above.
+/// @param numFrames   Frames of deterministic ramp audio to feed -- choose enough to span multiple
+///                    `Cluster::size` clusters so @p regionIndex >= 1 is meaningful.
+/// @param regionIndex The cluster index to acquire after finalize (>= 1 to probe the regression).
+/// @return The `DelugeRegionState` for @p regionIndex (`DELUGE_REGION_READY` == 1,
+///         `DELUGE_REGION_LOADING` == 2, `DELUGE_REGION_UNAVAILABLE` == 3), or 0 if the harness
+///         itself could not set up (setup()/finalize/open-read-stream failure -- NOT a regression
+///         finding).
+uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels, uint32_t numFrames,
+                                                             uint32_t regionIndex);
+
+/// @brief Re-query/retry the SAME open cursor's acquire for the region index passed to the last
+///        deluge_harness_recorder_finalized_multicluster_probe() call -- lets a caller (e.g. the
+///        host_app Rust side, where the async fill task needs real executor yields between checks)
+///        poll for a LOADING result to resolve. Returns `DELUGE_REGION_UNAVAILABLE` (3) if no
+///        probe is open.
+uint8_t deluge_harness_recorder_finalized_multicluster_probe_poll();
+
+/// @return The residency table's `num_clusters()` captured immediately after finalize (before any
+///         acquire) -- the direct assertion for "was table_ left under-sized". 0 if no probe has
+///         run (harness-error state, not a valid measurement).
+uint32_t deluge_harness_recorder_finalized_multicluster_probe_table_clusters();
+
+/// @return The finalized recording's true required cluster count for the same geometry
+///         (`ceil((audioDataStartPosBytes + audioDataLengthBytes) / Cluster::size)`, the exact
+///         formula finalizeRecordedFile()'s hoisted resize uses) -- what
+///         deluge_harness_recorder_finalized_multicluster_probe_table_clusters() must be >= for
+///         the invariant to hold. 0 if no probe has run.
+uint32_t deluge_harness_recorder_finalized_multicluster_probe_expected_clusters();
+
+/// @return 1 if the last acquire (from the initial call or a poll) resolved
+///         `DELUGE_REGION_READY` AND the acquired region's payload bytes matched the deterministic
+///         ramp this probe recorded, byte-for-byte. 0 otherwise (not READY, no probe has run, or a
+///         genuine byte mismatch).
+uint8_t deluge_harness_recorder_finalized_multicluster_probe_bytes_ok();
+
+/// @brief Tear down the finalized-multicluster probe's recorder/cursor. Safe to call even if no
+///        probe is open.
+void deluge_harness_recorder_finalized_multicluster_probe_end();
+
 } // extern "C"
 
 #endif // DELUGE_HOST

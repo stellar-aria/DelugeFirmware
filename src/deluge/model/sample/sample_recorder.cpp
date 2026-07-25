@@ -739,6 +739,9 @@ Error SampleRecorder::finalizeRecordedFile() {
 			// writeCluster() (above) is what recycles this buffer -- if we didn't call it, recycle
 			// directly so this buffer's memory isn't leaked.
 			recycleBuffer(currentRecordBuffer);
+			// SR3b Task 3 (Minor fix): same drained-slot nulling writeCluster() does -- see its
+			// comment. currentRecordClusterIndex still refers to this now-recycled buffer's slot here.
+			bufferTable_[currentRecordClusterIndex.load(std::memory_order_relaxed)] = nullptr;
 		}
 
 		firstUnwrittenClusterIndex++;
@@ -813,6 +816,15 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// now it's never touched at all, so size it explicitly here -- cheap (just the segment-pointer
 		// index + empty entries, no I/O) -- to what alterFile() itself expects (its own
 		// numClustersBeforeAction re-derives the identical value from idealFileSizeBeforeAction).
+		//
+		// SR3b Task 3: this is NOT made redundant by the unconditional final-geometry resize further
+		// down (after dataLengthAfterAction is folded into sample->audioDataLengthBytes) -- alterFile()
+		// needs table_ sized to the ORIGINAL, pre-action cluster count (it reads every pre-alteration
+		// cluster, e.g. both channels before a channel-removal downmix), which is >= the final,
+		// post-action count that later resize computes, so it must run BEFORE alterFile() is called,
+		// using the larger pre-action value. (alterFile()'s own truncateFileDownToSize() already
+		// trims table_ back down to the exact final count via erase_from() whenever the file actually
+		// shrank, so the later unconditional resize is a grow-only no-op for this branch.)
 		uint32_t numClustersBeforeAction =
 		    static_cast<uint32_t>(((idealFileSizeBeforeAction - 1) >> Cluster::size_magnitude) + 1);
 		try {
@@ -885,6 +897,45 @@ Error SampleRecorder::finalizeRecordedFile() {
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
 
+	// SR3b Task 3 (Critical regression fix): unconditionally restore the invariant the old
+	// per-cluster createNextCluster() resize used to guarantee as a side effect for every completed
+	// cluster -- the shared residency table (SampleStream::table_, used by ALL later playback of
+	// this Sample) sized to the real, final cluster count. This runs for BOTH finalize outcomes:
+	//   - the alterFile branch above already leaves table_ correctly sized on its own -- its own
+	//     pre-call resize(numClustersBeforeAction) satisfies alterFile()'s read-the-ORIGINAL-file
+	//     requirement (it must see every pre-alteration cluster, e.g. both channels before a
+	//     channel-removal downmix, so it needs the LARGER pre-action count, not this smaller
+	//     final one), and truncateFileDownToSize()'s erase_from() already trims table_ back down to
+	//     the exact final count whenever the file actually shrank. So for that branch this is a
+	//     grow-only no-op (finalClusterCount <= what's already there).
+	//   - the common, no-alteration else-branch -- the ONLY path AudioClip recording takes -- never
+	//     touches table_ at all, so without this it stays the single entry Sample::initialize(1) set
+	//     in setup(). Any later playback of a >1-cluster recording through that stale table --
+	//     including legacy C++ (sample_holder.cpp's claimClusterReasonsForMarker, bounded by
+	//     num_clusters()) and the Rust-cursor port (whose num_clusters is derived independently from
+	//     the finalized audioDataLengthBytes, NOT clamped by table_.size() -- see
+	//     crates/deluge_sample_source/src/abi.rs's num_clusters_for()) -- either silently truncates
+	//     playback to cluster 0, or, on the Rust path, reaches an out-of-bounds table_[index] write
+	//     in cluster_construct()/cluster_materialize() (sample_stream.cpp), which have no bounds
+	//     check of their own.
+	//
+	// Grow-only (never shrink here): this must never destroy entries the alterFile branch already
+	// established at the correct (possibly larger) size -- SegmentedVector::resize() to a SMALLER
+	// size destroys the removed tail without going through the resource manager's evict callback,
+	// which would corrupt its bookkeeping for any cluster still resident there.
+	{
+		uint32_t idealFileSizeAfterAction =
+		    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);
+		uint32_t finalClusterCount = ((idealFileSizeAfterAction - 1) >> Cluster::size_magnitude) + 1;
+		if (finalClusterCount > sample->stream().num_clusters()) {
+			try {
+				sample->stream().resize(finalClusterCount);
+			} catch (deluge::exception&) {
+				return Error::INSUFFICIENT_RAM;
+			}
+		}
+	}
+
 	// SR2d-4 Task 5: audioDataLengthBytes just reached its FINAL, definitive value -- re-register the
 	// fill-context so a later streamed playback of this (still resource-manager-resident) Sample
 	// consumes the real, finalized geometry rather than the still-recording sentinel/interim value any
@@ -930,6 +981,13 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	}
 
 	recycleBuffer(buffer);
+	// SR3b Task 3 (Minor fix): null the table slot now that its buffer has been recycled -- this
+	// index is drained (< firstUnwrittenClusterIndex once the caller advances it) and must never be
+	// read again, but leaving a dangling pointer here would let a stale/reused buffer linger at a
+	// drained index for anything that later scans bufferTable_ by index bounds alone (e.g. a
+	// watermark-bounded reader) to trip on. releaseCaptureBuffers() already tolerates a null entry
+	// here (its `if (buffer != nullptr)` guard).
+	bufferTable_[clusterIndex] = nullptr;
 
 	// RELEASE: publishes the new committed extent to any live-monitor reader that acquire-loads
 	// committedBytes (the reader-side wiring is a later task -- see the SR3b design doc).

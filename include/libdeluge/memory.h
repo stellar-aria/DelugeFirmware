@@ -26,12 +26,13 @@
 #define LIBDELUGE_MEMORY_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef enum DelugeMemoryKind {
+typedef enum DelugeMemoryKind : uint8_t {
 	DELUGE_MEM_FAST_INTERNAL = 0, ///< small, low-latency on-chip SRAM
 	DELUGE_MEM_LARGE_EXTERNAL = 1 ///< large external SDRAM
 } DelugeMemoryKind;

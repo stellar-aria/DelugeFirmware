@@ -24,6 +24,7 @@
 #define LIBDELUGE_BLOCK_DEVICE_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,7 +57,7 @@ uint32_t deluge_block_sector_size(uint8_t unit);
 DelugeStatus deluge_block_sync(uint8_t unit);
 
 /// A card-detect edge observed since the last poll.
-typedef enum DelugeCardEvent {
+typedef enum DelugeCardEvent : uint8_t {
 	DELUGE_CARD_EVENT_NONE = 0,
 	DELUGE_CARD_EVENT_INSERTED,
 	DELUGE_CARD_EVENT_EJECTED,

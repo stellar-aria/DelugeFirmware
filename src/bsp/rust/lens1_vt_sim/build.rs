@@ -121,8 +121,9 @@ fn run_bindgen(
         .allowlist_type("Deluge.*")
         .allowlist_type("RunCondition")
         .use_core()
-        // See ../build.rs: NO `-fshort-enums` — the C++ app isn't built with
-        // it either, so plain int-sized enums on both sides already agree.
+        // See ../build.rs: NO `-fshort-enums` — every libdeluge enum pins its
+        // underlying type explicitly in its header, so both sides already
+        // agree on each enum's width regardless of the flag.
         .clang_arg("--target=x86_64-unknown-linux-gnu")
         .layout_tests(false)
         .generate()

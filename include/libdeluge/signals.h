@@ -27,13 +27,14 @@
 #define LIBDELUGE_SIGNALS_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /// A named board digital line. Boards implement the subset they have.
-typedef enum DelugeSignal {
+typedef enum DelugeSignal : uint8_t {
 	// Outputs
 	DELUGE_SIGNAL_SYNC_LED = 0,    ///< external-clock "synced" indicator LED
 	DELUGE_SIGNAL_BATTERY_LED = 1, ///< low-battery indicator LED (open-drain)

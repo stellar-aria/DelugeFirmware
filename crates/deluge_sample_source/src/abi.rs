@@ -68,14 +68,14 @@ pub struct DelugeSampleSource {
 ///
 /// `#[repr(u8)]`, NOT plain `#[repr(C)]`: the header (`include/libdeluge/
 /// sample_source.h`) pins `enum DelugeRegionState` to an explicit `: uint8_t`
-/// fixed underlying type (C23 + C++11 syntax) -- deliberately narrow, unlike
-/// every other libdeluge enum, because this one crosses the FFI BY VALUE
-/// (`deluge_sample_region_acquire_ex`'s return) and a 1-byte return is worth
-/// pinning explicitly. A bare `#[repr(C)]` enum is Rust's C `int` (4 bytes),
-/// which would mismatch that explicit 1-byte C++ width. This does NOT rely on
-/// `-fshort-enums` -- the build passes no such flag (see `build.rs`'s
-/// `run_bindgen`); every other libdeluge enum is left at the platform-default
-/// `int` size on both sides instead.
+/// fixed underlying type (C23 + C++11 syntax) -- like every other libdeluge
+/// enum, each pinned to its own explicit fixed width in its header. This one
+/// crosses the FFI BY VALUE (`deluge_sample_region_acquire_ex`'s return), so
+/// a bare `#[repr(C)]` enum (Rust's C `int`, 4 bytes) would mismatch the
+/// header's 1-byte width; `#[repr(u8)]` matches it exactly. This does NOT
+/// rely on `-fshort-enums` -- the build passes no such flag (see
+/// `build.rs`'s `run_bindgen`); the explicit underlying type is what fixes
+/// the width on both sides, independent of any compiler flag.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DelugeRegionState {

@@ -32,6 +32,7 @@
 #define LIBDELUGE_FILE_IO_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,7 +48,7 @@ typedef struct DelugeDir DelugeDir;
 /// terminator (FAT LFN max is 255 characters).
 #define DELUGE_MAX_FILENAME 256
 
-typedef enum DelugeFileOpenMode {
+typedef enum DelugeFileOpenMode : uint8_t {
 	DELUGE_FILE_READ,             ///< open an existing file for reading
 	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
 	DELUGE_FILE_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists

@@ -297,13 +297,13 @@ ninja -C build-embassy-hostapp-tsan deluge_app fatfs NE10 eyalroz_printf \
 ```
 
 No `-fshort-enums` here, TSan or not (see `run_bindgen`'s comment in
-`build.rs`): the plain, uninstrumented `build-embassy-hostapp` tree doesn't
-pass it either, so its C enums are the platform-default 4-byte `int`, and
-bindgen no longer passes `-fshort-enums` when generating the host ABI's `mod
-sys` — both sides now agree on int-sized enums (with an explicit fixed
-underlying type where a narrow width is deliberate, e.g.
-`DelugeRegionState : uint8_t`). Passing `-fshort-enums` to only this TSan
-tree would reintroduce the same enum-width mismatch the non-TSan build fixed.
+`build.rs`): every libdeluge FFI enum now pins its underlying type explicitly
+in its header (e.g. `DelugeInputEventKind : uint8_t`, `DelugeStatus :
+int8_t`, `DelugeRegionState : uint8_t`), so both the plain, uninstrumented
+`build-embassy-hostapp` tree and bindgen's host-ABI `mod sys` agree on each
+enum's width regardless of `-fshort-enums` — the flag is irrelevant to
+sizing now, on either side. Passing `-fshort-enums` to only this TSan tree
+would still be pointless (and confusing): the explicit widths win either way.
 `deluge_app` is a CMake OBJECT
 library — clang only ever *compiles* these TUs here, it never links them, so
 clang's own `libclang_rt.tsan*` never enters the picture; the one real link
@@ -403,8 +403,8 @@ matching the pointed-at tree.
 ### Compile: clean, no TU special-casing
 
 All 348 `deluge_app` translation units (plus the 7 dependency archives)
-compile clean under `clang++ -fsanitize=thread -std=gnu++26` (default
-int-sized enums, no `-fshort-enums`).
+compile clean under `clang++ -fsanitize=thread -std=gnu++26` (explicit
+fixed-width libdeluge enums, no `-fshort-enums`).
 The only warnings are the same pre-existing ones the non-TSan build already
 produces (`[[gnu::hot]]` ignored-attribute, a couple of
 `-Wimplicit-const-int-float-conversion` hits in the fixed-point DSP code, one

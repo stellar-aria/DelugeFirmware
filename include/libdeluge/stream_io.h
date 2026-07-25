@@ -36,6 +36,7 @@
 #define LIBDELUGE_STREAM_IO_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,7 +45,7 @@ extern "C" {
 /// An open stream. Opaque; owned by the BSP implementation.
 typedef struct DelugeStream DelugeStream;
 
-typedef enum DelugeStreamMode {
+typedef enum DelugeStreamMode : uint8_t {
 	DELUGE_STREAM_READ,             ///< open an existing file (sector_of()-only; no read_at)
 	DELUGE_STREAM_WRITE_CREATE,     ///< create the file, truncating if it exists
 	DELUGE_STREAM_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists

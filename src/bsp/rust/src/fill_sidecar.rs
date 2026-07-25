@@ -58,6 +58,17 @@
 //! — `SingleOwner` is a zero-cost, unsafe `Sync` assertion backed by the single-task argument above,
 //! not a real cross-thread synchronization primitive. If a second toucher (any other task, or the
 //! audio ISR) ever needs this state, STOP and reconsider before reusing this type.
+//!
+//! ## Retirement (SR2d-4 Task 2)
+//!
+//! `streaming_loader::prod::native_finish` no longer reads/writes this table — the native fill's
+//! convert-state now lives directly on each `StreamedChunk` via `deluge_streaming_chunk_convert_state`/
+//! `_set_convert_state` instead (see that function's doc). `get`/`set` below (and the module as a
+//! whole, in the `mod fill_sidecar` tier gated to device/`host_app`) therefore have no callers left in
+//! this bin — kept defined-but-unused for reviewability rather than deleted in the same change that
+//! stopped using it; the module FILE itself is deleted in a later step of this fill-unification.
+// removed in the fill-unification sidecar-deletion task
+#![allow(dead_code)]
 use core::cell::RefCell;
 use core::ffi::c_void;
 

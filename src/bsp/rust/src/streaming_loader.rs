@@ -419,7 +419,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
 ))]
 mod prod {
     use super::{DelugeChunkConvertState, FillOps, LOWEST_PRIORITY, StreamingFillDescriptor};
-    use core::ffi::{c_char, c_void};
+    use core::ffi::c_void;
 
     unsafe extern "C" {
         fn deluge_streaming_resource_manager() -> *mut c_void;
@@ -429,15 +429,12 @@ mod prod {
         // `payload_with_trailing_slack()` span `finish_convert_stitch` needs) + set-loaded.
         fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
         fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
-        // SR2d-4 Task 1: the StreamedChunk convert-state get/set accessors. Declared only -- not
-        // yet called anywhere (a later task rewires `ProdOps::finish` onto these, off its own
-        // `fill_sidecar.rs` table, above). `#[allow(dead_code)]` because an unused `unsafe extern
-        // "C"` declaration still trips the same dead-code lint as a normal item.
-        #[allow(dead_code)]
+        // SR2d-4 Task 1 + Task 2: the StreamedChunk convert-state get/set accessors -- `native_finish`
+        // below reads/writes self's + each neighbour's convert-state through these instead of the
+        // retired `fill_sidecar.rs` table (see this task's commit for the swap).
         fn deluge_streaming_chunk_convert_state(
             chunk_backing: *mut c_void,
         ) -> DelugeChunkConvertState;
-        #[allow(dead_code)]
         fn deluge_streaming_chunk_set_convert_state(
             chunk_backing: *mut c_void,
             state: DelugeChunkConvertState,
@@ -446,12 +443,6 @@ mod prod {
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
         fn deluge_resource_lease_count_by_slot(mgr: *mut c_void, slot: u32) -> u32;
-        // The sidecar-overflow guard's two ingredients (SR2d-4 Task 3 review fix): the manager's
-        // ACTUAL chunk-table capacity, and the app's fatal-error primitive
-        // (`foundation/panic.h`'s `FREEZE_WITH_ERROR` macro calls this same `freezeWithError` C
-        // symbol) -- see `ProdOps::new()` below, which is this guard's one call site.
-        fn deluge_resource_chunk_cap(mgr: *mut c_void) -> u32;
-        fn freezeWithError(errmsg: *const c_char);
         // SR2d-4 Task 5: the native `begin`/`finish` wiring, replacing the
         // `deluge_streaming_begin_fill`/`_finish_fill` upcalls (whose C++ DEFINITIONS stay --
         // `sample_stream.cpp`'s legacy sync-fiber `read_cluster_data` path still calls them; this is
@@ -511,10 +502,12 @@ mod prod {
         Some((asset, index, ctx))
     }
 
-    /// `fill_sidecar::ConvertState` -> `fill_logic::ConvertState`: the two are separate types with
-    /// the identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the
-    /// same type) -- a trivial field-for-field copy at the one tier where both exist.
-    fn to_logic_state(s: crate::fill_sidecar::ConvertState) -> crate::fill_logic::ConvertState {
+    /// `DelugeChunkConvertState` (the C-ABI mirror `deluge_streaming_chunk_convert_state`/
+    /// `_set_convert_state` cross) -> `fill_logic::ConvertState`: the two are separate types with the
+    /// identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the same
+    /// type) -- a trivial field-for-field copy at the one tier where both exist. SR2d-4 Task 2: was
+    /// `fill_sidecar::ConvertState -> fill_logic::ConvertState` before this task swapped the store.
+    fn to_logic_state(s: DelugeChunkConvertState) -> crate::fill_logic::ConvertState {
         crate::fill_logic::ConvertState {
             first_three_bytes: s.first_three_bytes,
             start_converted: s.start_converted,
@@ -523,9 +516,9 @@ mod prod {
     }
 
     /// The inverse of [`to_logic_state`], for writing `finish_convert_stitch`'s (possibly updated)
-    /// output back to the sidecar.
-    fn to_sidecar_state(s: crate::fill_logic::ConvertState) -> crate::fill_sidecar::ConvertState {
-        crate::fill_sidecar::ConvertState {
+    /// output back onto the `StreamedChunk` via `deluge_streaming_chunk_set_convert_state`.
+    fn from_logic_state(s: crate::fill_logic::ConvertState) -> DelugeChunkConvertState {
+        DelugeChunkConvertState {
             first_three_bytes: s.first_three_bytes,
             start_converted: s.start_converted,
             end_converted: s.end_converted,
@@ -544,6 +537,215 @@ mod prod {
             cluster_size_magnitude: ctx.cluster_size_magnitude,
             raw_data_format: ctx.raw_data_format,
         }
+    }
+
+    /// Resolve `chunk_backing`'s destination buffer + physical sector range
+    /// (`deluge_streaming_begin_fill`'s native replacement — SR2d-4 Task 5, factored into a free fn
+    /// in Task 2). Looks up the live singleton resource manager itself (`deluge_streaming_resource_manager`)
+    /// rather than taking `mgr` as a parameter: there is exactly one process-wide manager, and this
+    /// shape lets [`ProdOps::begin`] (the async fill task) and the synchronous C++ fill path (Task 3/4,
+    /// once this is exposed through a strong C-ABI wrapper) call the SAME function with nothing but the
+    /// chunk pointer. `chunk_backing` must be a queued (or, from the sync path, otherwise still-leased),
+    /// resident `StreamedChunk*` -- see the module doc's "Sync-context safety" note on [`native_finish`]
+    /// below, which applies identically here (this function touches strictly less state: no neighbour
+    /// gather, no convert-state read/write).
+    fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
+        // SAFETY: returns the one process-wide GeneralMemoryAllocator resource manager; a stable
+        // singleton pointer, no aliasing/ownership concern.
+        let mgr = unsafe { deluge_streaming_resource_manager() };
+        let Some((_asset, index, ctx)) = resolve(mgr, chunk_backing) else {
+            return geometry_error();
+        };
+        let geo = to_fill_geometry(&ctx);
+        let r = crate::fill_logic::begin(index, &geo);
+        if !r.ok {
+            return geometry_error();
+        }
+        // SAFETY: `chunk_backing` is the same resident, leased `StreamedChunk*` `resolve` just
+        // validated has a registered fill-context.
+        let dest = unsafe { deluge_streaming_chunk_payload(chunk_backing) };
+        StreamingFillDescriptor {
+            dest,
+            num_sectors: r.num_sectors,
+            ok: true,
+            handle: ctx.efatfs_handle,
+            byte_offset: r.byte_offset,
+        }
+    }
+
+    /// Run the post-read convert/stitch/publish tail for `chunk_backing`
+    /// (`deluge_streaming_finish_fill`'s native replacement — SR2d-4 Task 5, factored into a free fn
+    /// and moved onto the `StreamedChunk` convert-state accessors in Task 2, off the retired
+    /// `fill_sidecar.rs` table). `read_ok` mirrors `finish_fill`'s own early-out contract (see the
+    /// body below); only called with `true` from [`fill_once`]'s current calling convention.
+    ///
+    /// Looks up the live singleton resource manager itself, exactly like [`native_begin`] — see that
+    /// function's doc for why (both are meant to be callable from the async task AND, from Task 3/4
+    /// on, the synchronous C++ fill path via a shared C-ABI wrapper).
+    ///
+    /// ## Sync-context safety
+    ///
+    /// Every operation this function performs beyond plain arithmetic goes through one of three
+    /// primitives, and all three are already relied on from a SYNCHRONOUS caller elsewhere in this
+    /// codebase, not just this async task:
+    /// - [`deluge_resource_try_acquire`]/[`deluge_resource_release`]: the manager's own masked
+    ///   critical section (`deluge_resource::sync::Masked`) guards every table mutation these make,
+    ///   the same masking the C++ sync-fiber path's own manager calls (`deluge_resource_request`,
+    ///   `deluge_resource_release`, etc. — see `sample_stream.cpp`) already go through today. Nothing
+    ///   about calling them from a synchronous, non-async context is new.
+    /// - [`deluge_streaming_chunk_convert_state`]/[`deluge_streaming_chunk_set_convert_state`]: plain
+    ///   field reads/writes on a `StreamedChunk*` (see `async_fill.cpp`'s definitions) — no locking at
+    ///   all, by design, exactly like the pre-existing [`deluge_streaming_chunk_payload`]/
+    ///   [`deluge_streaming_chunk_set_loaded`] this function already called before this task. Safe
+    ///   because the chunk this function touches (`chunk_backing` itself, and each neighbour just
+    ///   after its own successful `try_acquire`) is hard-leased for the duration of this call — the
+    ///   SAME "leased, so exclusively mine to mutate until I release it" discipline the legacy
+    ///   sync-fiber `finish_fill` (`async_fill.cpp`) already relies on when it writes these same
+    ///   fields directly. A synchronous caller on the single thread-mode executor (the C++ sync fill
+    ///   path never runs on the audio render ISR either — see `streaming_loader`'s module doc) has the
+    ///   identical exclusivity guarantee this async task has today.
+    /// - [`deluge_resource_mark_ready`]: also masked inside the manager, same as the acquire/release
+    ///   pair above.
+    ///
+    /// In short: nothing this function does depends on running on the Embassy executor specifically —
+    /// it depends only on the caller already holding a lease on `chunk_backing` (true for both the
+    /// loader-queue chunk this async task pops and the chunk the sync C++ path would already be
+    /// holding a lease on to call this at all) and on the manager's existing masked-critical-section
+    /// discipline, which is unconditional regardless of caller. No new cross-context hazard was found.
+    fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
+        if !read_ok {
+            // Mirrors `finish_fill`'s own `if (!read_ok) { return false; }` early-out
+            // (`async_fill.cpp:107-110`) -- dead in practice under `fill_once`'s current
+            // calling convention (it only ever calls `finish` after `read` succeeds; see
+            // `fill_once`'s doc), kept for parity with the upcall's contract this replaces.
+            return false;
+        }
+
+        // SAFETY: returns the one process-wide GeneralMemoryAllocator resource manager; a stable
+        // singleton pointer, no aliasing/ownership concern.
+        let mgr = unsafe { deluge_streaming_resource_manager() };
+
+        // Native `finish` -- convert + stitch + publish. `chunk_backing` is the same pointer `begin`
+        // was just called with, whose data has just been successfully read into its payload buffer.
+        let Some((asset, index, ctx)) = resolve(mgr, chunk_backing) else {
+            return false;
+        };
+        let geo = to_fill_geometry(&ctx);
+        let payload_len = ctx.cluster_size as usize + 7;
+
+        // SAFETY: `chunk_backing` is a resident, still-leased `StreamedChunk*`; its payload buffer is
+        // `payload_with_trailing_slack()` -- `cluster_size + 7` bytes, matching `payload_len`.
+        let self_payload = unsafe {
+            core::slice::from_raw_parts_mut(
+                deluge_streaming_chunk_payload(chunk_backing),
+                payload_len,
+            )
+        };
+        // SAFETY: `chunk_backing` is a resident, still-leased `StreamedChunk*` (see this function's
+        // doc, "Sync-context safety" above).
+        let mut self_state =
+            to_logic_state(unsafe { deluge_streaming_chunk_convert_state(chunk_backing) });
+
+        // Gather each neighbour, mirroring `async_fill.cpp:116-157`'s "present AND loaded" gate
+        // in one step: `try_acquire` reports resident-and-ready (the manager's `Loading` state
+        // is exactly the not-yet-`loaded` case the C++ checks) AND atomically takes a hard lease
+        // on a hit, so the neighbour can't be evicted out from under the stitch below the way a
+        // separate check-then-touch could race against an eviction between the two. The lease is
+        // released again right after the stitch (see the bottom of this function) -- it exists
+        // purely to pin the neighbour's payload buffer alive for this call's duration, not to
+        // hold it any longer than that (mirroring the C++'s use-then-forget borrow of
+        // `prevCluster`/`nextCluster`, just made eviction-safe under the manager's real
+        // lease/evict machinery, which the synchronous C++ path never had to contend with).
+        let mut prev_lease: Option<*mut u8> = None;
+        let mut prev_state = crate::fill_logic::ConvertState::default();
+        if let Some(prev_index) = index.checked_sub(1) {
+            // SAFETY: `mgr` is the live manager; `asset`/`prev_index` are a plain lookup.
+            let p = unsafe { deluge_resource_try_acquire(mgr, asset, prev_index) };
+            if !p.is_null() {
+                // SAFETY: `p` was just leased+validated resident by `try_acquire` above.
+                prev_state = to_logic_state(unsafe {
+                    deluge_streaming_chunk_convert_state(p as *mut c_void)
+                });
+                prev_lease = Some(p);
+            }
+        }
+        let prev_view = prev_lease.map(|p| crate::fill_logic::NeighbourView {
+            // SAFETY: `p` was just leased+validated resident by `try_acquire` above; its
+            // payload is `cluster_size + 7` bytes, matching `payload_len`.
+            payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+            unconverted_head: &prev_state.first_three_bytes,
+            start_converted: &mut prev_state.start_converted,
+            end_converted: &mut prev_state.end_converted,
+        });
+
+        let mut next_lease: Option<*mut u8> = None;
+        let mut next_state = crate::fill_logic::ConvertState::default();
+        if let Some(next_index) = index.checked_add(1) {
+            // SAFETY: `mgr` is the live manager; `asset`/`next_index` are a plain lookup.
+            let p = unsafe { deluge_resource_try_acquire(mgr, asset, next_index) };
+            if !p.is_null() {
+                // SAFETY: `p` was just leased+validated resident by `try_acquire` above.
+                next_state = to_logic_state(unsafe {
+                    deluge_streaming_chunk_convert_state(p as *mut c_void)
+                });
+                next_lease = Some(p);
+            }
+        }
+        let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
+            // SAFETY: same as the prev branch above.
+            payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+            unconverted_head: &next_state.first_three_bytes,
+            start_converted: &mut next_state.start_converted,
+            end_converted: &mut next_state.end_converted,
+        });
+
+        crate::fill_logic::finish_convert_stitch(
+            self_payload,
+            index,
+            &geo,
+            &mut self_state,
+            prev_view,
+            next_view,
+        );
+
+        // Write back the (possibly updated) convert-state -- self, and each neighbour actually
+        // visited -- then release the neighbour leases taken above.
+        // SAFETY: `chunk_backing` is still the valid, leased `StreamedChunk*` from `next()`.
+        unsafe {
+            deluge_streaming_chunk_set_convert_state(chunk_backing, from_logic_state(self_state))
+        };
+        if let Some(p) = prev_lease {
+            // SAFETY: `p` was leased by `deluge_resource_try_acquire` above and is still resident.
+            unsafe {
+                deluge_streaming_chunk_set_convert_state(
+                    p as *mut c_void,
+                    from_logic_state(prev_state),
+                )
+            };
+            // SAFETY: `p` was leased by `deluge_resource_try_acquire` above; released exactly
+            // once, now that the stitch that needed it pinned alive is done.
+            unsafe { deluge_resource_release(mgr, p) };
+        }
+        if let Some(p) = next_lease {
+            // SAFETY: same as the prev write-back above.
+            unsafe {
+                deluge_streaming_chunk_set_convert_state(
+                    p as *mut c_void,
+                    from_logic_state(next_state),
+                )
+            };
+            // SAFETY: same as the prev release above.
+            unsafe { deluge_resource_release(mgr, p) };
+        }
+
+        // SAFETY: `chunk_backing` is still the valid, leased `StreamedChunk*` from `next()`.
+        unsafe { deluge_streaming_chunk_set_loaded(chunk_backing) };
+        // Manager-owned readiness: mirrors `finish_fill`'s own `deluge_resource_mark_ready`
+        // call (`async_fill.cpp:169-173`) so the async/RT `try_acquire` path sees this chunk
+        // ready.
+        // SAFETY: `mgr`/`chunk_backing` are both still valid.
+        unsafe { deluge_resource_mark_ready(mgr, chunk_backing) };
+        true
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
@@ -565,34 +767,15 @@ mod prod {
             // singleton pointer.
             let mgr = unsafe { deluge_streaming_resource_manager() };
 
-            // Sidecar-overflow guard (SR2d-4 Task 3 review fix): the per-chunk convert-state
-            // sidecar (`fill_sidecar.rs`) is a fixed-capacity table indexed by this manager's
-            // chunk-table slot, sized generously (`fill_sidecar::SIDECAR_CAP`) for a NORMAL card
-            // but not provably large enough for every legal FAT geometry (see that constant's
-            // doc). A session whose actual `chunk_cap` exceeds it would otherwise let a slot fall
-            // off the edge of the sidecar table SILENTLY -- `fill_sidecar::set` would quietly drop
-            // that chunk's convert-state, and a neighbour's boundary stitch would read a stale
-            // default and corrupt stitched audio with no signal at all. Checked once here, at fill
-            // task startup, ahead of any fill this session ever runs (this is `ProdOps`'s one
-            // construction site -- see `streaming_fill_task` below): turn that silent corruption
-            // into a loud, diagnosable halt instead, the same way a fixed-table exhaustion
-            // anywhere else in this codebase is fatal (see `sample_stream.cpp`'s `RSA1` /
-            // `sample_source.cpp`'s `SSP1`). "SDC1" ("SiDeCar 1") is a fresh, previously-unused
-            // freeze code.
-            //
-            // SAFETY: `mgr` is the live singleton resource manager returned just above.
-            let chunk_cap = unsafe { deluge_resource_chunk_cap(mgr) };
-            if !crate::fill_sidecar::chunk_cap_fits(chunk_cap) {
-                // SAFETY: `c"SDC1"` is a valid NUL-terminated string literal, live for `'static`.
-                // `freezeWithError` blocks (see `foundation/panic.h`) but is not guaranteed to be a
-                // hard hardware halt (the OLED freeze screen can resume on user input, same caveat
-                // `sample_low_level_reader.cpp` documents for its own `SSP1` freeze) -- if it does
-                // return, fall through and construct `Self` anyway; there is no better fallback
-                // than "keep the fill task alive, degraded", and the sidecar's own `resolve_slot`
-                // bounds-check still prevents any actual out-of-bounds access either way.
-                unsafe { freezeWithError(c"SDC1".as_ptr()) };
-            }
-
+            // No sidecar-overflow guard here anymore (SR2d-4 Task 2): that guard
+            // (`deluge_resource_chunk_cap` vs. `fill_sidecar::SIDECAR_CAP`, `FREEZE_WITH_ERROR
+            // ("SDC1")`) protected the fixed-capacity `fill_sidecar.rs` table this constructor used
+            // to size-check at startup. `native_finish` below no longer reads/writes that table --
+            // convert-state now lives directly on each `StreamedChunk` via
+            // `deluge_streaming_chunk_convert_state`/`_set_convert_state`, which has no separate
+            // capacity to overflow (it's a plain field access on a chunk the caller already holds),
+            // so the guard has nothing left to protect. `fill_sidecar.rs` itself is deleted in a
+            // later step of this fill-unification; until then it just sits unused.
             Self { mgr }
         }
     }
@@ -609,26 +792,8 @@ mod prod {
         }
 
         fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {
-            // SR2d-4 Task 5: native `begin`, replacing the `deluge_streaming_begin_fill` upcall.
             // `chunk` was just returned by `next()` (a queued, still-leased `StreamedChunk*`).
-            let Some((_asset, index, ctx)) = resolve(self.mgr, chunk) else {
-                return geometry_error();
-            };
-            let geo = to_fill_geometry(&ctx);
-            let r = crate::fill_logic::begin(index, &geo);
-            if !r.ok {
-                return geometry_error();
-            }
-            // SAFETY: `chunk` is the same resident, leased `StreamedChunk*` `resolve` just
-            // validated has a registered fill-context.
-            let dest = unsafe { deluge_streaming_chunk_payload(chunk) };
-            StreamingFillDescriptor {
-                dest,
-                num_sectors: r.num_sectors,
-                ok: true,
-                handle: ctx.efatfs_handle,
-                byte_offset: r.byte_offset,
-            }
+            native_begin(chunk)
         }
 
         async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool {
@@ -650,111 +815,9 @@ mod prod {
         }
 
         fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool {
-            if !read_ok {
-                // Mirrors `finish_fill`'s own `if (!read_ok) { return false; }` early-out
-                // (`async_fill.cpp:107-110`) -- dead in practice under `fill_once`'s current
-                // calling convention (it only ever calls `finish` after `read` succeeds; see
-                // `fill_once`'s doc), kept for parity with the upcall's contract this replaces.
-                return false;
-            }
-
-            // SR2d-4 Task 5: native `finish` -- convert + stitch + publish, replacing the
-            // `deluge_streaming_finish_fill` upcall. `chunk` is the same pointer `begin` was just
-            // called with, whose data has just been successfully read into its payload buffer.
-            let Some((asset, index, ctx)) = resolve(self.mgr, chunk) else {
-                return false;
-            };
-            let geo = to_fill_geometry(&ctx);
-            let payload_len = ctx.cluster_size as usize + 7;
-
-            // SAFETY: `chunk` is a resident, still-leased `StreamedChunk*`; its payload buffer is
-            // `payload_with_trailing_slack()` -- `cluster_size + 7` bytes, matching `payload_len`.
-            let self_payload = unsafe {
-                core::slice::from_raw_parts_mut(deluge_streaming_chunk_payload(chunk), payload_len)
-            };
-            let mut self_state = to_logic_state(crate::fill_sidecar::get(self.mgr, chunk));
-
-            // Gather each neighbour, mirroring `async_fill.cpp:116-157`'s "present AND loaded" gate
-            // in one step: `try_acquire` reports resident-and-ready (the manager's `Loading` state
-            // is exactly the not-yet-`loaded` case the C++ checks) AND atomically takes a hard lease
-            // on a hit, so the neighbour can't be evicted out from under the stitch below the way a
-            // separate check-then-touch could race against an eviction between the two. The lease is
-            // released again right after the stitch (see the bottom of this function) -- it exists
-            // purely to pin the neighbour's payload buffer alive for this call's duration, not to
-            // hold it any longer than that (mirroring the C++'s use-then-forget borrow of
-            // `prevCluster`/`nextCluster`, just made eviction-safe under the manager's real
-            // lease/evict machinery, which the synchronous C++ path never had to contend with).
-            let mut prev_lease: Option<*mut u8> = None;
-            let mut prev_state = crate::fill_logic::ConvertState::default();
-            if let Some(prev_index) = index.checked_sub(1) {
-                // SAFETY: `mgr` is the live manager; `asset`/`prev_index` are a plain lookup.
-                let p = unsafe { deluge_resource_try_acquire(self.mgr, asset, prev_index) };
-                if !p.is_null() {
-                    prev_state =
-                        to_logic_state(crate::fill_sidecar::get(self.mgr, p as *mut c_void));
-                    prev_lease = Some(p);
-                }
-            }
-            let prev_view = prev_lease.map(|p| crate::fill_logic::NeighbourView {
-                // SAFETY: `p` was just leased+validated resident by `try_acquire` above; its
-                // payload is `cluster_size + 7` bytes, matching `payload_len`.
-                payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
-                unconverted_head: &prev_state.first_three_bytes,
-                start_converted: &mut prev_state.start_converted,
-                end_converted: &mut prev_state.end_converted,
-            });
-
-            let mut next_lease: Option<*mut u8> = None;
-            let mut next_state = crate::fill_logic::ConvertState::default();
-            if let Some(next_index) = index.checked_add(1) {
-                // SAFETY: `mgr` is the live manager; `asset`/`next_index` are a plain lookup.
-                let p = unsafe { deluge_resource_try_acquire(self.mgr, asset, next_index) };
-                if !p.is_null() {
-                    next_state =
-                        to_logic_state(crate::fill_sidecar::get(self.mgr, p as *mut c_void));
-                    next_lease = Some(p);
-                }
-            }
-            let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
-                // SAFETY: same as the prev branch above.
-                payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
-                unconverted_head: &next_state.first_three_bytes,
-                start_converted: &mut next_state.start_converted,
-                end_converted: &mut next_state.end_converted,
-            });
-
-            crate::fill_logic::finish_convert_stitch(
-                self_payload,
-                index,
-                &geo,
-                &mut self_state,
-                prev_view,
-                next_view,
-            );
-
-            // Write back the (possibly updated) convert-state -- self, and each neighbour actually
-            // visited -- then release the neighbour leases taken above.
-            crate::fill_sidecar::set(self.mgr, chunk, to_sidecar_state(self_state));
-            if let Some(p) = prev_lease {
-                crate::fill_sidecar::set(self.mgr, p as *mut c_void, to_sidecar_state(prev_state));
-                // SAFETY: `p` was leased by `deluge_resource_try_acquire` above; released exactly
-                // once, now that the stitch that needed it pinned alive is done.
-                unsafe { deluge_resource_release(self.mgr, p) };
-            }
-            if let Some(p) = next_lease {
-                crate::fill_sidecar::set(self.mgr, p as *mut c_void, to_sidecar_state(next_state));
-                // SAFETY: same as the prev release above.
-                unsafe { deluge_resource_release(self.mgr, p) };
-            }
-
-            // SAFETY: `chunk` is still the valid, leased `StreamedChunk*` from `next()`.
-            unsafe { deluge_streaming_chunk_set_loaded(chunk) };
-            // Manager-owned readiness: mirrors `finish_fill`'s own `deluge_resource_mark_ready`
-            // call (`async_fill.cpp:169-173`) so the async/RT `try_acquire` path sees this chunk
-            // ready.
-            // SAFETY: `mgr`/`chunk` are both still valid.
-            unsafe { deluge_resource_mark_ready(self.mgr, chunk) };
-            true
+            // `chunk` is the same pointer `begin` was just called with, whose data has just been
+            // successfully read into its payload buffer (when `read_ok`).
+            native_finish(chunk, read_ok)
         }
 
         fn lease_count(&self, chunk: *mut c_void) -> u32 {

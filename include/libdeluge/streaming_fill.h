@@ -101,6 +101,39 @@ uint8_t* deluge_streaming_chunk_payload(void* chunk_backing);
 ///                       deluge_resource_loader_next.
 void deluge_streaming_chunk_set_loaded(void* chunk_backing);
 
+/// @brief The chunk's pre-conversion convert-state, mirrored from `StreamedChunk`'s own fields.
+///
+/// `first_three_bytes` is the PRE-conversion first 3 bytes of the chunk's raw data (read by a
+/// neighbour's boundary stitch, which needs the byte pattern spanning the cluster boundary before
+/// this chunk's own in-place conversion overwrote it); `start_converted`/`end_converted` are
+/// idempotency guards so a boundary is never re-stitched once it's already been handled from the
+/// other side.
+typedef struct DelugeChunkConvertState {
+	uint8_t first_three_bytes[3]; ///< Pre-conversion first 3 raw bytes of the chunk's payload.
+	bool start_converted;         ///< Whether this chunk's start boundary has already been stitched.
+	bool end_converted;           ///< Whether this chunk's end boundary has already been stitched.
+} DelugeChunkConvertState;
+
+/// @brief Read the chunk's current convert-state.
+///
+/// Mirrors `StreamedChunk::first_three_bytes_pre_data_conversion` /
+/// `extra_bytes_at_start_converted` / `extra_bytes_at_end_converted` directly — the same fields the
+/// legacy sync-fiber `finish_fill` path reads/writes today. Added ahead of the native Rust fill
+/// task rewiring onto this store (a later step); not yet called from anywhere.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+/// @return The chunk's current convert-state.
+DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing);
+
+/// @brief Write the chunk's convert-state.
+///
+/// The inverse of deluge_streaming_chunk_convert_state — mirrors @p state back onto
+/// `StreamedChunk`'s own fields.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
+///                       deluge_resource_loader_next.
+/// @param state The convert-state to store.
+void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state);
+
 /// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
 ///        `async_streaming_loader`) owns the loader queue on this build/BSP.
 ///

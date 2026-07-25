@@ -66,6 +66,15 @@ static_assert(offsetof(DelugeStreamingFillContext, cluster_size_magnitude) == 24
 static_assert(offsetof(DelugeStreamingFillContext, raw_data_format) == 28);
 static_assert(sizeof(DelugeStreamingFillContext) == 32);
 
+// FFI layout guard for DelugeChunkConvertState (SR2d-4 Task 1), mirroring ConvertState's own
+// `core::mem::offset_of!` guard in streaming_loader.rs. No pointer members, and every member
+// (`uint8_t[3]` then two `bool`s) is 1-byte-aligned, so this layout is identical on the 32-bit
+// device and the 64-bit host_app build: no padding anywhere, laid out back-to-back.
+static_assert(offsetof(DelugeChunkConvertState, first_three_bytes) == 0);
+static_assert(offsetof(DelugeChunkConvertState, start_converted) == 3);
+static_assert(offsetof(DelugeChunkConvertState, end_converted) == 4);
+static_assert(sizeof(DelugeChunkConvertState) == 5);
+
 // begin_fill() mirrors read_cluster_data's "resolve where/how much" step (the last-cluster
 // short-read sector-count calc and the cluster's byte offset within the file); finish_fill()
 // mirrors its post-read "convert + stitch + publish" step.
@@ -207,6 +216,34 @@ uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {
 
 void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
 	reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;
+}
+
+// StreamedChunk convert-state get/set accessors (SR2d-4 Task 1): thin accessors over the same
+// three fields the legacy sync-fiber finish_fill() above reads/writes directly
+// (first_three_bytes_pre_data_conversion, extra_bytes_at_start_converted,
+// extra_bytes_at_end_converted -- cluster.h:102-106). Added ahead of a later task that rewires the
+// native Rust fill's begin/finish onto this store instead of its own sidecar (fill_sidecar.rs);
+// not yet called from anywhere. Same shape as deluge_streaming_chunk_payload/_set_loaded just
+// above -- real bodies only, no weak fallback, because this TU is part of the shared
+// deluge_SOURCES glob and so always compiles and links into every BSP.
+DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing) {
+	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
+	DelugeChunkConvertState state{};
+	for (size_t i = 0; i < 3; ++i) {
+		state.first_three_bytes[i] = static_cast<uint8_t>(cluster->first_three_bytes_pre_data_conversion[i]);
+	}
+	state.start_converted = cluster->extra_bytes_at_start_converted;
+	state.end_converted = cluster->extra_bytes_at_end_converted;
+	return state;
+}
+
+void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state) {
+	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
+	for (size_t i = 0; i < 3; ++i) {
+		cluster->first_three_bytes_pre_data_conversion[i] = static_cast<char>(state.first_three_bytes[i]);
+	}
+	cluster->extra_bytes_at_start_converted = state.start_converted;
+	cluster->extra_bytes_at_end_converted = state.end_converted;
 }
 
 // Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP

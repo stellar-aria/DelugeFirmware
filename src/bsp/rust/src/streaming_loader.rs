@@ -264,6 +264,34 @@ const _: () = {
     assert!(size_of::<StreamingFillDescriptor>() == size_of::<*mut u8>() + 16);
 };
 
+/// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeChunkConvertState` exactly (verbatim
+/// field order/types) — the per-chunk convert-state get/set accessors added in SR2d-4 Task 1,
+/// ahead of the later task that rewires the native fill's `finish` onto this store instead of its
+/// own `fill_sidecar.rs` table. Declared unconditionally alongside [`StreamingFillDescriptor`]
+/// (not `async_streaming_loader`-gated on its own) since it shares that struct's C-ABI-mirror
+/// role, but nothing outside `mod prod`'s (not-yet-called) extern declarations below references it
+/// yet, so it only actually needs to exist where those do.
+#[cfg(feature = "async_streaming_loader")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DelugeChunkConvertState {
+    pub first_three_bytes: [u8; 3],
+    pub start_converted: bool,
+    pub end_converted: bool,
+}
+
+/// FFI layout guard (SR2d-4 Task 1), mirroring the `static_assert`s in `async_fill.cpp` — see that
+/// file's comment for the byte-offset derivation. No pointer members, and every member (`[u8; 3]`
+/// then two `bool`s) is 1-byte-aligned, so the layout is identical on the 32-bit device and the
+/// 64-bit host_app build: no padding anywhere, laid out back-to-back.
+#[cfg(feature = "async_streaming_loader")]
+const _: () = {
+    assert!(core::mem::offset_of!(DelugeChunkConvertState, first_three_bytes) == 0);
+    assert!(core::mem::offset_of!(DelugeChunkConvertState, start_converted) == 3);
+    assert!(core::mem::offset_of!(DelugeChunkConvertState, end_converted) == 4);
+    assert!(size_of::<DelugeChunkConvertState>() == 5);
+};
+
 /// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
 /// read just failed while still wanted, so it sinks behind everything else
 /// instead of being popped again immediately.
@@ -390,7 +418,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
     any(target_os = "none", feature = "host_app")
 ))]
 mod prod {
-    use super::{FillOps, LOWEST_PRIORITY, StreamingFillDescriptor};
+    use super::{DelugeChunkConvertState, FillOps, LOWEST_PRIORITY, StreamingFillDescriptor};
     use core::ffi::{c_char, c_void};
 
     unsafe extern "C" {
@@ -401,6 +429,19 @@ mod prod {
         // `payload_with_trailing_slack()` span `finish_convert_stitch` needs) + set-loaded.
         fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
         fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
+        // SR2d-4 Task 1: the StreamedChunk convert-state get/set accessors. Declared only -- not
+        // yet called anywhere (a later task rewires `ProdOps::finish` onto these, off its own
+        // `fill_sidecar.rs` table, above). `#[allow(dead_code)]` because an unused `unsafe extern
+        // "C"` declaration still trips the same dead-code lint as a normal item.
+        #[allow(dead_code)]
+        fn deluge_streaming_chunk_convert_state(
+            chunk_backing: *mut c_void,
+        ) -> DelugeChunkConvertState;
+        #[allow(dead_code)]
+        fn deluge_streaming_chunk_set_convert_state(
+            chunk_backing: *mut c_void,
+            state: DelugeChunkConvertState,
+        );
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;

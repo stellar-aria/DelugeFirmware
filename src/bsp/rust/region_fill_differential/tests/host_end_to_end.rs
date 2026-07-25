@@ -10,13 +10,13 @@
 //! `build.rs` archives the FULL host-built C++ `deluge_app` object closure and force-roots the link at
 //! `deluge_app_init` (`-Wl,-u,deluge_app_init`) — which then needs the WHOLE boot-time provider surface
 //! satisfied (board/display/USB/OLED init, ~20+ symbols), not just the storage path. Verified
-//! empirically: enabling `--features host_app,async_streaming_loader` on the EXISTING, otherwise
-//! unrelated `tests/fill_sidecar_host.rs` (a plain `deluge_resource`-only test, normally built with
-//! neither feature) fails to link with 20+ undefined symbols (`deluge_control_enable_oled`,
-//! `deluge_board_init_early`, `openUSBHost`, `deluge_board_unlock_data_cache`, ...) — exactly the
-//! "cc-compiling a large C++ closure" case the brief calls out as the trigger to fall back to a host
-//! adapter instead. `ProdOps`'s two `StreamedChunk` accessors
-//! (`deluge_streaming_chunk_payload`/`_set_loaded`) are ALSO C++-defined (`async_fill.cpp`), so real
+//! empirically: enabling `--features host_app,async_streaming_loader` on a plain `deluge_resource`-
+//! only host test (normally built with neither feature) fails to link with 20+ undefined symbols
+//! (`deluge_control_enable_oled`, `deluge_board_init_early`, `openUSBHost`,
+//! `deluge_board_unlock_data_cache`, ...) — exactly the "cc-compiling a large C++ closure" case the
+//! brief calls out as the trigger to fall back to a host adapter instead. `ProdOps`'s two
+//! `StreamedChunk` accessors (`deluge_streaming_chunk_payload`/`_set_loaded`) are ALSO C++-defined
+//! (`async_fill.cpp`), so real
 //! `ProdOps`/`fill_once` are doubly out of reach here.
 //!
 //! So this test takes the "host adapter" path the brief explicitly sanctions, extended one step
@@ -32,13 +32,15 @@
 //! dedicated host coverage (`tests/streaming_fill_context_host.rs`).
 //!
 //! Everything else here is real: a genuine `deluge_resource` manager (built over a real heap via its
-//! C-ABI, mirroring `tests/fill_sidecar_host.rs`'s `TestManager`), the real per-chunk convert-state
-//! sidecar (`fill_sidecar.rs`, pulled in unmodified via `#[path]`, same convention as that test), and
-//! the real `fill_logic::begin`/`finish_convert_stitch` (SR2d-4 Tasks 4-5) — only the orchestration
-//! `ProdOps::begin`/`finish` themselves perform (resolve geometry, drive the read, gather neighbours,
-//! call `finish_convert_stitch`, write the sidecar back, publish) is reproduced by hand here, mirroring
-//! `streaming_loader.rs`'s `prod` module's own logic (not `fill_once`/`ProdOps` directly, which need
-//! the C++-defined accessors above).
+//! C-ABI), and the real `fill_logic::begin`/`finish_convert_stitch` (SR2d-4 Tasks 4-5). Convert-state
+//! itself is plain local `fill_logic::ConvertState` values (SR2d-4 Task 2 moved the live store onto
+//! `StreamedChunk`'s own convert-state accessors, which — like the two `StreamedChunk` accessors just
+//! above — are C++-defined and so out of reach here for the same reason; a never-`finish`ed chunk's
+//! state is simply zeroed `ConvertState::default()`, matching what the real store would report for a
+//! chunk nothing has ever written). Only the orchestration `ProdOps::begin`/`finish` themselves
+//! perform (resolve geometry, drive the read, gather neighbours, call `finish_convert_stitch`,
+//! publish) is reproduced by hand here, mirroring `streaming_loader.rs`'s `prod` module's own logic
+//! (not `fill_once`/`ProdOps` directly, which need the C++-defined accessors above).
 #![cfg(not(target_os = "none"))]
 
 use core::ffi::c_void;
@@ -52,15 +54,12 @@ use deluge_resource::{
 
 #[path = "../../src/fill_logic.rs"]
 mod fill_logic;
-#[path = "../../src/fill_sidecar.rs"]
-mod fill_sidecar;
 
 use fill_logic::{FillGeometry, NeighbourView, begin, finish_convert_stitch};
 
-// Single-threaded-per-test critical section, mirroring `tests/fill_sidecar_host.rs`'s stub:
-// `deluge_resource`'s `sync::Masked` calls these three C-ABI symbols; this test never models the
-// audio-ISR context, so inert no-op stand-ins are semantically correct (nothing here can race with
-// itself — a single thread, no concurrent "ISR").
+// Single-threaded-per-test critical section: `deluge_resource`'s `sync::Masked` calls these three
+// C-ABI symbols; this test never models the audio-ISR context, so inert no-op stand-ins are
+// semantically correct (nothing here can race with itself — a single thread, no concurrent "ISR").
 #[unsafe(no_mangle)]
 extern "C" fn ENTER_CRITICAL_SECTION() {}
 #[unsafe(no_mangle)]
@@ -81,8 +80,7 @@ const PAYLOAD_LEN: usize = CLUSTER_SIZE as usize + 7;
 
 /// `deluge_resource_request`'s async `construct` callback: no I/O, just makes the chunk's backing
 /// bytes deterministic (not uninitialized heap garbage) before the synthetic read/stitch fill in the
-/// meaningful bytes. Mirrors `tests/fill_sidecar_host.rs`'s `mock_construct` (a requestable asset needs
-/// SOME `construct` callback to be requestable at all).
+/// meaningful bytes. A requestable asset needs SOME `construct` callback to be requestable at all.
 unsafe extern "C" fn mock_construct(
     _ctx: *mut c_void,
     _owner: *mut c_void,
@@ -94,8 +92,7 @@ unsafe extern "C" fn mock_construct(
     unsafe { core::ptr::write_bytes(dest, 0xEE, PAYLOAD_LEN) };
 }
 
-/// A manager over a throwaway 16-aligned test heap, plus one requestable test asset — mirrors
-/// `tests/fill_sidecar_host.rs`'s `TestManager` exactly.
+/// A manager over a throwaway 16-aligned test heap, plus one requestable test asset.
 struct TestManager {
     handle: *mut DelugeResource,
     asset: u32,
@@ -132,10 +129,6 @@ impl TestManager {
             asset,
             _buf: buf,
         }
-    }
-
-    fn mgr(&self) -> *mut c_void {
-        self.handle as *mut c_void
     }
 
     /// Reserve chunk `index`'s backing under a hard lease, `PAYLOAD_LEN` bytes — the async/`request`
@@ -214,26 +207,6 @@ fn read_into(file: &[u8], geo: &FillGeometry, index: u32, dest: &mut [u8]) {
     assert!(filled, "synthetic read failed for index {index}");
 }
 
-/// `fill_sidecar::ConvertState` -> `fill_logic::ConvertState`, mirroring
-/// `streaming_loader::prod::to_logic_state` exactly (the two are separate types by design — see
-/// `fill_logic::ConvertState`'s own doc).
-fn to_logic_state(s: fill_sidecar::ConvertState) -> fill_logic::ConvertState {
-    fill_logic::ConvertState {
-        first_three_bytes: s.first_three_bytes,
-        start_converted: s.start_converted,
-        end_converted: s.end_converted,
-    }
-}
-
-/// The inverse of [`to_logic_state`], mirroring `streaming_loader::prod::to_sidecar_state`.
-fn to_sidecar_state(s: fill_logic::ConvertState) -> fill_sidecar::ConvertState {
-    fill_sidecar::ConvertState {
-        first_three_bytes: s.first_three_bytes,
-        start_converted: s.start_converted,
-        end_converted: s.end_converted,
-    }
-}
-
 /// Full pipeline: request 3 chunks (prev, self, next) from a real manager, read each via the synthetic
 /// file, run `finish_convert_stitch` on the middle one (mirroring `ProdOps::finish`'s neighbour-gather
 /// + convert/stitch + sidecar write-back + publish), then assert:
@@ -276,11 +249,12 @@ fn read_convert_stitch_publish_matches_cpp_reference_and_mark_ready_is_reachable
     );
 
     // -- ProdOps::finish's own orchestration, driven by hand (see the module doc): gather each
-    // neighbour's convert-state from the sidecar, run finish_convert_stitch, write the (possibly
-    // updated) state back, then publish. --
-    let mut self_state = to_logic_state(fill_sidecar::get(mgr.mgr(), self_ptr as *mut c_void));
-    let mut prev_state = to_logic_state(fill_sidecar::get(mgr.mgr(), prev_ptr as *mut c_void));
-    let mut next_state = to_logic_state(fill_sidecar::get(mgr.mgr(), next_ptr as *mut c_void));
+    // neighbour's convert-state (none of these three chunks has ever been `finish`ed before, so each
+    // starts at the zeroed default — matching what the real `StreamedChunk` accessors would report
+    // for a chunk nothing has ever written), run finish_convert_stitch, then publish. --
+    let mut self_state = fill_logic::ConvertState::default();
+    let mut prev_state = fill_logic::ConvertState::default();
+    let mut next_state = fill_logic::ConvertState::default();
 
     {
         // SAFETY: same three pointers, still the sole aliases; each slice is exclusively borrowed for
@@ -311,31 +285,16 @@ fn read_convert_stitch_publish_matches_cpp_reference_and_mark_ready_is_reachable
         );
     }
 
-    fill_sidecar::set(
-        mgr.mgr(),
-        self_ptr as *mut c_void,
-        to_sidecar_state(self_state),
-    );
-    fill_sidecar::set(
-        mgr.mgr(),
-        prev_ptr as *mut c_void,
-        to_sidecar_state(prev_state),
-    );
-    fill_sidecar::set(
-        mgr.mgr(),
-        next_ptr as *mut c_void,
-        to_sidecar_state(next_state),
-    );
     mgr.release(prev_ptr);
     mgr.release(next_ptr);
 
     mgr.mark_ready(self_ptr);
 
     // -- Cross-check against the SAME C++ reference the fill-differential uses, over freshly re-read
-    // clones of the SAME synthetic bytes — independent of the manager/sidecar plumbing above; this is
-    // what ties the end-to-end pipeline back to the byte-exactness gate. Both neighbours are fresh
-    // (never independently `finish`ed) here too, so their `unconverted_head`/`end_converted` inputs are
-    // the same zeroed defaults `fill_sidecar::get` returned above for a never-`set` chunk. --
+    // clones of the SAME synthetic bytes — independent of the manager plumbing above; this is what
+    // ties the end-to-end pipeline back to the byte-exactness gate. Both neighbours are fresh (never
+    // independently `finish`ed) here too, so their `unconverted_head`/`end_converted` inputs are the
+    // same zeroed defaults `self_state`/`prev_state`/`next_state` started from above. --
     let mut expect_self = vec![0u8; PAYLOAD_LEN];
     let mut expect_prev = vec![0u8; PAYLOAD_LEN];
     let mut expect_next = vec![0u8; PAYLOAD_LEN];

@@ -10,7 +10,7 @@
 //!
 //! ## `#[allow(dead_code)]` despite being wired
 //!
-//! This module (like `fill_sidecar`/`streaming_loader::fill_context_for`) is compiled unconditionally
+//! This module (like `streaming_loader::fill_context_for`) is compiled unconditionally
 //! (no `#[cfg]` — see `main.rs`'s `mod fill_logic;`), but its one real caller,
 //! `streaming_loader::prod::ProdOps`, only compiles on the device OR under the `host_app` feature (see
 //! that module's "Two compilation tiers" doc). A PLAIN host build/check/clippy of this bin (no
@@ -149,14 +149,14 @@ pub fn begin(index: u32, geo: &FillGeometry) -> BeginResult {
 // `payload_with_trailing_slack()`), and how to build each neighbour's edge from a `NeighbourView`.
 
 /// The per-chunk convert-state `finish`'s convert/stitch tail reads/writes for a chunk and its
-/// neighbours — the SAME three fields as `fill_sidecar::ConvertState` (that module's doc explains
-/// what each means: `first_three_bytes` is the pre-conversion first 3 bytes a neighbour's stitch
-/// reads; `start_converted`/`end_converted` are the boundary idempotency guards). Deliberately a
-/// SEPARATE type, not a re-export of `fill_sidecar::ConvertState`: `fill_sidecar` needs the real
-/// `deluge_resource_slot_of`/`_generation_of_slot` C ABI, so it only compiles on the device or under
-/// `host_app` (see its module's `#[cfg]` in `main.rs`), while this module (and
-/// [`finish_convert_stitch`]) stays a plain, FFI-free buffer operation that compiles and tests on
-/// EVERY tier, including a bare host build with neither feature — the same reason [`FillGeometry`]
+/// neighbours: `first_three_bytes` is the pre-conversion first 3 bytes a neighbour's stitch reads;
+/// `start_converted`/`end_converted` are the boundary idempotency guards. Deliberately a SEPARATE
+/// type, not a re-export of `streaming_loader::DelugeChunkConvertState` (the C-ABI mirror of the
+/// live `StreamedChunk` convert-state store): that type needs
+/// `deluge_streaming_chunk_convert_state`/`_set_convert_state`, so it only compiles on the device or
+/// under `host_app` (`async_streaming_loader`-gated in `streaming_loader.rs`), while this module
+/// (and [`finish_convert_stitch`]) stays a plain, FFI-free buffer operation that compiles and tests
+/// on EVERY tier, including a bare host build with neither feature — the same reason [`FillGeometry`]
 /// doesn't reuse `streaming_loader::FillContext` either. `streaming_loader::prod::ProdOps::finish`
 /// (the only real caller, gated to the tier where both types exist) converts between the two with a
 /// trivial field-for-field copy.
@@ -302,9 +302,7 @@ pub fn finish_convert_stitch(
 mod tests {
     use super::*;
 
-    /// 32 KiB clusters (magnitude 15), matching a common real-world FAT cluster
-    /// size — same value `fill_sidecar::SIDECAR_CAP`'s doc cites as "a common
-    /// real-world default".
+    /// 32 KiB clusters (magnitude 15), matching a common real-world FAT cluster size.
     const CLUSTER_SIZE: u32 = 32768;
     const CLUSTER_MAGNITUDE: u32 = 15;
 
@@ -828,9 +826,9 @@ mod tests {
 
         /// Splits a `&mut ConvertState` into independent `&mut bool` borrows of its two flags, so a
         /// caller can hand one to a `NeighbourView` while separately reading the other — mirrors how
-        /// `streaming_loader::prod::ProdOps::finish` will borrow a neighbour's sidecar state (test-only
-        /// plumbing; production code borrows two DISTINCT `fill_sidecar::ConvertState` copies instead,
-        /// so it never needs this split).
+        /// `streaming_loader::prod::ProdOps::finish` borrows a neighbour's convert-state (test-only
+        /// plumbing; production code borrows two DISTINCT `ConvertState` copies instead, so it never
+        /// needs this split).
         struct NeighbourStateSplit<'a> {
             start: &'a mut bool,
             end: &'a mut bool,

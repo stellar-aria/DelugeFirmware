@@ -8,7 +8,7 @@
 //! via `#[path]`, same convention as `tests/fill_logic_host.rs` (from inside that crate) — this crate
 //! does it from a sibling directory instead. `fill_logic.rs` has no CS/extern dependencies of its own
 //! (pure buffer arithmetic plus calls into `deluge_sample_convert`, which has none either), so unlike
-//! `region_differential`/`tests/fill_sidecar_host.rs` this file needs no critical-section stubs.
+//! `region_differential`/`tests/host_end_to_end.rs` this file needs no critical-section stubs.
 //!
 //! Two validating shapes, mirroring `region_differential`'s own tests/differential.rs:
 //!   1. BYTE-IDENTICAL cases across the required coverage (every `RawDataFormat`, the SIMD-prefix/

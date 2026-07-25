@@ -143,22 +143,6 @@ aligned = { version = "0.4", optional = true }
 embedded-fatfs = { path = "../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"], optional = true }
 embedded-io-async = { version = "0.7.0", optional = true }
 
-# `tests/fill_sidecar_host.rs` builds a REAL `deluge_resource` manager over a test heap (via its
-# C-ABI) to exercise the sidecar's actual slot/generation semantics — unlike
-# `tests/streaming_fill_host.rs`'s `FakeOps` double, this needs the crate genuinely linked. Unlike
-# the optional `host_app`-gated `deluge_resource` above (which pulls in the full host-built C++ app
-# closure), a dev-dependency only ever reaches test binaries — `deluge-bsp-rust` is bin-only (no
-# `[lib]` target, see the crate doc atop `main.rs`), so integration tests never link the production
-# bin's own compiled code, and this never affects a normal `cargo build`/`cargo run`.
-[target.'cfg(not(target_os = "none"))'.dev-dependencies]
-deluge_resource = { path = "../../../crates/deluge_resource" }
-# The test heap `deluge_resource_create` needs (`deluge_heap_create`). Cargo rejects the SAME
-# package appearing under two different extern names anywhere in one manifest, even across disjoint
-# target-cfg sections, so this must reuse the device side's `fs_alloc` rename (see its own comment
-# above) rather than the plain `deluge_alloc` name — a bare `deluge_alloc = { path = ... }` here
-# fails resolution with "depends on crate `deluge_alloc` multiple times with different names".
-fs_alloc = { package = "deluge_alloc", path = "../../../crates/deluge_alloc" }
-
 [features]
 default = ["rtt", "async_streaming_loader", "efatfs_streaming"]
 

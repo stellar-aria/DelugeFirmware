@@ -12,10 +12,9 @@
 //! test (`tests/host_end_to_end.rs`).
 //!
 //! The Rust side under test, `fill_logic::finish_convert_stitch`, is NOT re-exported from here —
-//! `deluge-bsp-rust` is bin-only (no `[lib]` target), so each test file pulls `src/fill_logic.rs` (and,
-//! for the host end-to-end test, `src/fill_sidecar.rs`) in unmodified via `#[path]`, the same
-//! convention `tests/fill_logic_host.rs`/`tests/fill_sidecar_host.rs` already use from INSIDE that
-//! crate — this crate just does it from a sibling directory instead.
+//! `deluge-bsp-rust` is bin-only (no `[lib]` target), so each test file pulls `src/fill_logic.rs` in
+//! unmodified via `#[path]`, the same convention `tests/fill_logic_host.rs` already uses from INSIDE
+//! that crate — this crate just does it from a sibling directory instead.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod cpp_ref;

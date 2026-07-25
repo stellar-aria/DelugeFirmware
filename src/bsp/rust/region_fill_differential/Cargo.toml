@@ -11,7 +11,7 @@ license = "GPL-3.0-or-later"
 #
 # `edition = "2024"` (not the sibling harnesses' "2021"): unlike `region_differential` (which only
 # depends on OTHER crates normally), this crate's test files pull `deluge-bsp-rust`'s own
-# `src/fill_logic.rs`/`src/fill_sidecar.rs` in unmodified via `#[path]` (that crate is bin-only, no
+# `src/fill_logic.rs` in unmodified via `#[path]` (that crate is bin-only, no
 # `[lib]` target — see its own Cargo.toml doc). `#[path]`-included source is parsed under the
 # INCLUDING crate's edition, and `deluge-bsp-rust` itself is `edition = "2024"` (its files use
 # `unsafe extern "C"` blocks / `#[unsafe(no_mangle)]`) — so this crate must match to parse them
@@ -27,8 +27,8 @@ license = "GPL-3.0-or-later"
 deluge_sample_convert = { path = "../sample_convert" }
 
 [dev-dependencies]
-# Host end-to-end test only: a real `deluge_resource` manager over a test heap (mirrors
-# `tests/fill_sidecar_host.rs`'s `TestManager`), and the heap it's built over.
+# Host end-to-end test only: a real `deluge_resource` manager over a test heap, and the heap it's
+# built over.
 deluge_resource = { path = "../../../../crates/deluge_resource" }
 fs_alloc = { package = "deluge_alloc", path = "../../../../crates/deluge_alloc" }
 

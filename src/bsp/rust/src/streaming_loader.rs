@@ -266,11 +266,11 @@ const _: () = {
 
 /// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeChunkConvertState` exactly (verbatim
 /// field order/types) — the per-chunk convert-state get/set accessors added in SR2d-4 Task 1,
-/// ahead of the later task that rewires the native fill's `finish` onto this store instead of its
-/// own `fill_sidecar.rs` table. Declared unconditionally alongside [`StreamingFillDescriptor`]
-/// (not `async_streaming_loader`-gated on its own) since it shares that struct's C-ABI-mirror
-/// role, but nothing outside `mod prod`'s (not-yet-called) extern declarations below references it
-/// yet, so it only actually needs to exist where those do.
+/// which `native_finish` reads/writes directly (SR2d-4 Task 2) as the single store for this state.
+/// Declared unconditionally alongside [`StreamingFillDescriptor`] (not
+/// `async_streaming_loader`-gated on its own) since it shares that struct's C-ABI-mirror role, but
+/// nothing outside `mod prod`'s (not-yet-called) extern declarations below references it yet, so it
+/// only actually needs to exist where those do.
 #[cfg(feature = "async_streaming_loader")]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -430,8 +430,8 @@ mod prod {
         fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
         fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
         // SR2d-4 Task 1 + Task 2: the StreamedChunk convert-state get/set accessors -- `native_finish`
-        // below reads/writes self's + each neighbour's convert-state through these instead of the
-        // retired `fill_sidecar.rs` table (see this task's commit for the swap).
+        // below reads/writes self's + each neighbour's convert-state directly through these (the
+        // single store for this state; SR2d-4 Task 2 retired the earlier per-chunk sidecar table).
         fn deluge_streaming_chunk_convert_state(
             chunk_backing: *mut c_void,
         ) -> DelugeChunkConvertState;
@@ -505,8 +505,7 @@ mod prod {
     /// `DelugeChunkConvertState` (the C-ABI mirror `deluge_streaming_chunk_convert_state`/
     /// `_set_convert_state` cross) -> `fill_logic::ConvertState`: the two are separate types with the
     /// identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the same
-    /// type) -- a trivial field-for-field copy at the one tier where both exist. SR2d-4 Task 2: was
-    /// `fill_sidecar::ConvertState -> fill_logic::ConvertState` before this task swapped the store.
+    /// type) -- a trivial field-for-field copy at the one tier where both exist.
     fn to_logic_state(s: DelugeChunkConvertState) -> crate::fill_logic::ConvertState {
         crate::fill_logic::ConvertState {
             first_three_bytes: s.first_three_bytes,
@@ -575,9 +574,9 @@ mod prod {
 
     /// Run the post-read convert/stitch/publish tail for `chunk_backing`
     /// (`deluge_streaming_finish_fill`'s native replacement — SR2d-4 Task 5, factored into a free fn
-    /// and moved onto the `StreamedChunk` convert-state accessors in Task 2, off the retired
-    /// `fill_sidecar.rs` table). `read_ok` mirrors `finish_fill`'s own early-out contract (see the
-    /// body below); only called with `true` from [`fill_once`]'s current calling convention.
+    /// and moved onto the `StreamedChunk` convert-state accessors in Task 2). `read_ok` mirrors
+    /// `finish_fill`'s own early-out contract (see the body below); only called with `true` from
+    /// [`fill_once`]'s current calling convention.
     ///
     /// Looks up the live singleton resource manager itself, exactly like [`native_begin`] — see that
     /// function's doc for why (both are meant to be callable from the async task AND, from Task 3/4
@@ -825,15 +824,11 @@ mod prod {
             // singleton pointer.
             let mgr = unsafe { deluge_streaming_resource_manager() };
 
-            // No sidecar-overflow guard here anymore (SR2d-4 Task 2): that guard
-            // (`deluge_resource_chunk_cap` vs. `fill_sidecar::SIDECAR_CAP`, `FREEZE_WITH_ERROR
-            // ("SDC1")`) protected the fixed-capacity `fill_sidecar.rs` table this constructor used
-            // to size-check at startup. `native_finish` below no longer reads/writes that table --
-            // convert-state now lives directly on each `StreamedChunk` via
-            // `deluge_streaming_chunk_convert_state`/`_set_convert_state`, which has no separate
-            // capacity to overflow (it's a plain field access on a chunk the caller already holds),
-            // so the guard has nothing left to protect. `fill_sidecar.rs` itself is deleted in a
-            // later step of this fill-unification; until then it just sits unused.
+            // No startup capacity guard here (SR2d-4 Task 2 retired it along with the earlier
+            // per-chunk convert-state sidecar it protected): convert-state now lives directly on
+            // each `StreamedChunk` via `deluge_streaming_chunk_convert_state`/`_set_convert_state`,
+            // which has no separate capacity to overflow (it's a plain field access on a chunk the
+            // caller already holds), so there is nothing left to guard.
             Self { mgr }
         }
     }

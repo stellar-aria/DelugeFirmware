@@ -149,20 +149,9 @@ mod fiber;
 /// `finish_fill`'s convert + stitch tail (over `deluge_sample_convert`), both from geometry/buffers
 /// alone. No FFI/statics, so it needs no `#[cfg]` gate — same tier as `fiber`/`scheduler` above,
 /// compiled everywhere. Wired into `streaming_loader::prod::ProdOps::begin`/`finish`. Its host tests
-/// run via `tests/fill_logic_host.rs` (same `#[path]` convention as `tests/fill_sidecar_host.rs`),
-/// not a plain `cargo test` of this bin (which is `test = false` — see `Cargo.toml`).
+/// run via `tests/fill_logic_host.rs` (same `#[path]` convention `tests/streaming_fill_host.rs`
+/// also uses), not a plain `cargo test` of this bin (which is `test = false` — see `Cargo.toml`).
 mod fill_logic;
-/// Per-chunk convert-state sidecar for the native fill (SR2d-4 Task 3): the
-/// `first_three_bytes`/`start_converted`/`end_converted` state a chunk's convert/stitch tail
-/// reads/writes, keyed by the manager's chunk-table slot + generation. Needs the real
-/// `deluge_resource_slot_of`/`_generation_of_slot` C-ABI, so same tier as [`streaming_loader`]
-/// below: device, or host under `host_app`. RETIRED (fill-unification SR2d-4 Task 2):
-/// `streaming_loader::prod::native_finish` now reads/writes convert-state directly on the
-/// `StreamedChunk` instead (`deluge_streaming_chunk_convert_state`/`_set_convert_state`) — this
-/// module has no callers left in this bin and is kept defined-but-unused (see its own module doc's
-/// "Retirement" section) until a later step deletes the file outright.
-#[cfg(any(target_os = "none", feature = "host_app"))]
-mod fill_sidecar;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
 mod flash;
 /// Host-only no-op stubs for the peripheral (MIDI/audio/CV-gate/signals) C ABI

@@ -231,11 +231,12 @@ void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
 // StreamedChunk convert-state get/set accessors (SR2d-4 Task 1): thin accessors over the same
 // three fields the legacy sync-fiber finish_fill() above reads/writes directly
 // (first_three_bytes_pre_data_conversion, extra_bytes_at_start_converted,
-// extra_bytes_at_end_converted -- cluster.h:102-106). Added ahead of a later task that rewires the
-// native Rust fill's begin/finish onto this store instead of its own sidecar (fill_sidecar.rs);
-// not yet called from anywhere. Same shape as deluge_streaming_chunk_payload/_set_loaded just
-// above -- real bodies only, no weak fallback, because this TU is part of the shared
-// deluge_SOURCES glob and so always compiles and links into every BSP.
+// extra_bytes_at_end_converted -- cluster.h:102-106). The native Rust fill's begin/finish
+// (streaming_loader.rs's native_begin/native_finish) read/write convert-state directly through
+// these (SR2d-4 Task 2) -- the single store for this state, replacing an earlier per-chunk sidecar
+// table (since deleted). Same shape as deluge_streaming_chunk_payload/_set_loaded just above --
+// real bodies only, no weak fallback, because this TU is part of the shared deluge_SOURCES glob
+// and so always compiles and links into every BSP.
 DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing) {
 	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
 	DelugeChunkConvertState state{};

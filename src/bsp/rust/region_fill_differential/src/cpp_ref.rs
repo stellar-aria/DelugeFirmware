@@ -7,7 +7,7 @@
 //!
 //! [`Geometry`]/[`Neighbour`]/[`ConvertState`] mirror `fill_logic`'s own `FillGeometry`/`NeighbourView`/
 //! `ConvertState` field-for-field, kept as independent types for the same reason `fill_logic`'s own doc
-//! gives for not sharing types with `fill_sidecar`/`streaming_loader`: this module has no dependency on
+//! gives for not sharing types with `streaming_loader`: this module has no dependency on
 //! `deluge-bsp-rust` at all (it only talks to the cc-compiled C++ slice), so it stays fully decoupled.
 
 mod ffi {

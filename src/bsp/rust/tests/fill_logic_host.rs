@@ -5,7 +5,7 @@
 //!
 //! `deluge-bsp-rust` is bin-only (no `[lib]` target — see `Cargo.toml`), so this
 //! recompiles `src/fill_logic.rs` unmodified into this test binary via `#[path]`,
-//! same convention as `tests/fill_sidecar_host.rs`/`tests/streaming_fill_host.rs`.
+//! same convention as `tests/streaming_fill_host.rs`.
 //! The actual `#[test]` functions live in `fill_logic.rs` itself (its own
 //! `#[cfg(test)] mod tests`), not in this file.
 #![cfg(not(target_os = "none"))]

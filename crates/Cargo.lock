@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "deluge_alloc",
  "deluge_resource",
+ "deluge_sample_source",
 ]
 
 [[package]]

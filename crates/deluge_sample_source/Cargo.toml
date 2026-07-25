@@ -21,4 +21,14 @@ critical-section = { version = "1", features = ["std"] }
 # own `host_app` feature down to this one (see its Cargo.toml).
 host_app = []
 
+# SIM Task 1: the C-host sim's own sibling of `host_app` above. The sim links this crate through the
+# `deluge_rust` umbrella (crates/deluge_rust/Cargo.toml's own `sim` feature forwards to this one) rather
+# than standing in for a device build, so it needs a distinct selector -- but it drives the exact same
+# `abi.rs` cfg_attr gate (widened below to `any(target_os = "none", feature = "host_app", feature =
+# "sim")`), because the point of this feature is precisely to make the strong Rust cursor symbols win the
+# sim link over `sample_source.cpp`'s `__attribute__((weak))` fallback (SR2d-5), so golden can validate
+# the Rust cursor runs identically to device/host_app. Carries no dependency of its own, same shape as
+# `host_app`.
+sim = []
+
 [lib]

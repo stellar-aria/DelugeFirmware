@@ -18,6 +18,16 @@
 pub use deluge_alloc::*;
 pub use deluge_resource::*;
 
+// SR3a Task 1: link-only force-link for the sim's `sim` feature (see Cargo.toml), mirroring
+// `src/bsp/rust/src/main.rs`'s device `extern crate deluge_sample_source` (SR2d-5 Task 4).
+// Unlike `deluge_alloc`/`deluge_resource` above, nothing in this crate's own Rust code
+// references `deluge_sample_source`'s items -- there is no `pub use` to keep it live -- so
+// without this, rustc/lld would never pull its single-object rlib into `libdeluge_rust.a`'s
+// link at all, even with the optional dependency + `sim` feature wired in Cargo.toml, and the
+// sim's C++ reader would keep resolving `sample_source.cpp`'s weak fallback.
+#[cfg(feature = "sim")]
+extern crate deluge_sample_source;
+
 // Bare-metal panic handler (device only); the host build uses std's. This is the
 // one panic handler for the entire dependency graph.
 #[cfg(target_os = "none")]

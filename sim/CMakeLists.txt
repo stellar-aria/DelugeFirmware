@@ -312,7 +312,8 @@ add_subdirectory(${REPO_ROOT}/src/fatfs      ${CMAKE_BINARY_DIR}/fatfs)      # f
 add_subdirectory(${REPO_ROOT}/src/OSLikeStuff ${CMAKE_BINARY_DIR}/scheduler) # deluge_scheduler
 add_subdirectory(${REPO_ROOT}/src/deluge     ${CMAKE_BINARY_DIR}/app)        # deluge_app + deluge_dsp + generators
 
-# --- Rust core (crates/ workspace: deluge_rust umbrella = alloc + slab + resource) -
+# --- Rust core (crates/ workspace: deluge_rust umbrella = alloc + slab + resource,
+# + the region cursor (deluge_sample_source) under its `sim` feature, SR3a Task 1) -
 # Build the umbrella as a host staticlib matching the sim's word size and link it
 # into the sim executables. The deluge_app allocator (heaps + the GMA coordinator)
 # is unconditionally backed by it; the legacy C++ MemoryRegion path has been retired.
@@ -335,13 +336,20 @@ set(SIM_RUST_LIB ${SIM_RUST_WS}/target/${SIM_RUST_TARGET}/release/libdeluge_rust
 file(GLOB_RECURSE SIM_RUST_SOURCES CONFIGURE_DEPENDS
     ${SIM_RUST_WS}/deluge_alloc/src/*.rs
     ${SIM_RUST_WS}/deluge_resource/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_source/src/*.rs
     ${SIM_RUST_WS}/deluge_rust/src/*.rs)
-# Under the ASan sim build, turn on the allocator's poison hooks so use-after-free
-# within a heap is caught (the __asan_*_memory_region calls resolve from libasan at
-# the final C++ link). The feature is a no-op in the crate otherwise.
-set(SIM_RUST_FEATURES "")
+# SR3a Task 1: always build the Rust region cursor (deluge_sample_source, SR2d-5) into the
+# umbrella so the sim resolves the SAME strong `deluge_sample_source_*`/`deluge_sample_region_*`
+# cursor as device/host_app, instead of sample_source.cpp's `__attribute__((weak))` fallback --
+# this is what THIS task wires (proved via nm on the sim binary); golden validation against it
+# is a later task. `deluge_rust/sim` forwards to `deluge_sample_source`'s own `sim` feature,
+# which widens abi.rs's cfg gate to actually emit the symbols (see that crate's Cargo.toml).
+# Under the ASan sim build, also turn on the allocator's poison hooks so use-after-free within a
+# heap is caught (the __asan_*_memory_region calls resolve from libasan at the final C++ link).
+# That feature is a no-op in the crate otherwise.
+set(SIM_RUST_FEATURES --features deluge_rust/sim)
 if(DELUGE_SIM_SANITIZE)
-    set(SIM_RUST_FEATURES --features deluge_rust/asan)
+    list(APPEND SIM_RUST_FEATURES --features deluge_rust/asan)
 endif()
 add_custom_command(
     OUTPUT ${SIM_RUST_LIB}
@@ -351,6 +359,7 @@ add_custom_command(
         ${SIM_RUST_WS}/Cargo.lock
         ${SIM_RUST_WS}/Cargo.toml ${SIM_RUST_WS}/deluge_alloc/Cargo.toml
         ${SIM_RUST_WS}/deluge_resource/Cargo.toml ${SIM_RUST_WS}/deluge_rust/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_source/Cargo.toml
     COMMENT "Building Rust deluge_rust staticlib (${SIM_RUST_TARGET})"
     VERBATIM
 )
@@ -359,7 +368,30 @@ add_library(deluge_rust_sim STATIC IMPORTED GLOBAL)
 set_target_properties(deluge_rust_sim PROPERTIES IMPORTED_LOCATION ${SIM_RUST_LIB})
 add_dependencies(deluge_rust_sim sim_deluge_rust_build)
 # Libs the host Rust std staticlib references; linked into the sim executables below.
-set(SIM_ALLOC_LINK deluge_rust_sim pthread dl m)
+#
+# SR3a Task 1: deluge_rust_sim must be linked `$<LINK_LIBRARY:WHOLE_ARCHIVE,...>`, not as a plain
+# (lazily-extracted) static archive. deluge_app (an OBJECT library, above) contributes
+# sample_source.cpp's `__attribute__((weak))` `deluge_sample_source_*` definitions to the link
+# UNCONDITIONALLY (object libraries' .o's are always included, never lazily pulled) and comes
+# BEFORE this archive on the link line, so by the time a plain-static ld reaches
+# libdeluge_rust.a, `deluge_sample_source_open` etc. already have a (weak) definition and are no
+# longer "undefined" -- the ordinary archive-member-extraction rule ("only pull members that
+# resolve a currently-undefined symbol") then never even looks inside libdeluge_rust.a for those
+# symbols, so the strong Rust override never enters the link and the weak C++ fallback silently
+# wins (confirmed empirically: without WHOLE_ARCHIVE, `nm` on deluge_render kept showing all 7 as
+# `W`). WHOLE_ARCHIVE unconditionally extracts every object in the archive regardless of
+# reference/order, which lets ordinary weak/strong symbol resolution (strong always wins once
+# both definitions are actually in the link, no duplicate-symbol error) take over correctly. This
+# differs from the device build (src/bsp/rust/src/main.rs's `extern crate` force-link, SR2d-5 Task
+# 4): there, `deluge_sample_source`'s rlib is processed by rustc's own link line BEFORE the
+# pre-built libdeluge_app.a (a `cargo:rustc-link-lib=static=` native lib, appended last), so the
+# strong symbol is already defined by the time the weak one is seen and no WHOLE_ARCHIVE is
+# needed there. The sim's link order is the reverse (deluge_app first, deluge_rust_sim last), so
+# it needs this extra push. Whole-archiving the WHOLE umbrella (deluge_alloc + deluge_resource +
+# deluge_sample_source) rather than just the cursor crate is deliberate simplicity -- the other
+# two have no C++ weak counterpart to collide with, so this is a no-op for them (their code was
+# already fully pulled in via ordinary undefined-symbol references).
+set(SIM_ALLOC_LINK $<LINK_LIBRARY:WHOLE_ARCHIVE,deluge_rust_sim> pthread dl m)
 if(APPLE)
     # host_pcm.c's native CoreAudio (AudioQueue) audio backend.
     list(APPEND SIM_ALLOC_LINK "-framework AudioToolbox")

@@ -59,8 +59,8 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
     cmake -B "$TSAN_BUILD_DIR" -S "$REPO_ROOT/sim" -G Ninja \
         -DDELUGE_SIM_X64=ON \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-        -DCMAKE_C_FLAGS="-fshort-enums -fsanitize=thread" \
-        -DCMAKE_CXX_FLAGS="-fshort-enums -fsanitize=thread" >/dev/null
+        -DCMAKE_C_FLAGS="-fsanitize=thread" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=thread" >/dev/null
     ninja -C "$TSAN_BUILD_DIR" deluge_app fatfs NE10 eyalroz_printf \
         deluge_dsp deluge_scheduler deluge_foundation deluge_midi
 

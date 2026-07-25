@@ -290,15 +290,21 @@ this doc uses):
 cmake -B build-embassy-hostapp-tsan -S sim -G Ninja \
   -DDELUGE_SIM_X64=ON \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-  -DCMAKE_C_FLAGS="-fshort-enums -fsanitize=thread" \
-  -DCMAKE_CXX_FLAGS="-fshort-enums -fsanitize=thread"
+  -DCMAKE_C_FLAGS="-fsanitize=thread" \
+  -DCMAKE_CXX_FLAGS="-fsanitize=thread"
 ninja -C build-embassy-hostapp-tsan deluge_app fatfs NE10 eyalroz_printf \
   deluge_dsp deluge_scheduler deluge_foundation deluge_midi
 ```
 
-`-fshort-enums` is required regardless of TSan (see `run_bindgen`'s comment in
-`build.rs` — it's what makes the host ABI's enum layout match the arm-eabi
-device build bindgen already assumes). `deluge_app` is a CMake OBJECT
+No `-fshort-enums` here, TSan or not (see `run_bindgen`'s comment in
+`build.rs`): the plain, uninstrumented `build-embassy-hostapp` tree doesn't
+pass it either, so its C enums are the platform-default 4-byte `int`, and
+bindgen no longer passes `-fshort-enums` when generating the host ABI's `mod
+sys` — both sides now agree on int-sized enums (with an explicit fixed
+underlying type where a narrow width is deliberate, e.g.
+`DelugeRegionState : uint8_t`). Passing `-fshort-enums` to only this TSan
+tree would reintroduce the same enum-width mismatch the non-TSan build fixed.
+`deluge_app` is a CMake OBJECT
 library — clang only ever *compiles* these TUs here, it never links them, so
 clang's own `libclang_rt.tsan*` never enters the picture; the one real link
 happens later, in step 2, via rustc/lld pulling in
@@ -397,7 +403,8 @@ matching the pointed-at tree.
 ### Compile: clean, no TU special-casing
 
 All 348 `deluge_app` translation units (plus the 7 dependency archives)
-compile clean under `clang++ -fshort-enums -fsanitize=thread -std=gnu++26`.
+compile clean under `clang++ -fsanitize=thread -std=gnu++26` (default
+int-sized enums, no `-fshort-enums`).
 The only warnings are the same pre-existing ones the non-TSan build already
 produces (`[[gnu::hot]]` ignored-attribute, a couple of
 `-Wimplicit-const-int-float-conversion` hits in the fixed-point DSP code, one

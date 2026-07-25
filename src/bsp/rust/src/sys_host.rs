@@ -3,7 +3,7 @@
 //! types reproduce the C-ABI layout of `include/libdeluge/*.h` exactly, so the
 //! same boundary code in `control.rs`/`display.rs` compiles and runs unchanged
 //! on the host. Layout is checked by the `control.rs` ABI guard
-//! (`DelugeInputEvent` == 6 bytes).
+//! (`DelugeInputEvent` == 8 bytes).
 //!
 //! Verified field-by-field against `include/libdeluge/types.h`
 //! (`DelugeStatus`) and `include/libdeluge/control_surface.h`

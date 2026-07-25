@@ -75,13 +75,14 @@ use crate::sys::{
 // its top-of-file comment), so `crate::sys` simply doesn't exist to import on
 // host, independent of what deluge-sdk exposes. Mirror the C types' shapes
 // directly here instead (same convention as fiber.rs's `RunCondition`):
-// `DelugeStatus` is `i8` (its values run -13..=0, the width clang's
-// `-fshort-enums` would pick for the armv7a app), `DelugeCardEvent` is `u8`
-// (0..=2). Values match include/libdeluge/{types,block_device}.h exactly, so
-// the full card-event edge-tracking algorithm in
+// `DelugeStatus` is `i32` (its values run -13..=0, forcing a signed type;
+// plain int-sized C enums throughout the build — no `-fshort-enums`, see
+// `../build.rs`), `DelugeCardEvent` is `u32` (0..=2, non-negative so clang
+// picks `unsigned int`). Values match include/libdeluge/{types,block_device}.h
+// exactly, so the full card-event edge-tracking algorithm in
 // `deluge_block_poll_card_event` below runs identically on both targets.
 #[cfg(not(target_os = "none"))]
-type DelugeStatus = i8;
+type DelugeStatus = i32;
 #[cfg(not(target_os = "none"))]
 const DELUGE_OK: DelugeStatus = 0;
 #[cfg(not(target_os = "none"))]
@@ -92,7 +93,7 @@ const DELUGE_ERR_NODEV: DelugeStatus = -6;
 const DELUGE_ERR_WRITE_PROTECTED: DelugeStatus = -12;
 
 #[cfg(not(target_os = "none"))]
-type DelugeCardEvent = u8;
+type DelugeCardEvent = u32;
 #[cfg(not(target_os = "none"))]
 const CARD_NONE: DelugeCardEvent = 0;
 #[cfg(not(target_os = "none"))]

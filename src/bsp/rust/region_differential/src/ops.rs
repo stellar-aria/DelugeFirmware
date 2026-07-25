@@ -23,8 +23,9 @@ pub enum RegionState {
 }
 
 impl RegionState {
-    /// Map the raw `DelugeRegionState` (as returned across the C ABI) to this enum.
-    pub fn from_raw(raw: i32) -> Self {
+    /// Map the raw `DelugeRegionState` (as returned across the C ABI, `u8` —
+    /// the header's explicit `: uint8_t` fixed underlying type) to this enum.
+    pub fn from_raw(raw: u8) -> Self {
         match raw {
             1 => RegionState::Ready,
             2 => RegionState::Loading,

@@ -31,20 +31,23 @@ static BOOT_FW: AtomicU16 = AtomicU16::new(0);
 /// "Received" sentinel bit OR-ed into [`BOOT_FW`] (raw byte is only 8 bits).
 const BOOT_FW_RECEIVED: u16 = 0x100;
 
-// ABI guard: the C++ app is built arm-none-eabi (`-fshort-enums`), so
-// DelugeInputEventKind is 1 byte and DelugeInputEvent is {kind@0, x@1, y@2,
-// value@4} = 6 bytes. bindgen must match (see build.rs --target/-fshort-enums);
-// if it ever regresses to a 4-byte enum the app reads x/y/value from the wrong
-// offsets (silently, as garbage) — this was a real, hard-to-find bug. Fail the
-// build instead.
+// ABI guard: the C++ app is built with plain (unfixed) `int`-sized enums —
+// `-fshort-enums` is NOT used anywhere in the build (see build.rs) — so
+// DelugeInputEventKind is 4 bytes and DelugeInputEvent is {kind@0 (4B), x@4,
+// y@5, value@6} = 8 bytes (the i16 `value` only needs 2-byte alignment, so it
+// abuts `y` with no padding). bindgen must match (see build.rs --target,
+// which no longer passes -fshort-enums); if this ever regresses to a
+// short/narrow enum the app reads x/y/value from the wrong offsets (silently,
+// as garbage) — this was a real, hard-to-find bug (see DelugeRegionState's
+// history in sample_source.h). Fail the build instead.
 const _: () = {
     assert!(
-        core::mem::size_of::<DelugeInputEvent>() == 6,
-        "DelugeInputEvent ABI drift: must be 6 bytes (arm-eabi short-enum kind)"
+        core::mem::size_of::<DelugeInputEvent>() == 8,
+        "DelugeInputEvent ABI drift: must be 8 bytes (int-sized kind, no -fshort-enums)"
     );
     assert!(
-        core::mem::size_of::<crate::sys::DelugeInputEventKind>() == 1,
-        "DelugeInputEventKind must be 1 byte (arm-eabi -fshort-enums)"
+        core::mem::size_of::<crate::sys::DelugeInputEventKind>() == 4,
+        "DelugeInputEventKind must be 4 bytes (default int-sized C enum, no -fshort-enums)"
     );
 };
 

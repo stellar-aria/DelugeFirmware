@@ -121,10 +121,9 @@ fn run_bindgen(
         .allowlist_type("Deluge.*")
         .allowlist_type("RunCondition")
         .use_core()
-        // See ../build.rs: the app is built with -fshort-enums; must match or
-        // every enum-bearing POD is laid out differently across the boundary.
+        // See ../build.rs: NO `-fshort-enums` — the C++ app isn't built with
+        // it either, so plain int-sized enums on both sides already agree.
         .clang_arg("--target=x86_64-unknown-linux-gnu")
-        .clang_arg("-fshort-enums")
         .layout_tests(false)
         .generate()
         .expect("bindgen failed on libdeluge headers");

@@ -43,7 +43,15 @@ typedef struct DelugeSampleGeometry {
 /// Each state carries a LEASE POLICY, which is part of the contract, not an implementation detail.
 /// Numbered from 1 (not 0) so `if (state)` cannot be misread as a boolean — always compare against
 /// a named constant.
-typedef enum DelugeRegionState {
+///
+/// Fixed underlying type (`: uint8_t`, C23 + C++11): this enum crosses the FFI BY VALUE
+/// (`deluge_sample_region_acquire_ex`'s return), so its width must be pinned explicitly rather than
+/// left to "whatever the C++ build's default `int` enum happens to be" — the Rust side
+/// (`DelugeRegionState` in `crates/deluge_sample_source/src/abi.rs`) is `#[repr(u8)]` to match. Every
+/// OTHER libdeluge enum stays a plain (unfixed, `int`-sized) C enum and relies on bindgen no longer
+/// passing `-fshort-enums` (see `src/bsp/rust/build.rs`) to agree with the C++ side's default int
+/// width instead.
+typedef enum DelugeRegionState : uint8_t {
 	/// Resident AND loaded. `out` is filled and the source holds the pin backing it; the caller may
 	/// read `payload_base` until it releases the lease, closes, or acquires a different region.
 	DELUGE_REGION_READY = 1,

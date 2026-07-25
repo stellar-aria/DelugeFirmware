@@ -190,23 +190,26 @@ fn run_bindgen(
         .allowlist_type("Deluge.*")
         .allowlist_type("RunCondition")
         .use_core()
-        // CRITICAL: the C++ app is built with `-fshort-enums` (arm-eabi always;
-        // the host_app build-embassy-hostapp tree opts in too), which makes
-        // enums the smallest type that fits —
-        // e.g. DelugeInputEventKind (0..3) is 1 byte, so DelugeInputEvent is
-        // {kind@0, x@1, y@2, value@4}. bindgen runs under the *host* clang, which
-        // sizes enums as 4-byte `int` by default; without this flag every
-        // enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card events, …)
-        // is laid out differently on the two sides and fields read as garbage
-        // across the ABI. Point libclang at the actual target so it computes the
-        // same layout as the app being linked; -fshort-enums alone is ignored
-        // when libclang targets x86_64 without an explicit --target (host
-        // x86_64 mandates 4-byte int enums by default, same as arm w/o the
-        // flag) — with an explicit target the flag applies on both.
+        // NO `-fshort-enums`: the C++ app is NOT built with it (verified —
+        // it's in no committed cmake/preset config, arm-eabi or host_app), so
+        // its plain C enums (DelugeInputEventKind, DelugeCardEvent, DelugeStatus,
+        // …) are the platform-default 4-byte `int`. Passing -fshort-enums here
+        // used to make bindgen size those enums as the smallest type that fits
+        // instead (e.g. DelugeInputEventKind (0..3) as 1 byte) — a WIDTH
+        // MISMATCH against the real int-sized C++ enum, silently laying out
+        // every enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card
+        // events, …) differently on the two sides of the FFI. (This is exactly
+        // how `DelugeRegionState`'s FFI-return enum went stale: see
+        // `include/libdeluge/sample_source.h`, which now pins it with an
+        // explicit `: uint8_t` fixed underlying type to match the Rust side's
+        // deliberately-narrow `#[repr(u8)]` — the one enum where a byte return
+        // width IS wanted, done explicitly on both sides instead of via a
+        // global short-enums flag.) Point libclang at the actual target purely
+        // for pointer width / alignment / calling convention, not enum sizing.
         .clang_arg(format!("--target={clang_target}"))
-        .clang_arg("-fshort-enums")
-        // Layouts now match the app being linked; the asserts would run
-        // host-side anyway.
+        // Layouts now match the app being linked (default int-sized enums on
+        // both sides, plus the explicit fixed-width exception above); the
+        // asserts would run host-side anyway.
         .layout_tests(false)
         .generate()
         .expect("bindgen failed on libdeluge headers");
@@ -217,9 +220,10 @@ fn run_bindgen(
     println!("cargo:rerun-if-changed={}", include_dir.display());
 }
 
-/// `host_app` feature: bindgen the host ABI (x86-64 + `-fshort-enums`, matching
-/// build-embassy-hostapp's CMake config) into the real `mod sys`, then archive
-/// the host-built C++ `deluge_app` object closure and emit link directives so
+/// `host_app` feature: bindgen the host ABI (x86-64, default int-sized enums —
+/// matching build-embassy-hostapp's CMake config, which does not pass
+/// `-fshort-enums` either) into the real `mod sys`, then archive the
+/// host-built C++ `deluge_app` object closure and emit link directives so
 /// the crate reaches the linker against real provider-symbol references.
 fn run_host_app(
     repo_root: &std::path::Path,

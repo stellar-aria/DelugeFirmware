@@ -45,14 +45,20 @@ extern "C" {
         stream_backing: *mut c_void,
         geometry: DelugeSampleGeometry,
     ) -> *mut DelugeSampleSource;
+    // Return type `u8`, NOT `i32`: `DelugeRegionState` (`include/libdeluge/
+    // sample_source.h`) has an explicit `: uint8_t` fixed underlying type
+    // (deliberately narrow, since it crosses the FFI by value) — an `i32`
+    // declaration here would read 3 bytes of undefined register content above
+    // the true 1-byte return, exactly the width-mismatch bug this whole port
+    // exists to catch. See `RegionState::from_raw` (ops.rs).
     fn deluge_sample_region_acquire_ex(
         src: *mut DelugeSampleSource,
         index: u32,
         direction: i8,
         priority: u32,
         out: *mut DelugeSampleRegion,
-    ) -> i32;
-    fn deluge_sample_region_state(src: *const DelugeSampleSource, index: u32) -> i32;
+    ) -> u8;
+    fn deluge_sample_region_state(src: *const DelugeSampleSource, index: u32) -> u8;
     fn deluge_sample_region_retain(lease: u64);
     fn deluge_sample_region_release(lease: u64);
     fn deluge_sample_source_close(src: *mut DelugeSampleSource);

@@ -175,6 +175,10 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
+/// SR3b Task 2 Step 4: does a still-recording sample's live read-back resolve on THIS target
+/// (`async_streaming_loader` on)? See its module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod recorder_probe;
 /// Streaming-underrun harness: the reusable, thread-agnostic scenario driver
 /// (load a real song, start playback, start a concurrent recording, step N audio
 /// blocks) — see its module doc. `host_app`-only.
@@ -882,6 +886,25 @@ fn main() {
                 }
             });
 
+        // --- SR3b Task 2 Step 4: opt-in recorder live-readback probe -------
+        // Off by default. Set DELUGE_RECORDER_PROBE=1 to switch this run into the diagnostic:
+        // construct a real SampleRecorder, feed it audio, and probe whether a still-recording
+        // sample's data can be read back through the region port on THIS target — see
+        // recorder_probe.rs's module doc. Mutually exclusive with the streaming-underrun
+        // scenario above in practice (both would work concurrently, but nothing exercises them
+        // together) — this task only needs the boot-ready signal, not a loaded song.
+        let recorder_probe_requested = std::env::var("DELUGE_RECORDER_PROBE").as_deref() == Ok("1");
+        let recorder_probe_step_timeout_ms: u64 =
+            std::env::var("DELUGE_RECORDER_PROBE_STEP_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20_000);
+        let recorder_probe_poll_window_ms: u64 =
+            std::env::var("DELUGE_RECORDER_PROBE_POLL_WINDOW_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5_000);
+
         // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
@@ -979,6 +1002,15 @@ fn main() {
                     // thread itself).
                     if let Some(cfg) = scenario_cfg {
                         spawner.spawn(crate::scenario::scenario_task(cfg).unwrap());
+                    }
+                    if recorder_probe_requested {
+                        spawner.spawn(
+                            crate::recorder_probe::recorder_probe_task(
+                                recorder_probe_step_timeout_ms,
+                                recorder_probe_poll_window_ms,
+                            )
+                            .unwrap(),
+                        );
                     }
                 });
             })
@@ -1109,6 +1141,65 @@ fn main() {
                 log::error!("deluge-bsp-rust: HOST APP scenario FAILED (see fields above)");
                 hard_exit(1);
             }
+        }
+
+        // SR3b Task 2 Step 4: if the recorder live-readback probe was requested, wait for it
+        // (spawned above, on the host-app executor) to finish, report the finding, and exit —
+        // same shape as the scenario block above. A diagnostic, not a normative gate: any
+        // outcome (READY, LOADING-forever, UNAVAILABLE) is a valid, reportable finding, so this
+        // only hard_exit(1)s if the HARNESS itself failed (couldn't even set up the recorder /
+        // never reached boot), not on an unresolved read.
+        if recorder_probe_requested {
+            let watchdog = Duration::from_millis(
+                recorder_probe_step_timeout_ms + recorder_probe_poll_window_ms + 10_000,
+            );
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::recorder_probe::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP recorder probe TIMED OUT after {watchdog:?} \
+                         with no result (recorder_probe_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP recorder live-readback probe result: boot_ready={} \
+                 initial_state={} final_state={} poll_iterations={} resolved_ready={} \
+                 (state: 0=harness-error 1=READY 2=LOADING 3=UNAVAILABLE)",
+                result.boot_ready,
+                result.initial_state,
+                result.final_state,
+                result.poll_iterations,
+                result.resolved_ready,
+            );
+            if !result.boot_ready
+                || result.initial_state == crate::recorder_probe::STATE_HARNESS_ERROR
+            {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder probe HARNESS FAILURE (see fields above)"
+                );
+                hard_exit(1);
+            }
+            if result.resolved_ready {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP recorder probe FINDING — a still-recording \
+                     sample's data DID resolve READY on this target (async_streaming_loader on)."
+                );
+            } else {
+                log::warn!(
+                    "deluge-bsp-rust: HOST APP recorder probe FINDING — a still-recording \
+                     sample's data did NOT resolve READY on this target within the poll window \
+                     (final_state={}) — matches the SR3b routing spike's prediction that the \
+                     async loader cannot read a handle-less recording.",
+                    result.final_state,
+                );
+            }
+            hard_exit(0);
         }
 
         // --- Widen the concurrent window before exit ------------------------

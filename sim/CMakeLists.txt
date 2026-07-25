@@ -470,6 +470,30 @@ if(RT_LIB)
     target_link_libraries(deluge_loadcheck PRIVATE ${RT_LIB})
 endif()
 
+# deluge_recorder_roundtrip: headless byte-exact round-trip oracle for SampleRecorder (SR3b Task 2).
+# Same app + host BSP as deluge_render/deluge_loadcheck, with its own main()/driver
+# (host_recorder_roundtrip_main.cpp) that constructs a real SampleRecorder directly, feeds it a
+# deterministic PCM ramp, pumps its fiber drain (cardRoutine()) synchronously, finalizes, and reads
+# the produced SD file back byte-exact. No mtools/project dependency (only ever writes new files, the
+# disk image is freshly mformat-ed empty) — self-contained, no golden-corpus fixture needed.
+add_executable(deluge_recorder_roundtrip
+    ${REPO_ROOT}/src/bsp/host/host_bsp.c
+    ${REPO_ROOT}/src/bsp/host/host_platform.c
+    ${REPO_ROOT}/src/bsp/host/host_audio.c
+    ${REPO_ROOT}/src/bsp/host/host_link.c
+    ${REPO_ROOT}/src/bsp/host/host_ws.c
+    ${REPO_ROOT}/src/bsp/host/host_pcm.c
+    ${REPO_ROOT}/src/bsp/host/host_midi.c
+    ${REPO_ROOT}/src/bsp/host/host_recorder_roundtrip_main.cpp
+    ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
+)
+target_include_directories(deluge_recorder_roundtrip PRIVATE ${HOST_INCLUDE_DIRS} ${REPO_ROOT}/src/deluge)
+target_link_libraries(deluge_recorder_roundtrip PRIVATE deluge_app deluge_scheduler ${SIM_ALLOC_LINK})
+if(RT_LIB)
+    target_link_libraries(deluge_recorder_roundtrip PRIVATE ${RT_LIB})
+endif()
+
 # ---------------------------------------------------------------------------
 # Layout-invariance guard (CTest). Render each fixture at two heap-pad layouts
 # (DELUGE_SIM_HEAP_PAD via scripts/golden_mixdown.sh padsweep) and assert the
@@ -494,3 +518,9 @@ foreach(fixture cordae highsiderr icoustic)
         TIMEOUT 1200
     )
 endforeach()
+
+# SampleRecorder byte-exact round-trip oracle (SR3b Task 2). Self-contained (no fixture/corpus
+# dependency, only requires mtools for the empty-image mformat), so it runs unconditionally rather
+# than SKIP-on-missing-fixture like the padsweep tests above.
+add_test(NAME recorder_roundtrip COMMAND deluge_recorder_roundtrip)
+set_tests_properties(recorder_roundtrip PROPERTIES LABELS recorder TIMEOUT 120)

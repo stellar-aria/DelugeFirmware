@@ -56,6 +56,13 @@ StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing);
 
 /// @brief Convert, stitch, and publish readiness for a chunk's just-read payload.
 ///
+/// Called from both fill paths: the synchronous fiber pump (`SampleStream::read_cluster_data`)
+/// after its own blocking read, and (indirectly, via its own native tail rather than this symbol)
+/// the Rust async fill task. The definition is `__attribute__((weak))` in `async_fill.cpp` — the
+/// legacy fallback for BSPs that don't link the Rust crate. On the Rust/Embassy BSP a strong
+/// override (`streaming_loader.rs`) wins the link instead, routing the synchronous caller through
+/// the SAME native convert/stitch/publish tail (and `StreamedChunk` convert-state store) the async
+/// task already uses.
 /// @param chunk_backing Opaque `StreamedChunk` backing pointer; the same value passed to the
 ///                       matching deluge_streaming_begin_fill call.
 /// @param read_ok        False if the underlying sector read failed: the fill is abandoned (this

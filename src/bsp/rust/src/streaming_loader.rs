@@ -762,6 +762,28 @@ mod prod {
         true
     }
 
+    /// Strong override of `deluge_streaming_finish_fill` (SR2d-4 Task 3). This is the
+    /// app→BSP down-call `SampleStream::read_cluster_data`'s SYNCHRONOUS fill path
+    /// (`sample_stream.cpp`) makes after its own blocking read completes; `async_fill.cpp`'s
+    /// `deluge_streaming_finish_fill` body is now `__attribute__((weak))`, so on the Rust BSP
+    /// this strong definition wins the link and the sync path runs through the exact same
+    /// [`native_finish`] tail (and therefore the same `StreamedChunk` convert-state store,
+    /// via `deluge_streaming_chunk_convert_state`/`_set_convert_state`) as the async fill task
+    /// (`ProdOps::finish`, just below) already does — no more separate convert-state copies
+    /// for the two paths. Only compiled where [`native_finish`] itself is (this module's
+    /// `async_streaming_loader` + device-or-`host_app` gate); a build without that feature
+    /// falls back to the weak legacy C++ body, same as before this task.
+    ///
+    /// The async task is unaffected: [`ProdOps::finish`] below still calls [`native_finish`]
+    /// directly as a plain fn call, not through this symbol.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn deluge_streaming_finish_fill(
+        chunk_backing: *mut c_void,
+        read_ok: bool,
+    ) -> bool {
+        native_finish(chunk_backing, read_ok)
+    }
+
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
     /// `deluge_resource.h`'s loader-queue C ABI and the efatfs streaming read
     /// (`crate::efatfs_fs`/`crate::efatfs_host_shim`). `!Send`/`!Sync` (a raw

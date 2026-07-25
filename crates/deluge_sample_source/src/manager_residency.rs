@@ -1,6 +1,39 @@
 use crate::residency::{Get, RegionPin, Residency};
+use core::ffi::c_void;
 use deluge_resource::facade::{Lease, Resource};
 use deluge_resource::DelugeResource;
+
+// Both symbols are C-ABI entry points the APP provides in production
+// (`src/deluge/storage/audio/stream/async_fill.cpp` and `sample_stream.cpp`). This
+// crate's own `cargo test` binary links `deluge_resource` (and this crate) standalone,
+// with no app around to supply them, so `#[cfg(test)]` stubs below stand in — mirroring
+// the `host_critical_section_stubs` pattern in `lib.rs`.
+unsafe extern "C" {
+    /// Returns `backing + kChunkPayloadOffset` for a real `StreamedChunk` backing.
+    fn deluge_streaming_chunk_payload(chunk: *mut c_void) -> *mut u8;
+    /// Wakes the async fill task (mirrors `SampleStream::get_cluster`'s post-enqueue
+    /// signal) so an enqueued-but-unwoken chunk doesn't stall on `FILL_WAKE`.
+    fn deluge_streaming_signal_fill();
+}
+
+// Test-only stand-ins for the two C-ABI symbols above, so this crate's host unit tests
+// link standalone (see the comment on the `extern "C"` block). `deluge_streaming_chunk_payload`
+// is an IDENTITY stub — it returns its argument unchanged, not `backing +
+// kChunkPayloadOffset` — because this crate's tests (`make_ramp_construct` et al., below)
+// seed payload==backing directly. This does NOT exercise the real offset behavior; that's
+// proved by the separate real-`StreamedChunk` gate, not by this crate's tests.
+#[cfg(test)]
+mod host_streaming_stubs {
+    use core::ffi::c_void;
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_payload(chunk: *mut c_void) -> *mut u8 {
+        chunk as *mut u8
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_signal_fill() {}
+}
 
 /// Production residency provider: composes the `deluge_resource` facade. `Ready` =
 /// a cache hit (`acquire_leased`); `Loading` = a fresh reservation (`request` +
@@ -67,7 +100,11 @@ impl RegionPin for ManagerPin {
         self.resource().is_ready(self.lease.chunk())
     }
     fn payload(&self) -> *const u8 {
-        self.lease.chunk().as_ptr() as *const u8
+        // SAFETY: the chunk is lease-pinned resident for this pin's lifetime, so its backing
+        // is a live StreamedChunk; deluge_streaming_chunk_payload returns backing+kChunkPayloadOffset.
+        unsafe {
+            deluge_streaming_chunk_payload(self.lease.chunk().as_ptr() as *mut c_void) as *const u8
+        }
     }
     fn token(&self) -> u64 {
         self.resource().pin_token(self.lease.chunk())
@@ -94,6 +131,8 @@ impl Residency for ManagerResidency {
             Some(lease) => {
                 let slot = res.slot_of(lease.chunk());
                 res.loader_enqueue(slot, priority);
+                // SAFETY: no-arg C-ABI wake; mirrors SampleStream::get_cluster's post-enqueue signal.
+                unsafe { deluge_streaming_signal_fill() };
                 Get::Loading(ManagerPin {
                     lease,
                     index,

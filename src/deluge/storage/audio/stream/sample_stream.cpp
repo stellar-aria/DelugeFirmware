@@ -386,3 +386,16 @@ void SampleStream::erase_from(size_t index) {
 }
 
 } // namespace deluge::audio::stream
+
+extern "C" {
+
+// The region-port open() bridge's stream-backing -> resource-asset accessor (SR2d-5 Task 1;
+// declared in libdeluge/streaming_fill.h alongside its sibling deluge_streaming_resource_manager).
+// The real body: SampleStream is always available wherever this TU compiles, so this just forwards
+// to the lazy-init entry point. The `__attribute__((weak))` no-op fallback for build configs
+// without a real SampleStream lives in async_fill.cpp, mirroring that file's other weak fallbacks.
+uint32_t deluge_sample_stream_asset_id(void* stream_backing) {
+	return reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing)->ensure_resource_asset();
+}
+
+} // extern "C"

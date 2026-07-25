@@ -5,15 +5,24 @@
 //! `claim_source_slot`/`release_source_slot`) natively.
 //!
 //! NOT yet the link-time weak/strong selector that makes these symbols win
-//! over the C++ backing on device/host_app builds -- that is SR2d-5. This
-//! module only needs to compile and be unit-testable on its own; nothing here
-//! is wired into the app, the sim, or the region-differential gate.
+//! over the C++ backing on device/host_app builds -- that is SR2d-5 Task 4.
+//! This module only needs to compile and be unit-testable on its own; nothing
+//! here is wired into the app, the sim, or the region-differential gate.
 //!
 //! # `open()`'s `stream_backing`
-//! In production this will carry `{manager handle, asset id}`, built at
-//! sample-load from the SampleStream/efatfs (SR2d-4/5). For this rung it is a
-//! caller-supplied [`SampleSourceDescriptor`] the unit tests construct
-//! directly over a test `deluge_resource` manager + asset (Task 2's harness).
+//! The reader passes its opaque `deluge::audio::stream::SampleStream*`
+//! unchanged (SR2d-5 Task 1) -- the same pointer the C++ backing
+//! (`sample_source.cpp`) already casts to `SampleStream*`. This module
+//! bridges it to the `{manager handle, asset id}` pair `ManagerResidency`
+//! needs via two C-ABI calls: `deluge_streaming_resource_manager()` (the
+//! process-wide boot-singleton getter, `include/libdeluge/streaming_fill.h`)
+//! and `deluge_sample_stream_asset_id(stream_backing)` (the lazy-init
+//! accessor added alongside it, wrapping `SampleStream::ensure_resource_asset()`).
+//! Neither call dereferences `stream_backing` on the Rust side -- it is
+//! forwarded straight through as an opaque pointer, exactly as the header's
+//! `void*` contract requires. Unit tests can't build a real `SampleStream`,
+//! so they override both externs with test doubles driving a test
+//! `deluge_resource` manager + asset (see the `tests` module below).
 //!
 //! # `retain`/`release` and the single boot-singleton manager
 //! `deluge_sample_region_retain`/`_release` take ONLY the opaque `lease`
@@ -90,20 +99,25 @@ pub struct DelugeSampleRegion {
     pub lease: u64,
 }
 
-/// Production-shape carrier for `deluge_sample_source_open`'s `void*
-/// stream_backing`: `{manager handle, asset id}`. In production this will be
-/// built at sample-load from the SampleStream/efatfs (SR2d-4/5); this rung's
-/// unit tests construct one directly over a test `deluge_resource` manager +
-/// asset (mirroring Task 2's/`cursor.rs`'s test harness).
-///
-/// `DelugeSampleGeometry` is NOT redefined here: `geometry::Geometry` is
-/// already `#[repr(C)]` and field-for-field identical to the header's
-/// `DelugeSampleGeometry` (see `geometry.rs`), so `deluge_sample_source_open`
-/// takes it directly rather than duplicating an equivalent struct.
-#[repr(C)]
-pub struct SampleSourceDescriptor {
-    pub handle: *mut DelugeResource,
-    pub asset: u32,
+// `DelugeSampleGeometry` is NOT redefined here: `geometry::Geometry` is already `#[repr(C)]` and
+// field-for-field identical to the header's `DelugeSampleGeometry` (see `geometry.rs`), so
+// `deluge_sample_source_open` takes it directly rather than duplicating an equivalent struct.
+
+// ---------------------------------------------------------------------------
+// The open() bridge: stream_backing -> {manager handle, asset id}
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    /// The resource-manager instance the streaming loader queue lives on
+    /// (`include/libdeluge/streaming_fill.h`). The process-wide boot-singleton
+    /// handle -- the same one `ManagerResidency::new`'s contract requires to
+    /// stay live for the process's whole remaining life.
+    fn deluge_streaming_resource_manager() -> *mut DelugeResource;
+    /// `stream_backing`'s (a `deluge::audio::stream::SampleStream*`)
+    /// resource-manager Asset id, defining it first if not yet defined
+    /// (`include/libdeluge/streaming_fill.h`, wrapping
+    /// `SampleStream::ensure_resource_asset()`).
+    fn deluge_sample_stream_asset_id(stream_backing: *mut c_void) -> u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,15 +293,16 @@ fn num_clusters_for(geo: &Geometry) -> u32 {
 // C-ABI surface
 // ---------------------------------------------------------------------------
 
-/// Open a per-reader cursor. See the module doc for `stream_backing`'s shape
-/// this rung.
+/// Open a per-reader cursor from the reader's opaque stream backing. See the
+/// module doc for the `stream_backing` -> `{manager handle, asset id}` bridge.
 ///
 /// # Safety
-/// `stream_backing`, if non-null, must point to a live, readable
-/// `SampleSourceDescriptor` for the duration of this call, whose `handle`
-/// must itself be a live `deluge_resource` handle for the whole life of the
-/// `SampleSource` this opens (the crate-wide boot-singleton contract --
-/// see `ManagerResidency::new`).
+/// `stream_backing`, if non-null, must be a live `deluge::audio::stream::
+/// SampleStream*` for the duration of this call -- forwarded as-is to
+/// `deluge_sample_stream_asset_id`, never dereferenced on the Rust side.
+/// `deluge_streaming_resource_manager`'s returned handle, if non-null, must be
+/// live for the whole life of the `SampleSource` this opens (the crate-wide
+/// boot-singleton contract -- see `ManagerResidency::new`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn deluge_sample_source_open(
     stream_backing: *mut c_void,
@@ -296,16 +311,24 @@ pub unsafe extern "C" fn deluge_sample_source_open(
     if stream_backing.is_null() {
         return core::ptr::null_mut();
     }
-    // SAFETY: forwarded from this fn's own contract above.
-    let desc = unsafe { &*(stream_backing as *const SampleSourceDescriptor) };
+    // SAFETY: no preconditions beyond FFI-safety -- the process-wide
+    // boot-singleton getter (mirrors `GeneralMemoryAllocator::get().resourceManager()`).
+    let handle = unsafe { deluge_streaming_resource_manager() };
+    if handle.is_null() {
+        // No manager yet (e.g. boot ordering) -- nothing to build a residency over.
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `stream_backing` is non-null (checked above) and, per this fn's
+    // contract, a live `SampleStream*` for the duration of this call.
+    let asset = unsafe { deluge_sample_stream_asset_id(stream_backing) };
     let num_clusters = num_clusters_for(&geometry);
-    // SAFETY: `desc.handle` must be a live `deluge_resource` handle for this
-    // source's whole life -- forwarded from `SampleSourceDescriptor`'s own
+    // SAFETY: `handle` is non-null (checked above) and live for this source's
+    // whole life -- forwarded from `deluge_streaming_resource_manager`'s own
     // contract (this fn's contract above).
     let residency = unsafe {
         ManagerResidency::new(
-            desc.handle,
-            desc.asset,
+            handle,
+            asset,
             geometry.cluster_size_bytes as usize,
             num_clusters,
         )
@@ -338,7 +361,7 @@ pub unsafe extern "C" fn deluge_sample_source_open(
     // ABI (see the module doc): production runs exactly one boot-singleton
     // `deluge_resource` handle, so every `open()` stores the same value here
     // in practice.
-    m_set(&ACTIVE_MANAGER.0, desc.handle);
+    m_set(&ACTIVE_MANAGER.0, handle);
     slot.source.get() as *mut DelugeSampleSource
 }
 
@@ -609,14 +632,58 @@ mod tests {
         }
     }
 
-    /// A `SampleSourceDescriptor` over a fresh test manager + ramp asset, as a
-    /// `void*` ready to hand to `deluge_sample_source_open`. Leaks the
-    /// descriptor itself (a few bytes, for the test binary's remaining life)
-    /// so the returned pointer stays valid without borrow-juggling in every
-    /// test.
-    fn test_descriptor_ptr(handle: *mut DelugeResource, asset: u32) -> *mut c_void {
-        let desc = std::boxed::Box::new(SampleSourceDescriptor { handle, asset });
-        std::boxed::Box::into_raw(desc) as *mut c_void
+    /// Test doubles for `deluge_streaming_resource_manager`/
+    /// `deluge_sample_stream_asset_id`: `sample_stream.cpp`'s/`async_fill.cpp`'s
+    /// real C++ bodies aren't linked into this test binary, and there is no
+    /// real `SampleStream` to build in a unit test, so `open()`'s bridge is
+    /// exercised against these no-mangle overrides instead -- resolved by the
+    /// linker in place of the `unsafe extern "C"` declarations above, exactly
+    /// the same trick `lib.rs`'s `host_critical_section_stubs` already uses
+    /// for `deluge_resource::sync`'s critical-section externs.
+    ///
+    /// Both tests that call `deluge_sample_source_open` set these via
+    /// `set_test_bridge` before opening, under the same `TEST_LOCK` that
+    /// already serializes this module's tests against the shared `POOL`/
+    /// `ACTIVE_MANAGER` statics -- so a plain (non-atomic) `Cell` pair
+    /// suffices here too.
+    struct TestBridge {
+        handle: Cell<*mut DelugeResource>,
+        asset: Cell<u32>,
+    }
+    // SAFETY: every touch of both cells is serialized by TEST_LOCK (see the
+    // doc above), so there is never concurrent access to race.
+    unsafe impl Sync for TestBridge {}
+    static TEST_BRIDGE: TestBridge = TestBridge {
+        handle: Cell::new(core::ptr::null_mut()),
+        asset: Cell::new(0),
+    };
+
+    fn set_test_bridge(handle: *mut DelugeResource, asset: u32) {
+        TEST_BRIDGE.handle.set(handle);
+        TEST_BRIDGE.asset.set(asset);
+    }
+
+    /// Test double for `deluge_streaming_resource_manager`. See `TestBridge`'s doc.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_resource_manager() -> *mut DelugeResource {
+        TEST_BRIDGE.handle.get()
+    }
+
+    /// Test double for `deluge_sample_stream_asset_id`. Ignores `stream_backing`
+    /// -- this test binary has no real `SampleStream` to dereference; see
+    /// `dummy_stream_backing` and `TestBridge`'s doc.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_sample_stream_asset_id(_stream_backing: *mut c_void) -> u32 {
+        TEST_BRIDGE.asset.get()
+    }
+
+    /// A non-null dummy `stream_backing` for `deluge_sample_source_open`: the
+    /// bridge test doubles above never dereference it (only `open()` itself
+    /// null-checks it), so any non-null value stands in for the real
+    /// `SampleStream*` production would pass.
+    fn dummy_stream_backing() -> *mut c_void {
+        static DUMMY: u8 = 0;
+        &DUMMY as *const u8 as *mut c_void
     }
 
     #[test]
@@ -625,17 +692,17 @@ mod tests {
         let h = test_manager_handle();
         let asset = define_ramp_asset(h);
         let geo = test_geo(4);
-        let desc_ptr = test_descriptor_ptr(h, asset);
+        set_test_bridge(h, asset);
+        let backing = dummy_stream_backing();
 
-        // SAFETY: `desc_ptr` is a live `SampleSourceDescriptor` for the whole
-        // test; `geo` is Copy.
-        let src1 = unsafe { deluge_sample_source_open(desc_ptr, geo) };
+        // SAFETY: `backing` is a live dummy for the whole test; `geo` is Copy.
+        let src1 = unsafe { deluge_sample_source_open(backing, geo) };
         assert!(!src1.is_null(), "first open must succeed");
 
         // A second open() -- alloc-free BY CONSTRUCTION (claim_slot only ever
         // flips an in_use Cell<bool> under a masked check-and-set, never
         // touches the heap) -- gets a DIFFERENT slot than the first, still-live one.
-        let src2 = unsafe { deluge_sample_source_open(desc_ptr, geo) };
+        let src2 = unsafe { deluge_sample_source_open(backing, geo) };
         assert!(!src2.is_null(), "second open must succeed");
         assert_ne!(
             src1, src2,
@@ -652,8 +719,8 @@ mod tests {
         // open/close cycles must keep succeeding (never null), proving slots
         // are reclaimed rather than leaked.
         for _ in 0..8 {
-            // SAFETY: `desc_ptr` is still live.
-            let s = unsafe { deluge_sample_source_open(desc_ptr, geo) };
+            // SAFETY: `backing` is still live.
+            let s = unsafe { deluge_sample_source_open(backing, geo) };
             assert!(
                 !s.is_null(),
                 "close must return the slot to the pool for reuse"
@@ -670,10 +737,11 @@ mod tests {
         let asset = define_ramp_asset(h);
         mark_index_ready(h, asset, 0);
         let geo = test_geo(4);
-        let desc_ptr = test_descriptor_ptr(h, asset);
+        set_test_bridge(h, asset);
+        let backing = dummy_stream_backing();
 
-        // SAFETY: `desc_ptr` is live for the whole test; `geo` is Copy.
-        let src = unsafe { deluge_sample_source_open(desc_ptr, geo) };
+        // SAFETY: `backing` is live for the whole test; `geo` is Copy.
+        let src = unsafe { deluge_sample_source_open(backing, geo) };
         assert!(!src.is_null());
 
         let mut out = DelugeSampleRegion {

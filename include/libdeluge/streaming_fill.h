@@ -82,6 +82,25 @@ bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok);
 ///         GeneralMemoryAllocator's resourceManager().
 DelugeResource* deluge_streaming_resource_manager(void);
 
+/// @brief The resource-manager Asset id backing @p stream_backing, defining it first if needed.
+///
+/// The region-port `open()` bridge (SR2d-5 Task 1): the reader passes its
+/// `deluge::audio::stream::SampleStream*` as `deluge_sample_source_open`'s opaque `stream_backing`,
+/// and the Rust cursor resolves it to `{deluge_streaming_resource_manager(), this accessor's
+/// return}` before building its own residency provider — the same `{manager handle, asset id}`
+/// pair `SampleStream::ensure_resource_asset()` itself defines against
+/// `deluge_streaming_resource_manager()`. Calls the LAZY-init entry (`ensure_resource_asset()`,
+/// not the plain `resource_asset_id()` getter): the asset may not be defined yet on a reader's
+/// first open (e.g. a sample that has never been through `SampleStream::get_cluster()`), and this
+/// is the one entry point that defines it on demand.
+/// @param stream_backing Opaque `SampleStream*` backing pointer, as passed to
+///                        deluge_sample_source_open. The real definition (`sample_stream.cpp`)
+///                        requires this to be a live `SampleStream*`; the `__attribute__((weak))`
+///                        no-op fallback (`async_fill.cpp`, for build configs without a real
+///                        `SampleStream`) ignores it.
+/// @return The Asset id, or DELUGE_RESOURCE_NO_ASSET on the weak fallback.
+uint32_t deluge_sample_stream_asset_id(void* stream_backing);
+
 /// @brief Whether a queued chunk has been marked unloadable since it was enqueued.
 ///
 /// Mirrors pump()'s safety-net skip right after deluge_resource_loader_next() (loader.cpp):

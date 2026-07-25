@@ -670,9 +670,18 @@ mod prod {
             }
         }
         let prev_view = prev_lease.map(|p| crate::fill_logic::NeighbourView {
-            // SAFETY: `p` was just leased+validated resident by `try_acquire` above; its
-            // payload is `cluster_size + 7` bytes, matching `payload_len`.
-            payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+            // SAFETY: `p` was just leased+validated resident by `try_acquire` above, but `p`
+            // itself is the neighbour's BACKING pointer (`== StreamedChunk*`), not its payload --
+            // same distinction as `chunk_backing` vs `self_payload` above.
+            // `deluge_streaming_chunk_payload(p)` returns the neighbour's payload base
+            // (`backing + kChunkPayloadOffset`), its `payload_with_trailing_slack()` buffer --
+            // `cluster_size + 7` bytes, matching `payload_len`.
+            payload: unsafe {
+                core::slice::from_raw_parts_mut(
+                    deluge_streaming_chunk_payload(p as *mut c_void),
+                    payload_len,
+                )
+            },
             unconverted_head: &prev_state.first_three_bytes,
             start_converted: &mut prev_state.start_converted,
             end_converted: &mut prev_state.end_converted,
@@ -693,7 +702,12 @@ mod prod {
         }
         let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
             // SAFETY: same as the prev branch above.
-            payload: unsafe { core::slice::from_raw_parts_mut(p, payload_len) },
+            payload: unsafe {
+                core::slice::from_raw_parts_mut(
+                    deluge_streaming_chunk_payload(p as *mut c_void),
+                    payload_len,
+                )
+            },
             unconverted_head: &next_state.first_three_bytes,
             start_converted: &mut next_state.start_converted,
             end_converted: &mut next_state.end_converted,

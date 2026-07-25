@@ -199,7 +199,15 @@ void release_pending(DelugeSampleSource& src) {
 
 extern "C" {
 
-DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSampleGeometry geometry) {
+// Weak fallback (SR2d-5 Task 4): every deluge_sample_source_*/deluge_sample_region_* DEFINITION below
+// is now `__attribute__((weak))`, mirroring async_fill.cpp's deluge_streaming_begin_fill/finish_fill
+// weak pattern (SR2d-4 Task 3/4). This C++ backing (the SampleStream/StreamedChunk residency machinery
+// above) stays the legacy/sim fallback for BSPs that don't link the Rust deluge_sample_source crate --
+// the C-host sim (golden) is one such BSP, so it keeps running this body unchanged. The Rust Embassy BSP
+// (device + host_app) provides strong overrides (crates/deluge_sample_source/src/abi.rs) that win the
+// link there, so the whole region-port cursor runs in Rust behind the port on those targets.
+__attribute__((weak)) DelugeSampleSource* deluge_sample_source_open(void* stream_backing,
+                                                                    DelugeSampleGeometry geometry) {
 	auto* stream = reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing);
 	DelugeSampleSource* src = claim_source_slot();
 	if (src == nullptr) {
@@ -214,8 +222,9 @@ DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSample
 	return src;
 }
 
-DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
-                                                  uint32_t priority, DelugeSampleRegion* out) {
+__attribute__((weak)) DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index,
+                                                                        int8_t direction, uint32_t priority,
+                                                                        DelugeSampleRegion* out) {
 	// Null-tolerant, matching _release / _close below: open() returns nullptr on pool exhaustion (its
 	// FREEZE_WITH_ERROR("SSP1") is NOT a hard halt on hardware — it blocks then RESUMES), so `src` can be
 	// null here. There is no cursor to schedule a fill on, so this is UNAVAILABLE (nothing to wait for),
@@ -311,14 +320,14 @@ DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint3
 	return DELUGE_REGION_READY;
 }
 
-bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
-                                  DelugeSampleRegion* out) {
+__attribute__((weak)) bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction,
+                                                        uint32_t priority, DelugeSampleRegion* out) {
 	// Boolean form, expressed in terms of the tri-state: everything that is not READY is the single
 	// "NotReady" that callers using this form act on.
 	return deluge_sample_region_acquire_ex(src, index, direction, priority, out) == DELUGE_REGION_READY;
 }
 
-DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index) {
+__attribute__((weak)) DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index) {
 	// Pure observation — no get_cluster(), no lease, no mutation (hence the const source). Resolves
 	// `index` by matching it against each tracked chunk's OWN `cluster_index`, never by assuming
 	// `index` is "the standing prefetch" or "whatever the last acquire_ex call was about" -- that
@@ -351,21 +360,21 @@ DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint
 	return DELUGE_REGION_UNAVAILABLE;
 }
 
-void deluge_sample_region_retain(uint64_t lease) {
+__attribute__((weak)) void deluge_sample_region_retain(uint64_t lease) {
 	if (lease == 0) {
 		return;
 	}
 	deluge::cluster::add_lease(reinterpret_cast<StreamedChunk*>(lease));
 }
 
-void deluge_sample_region_release(uint64_t lease) {
+__attribute__((weak)) void deluge_sample_region_release(uint64_t lease) {
 	if (lease == 0) {
 		return;
 	}
 	deluge::cluster::release_lease(reinterpret_cast<StreamedChunk*>(lease));
 }
 
-void deluge_sample_source_close(DelugeSampleSource* src) {
+__attribute__((weak)) void deluge_sample_source_close(DelugeSampleSource* src) {
 	if (src == nullptr) {
 		return;
 	}

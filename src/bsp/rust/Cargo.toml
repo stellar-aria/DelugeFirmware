@@ -97,6 +97,16 @@ fs_alloc = { package = "deluge_alloc", path = "../../../crates/deluge_alloc" }
 # in transitively via deluge_resource.
 deluge_resource = { path = "../../../crates/deluge_resource" }
 
+# SR2d-5 Task 4: the Rust region-port cursor (`deluge_sample_source_*`/`deluge_sample_region_*`),
+# wrapping `cursor::SampleSource<ManagerResidency>` over the SAME `deluge_resource` handle above --
+# calls it directly, not through a second manager. Its strong `#[no_mangle]` symbols (gated
+# `cfg(any(target_os = "none", feature = "host_app"))`, see abi.rs) win the link on device here,
+# overriding sample_source.cpp's now-`__attribute__((weak))` legacy/sim fallback. It does NOT depend on
+# (or define) any `deluge_streaming_*` symbol -- it only CALLS a couple of those as `unsafe extern "C"`
+# (the open-bridge accessors), which the archived C++ app closure provides -- so this composes without a
+# duplicate-symbol conflict.
+deluge_sample_source = { path = "../../../crates/deluge_sample_source" }
+
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
@@ -126,6 +136,13 @@ corosensei = "0.3"
 # dup-handler risk). Optional + gated by `host_app` so a plain host build never
 # pulls it in.
 deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
+
+# SR2d-5 Task 4: host-side sibling of the device dep above. `abi.rs`'s strong symbols are gated
+# `cfg(any(target_os = "none", feature = "host_app"))`, so this crate's OWN `host_app` feature (forwarded
+# below) must be turned on alongside `deluge-bsp-rust`'s -- optional + gated the same way `deluge_resource`
+# just above is, so a plain host build never pulls it in (and never exports its no_mangle symbols; see
+# abi.rs's cfg_attr gate).
+deluge_sample_source = { path = "../../../crates/deluge_sample_source", optional = true }
 
 # R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack the
 # device path (above) uses, made available on host too — `efatfs_host_shim.rs`
@@ -162,6 +179,8 @@ sanitize = ["corosensei/sanitizer"]
 ## storage stack `efatfs_host_shim`/`efatfs_core` need on host. Off by default.
 host_app = [
     "dep:deluge_resource",
+    "dep:deluge_sample_source",
+    "deluge_sample_source/host_app",
     "dep:block-device-driver",
     "dep:block-device-adapters",
     "dep:aligned",

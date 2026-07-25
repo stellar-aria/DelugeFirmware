@@ -45,6 +45,19 @@ extern crate deluge_resource;
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_resource;
 
+// SR2d-5 Task 4: link-only, same reasoning as the `deluge_resource` pair above. The C++ reader
+// (sample_source.cpp) calls the `deluge_sample_source_*`/`deluge_sample_region_*` C ABI; those
+// definitions there are now `__attribute__((weak))`, and `deluge_sample_source`'s crate (`abi.rs`)
+// provides the strong override, gated `cfg(any(target_os = "none", feature = "host_app"))` to match
+// these two `extern crate` arms exactly. Without this, rustc/lld would never pull
+// `deluge_sample_source`'s single-object rlib into the link at all (nothing in this crate's own Rust
+// code references it), so the weak C++ body would keep winning even on device/host_app.
+#[cfg(target_os = "none")]
+extern crate deluge_sample_source;
+/// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_sample_source;
+
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
 /// service functions are defined in [`ffi`]). No C++ app is linked on host
 /// unless `host_app` is enabled (see build.rs), so there is no bindgen output

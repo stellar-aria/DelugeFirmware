@@ -422,6 +422,7 @@ dependencies = [
  "deluge_alloc",
  "deluge_resource",
  "deluge_sample_convert",
+ "deluge_sample_source",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync",
@@ -453,6 +454,13 @@ name = "deluge_sample_convert"
 version = "0.1.0"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "deluge_sample_source"
+version = "0.1.0"
+dependencies = [
+ "deluge_resource",
 ]
 
 [[package]]

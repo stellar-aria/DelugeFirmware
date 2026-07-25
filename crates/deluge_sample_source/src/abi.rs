@@ -303,7 +303,7 @@ fn num_clusters_for(geo: &Geometry) -> u32 {
 /// `deluge_streaming_resource_manager`'s returned handle, if non-null, must be
 /// live for the whole life of the `SampleSource` this opens (the crate-wide
 /// boot-singleton contract -- see `ManagerResidency::new`).
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub unsafe extern "C" fn deluge_sample_source_open(
     stream_backing: *mut c_void,
     geometry: Geometry,
@@ -372,7 +372,7 @@ pub unsafe extern "C" fn deluge_sample_source_open(
 /// `src`, if non-null, must be a live pointer from `deluge_sample_source_open`
 /// not yet closed. `out`, if non-null, must be a valid, writable
 /// `DelugeSampleRegion` -- it is written only on `DELUGE_REGION_READY`.
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub unsafe extern "C" fn deluge_sample_region_acquire_ex(
     src: *mut DelugeSampleSource,
     index: u32,
@@ -412,7 +412,7 @@ pub unsafe extern "C" fn deluge_sample_region_acquire_ex(
 ///
 /// # Safety
 /// Same contract as [`deluge_sample_region_acquire_ex`].
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub unsafe extern "C" fn deluge_sample_region_acquire(
     src: *mut DelugeSampleSource,
     index: u32,
@@ -431,7 +431,7 @@ pub unsafe extern "C" fn deluge_sample_region_acquire(
 /// # Safety
 /// `src`, if non-null, must be a live pointer from `deluge_sample_source_open`
 /// not yet closed.
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub unsafe extern "C" fn deluge_sample_region_state(
     src: *const DelugeSampleSource,
     index: u32,
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn deluge_sample_region_state(
 /// Take an independent pin on the region's chunk, keyed on the opaque `lease`
 /// token alone. `lease == 0` is a no-op, as is a call before any source has
 /// ever been opened (nothing cached in [`ACTIVE_MANAGER`] to route through).
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub extern "C" fn deluge_sample_region_retain(lease: u64) {
     let handle = m_get(&ACTIVE_MANAGER.0);
     if handle.is_null() {
@@ -465,7 +465,7 @@ pub extern "C" fn deluge_sample_region_retain(lease: u64) {
 /// Drop an independent pin taken via [`deluge_sample_region_retain`]. See its
 /// doc for the `ACTIVE_MANAGER` routing and the `lease == 0` / no-source
 /// no-op cases.
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub extern "C" fn deluge_sample_region_release(lease: u64) {
     let handle = m_get(&ACTIVE_MANAGER.0);
     if handle.is_null() {
@@ -482,7 +482,7 @@ pub extern "C" fn deluge_sample_region_release(lease: u64) {
 /// # Safety
 /// `src`, if non-null, must be a live pointer from `deluge_sample_source_open`
 /// not yet closed, and must not be used again after this call.
-#[unsafe(no_mangle)]
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
 pub unsafe extern "C" fn deluge_sample_source_close(src: *mut DelugeSampleSource) {
     if src.is_null() {
         return;

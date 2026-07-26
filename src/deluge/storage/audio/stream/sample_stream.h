@@ -38,14 +38,16 @@ namespace deluge::audio::stream {
 ///
 /// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
 /// streaming state:
-///   - the **residency table** (`table_`): one `SampleCluster` entry per cluster of the file, each
-///     holding the resident `StreamedChunk*` (null when the chunk is not in RAM) plus the entry's
-///     waveform min/max cache;
+///   - the **`table_` vector**: one `SampleCluster` entry per cluster, holding the entry's waveform
+///     min/max overview cache. Its `StreamedChunk*` field is now a DEAD residency mirror — residency
+///     lives entirely in the resource manager, reached via chunk_at()/get_cluster() → the manager
+///     peek; the field + the vector itself are retired in a later slice (SR3e);
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** id cache (`resource_asset_id_`); the Asset's
-///     *definition* + the materialize / construct / evict callbacks the manager invokes now live in
-///     `chunk_residency.cpp` (`deluge_streaming_define_asset()`), not here;
+///     *definition* + the materialize / construct callbacks the manager invokes now live in
+///     `chunk_residency.cpp` (`deluge_streaming_define_asset()`), not here (eviction needs no callback —
+///     the manager frees the trivially-destructible slab chunk itself);
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
 /// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident

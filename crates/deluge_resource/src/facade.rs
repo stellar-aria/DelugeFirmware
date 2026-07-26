@@ -69,6 +69,18 @@ impl<'m> Resource<'m> {
         Chunk::from_ptr(self.mgr.try_acquire(asset, index))
     }
 
+    /// Non-leasing residency peek: `Some(Chunk)` if `index` of `asset` is RESIDENT,
+    /// regardless of `ready`/loaded state — `None` only on a miss. Unlike
+    /// `try_acquire`/`acquire_leased` this takes NO lease and does NOT bump recency,
+    /// so it never perturbs `evict_lowest`'s victim choice. For a caller (e.g. the
+    /// C++ `get_cluster` port) that needs to distinguish "already resident, don't
+    /// double-allocate" from "not resident, must request" without pinning it or
+    /// disturbing LRU order; callers that need loaded data still check the chunk's
+    /// own ready/loaded flag (see `is_ready`) after the peek.
+    pub fn peek(&self, asset: u32, index: u32) -> Option<Chunk> {
+        Chunk::from_ptr(self.mgr.peek(asset, index))
+    }
+
     /// Reserve + construct (no I/O; `ready = false`) chunk `index` of `asset`, so an
     /// external loader can fill it and call `mark_ready`, wrapping the one lease this
     /// takes into the RAII `Lease` guard. `None` on OOM, a full table with nothing
@@ -415,6 +427,67 @@ mod tests {
             assert_eq!(rsrc.lease_count_by_slot(slot), base + 1);
         }
         assert_eq!(rsrc.lease_count_by_slot(slot), base);
+    }
+
+    /// `peek` is `try_acquire` minus the mutation: resident (ready OR not — see the
+    /// `Manager::peek` doc, it is deliberately NOT ready-gated) reports the backing;
+    /// not-resident reports `None`; and unlike `try_acquire` it takes NO lease and
+    /// does NOT bump recency, so it must not perturb `evict_lowest`'s victim choice.
+    #[test]
+    fn peek_is_resident_not_ready_gated_and_perturbs_neither_leases_nor_eviction_order() {
+        let rsrc = test_resource();
+        let asset = rsrc.define_test_asset();
+
+        // Not resident -> None.
+        assert!(rsrc.resource().peek(asset, 0).is_none());
+
+        // Resident but NOT ready (`request` leaves `ready = false` until `mark_ready`).
+        let req0 = rsrc.request(asset, 0, CHUNK_SIZE).unwrap();
+        let c0 = req0.chunk();
+        let slot0 = rsrc.slot_of(c0);
+        let base0 = rsrc.lease_count_by_slot(slot0);
+        let peeked = rsrc
+            .resource()
+            .peek(asset, 0)
+            .expect("resident-but-not-ready is still a peek hit");
+        assert_eq!(peeked, c0);
+        assert_eq!(
+            rsrc.lease_count_by_slot(slot0),
+            base0,
+            "peek must not take a lease"
+        );
+
+        // Now ready: same chunk, still no lease taken by peek.
+        rsrc.mark_ready(c0);
+        let peeked_ready = rsrc.resource().peek(asset, 0).expect("resident and ready");
+        assert_eq!(peeked_ready, c0);
+        assert_eq!(rsrc.lease_count_by_slot(slot0), base0);
+
+        // Release req0's lease so c0 becomes evictable, then give it a strictly
+        // newer (higher-recency) sibling c1.
+        drop(req0);
+        let req1 = rsrc.request(asset, 1, CHUNK_SIZE).unwrap();
+        let c1 = req1.chunk();
+        rsrc.mark_ready(c1);
+        drop(req1);
+
+        // c0 is older -> evict_lowest would pick it first, with or without peeking
+        // it repeatedly in between (a bugged peek that bumped recency would make c0
+        // look newer than c1 and flip the victim).
+        for _ in 0..5 {
+            assert_eq!(rsrc.resource().peek(asset, 0), Some(c0));
+        }
+        // SAFETY: `rsrc.handle` is the live handle backing this test's manager.
+        let evicted = unsafe { crate::deluge_resource_try_evict(rsrc.handle) };
+        assert!(evicted, "something evictable should have been reclaimed");
+        assert!(
+            rsrc.resource().peek(asset, 0).is_none(),
+            "peeking c0 repeatedly must not have bumped its recency past c1's"
+        );
+        assert!(
+            rsrc.resource().peek(asset, 1).is_some(),
+            "c1 (never peeked) must still be resident"
+        );
     }
 
     /// Compile-check (and a real drop-cycle exercise): `Lease` carries no lifetime, so

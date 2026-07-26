@@ -949,6 +949,23 @@ impl Manager {
         })
     }
 
+    /// Non-leasing residency peek: the backing pointer for `(asset, index)` if RESIDENT (backing
+    /// non-null), regardless of `ready`/loaded state, else null. Unlike `try_acquire` it takes NO
+    /// lease and does NOT bump recency — a peek must not perturb eviction ordering. Not ready-gated:
+    /// a constructed-but-not-yet-loaded chunk is resident; callers check `->loaded` themselves.
+    pub(crate) fn peek(&self, asset: u32, index: u32) -> *mut u8 {
+        let Some(c) = self.find_resident(asset, index) else {
+            return ptr::null_mut();
+        };
+        // Masked re-read: the slot could have been evicted/reused between find_resident and here;
+        // re-validate identity (NOT ready) and return null on a race — never a stale pointer.
+        let s = m_get(&self.chunks[c]);
+        if s.backing.is_null() || s.asset != asset || s.index != index {
+            return ptr::null_mut();
+        }
+        s.backing
+    }
+
     fn define_asset(&self, owner: *mut c_void, source: Source) -> u32 {
         for i in 0..self.assets.len() {
             if m_get(&self.assets[i]).in_use {
@@ -1302,6 +1319,21 @@ pub unsafe extern "C" fn deluge_resource_try_acquire(
         return ptr::null_mut();
     }
     mgr(handle).try_acquire(asset, index)
+}
+
+/// Non-leasing residency peek: the backing pointer for `(asset, index)` if resident (ready OR not),
+/// else null. Does NOT take a lease and does NOT bump recency — a peek must not perturb eviction
+/// ordering. Callers that need loaded data check the chunk's own ready/loaded flag.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_peek(
+    handle: *mut DelugeResource,
+    asset: u32,
+    index: u32,
+) -> *mut u8 {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    mgr(handle).peek(asset, index)
 }
 
 /// Mark a `request`ed (Loading) chunk ready — called when the read completes (the C++ loader after

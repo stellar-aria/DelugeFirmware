@@ -19,6 +19,7 @@
 
 #include "definitions_cxx.hpp"
 #include "model/sample/sample_cluster.h"
+#include "model/sample/sample_length_sentinel.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
 #include "storage/audio/stream/convert.h"
@@ -121,7 +122,9 @@ public:
 	/// @brief Sentinel value for `audioDataLengthBytes` / `lengthInSamples` meaning "not yet known".
 	///
 	/// Set while a recording is in progress and its final length hasn't been determined yet.
-	static constexpr uint64_t kUnknownLengthSentinel = 0x8FFFFFFFFFFFFFFFull;
+	/// @see deluge::sample_length::kUnknownLengthSentinel (sample_length_sentinel.h) -- the same
+	///      value, standalone for consumers that don't want the full `Sample` class.
+	static constexpr uint64_t kUnknownLengthSentinel = deluge::sample_length::kUnknownLengthSentinel;
 	/// @return Whether this Sample's length has been determined (i.e. is not the "unknown" sentinel).
 	[[nodiscard]] bool isLengthKnown() const { return audioDataLengthBytes != kUnknownLengthSentinel; }
 

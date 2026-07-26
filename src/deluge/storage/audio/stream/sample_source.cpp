@@ -23,9 +23,9 @@
 
 #include "libdeluge/sample_source.h"
 
-#include "definitions_cxx.hpp"   // ClusterLoad (CLUSTER_ENQUEUE), kMaxNumVoicesUnison, kNumSources
-#include "foundation/panic.h"    // FREEZE_WITH_ERROR (pool-exhaustion freeze)
-#include "model/sample/sample.h" // Sample::kUnknownLengthSentinel
+#include "definitions_cxx.hpp"                   // ClusterLoad (CLUSTER_ENQUEUE), kMaxNumVoicesUnison, kNumSources
+#include "foundation/panic.h"                    // FREEZE_WITH_ERROR (pool-exhaustion freeze)
+#include "model/sample/sample_length_sentinel.h" // deluge::sample_length::kUnknownLengthSentinel
 #include "storage/audio/stream/sample_stream.h"
 #include "storage/cluster/cluster.h"
 
@@ -152,7 +152,8 @@ void release_source_slot(DelugeSampleSource* src) {
 
 	// Sentinel for "still recording, length unknown" (see sample_recorder.cpp) -- leave the full
 	// cluster size, same as begin_fill's `sample->audioDataLengthBytes && != sentinel` guard.
-	if (geo.audio_data_length_bytes != 0 && geo.audio_data_length_bytes != Sample::kUnknownLengthSentinel) {
+	if (geo.audio_data_length_bytes != 0
+	    && geo.audio_data_length_bytes != deluge::sample_length::kUnknownLengthSentinel) {
 		uint64_t audio_data_end_bytes = geo.audio_data_length_bytes + geo.audio_data_start_bytes;
 		uint64_t start_byte_this_cluster = static_cast<uint64_t>(index) * geo.cluster_size_bytes;
 		if (audio_data_end_bytes <= start_byte_this_cluster) {

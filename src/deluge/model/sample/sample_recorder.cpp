@@ -876,7 +876,11 @@ Error SampleRecorder::finalizeRecordedFile() {
 		uint32_t idealFileSizeAfterAction =
 		    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);
 		uint32_t finalClusterCount = ((idealFileSizeAfterAction - 1) >> Cluster::size_magnitude) + 1;
-		if (finalClusterCount > sample->stream().num_clusters()) {
+		// Guard on the PHYSICAL table size, not num_clusters(): num_clusters() is now derived from the
+		// same geometric formula as finalClusterCount, so guarding on it would be tautologically false
+		// and skip this grow, leaving table_ at its initialize(1) size while derived num_clusters()
+		// reports the true count -- an OOB when later playback/overview indexes entry() up to that count.
+		if (finalClusterCount > sample->stream().table_size()) {
 			try {
 				sample->stream().resize(finalClusterCount);
 			} catch (deluge::exception&) {

@@ -289,12 +289,15 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels
 		return 0;
 	}
 
-	// The exact formula finalizeRecordedFile()'s hoisted SR3b Task 3 resize uses -- what
-	// sample->stream().num_clusters() (captured right below) MUST be >= for the fix to hold.
+	// The exact formula finalizeRecordedFile()'s hoisted resize uses -- the PHYSICAL residency table
+	// (stream().table_size(), captured right below) MUST be >= this for the grow to have fired. We
+	// deliberately read table_size() and NOT num_clusters() here: num_clusters() is now derived from
+	// this same geometric formula, so reading it would make this probe tautological and blind to a
+	// skipped grow (the exact regression this case exists to catch).
 	uint32_t idealFileSizeAfterAction =
 	    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);
 	g_finalizedExpectedClusters = ((idealFileSizeAfterAction - 1) >> Cluster::size_magnitude) + 1;
-	g_finalizedTableClusters = static_cast<uint32_t>(sample->stream().num_clusters());
+	g_finalizedTableClusters = static_cast<uint32_t>(sample->stream().table_size());
 
 	// Host-sim wrinkle (see mirrorFinalizedFileToSdRoot()'s doc): if this binary's streaming read
 	// path is backed by a POSIX DELUGE_SD_ROOT separate from the FAT image the recorder wrote into,

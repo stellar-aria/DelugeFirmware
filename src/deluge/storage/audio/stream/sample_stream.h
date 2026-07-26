@@ -185,8 +185,15 @@ public:
 	///         under the `efatfs_streaming` build; consulted by begin_fill() to route the read.
 	[[nodiscard]] uint32_t efatfs_handle() const { return efatfs_handle_; }
 
-	/// @return The number of entries in the residency table.
+	/// @return The sample's logical cluster count, DERIVED (geometry when the length is known, the live
+	///         recorder's captured-cluster count while recording) — NOT the physical `table_` size. Use
+	///         table_size() when you need the residency table's actual capacity.
 	[[nodiscard]] size_t num_clusters() const;
+
+	/// @return The physical entry count of the residency table (`table_.size()`). Distinct from
+	///         num_clusters() since that became derived: callers that size or bounds-check the table's
+	///         backing storage (e.g. the finalize-time grow) must observe this, not the logical count.
+	[[nodiscard]] size_t table_size() const;
 
 	/// @brief Resize the residency table to @p n entries (grows the table as a recording extends).
 	void resize(size_t n);

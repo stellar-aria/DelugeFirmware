@@ -322,6 +322,9 @@ const SampleCluster& SampleStream::entry(uint32_t index) const {
 size_t SampleStream::num_clusters() const {
 	return sample_.isLengthKnown() ? sample_.geometricClusterCount() : liveRecorderClusterCount(sample_);
 }
+size_t SampleStream::table_size() const {
+	return table_.size();
+}
 void SampleStream::resize(size_t n) {
 	table_.resize(n);
 }

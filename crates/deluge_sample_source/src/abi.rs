@@ -19,7 +19,7 @@
 //! needs via two C-ABI calls: `deluge_streaming_resource_manager()` (the
 //! process-wide boot-singleton getter, `include/libdeluge/streaming_fill.h`)
 //! and `deluge_sample_stream_asset_id(stream_backing)` (the lazy-init
-//! accessor added alongside it, wrapping `SampleStream::ensure_resource_asset()`).
+//! accessor added alongside it, wrapping `deluge_streaming_define_asset()`).
 //! Neither call dereferences `stream_backing` on the Rust side -- it is
 //! forwarded straight through as an opaque pointer, exactly as the header's
 //! `void*` contract requires. Unit tests can't build a real `SampleStream`,
@@ -122,7 +122,7 @@ unsafe extern "C" {
     /// `stream_backing`'s (a `deluge::audio::stream::SampleStream*`)
     /// resource-manager Asset id, defining it first if not yet defined
     /// (`include/libdeluge/streaming_fill.h`, wrapping
-    /// `SampleStream::ensure_resource_asset()`).
+    /// `deluge_streaming_define_asset()`).
     fn deluge_sample_stream_asset_id(stream_backing: *mut c_void) -> u32;
 }
 

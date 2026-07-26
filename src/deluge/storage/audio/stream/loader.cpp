@@ -54,7 +54,7 @@ constexpr uint32_t kLowestLoaderPriority = 0xFFFFFFFF;
 namespace {
 /// Reconstruct one popped, manager-owned cluster. Opens the user-action gate for the duration of the card
 /// read (see `deluge::sync::StorageOp`) so the handful of safe UI actions can run while it blocks. Every
-/// queued cluster is manager-owned — get_cluster() ran ensure_resource_asset() and construct/materialize
+/// queued cluster is manager-owned — get_cluster() ran deluge_streaming_define_asset() and construct/materialize
 /// set `cluster->sample` before it was enqueued — so it is already constructed + leased; the read just
 /// flips `loaded` true (or fails).
 /// @return `true` to keep draining; `false` only when the read failed while the cluster is still wanted

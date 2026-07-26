@@ -213,7 +213,7 @@ DelugeResource* deluge_streaming_resource_manager(void) {
 
 // Weak fallback for the region-port open() bridge's stream-backing -> resource-asset accessor
 // (SR2d-5 Task 1). The real definition (sample_stream.cpp) forwards to
-// SampleStream::ensure_resource_asset() wherever a real SampleStream is compiled in; build
+// deluge_streaming_define_asset() (chunk_residency.cpp) wherever a real SampleStream is compiled in; build
 // configs that link this TU without one (a minimal test driver assembling its own source list,
 // mirroring the other weak fallbacks in this file) resolve this no-op instead.
 __attribute__((weak)) uint32_t deluge_sample_stream_asset_id(void* /*stream_backing*/) {

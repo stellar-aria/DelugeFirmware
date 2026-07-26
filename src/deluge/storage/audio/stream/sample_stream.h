@@ -43,8 +43,9 @@ namespace deluge::audio::stream {
 ///     waveform min/max cache;
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
-///   - the sample's **resource-manager Asset** and the materialize / construct / evict callbacks the
-///     manager invokes to reconstruct a cluster on demand or drop one under memory pressure;
+///   - the sample's **resource-manager Asset** id cache (`resource_asset_id_`); the Asset's
+///     *definition* + the materialize / construct / evict callbacks the manager invokes now live in
+///     `chunk_residency.cpp` (`deluge_streaming_define_asset()`), not here;
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
 /// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident

@@ -104,8 +104,9 @@ Error Sample::initialize(int32_t newNumClusters) {
 	return Error::NONE;
 }
 
-// The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks),
-// ensure_resource_asset(), and the residency table itself all live on
+// The SAMPLE-cluster resource-manager Source callbacks (materialize / construct / evict) and the
+// asset-definition entry deluge_streaming_define_asset() live in
+// storage/audio/stream/chunk_residency.cpp; the residency table itself lives on
 // deluge::audio::stream::SampleStream -- storage/audio/stream/sample_stream.{h,cpp}.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========

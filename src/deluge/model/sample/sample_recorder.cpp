@@ -798,31 +798,6 @@ Error SampleRecorder::finalizeRecordedFile() {
 			return Error::SD_CARD;
 		}
 
-		// SR3b: alterFile() (unchanged -- a post-capture, non-RT file transform, out of this task's
-		// scope) still reads/writes the finished file through the SHARED residency table
-		// (get_cluster()/num_clusters()/erase_from()), because our own capture buffers are gone by
-		// now (recycled/freed) and were never registered there in the first place. Previously that
-		// table was incidentally sized to match by the recorder's own resize() calls during capture;
-		// now it's never touched at all, so size it explicitly here -- cheap (just the segment-pointer
-		// index + empty entries, no I/O) -- to what alterFile() itself expects (its own
-		// numClustersBeforeAction re-derives the identical value from idealFileSizeBeforeAction).
-		//
-		// SR3b Task 3: this is NOT made redundant by the unconditional final-geometry resize further
-		// down (after dataLengthAfterAction is folded into sample->audioDataLengthBytes) -- alterFile()
-		// needs table_ sized to the ORIGINAL, pre-action cluster count (it reads every pre-alteration
-		// cluster, e.g. both channels before a channel-removal downmix), which is >= the final,
-		// post-action count that later resize computes, so it must run BEFORE alterFile() is called,
-		// using the larger pre-action value. (alterFile()'s own truncateFileDownToSize() already
-		// trims table_ back down to the exact final count via erase_from() whenever the file actually
-		// shrank, so the later unconditional resize is a grow-only no-op for this branch.)
-		uint32_t numClustersBeforeAction =
-		    static_cast<uint32_t>(((idealFileSizeBeforeAction - 1) >> Cluster::size_magnitude) + 1);
-		try {
-			sample->stream().resize(numClustersBeforeAction);
-		} catch (deluge::exception&) {
-			return Error::INSUFFICIENT_RAM;
-		}
-
 		Error error = alterFile(action, lshiftAmount, idealFileSizeBeforeAction, dataLengthAfterAction);
 		if (error != Error::NONE) {
 			return error;

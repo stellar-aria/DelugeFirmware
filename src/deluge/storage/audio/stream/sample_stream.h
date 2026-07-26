@@ -17,9 +17,10 @@
 
 #pragma once
 
-#include "definitions_cxx.hpp"           // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
-#include "memory/fast_allocator.h"       // deluge::memory::fast_allocator
-#include "model/sample/sample_cluster.h" // SampleCluster, the residency table's element type
+#include "definitions_cxx.hpp"                    // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
+#include "memory/fast_allocator.h"                // deluge::memory::fast_allocator
+#include "model/sample/sample_cluster.h"          // SampleCluster, the residency table's element type
+#include "storage/audio/stream/chunk_residency.h" // the relocated resource-manager Source callbacks (friended below)
 #include "storage/audio/stream/read_source.h"
 #include "util/segmented_vector.h" // deluge::SegmentedVector
 #include <cstddef>
@@ -218,25 +219,14 @@ public:
 
 private:
 	/// @name Resource-manager Source callbacks (SAMPLE clusters)
-	/// The manager invokes these to reconstruct or drop a cluster. A Chunk's backing is a uniform slab
-	/// slot; each callback receives the owning `Sample*` (registered by ensure_resource_asset()) and
-	/// reaches its residency table via `sample->stream()`.
+	/// The manager invokes these to reconstruct or drop a cluster; they live in their own translation
+	/// unit (chunk_residency.cpp, declared in chunk_residency.h) rather than as members here, but still
+	/// reach into `table_` directly via `sample->stream()`, so they're friended rather than routed
+	/// through a public accessor.
 	/// @{
-
-	/// @brief Reconstruct cluster @p index synchronously: placement-new a `StreamedChunk` into @p dest
-	///        and read its data. On read failure the chunk is destructed and the slot freed.
-	/// @return `true` if the cluster was materialized and stored in the table.
-	static bool cluster_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
-
-	/// @brief Prefetch counterpart to cluster_materialize(): construct the `StreamedChunk` but do not
-	///        read it (`loaded` stays false), so the audio thread never blocks — the background loader
-	///        fills it later. The table pointer is set immediately so the requester holds a valid chunk.
-	static void cluster_construct(void* ctx, void* owner, uint32_t index, void* dest);
-
-	/// @brief Evict cluster @p index: null its table pointer, de-queue it from the loader, and destruct
-	///        the `StreamedChunk` (the manager frees the slab slot).
-	static void cluster_evict(void* ctx, void* owner, uint32_t index);
-
+	friend void ::deluge_streaming_chunk_construct(void* ctx, void* owner, uint32_t index, void* dest);
+	friend bool ::deluge_streaming_chunk_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
+	friend void ::deluge_streaming_chunk_evict(void* ctx, void* owner, uint32_t index);
 	/// @}
 
 	Sample& sample_;

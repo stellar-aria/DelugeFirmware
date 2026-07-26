@@ -35,52 +35,6 @@
 
 namespace deluge::audio::stream {
 
-// Resource-manager Source callbacks (contract documented in sample_stream.h). `owner` is the Sample*
-// registered by ensure_resource_asset(); being statics, these reach the residency table through that
-// sample's own SampleStream via `sample->stream().table_`.
-
-bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-
-	bool ok = sample->stream().read_cluster_data(*cluster, 0); // uses payload() — payload_ set above
-	if (ok) {
-		sample->stream().table_[index].cluster = cluster;
-	}
-	else {
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-	return ok;
-}
-
-void SampleStream::cluster_construct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-	// cluster->loaded stays false — the loader reads it.
-	sample->stream().table_[index].cluster = cluster;
-}
-
-void SampleStream::cluster_evict(void* /*ctx*/, void* owner, uint32_t index) {
-	auto* sample = static_cast<Sample*>(owner);
-	SampleStream& stream = sample->stream();
-	StreamedChunk* cluster = stream.table_[index].cluster;
-	stream.table_[index].cluster = nullptr;
-	if (cluster != nullptr) {
-		// A constructed-but-not-yet-loaded chunk may still be in the loader queue — de-queue it so the
-		// queue can't dangle onto freed memory. (Eviction also resets the slot, but be explicit.)
-		deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot);
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-}
-
 uint32_t SampleStream::ensure_resource_asset() {
 	if (resource_asset_id_ != DELUGE_RESOURCE_NO_ASSET) {
 		return resource_asset_id_;
@@ -93,14 +47,15 @@ uint32_t SampleStream::ensure_resource_asset() {
 	    (sample_.rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	resource_asset_id_ = (mgr != nullptr)
-	                         ? deluge_resource_define_asset(mgr, &sample_, cluster_materialize, cluster_evict, nullptr,
-	                                                        clusterCost, DELUGE_RESOURCE_BACKING_SLAB)
+	                         ? deluge_resource_define_asset(mgr, &sample_, deluge_streaming_chunk_materialize,
+	                                                        deluge_streaming_chunk_evict, nullptr, clusterCost,
+	                                                        DELUGE_RESOURCE_BACKING_SLAB)
 	                         : DELUGE_RESOURCE_NO_ASSET;
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
 		FREEZE_WITH_ERROR("RSA1"); // resource asset table exhausted (raise kAssetCap)
 	}
 	// Attach the async-prefetch path so CLUSTER_ENQUEUE can request (construct now, load later).
-	deluge_resource_set_construct(mgr, resource_asset_id_, cluster_construct);
+	deluge_resource_set_construct(mgr, resource_asset_id_, deluge_streaming_chunk_construct);
 	// If the sample is already project-relevant (a holder gained it before its first stream), apply the
 	// soft-reference now — numReasonsIncreasedFromZero fired before the asset existed, so it was a no-op.
 	if (sample_.isProjectReferenced()) {

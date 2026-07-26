@@ -97,8 +97,8 @@ pub extern "C" fn deluge_streaming_signal_fill() {
 }
 
 // ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────
-// Registered by C++ at sample-load (`SampleStream::ensure_resource_asset()`/`open_read_stream()`,
-// see `sample_stream.cpp`, and `SampleRecorder::setup()`/`finalizeRecordedFile()` — SR2d-4 Task 5);
+// Registered by C++ at sample-load (`deluge_streaming_define_asset()`/`SampleStream::open_read_stream()`,
+// see `chunk_residency.cpp`/`sample_stream.cpp`);
 // read by the native fill task via [`fill_context_for`] (`prod::ProdOps::begin`/`finish`, SR2d-4
 // Task 5). See `include/libdeluge/streaming_fill.h`'s doc for the C-side contract.
 
@@ -173,8 +173,8 @@ const _: () = {
 };
 
 /// The per-asset fill-context table: written on the main/load thread
-/// (`deluge_streaming_set_fill_context`, called from `SampleStream::ensure_resource_asset()`/
-/// `open_read_stream()` at sample-load) and read by [`streaming_fill_task`] (`prod::ProdOps::begin`/
+/// (`deluge_streaming_set_fill_context`, called from `deluge_streaming_define_asset()`/
+/// `SampleStream::open_read_stream()` at sample-load) and read by [`streaming_fill_task`] (`prod::ProdOps::begin`/
 /// `finish`, via [`fill_context_for`]). Neither side ever runs on the audio render ISR — asset definition happens at
 /// sample-load, and the fill task runs on the same thread-mode Embassy executor the C++ enqueue path
 /// does (see the module doc's "Concurrency" section) — so this table doesn't need the resource
@@ -472,7 +472,7 @@ mod prod {
     /// `async_fill.cpp:89-90`). `ProdOps::begin` returns this whenever a chunk's identity or
     /// fill-context can't be resolved -- should not happen in practice (every chunk on the loader
     /// queue is a resident, still-leased `StreamedChunk` whose asset registered its context at
-    /// `ensure_resource_asset()` before it could ever be enqueued -- see the module doc), but failing
+    /// `deluge_streaming_define_asset()` before it could ever be enqueued -- see the module doc), but failing
     /// closed here is strictly safer than dereferencing a geometry that isn't there. `fill_once`
     /// already treats `!d.ok` as "skip this chunk, don't read, don't call finish" (the same path an
     /// unloadable/geometry-error chunk already takes), so this degrades exactly like that existing,

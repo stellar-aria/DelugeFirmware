@@ -20,7 +20,7 @@
 #include "definitions_cxx.hpp"                    // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
 #include "memory/fast_allocator.h"                // deluge::memory::fast_allocator
 #include "model/sample/sample_cluster.h"          // SampleCluster, the residency table's element type
-#include "storage/audio/stream/chunk_residency.h" // the relocated resource-manager Source callbacks (friended below)
+#include "storage/audio/stream/chunk_residency.h" // deluge_streaming_define_asset() + the chunk Source callbacks
 #include "storage/audio/stream/read_source.h"
 #include "util/segmented_vector.h" // deluge::SegmentedVector
 #include <cstddef>
@@ -215,17 +215,6 @@ public:
 	void register_fill_context();
 
 private:
-	/// @name Resource-manager Source callbacks (SAMPLE clusters)
-	/// The manager invokes these to reconstruct or drop a cluster; they live in their own translation
-	/// unit (chunk_residency.cpp, declared in chunk_residency.h) rather than as members here, but still
-	/// reach into `table_` directly via `sample->stream()`, so they're friended rather than routed
-	/// through a public accessor.
-	/// @{
-	friend void ::deluge_streaming_chunk_construct(void* ctx, void* owner, uint32_t index, void* dest);
-	friend bool ::deluge_streaming_chunk_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
-	friend void ::deluge_streaming_chunk_evict(void* ctx, void* owner, uint32_t index);
-	/// @}
-
 	Sample& sample_;
 
 	/// This sample's Asset id, DELUGE_RESOURCE_NO_ASSET until defined on first use. The sentinel is a

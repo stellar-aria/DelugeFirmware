@@ -41,18 +41,14 @@ extern "C" {
 uint32_t deluge_streaming_define_asset(Sample* sample);
 
 /// @brief Prefetch counterpart to deluge_streaming_chunk_materialize(): construct the `StreamedChunk`
-///        but do not read it (`loaded` stays false), so the audio thread never blocks — the
-///        background loader fills it later. The table pointer is set immediately so the requester
-///        holds a valid chunk.
+///        into @p dest (the manager backing) but do not read it (`loaded` stays false), so the audio
+///        thread never blocks — the background loader fills it later.
 void deluge_streaming_chunk_construct(void* ctx, void* owner, uint32_t index, void* dest);
 
 /// @brief Reconstruct cluster @p index synchronously: placement-new a `StreamedChunk` into @p dest
-///        and read its data. On read failure the chunk is destructed and the slot freed.
-/// @return `true` if the cluster was materialized and stored in the table.
+///        (the manager backing) and read its data. On read failure the chunk is destructed and the
+///        slot freed.
+/// @return `true` if the cluster was materialized.
 bool deluge_streaming_chunk_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
-
-/// @brief Evict cluster @p index: null its table pointer, de-queue it from the loader, and destruct
-///        the `StreamedChunk` (the manager frees the slab slot).
-void deluge_streaming_chunk_evict(void* ctx, void* owner, uint32_t index);
 
 } // extern "C"

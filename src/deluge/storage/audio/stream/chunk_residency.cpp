@@ -25,9 +25,9 @@
 #include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
 
 // Resource-manager Source callbacks (contract documented in sample_stream.h and chunk_residency.h).
-// `owner` is the Sample* registered by deluge_streaming_define_asset() below; these reach the
-// residency table through that sample's own SampleStream via `sample->stream().table_` -- a
-// deliberate later-slice (SR3d) edge, not something to clean up here.
+// `owner` is the Sample* registered by deluge_streaming_define_asset() below. The chunk IS the
+// manager's slab backing (placement-new'd at `dest`); residency lives entirely in the manager, so
+// these callbacks no longer mirror anything into SampleStream (SR3d).
 
 uint32_t deluge_streaming_define_asset(Sample* sample) {
 	deluge::audio::stream::SampleStream& stream = sample->stream();
@@ -42,8 +42,8 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 	    (sample->rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	uint32_t asset_id = (mgr != nullptr) ? deluge_resource_define_asset(mgr, sample, deluge_streaming_chunk_materialize,
-	                                                                    deluge_streaming_chunk_evict, nullptr,
-	                                                                    clusterCost, DELUGE_RESOURCE_BACKING_SLAB)
+	                                                                    /*on_evict=*/nullptr, nullptr, clusterCost,
+	                                                                    DELUGE_RESOURCE_BACKING_SLAB)
 	                                     : DELUGE_RESOURCE_NO_ASSET;
 	stream.set_resource_asset_id(asset_id);
 	if (stream.resource_asset_id() == DELUGE_RESOURCE_NO_ASSET) {
@@ -76,10 +76,7 @@ bool deluge_streaming_chunk_materialize(void* /*ctx*/, void* owner, uint32_t ind
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
 
 	bool ok = sample->stream().read_cluster_data(*cluster, 0); // uses payload() — payload_ set above
-	if (ok) {
-		sample->stream().table_[index].cluster = cluster;
-	}
-	else {
+	if (!ok) {
 		cluster->~StreamedChunk(); // manager frees the slab slot
 	}
 	return ok;
@@ -92,19 +89,10 @@ void deluge_streaming_chunk_construct(void* /*ctx*/, void* owner, uint32_t index
 	cluster->sample = sample;
 	cluster->cluster_index = index;
 	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-	// cluster->loaded stays false — the loader reads it.
-	sample->stream().table_[index].cluster = cluster;
+	// cluster->loaded stays false — the loader reads it. The chunk is the manager backing at `dest`;
+	// residency is the manager's, so nothing is mirrored into SampleStream.
 }
 
-void deluge_streaming_chunk_evict(void* /*ctx*/, void* owner, uint32_t index) {
-	auto* sample = static_cast<Sample*>(owner);
-	deluge::audio::stream::SampleStream& stream = sample->stream();
-	StreamedChunk* cluster = stream.table_[index].cluster;
-	stream.table_[index].cluster = nullptr;
-	if (cluster != nullptr) {
-		// A constructed-but-not-yet-loaded chunk may still be in the loader queue — de-queue it so the
-		// queue can't dangle onto freed memory. (Eviction also resets the slot, but be explicit.)
-		deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot);
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-}
+// No evict callback (SR3d): a StreamedChunk is a trivially-destructible POD living in the manager's
+// slab, and the manager frees the slab + auto-de-queues the loader entry on eviction — there is
+// nothing an evict callback would need to do, so the asset registers a null on_evict.

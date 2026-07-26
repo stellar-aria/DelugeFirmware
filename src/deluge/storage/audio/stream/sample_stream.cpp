@@ -198,18 +198,21 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 	// recording) is manager-owned (deluge_streaming_define_asset() FREEZEs if the asset table is
 	// exhausted — no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
 	// construct/materialize callback records the slot handle); add_lease/request take the lease.
-	// non-null `cluster` <=> manager-resident (on_evict nulls it).
+	// Residency lives in the manager; the returned chunk pointer IS the manager backing (a
+	// StreamedChunk placement-new'd into the slab slot). SR3d: no app-side table_ mirror.
 	uint32_t asset = deluge_streaming_define_asset(&sample_);
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	bool wasResident = (table_[index].cluster != nullptr);
 
 	if (load_instruction == CLUSTER_DONT_LOAD) {
 		// "Allocate but don't read from the card" — recording / convert write target. Resident ⇒ just
 		// pin (lease); not-resident ⇒ construct an empty cluster (no I/O). Held *dirty* so the manager
 		// never evicts the unflushed data; writeCluster clears dirty once it is on the card, after
 		// which it is reconstructable like any sample cluster.
-		if (wasResident) {
-			deluge_resource_add_lease(mgr, table_[index].cluster);
+		void* existing = deluge_resource_peek(mgr, asset, index); // resident (ready-or-not) backing, or null
+		StreamedChunk* cluster;
+		if (existing != nullptr) {
+			deluge_resource_add_lease(mgr, existing);
+			cluster = reinterpret_cast<StreamedChunk*>(existing);
 		}
 		else {
 			void* p = deluge_resource_request(mgr, asset, index, kSlabBackedSizeIgnored);
@@ -219,10 +222,10 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 				}
 				return nullptr;
 			}
-			table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
+			cluster = reinterpret_cast<StreamedChunk*>(p);
 		}
-		deluge_resource_mark_dirty(mgr, table_[index].cluster, true);
-		return table_[index].cluster;
+		deluge_resource_mark_dirty(mgr, cluster, true);
+		return cluster;
 	}
 
 	if (load_instruction == CLUSTER_ENQUEUE) {
@@ -236,14 +239,14 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 			}
 			return nullptr;
 		}
-		table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
-		if (!table_[index].cluster->loaded) {
-			deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot, priority_rating);
+		auto* cluster = reinterpret_cast<StreamedChunk*>(p);
+		if (!cluster->loaded) {
+			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, priority_rating);
 			// Wake the async streaming-fill task; a no-op unless it's the active backing — see
 			// deluge_streaming_async_active()'s doc.
 			deluge_streaming_signal_fill();
 		}
-		return table_[index].cluster;
+		return cluster;
 	}
 
 	// CLUSTER_LOAD_IMMEDIATELY / _OR_ENQUEUE: must have it loaded now → acquire (full
@@ -255,14 +258,14 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 		}
 		return nullptr;
 	}
-	table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
+	auto* cluster = reinterpret_cast<StreamedChunk*>(p);
 	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
-	if (!table_[index].cluster->loaded) {
-		bool ok = read_cluster_data(*table_[index].cluster, 0);
-		deluge_resource_loader_remove(mgr, table_[index].cluster->resource_slot); // it no longer needs the loader
+	if (!cluster->loaded) {
+		bool ok = read_cluster_data(*cluster, 0);
+		deluge_resource_loader_remove(mgr, cluster->resource_slot); // it no longer needs the loader
 		if (!ok) {
 			if (load_instruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
-				deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot,
+				deluge_resource_loader_enqueue(mgr, cluster->resource_slot,
 				                               priority_rating); // fall back to async
 				// Same wakeup as the CLUSTER_ENQUEUE path above — this fallback is also an async
 				// enqueue, so it needs the same signal (see deluge_streaming_signal_fill()'s doc).
@@ -276,7 +279,7 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 			}
 		}
 	}
-	return table_[index].cluster;
+	return cluster;
 }
 
 StreamedChunk* SampleStream::chunk_at(uint32_t index) const {

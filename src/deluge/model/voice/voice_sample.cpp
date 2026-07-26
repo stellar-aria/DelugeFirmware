@@ -246,7 +246,8 @@ goodToGo:
 			// consumers expect. The DECISION above already acquired the start region through the port
 			// (source_->current is pinned, neighbour prefetched); this re-acquires the SAME index, which the
 			// port makes idempotent -- acquire_ex drops the duplicate lease get_cluster adds when src->current
-			// already holds the chunk (see sample_source.cpp step 4), so the two acquires net one lease, and
+			// already holds the chunk (see the cursor's acquire_ex in deluge_sample_source), so the two
+			// acquires net one lease, and
 			// the standing prefetch is already the neighbour so it is not re-fetched. Same priority
 			// (0xFFFFFFFF) as the decision acquire so nothing about residency changes on the re-acquire.
 			// startAtByte >> Cluster::size_magnitude == startAtClusterIndex and startAtByte &

@@ -46,10 +46,10 @@ extern crate deluge_resource;
 extern crate deluge_resource;
 
 // SR2d-5 Task 4: link-only, same reasoning as the `deluge_resource` pair above. The C++ reader
-// (sample_source.cpp) calls the `deluge_sample_source_*`/`deluge_sample_region_*` C ABI; those
-// definitions there are now `__attribute__((weak))`, and `deluge_sample_source`'s crate (`abi.rs`)
-// provides the strong override, gated `cfg(any(target_os = "none", feature = "host_app"))` to match
-// these two `extern crate` arms exactly. Without this, rustc/lld would never pull
+// (sample_low_level_reader.cpp) CALLS the `deluge_sample_source_*`/`deluge_sample_region_*` C ABI;
+// `deluge_sample_source`'s crate (`abi.rs`) is the sole definition of those symbols (the C++ weak
+// fallback sample_source.cpp was deleted in SR3f), gated `cfg(any(target_os = "none", feature =
+// "host_app"))` to match these two `extern crate` arms exactly. Without this, rustc/lld would never pull
 // `deluge_sample_source`'s single-object rlib into the link at all (nothing in this crate's own Rust
 // code references it), so the weak C++ body would keep winning even on device/host_app.
 #[cfg(target_os = "none")]

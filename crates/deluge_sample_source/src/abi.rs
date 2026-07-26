@@ -8,8 +8,7 @@
 //! C++ backing is the `cfg_attr` gate on each `#[no_mangle]` below (device +
 //! host_app: SR2d-5 Task 4; the C-host sim: SR3a Task 1, via this crate's own
 //! `sim` feature, forwarded from `deluge_rust`'s umbrella build -- see
-//! `crates/deluge_rust/Cargo.toml` and `sim/CMakeLists.txt`). Still not wired
-//! into the region-differential gate.
+//! `crates/deluge_rust/Cargo.toml` and `sim/CMakeLists.txt`).
 //!
 //! # `open()`'s `stream_backing`
 //! The reader passes its opaque `deluge::audio::stream::SampleStream*`
@@ -558,8 +557,8 @@ mod tests {
     /// Both tests below mutate the process-wide [`POOL`] and [`ACTIVE_MANAGER`]
     /// statics; under the default parallel test runner two tests running at once
     /// would race that shared state. Every test takes this lock for its whole run
-    /// -- mirrors `region_differential`'s own `tests/differential.rs::TEST_LOCK`
-    /// (same process-wide-singleton problem, same fix).
+    /// -- the standard process-wide-singleton test-lock pattern (same problem, same
+    /// fix as the region-port harnesses use for their own shared statics).
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// `construct` seeds a per-index ramp: `dest[b] = index as u8 + b as u8`.
@@ -805,10 +804,9 @@ mod tests {
     /// boolean acquire's true, unchanged" (plus the boolean-specific half of
     /// "acquire on a not-yet-loaded cluster returns false and leaves `out`
     /// untouched"). [`deluge_sample_region_acquire`] -- the boolean C-ABI
-    /// wrapper -- was previously exercised only by the C++ mirror: every other
-    /// test in this module calls `deluge_sample_region_acquire_ex` directly, and
-    /// `region_differential`'s `RustBackend` drives `SampleSource::acquire_ex`
-    /// below the ABI, never the boolean wrapper itself.
+    /// wrapper -- was previously exercised only by the (now-deleted) C++ mirror:
+    /// every other test in this module calls `deluge_sample_region_acquire_ex`
+    /// directly, so this test is now the boolean wrapper's sole coverage.
     #[test]
     fn boolean_acquire_matches_ready_and_is_false_with_out_untouched_otherwise() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

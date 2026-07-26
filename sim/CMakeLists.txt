@@ -338,12 +338,12 @@ file(GLOB_RECURSE SIM_RUST_SOURCES CONFIGURE_DEPENDS
     ${SIM_RUST_WS}/deluge_resource/src/*.rs
     ${SIM_RUST_WS}/deluge_sample_source/src/*.rs
     ${SIM_RUST_WS}/deluge_rust/src/*.rs)
-# SR3a Task 1: always build the Rust region cursor (deluge_sample_source, SR2d-5) into the
-# umbrella so the sim resolves the SAME strong `deluge_sample_source_*`/`deluge_sample_region_*`
-# cursor as device/host_app, instead of sample_source.cpp's `__attribute__((weak))` fallback --
-# this is what THIS task wires (proved via nm on the sim binary); golden validation against it
-# is a later task. `deluge_rust/sim` forwards to `deluge_sample_source`'s own `sim` feature,
-# which widens abi.rs's cfg gate to actually emit the symbols (see that crate's Cargo.toml).
+# Always build the Rust region cursor (deluge_sample_source, SR2d-5) into the umbrella so the sim
+# resolves the SAME strong `deluge_sample_source_*`/`deluge_sample_region_*` cursor as
+# device/host_app. Since SR3f deleted the C++ weak fallback (sample_source.cpp), the Rust cursor is
+# the sole definition of those symbols here (proved via nm on the sim binary; golden byte-identical).
+# `deluge_rust/sim` forwards to `deluge_sample_source`'s own `sim` feature, which widens abi.rs's cfg
+# gate to actually emit the symbols (see that crate's Cargo.toml).
 # Under the ASan sim build, also turn on the allocator's poison hooks so use-after-free within a
 # heap is caught (the __asan_*_memory_region calls resolve from libasan at the final C++ link).
 # That feature is a no-op in the crate otherwise.

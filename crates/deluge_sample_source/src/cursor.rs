@@ -801,9 +801,9 @@ mod tests {
     /// tail ("when the fill lands, the same retry becomes READY and the retained
     /// lease folds into the current pin -- exactly one lease, no duplicate from
     /// the retries"). `acquire_loading_retains_pending_and_leaves_current` never
-    /// marks the index ready, and `region_differential`'s harness clusters never
-    /// transition Loading -> Ready mid-run (see `rust_backend.rs`'s doc), so this
-    /// landing fold was previously only exercised by the C++ mirror.
+    /// marks the index ready, so this landing fold was previously exercised only
+    /// by the (now-deleted) C++ mirror and its differential harness -- this test
+    /// is now its sole coverage.
     #[test]
     fn loading_retry_that_lands_ready_folds_into_a_single_lease() {
         let (src, h, asset) = new_source(4);

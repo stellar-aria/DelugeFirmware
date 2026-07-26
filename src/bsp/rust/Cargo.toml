@@ -100,8 +100,9 @@ deluge_resource = { path = "../../../crates/deluge_resource" }
 # SR2d-5 Task 4: the Rust region-port cursor (`deluge_sample_source_*`/`deluge_sample_region_*`),
 # wrapping `cursor::SampleSource<ManagerResidency>` over the SAME `deluge_resource` handle above --
 # calls it directly, not through a second manager. Its strong `#[no_mangle]` symbols (gated
-# `cfg(any(target_os = "none", feature = "host_app"))`, see abi.rs) win the link on device here,
-# overriding sample_source.cpp's now-`__attribute__((weak))` legacy/sim fallback. It does NOT depend on
+# `cfg(any(target_os = "none", feature = "host_app"))`, see abi.rs) are the SOLE definition of the
+# `deluge_sample_source_*`/`deluge_sample_region_*` C ABI on device (the C++ weak fallback
+# sample_source.cpp was deleted in SR3f). It does NOT depend on
 # (or define) any `deluge_streaming_*` symbol -- it only CALLS a couple of those as `unsafe extern "C"`
 # (the open-bridge accessors), which the archived C++ app closure provides -- so this composes without a
 # duplicate-symbol conflict.

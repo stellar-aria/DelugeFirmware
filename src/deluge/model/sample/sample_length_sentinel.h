@@ -28,8 +28,8 @@ namespace deluge::sample_length {
 ///        "not yet known" -- set while a recording is in progress and its final length hasn't been
 ///        determined yet.
 ///
-/// Standalone so light, non-`Sample` consumers (e.g. the region-port cursor, `sample_source.cpp`)
-/// can test against it without pulling in the full `Sample` class -- which, among other things,
+/// Standalone so light, non-`Sample` consumers (e.g. the region-port cursor) can test against it
+/// without pulling in the full `Sample` class -- which, among other things,
 /// declares a `SampleStream` member built from the REAL `SampleStream(Sample&)` constructor,
 /// something a differential-test harness shadowing `SampleStream` with a test double can't satisfy.
 /// `Sample::kUnknownLengthSentinel` (sample.h) is this same value, re-exported as a class member for

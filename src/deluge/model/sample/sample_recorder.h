@@ -95,12 +95,6 @@ public:
 	// bufferTable_ (see below), not a shared residency table. See docs/dev/known-concurrency-bugs.md (B3).
 	std::atomic<int32_t> currentRecordClusterIndex = -1;
 
-	// SR3b: bytes flushed to SD, release-advanced by the fiber (writeCluster()) after each successful
-	// write_at, replacing currentRecordClusterIndex + shared-table growth as the published growth
-	// signal. This is the live extent of the recording a reader may consult -- publishing it here is
-	// this task's whole job; wiring a reader to it is a later task (see the SR3b design doc).
-	std::atomic<uint64_t> committedBytes{0};
-
 	uint32_t audioFileNumber{};
 	AudioRecordingFolder folderID;
 

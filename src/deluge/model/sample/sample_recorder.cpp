@@ -984,14 +984,10 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	// SR3b Task 3 (Minor fix): null the table slot now that its buffer has been recycled -- this
 	// index is drained (< firstUnwrittenClusterIndex once the caller advances it) and must never be
 	// read again, but leaving a dangling pointer here would let a stale/reused buffer linger at a
-	// drained index for anything that later scans bufferTable_ by index bounds alone (e.g. a
-	// watermark-bounded reader) to trip on. releaseCaptureBuffers() already tolerates a null entry
-	// here (its `if (buffer != nullptr)` guard).
+	// drained index. Nulling it here keeps bufferTable_ free of dangling drained-buffer pointers;
+	// releaseCaptureBuffers() already tolerates a null entry here (its `if (buffer != nullptr)`
+	// guard).
 	bufferTable_[clusterIndex] = nullptr;
-
-	// RELEASE: publishes the new committed extent to any live-monitor reader that acquire-loads
-	// committedBytes (the reader-side wiring is a later task -- see the SR3b design doc).
-	committedBytes.fetch_add(numBytes, std::memory_order_release);
 
 	return Error::NONE;
 }

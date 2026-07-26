@@ -1473,7 +1473,11 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 
 	uint64_t numClustersAfterAction = ((newFileSize - 1) >> Cluster::size_magnitude) + 1;
 
-	if (numClustersAfterAction < sample->stream().num_clusters()) {
+	// Guard on the PHYSICAL table size, not num_clusters(): erase_from() shrinks the actual table_
+	// storage, so the "am I really shrinking?" test must observe table_size(). num_clusters() is now
+	// derived and no longer tracks the physical table, so comparing against it would mis-gate this
+	// shrink (matching the finalize-grow fix in the same file).
+	if (numClustersAfterAction < sample->stream().table_size()) {
 		sample->stream().erase_from(numClustersAfterAction);
 	}
 

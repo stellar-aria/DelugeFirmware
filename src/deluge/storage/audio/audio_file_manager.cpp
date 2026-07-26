@@ -850,8 +850,9 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 	}
 
 	if (*error != Error::NONE) {
-		// ~AudioFile removes the pointers back to the Sample / SampleClusters from any Clusters;
-		// destroyAudioFileObject also un-adopts + frees (through the manager if adopted).
+		// ~AudioFile (for a Sample, via ~SampleStream::release_asset) releases the streaming asset back to
+		// the resource manager, freeing any resident clusters; destroyAudioFileObject also un-adopts +
+		// frees (through the manager if adopted).
 		destroyAudioFileObject(*audioFile);
 		return nullptr;
 	}

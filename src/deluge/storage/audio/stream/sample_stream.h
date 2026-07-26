@@ -25,7 +25,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string_view>
 
 class Sample;
@@ -45,7 +44,7 @@ namespace deluge::audio::stream {
 ///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** and the materialize / construct / evict callbacks the
 ///     manager invokes to reconstruct a cluster on demand or drop one under memory pressure;
-///   - **read-source selection** — the single place the stream-vs-recording decision is made.
+///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
 /// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident
 /// one through chunk_at(); no caller indexes the table directly, and none branches on how a cluster's
@@ -111,26 +110,13 @@ public:
 	///         this to `Error::FILE_NOT_FOUND`).
 	bool open_read_stream(std::string_view path);
 
-	/// @brief Select the read source from this sample's backing state.
+	/// @brief Build this sample's read source.
 	///
-	/// This is the single point where the stream-vs-recording decision is made; no caller branches on it.
-	/// @return An `EfatfsReadSource` when an efatfs read handle is open (a normal card-loaded sample),
-	///         otherwise a `RecordingReadSource` reading through the recorder's own open efatfs write
-	///         context (a sample still being recorded; see set_recording_write_stream()).
+	/// The single point a cluster read is issued from; no caller branches on it.
+	/// @return An `EfatfsReadSource` over the efatfs read handle (0 if none is open yet -- e.g. a
+	///         still-recording sample, which has no reader at all; see the .cpp for why a handle-0
+	///         read is safe and simply fails).
 	[[nodiscard]] std::unique_ptr<ReadSource> make_read_source();
-
-	/// @brief Wire (or clear, with `nullptr`) the recording write context make_read_source() reads a
-	///        still-recording sample's evicted clusters through.
-	///
-	/// `SampleRecorder` calls this once, in setup(), with the address of its own
-	/// `std::optional<deluge::io::Stream> file` member -- stable for the recorder's whole lifetime
-	/// even though the optional itself gets reset()/re-emplaced across the recording's several
-	/// open/close windows (initial open, mid-alteration reopen, final close). It's cleared (set back
-	/// to `nullptr`) in detachSample(), the point after which the recorder may be destructed.
-	/// @see storage/audio/stream/read_source.h's RecordingReadSource.
-	void set_recording_write_stream(std::optional<deluge::io::Stream>* write_stream) {
-		recording_write_stream_ = write_stream;
-	}
 
 	/// @}
 	/// @name Cluster residency
@@ -264,14 +250,6 @@ private:
 	/// C-FatFS sector path is unaffected; the `efatfs_streaming` read path (Task 6) sets it in
 	/// open_read_stream() via deluge_efatfs_open() and clears it on close.
 	uint32_t efatfs_handle_ = 0;
-
-	/// R3: the currently-recording `SampleRecorder`'s open efatfs write context, or `nullptr` if this
-	/// sample isn't being recorded (a normal card-loaded sample, which reads via `efatfs_handle_`
-	/// instead). Wired by `set_recording_write_stream()`; `make_read_source()` reads a still-recording
-	/// sample's evicted cluster back through `*recording_write_stream_` via a `RecordingReadSource`.
-	/// Never owned here -- the recorder outlives every read that can reach it, by construction (see
-	/// set_recording_write_stream()'s doc).
-	std::optional<deluge::io::Stream>* recording_write_stream_ = nullptr;
 
 	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
 	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth

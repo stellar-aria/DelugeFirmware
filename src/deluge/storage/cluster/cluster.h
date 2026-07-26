@@ -89,6 +89,17 @@ inline constexpr size_t kSlabBackedSizeIgnored = 0;
 /// absorb an offset of at least CACHE_LINE_SIZE.
 ///
 /// @warning Only construct via placement `new` into a slab slot (asset callbacks).
+///
+/// @note **Layout vs. the Rust fill task.** Rust never reads this struct's raw byte layout — every
+///       touch from the native fill task is an opaque `chunk_backing` pointer round-tripped through
+///       the C++ accessor functions in storage/audio/stream/async_fill.cpp
+///       (`deluge_streaming_chunk_payload`, `deluge_streaming_chunk_set_loaded`,
+///       `deluge_streaming_chunk_convert_state`/`_set_convert_state`), all of which resolve fields by
+///       NAME through the real, compiler-computed layout (confirmed by grepping src/bsp/rust: no
+///       hard-coded StreamedChunk offset exists anywhere). So adding, removing, or reordering a field
+///       here (as SR3b's deletion of the recorder-shadow-counter field, formerly right after
+///       `resource_slot`, did) needs no matching Rust-side change and pins no offset — checked
+///       2026-07-25.
 struct StreamedChunk final {
 	uint32_t cluster_index = 0;
 
@@ -97,7 +108,6 @@ struct StreamedChunk final {
 	/// @note `0xFFFFFFFF` == DELUGE_RESOURCE_NO_SLOT (literal here so this widely-included header
 	///       needn't pull in deluge_resource.h).
 	uint32_t resource_slot = 0xFFFFFFFF;
-	int8_t num_reasons_held_by_sample_recorder = 0;
 	bool unloadable = false;
 	bool extra_bytes_at_start_converted = false;
 	bool extra_bytes_at_end_converted = false;

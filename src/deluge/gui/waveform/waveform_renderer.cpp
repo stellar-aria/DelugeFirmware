@@ -605,10 +605,19 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 		return true; // Already cached (perhaps by a previous render)
 	}
 
-	// Don't cache a cluster a recorder is still writing into - its data isn't final yet. We leave the
-	// scan cursor parked here; once recording moves on / finishes, the reason is released and we proceed.
-	if (sampleCluster->cluster != nullptr && sampleCluster->cluster->num_reasons_held_by_sample_recorder > 0) {
-		return false;
+	// Don't investigate a cluster of a Sample a SampleRecorder still has open. Post-decouple, the
+	// recorder writes into private capture buffers and never opens a real efatfs read handle on this
+	// Sample (SampleStream::efatfs_handle() stays 0 for its whole life as a recording target -- see
+	// SampleStream::open_read_stream()/make_read_source()), so ANY get_cluster() load attempt here --
+	// not just the actively-being-written cluster -- would simply fail. (The background scan does
+	// reach a recording-in-progress Sample: SampleRecorder::setup() registers it in
+	// audioFileManager.audioFiles as soon as the file's created, well before capture finishes.) We
+	// leave the scan cursor parked here; once the recorder detaches (recording finishes and the
+	// SampleRecorder is destructed), the Sample becomes independently loadable and the scan resumes.
+	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
+		if (recorder->sample == sample) {
+			return false;
+		}
 	}
 
 	const int32_t frameSize = sample->numChannels * sample->byteDepth;

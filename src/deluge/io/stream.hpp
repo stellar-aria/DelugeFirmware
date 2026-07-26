@@ -39,10 +39,13 @@ public:
 	/// @brief Read up to @p dst.size() bytes at absolute @p byte_offset back through this stream's
 	///        OWN open write context, bounded by its live (not yet flushed to disk) size.
 	///
-	/// R3: the sample recorder's mid-write read-back path (a still-recording sample's evicted
-	/// cluster) -- see storage/audio/stream/read_source.h's `RecordingReadSource`. Both backends
-	/// implement it: `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on
-	/// C-FatFS. EOF-honest -- the returned count may be short of @p dst.size().
+	/// R3: used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open
+	/// write context) and `finalizeRecordedFile()`'s header patch-back. (SR3b deleted the OTHER
+	/// caller this doc used to point to -- `RecordingReadSource`, a still-recording sample's evicted-
+	/// cluster read-back -- as a dead end on the real device; see
+	/// storage/audio/stream/read_source.h.) Both backends implement it:
+	/// `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on C-FatFS. EOF-honest --
+	/// the returned count may be short of @p dst.size().
 	std::expected<uint32_t, Status> read_at_via(uint32_t byte_offset, std::span<std::byte> dst);
 	std::expected<void, Status> truncate(uint32_t new_size);
 	std::expected<uint32_t, Status> size();

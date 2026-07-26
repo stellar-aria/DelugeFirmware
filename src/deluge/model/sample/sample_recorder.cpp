@@ -70,10 +70,6 @@ void SampleRecorder::detachSample() {
 	// any undrained buffers (an abort mid-recording) plus anything sitting in the recycle ring.
 	releaseCaptureBuffers();
 
-	// R3 Task 6: unwire the read-back path before this recorder can be destructed -- see
-	// set_recording_write_stream()'s doc.
-	sample->stream().set_recording_write_stream(nullptr);
-
 	sample->removeReason("E400");
 }
 
@@ -141,12 +137,6 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 	}
 
 	sample = new (sample_memory) Sample;
-
-	// R3 Task 6: wire this sample's read path to this recorder's own write context (stable address
-	// for the recorder's whole lifetime -- see set_recording_write_stream()'s doc) -- a still-
-	// recording sample's evicted clusters read back through it (RecordingReadSource). Cleared in
-	// detachSample(), the point after which this recorder may be destructed.
-	sample->stream().set_recording_write_stream(&file);
 
 	// SR3b: reserve OUR OWN buffer table's segment-pointer index to the max recording size up front
 	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that

@@ -17,23 +17,22 @@
 
 #pragma once
 
-/// @brief Host-only C-ABI diagnostic for SR3b Task 2's headline question (see
+/// @brief Host-only C-ABI diagnostic, originally built for SR3b Task 2's headline question (see
 ///        `.superpowers/sdd/sr3b-routing-spike.md`): CAN a still-recording sample be read back
-///        through the same residency cursor real playback uses, on a target where the async Rust
-///        loader is active (`host_app`)?
+///        through the same residency cursor real playback uses? Now (SR3b Task 4) a regression gate
+///        for the answer that spike led to: `RecordingReadSource` is deleted, so the answer is NO on
+///        every target, not just `host_app`.
 ///
 /// `deluge_harness_recorder_probe()` constructs a real `SampleRecorder`, feeds it a small amount of
 /// deterministic audio (leaving it in `RecorderStatus::CAPTURING_DATA` — never finalized/closed, so
 /// its Sample genuinely has no efatfs read handle, `SampleStream::efatfs_handle() == 0`, exactly the
-/// "still-recording" condition `SampleStream::make_read_source()` branches on), then opens a
-/// `DelugeSampleSource` cursor against that Sample's `SampleStream` and calls
-/// `deluge_sample_region_acquire_ex(index=0)` — the exact same region-port entry point
-/// `SampleLowLevelReader` uses for real playback (see `sample_low_level_reader.cpp`). The returned
-/// `DelugeRegionState` (READY / LOADING / UNAVAILABLE) is the empirical, target-specific answer:
-/// on the C-host sim (no async loader) the fiber `loader::pump()` drain reaches `RecordingReadSource`
-/// and this resolves READY; on `host_app` (`async_streaming_loader` on by default) the Rust async
-/// fill task owns the drain and reads via `efatfs_fs::read_at(handle=0, ...)`, which the spike's
-/// static analysis predicts fails — this probe is what turns that prediction into a measurement.
+/// "still-recording" condition), then opens a `DelugeSampleSource` cursor against that Sample's
+/// `SampleStream` and calls `deluge_sample_region_acquire_ex(index=0)` — the exact same region-port
+/// entry point `SampleLowLevelReader` uses for real playback (see `sample_low_level_reader.cpp`). The
+/// returned `DelugeRegionState`: with `RecordingReadSource` deleted, `SampleStream::make_read_source()`
+/// always returns an `EfatfsReadSource` over a 0 handle, so the read fails and the loader re-queues it
+/// (`deluge::audio::stream::loader.cpp`'s `reconstruct_one()`) rather than failing outright -- the
+/// acquire is expected to settle on LOADING, uniformly, on every target.
 ///
 /// `DELUGE_HOST`-only, same reach as `harness/streaming_scenario.h` (compiled into
 /// deluge_host/deluge_render/deluge_loadcheck AND the Rust Embassy `host_app` build, never the ARM

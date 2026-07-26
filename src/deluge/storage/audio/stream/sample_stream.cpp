@@ -157,9 +157,9 @@ void SampleStream::release_asset() {
 bool SampleStream::open_read_stream(std::string_view path) {
 	// R1: efatfs IS the streaming read path — no C-FatFS fallback. Open the efatfs file handle; a
 	// failure to open is a stream-open failure propagated to the caller (the sample won't load).
-	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone; a still-
-	// recording sample instead reads through the recorder's own open write context (R3 Task 6; see
-	// recording_write_stream_).
+	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone. A
+	// still-recording sample has no read handle at all (see make_read_source()) until this same
+	// path reopens one once recording finishes.
 	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
 	uint32_t handle = 0;
 	if (!deluge_efatfs_open(cpath.c_str(), &handle)) {
@@ -175,14 +175,15 @@ bool SampleStream::open_read_stream(std::string_view path) {
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
-	// R1: an open efatfs read handle = the streaming read path (a normal card-loaded sample).
-	// R3 Task 6: otherwise, this sample is still being recorded -- read its evicted cluster back
-	// through the recorder's own open write context instead (recording_write_stream_).
-	if (efatfs_handle_ != 0) {
-		return std::make_unique<EfatfsReadSource>(efatfs_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
-	}
-	return std::make_unique<RecordingReadSource>(recording_write_stream_,
-	                                             static_cast<uint8_t>(Cluster::size_magnitude));
+	// R1: an open efatfs read handle = the streaming read path (a normal card-loaded sample). A
+	// still-recording sample (efatfs_handle_ == 0 -- no read handle is opened until recording
+	// finishes) has no reader at all: SR3b deleted RecordingReadSource, the former recorder-write-
+	// context read-back, as a dead end on the real device (the async Rust loader reads via a raw
+	// efatfs handle and never routed through this C++ abstraction anyway). A caller that could reach
+	// a still-recording Sample must guard against it itself (see
+	// WaveformRenderer::investigateWholeCluster()) -- a handle-0 read here just fails cleanly
+	// (deluge_efatfs_read_at()/efatfs_fs::read_at() both treat handle 0 as "no such handle").
+	return std::make_unique<EfatfsReadSource>(efatfs_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
 }
 
 #define REPORT_LOAD_TIME 0
@@ -223,9 +224,9 @@ bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] in
 	uint32_t bytesRead = 0;
 	DelugeStatus status;
 	{
-		// Read seam: SampleStream::make_read_source owns source selection (EfatfsReadSource for a
-		// loaded sample, RecordingReadSource for a still-being-written recording, reading via the
-		// recorder's write context). See storage/audio/stream/sample_stream.h and design §6/§7.
+		// Read seam: SampleStream::make_read_source owns source selection -- unconditionally
+		// EfatfsReadSource now (SR3b deleted the RecordingReadSource branch; see that method's doc).
+		// See storage/audio/stream/sample_stream.h and design §6/§7.
 		auto source = make_read_source();
 		auto readResult = source->read(static_cast<uint32_t>(clusterIndex),
 		                               std::span<std::byte>(reinterpret_cast<std::byte*>(fill.dest), bytesRequested));

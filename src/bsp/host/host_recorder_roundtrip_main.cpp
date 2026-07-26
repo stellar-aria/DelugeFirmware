@@ -56,10 +56,13 @@
 extern "C" int32_t deluge_main(void);
 extern TaskHandle startupConditionalTask;
 
-// SR3b Task 2 Step 4's sim-side sanity check for the recorder live-readback probe (see
-// harness/recorder_readback_probe.h) — the C-host sim is the "control" target the spike predicts
-// SHOULD resolve READY (no async loader; the fiber pump drains through RecordingReadSource), so
-// exercising it here first validates the probe itself before trusting its result on host_app.
+// SR3b Task 4 regression gate for the recorder live-readback probe (see
+// harness/recorder_readback_probe.h). This used to be the sim-side control for the routing spike
+// ("does the fiber pump reach RecordingReadSource and resolve READY here?"); now that
+// RecordingReadSource is deleted, make_read_source() is unconditionally EfatfsReadSource, so a
+// still-recording sample (efatfs_handle_ == 0) has no reader anywhere -- the read fails, the loader
+// re-queues it (deluge::audio::stream::loader.cpp), and the acquire never leaves LOADING on ANY
+// target. Exercised here as the regression gate for that outcome.
 extern "C" {
 uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, uint32_t pumpDrainTicks);
 void deluge_harness_recorder_probe_end();
@@ -573,14 +576,16 @@ void deluge_recorder_roundtrip_driver() {
 
 	printf("%d/%d cases passed\n", g_cases - g_failures, g_cases);
 
-	// SR3b routing-spike sanity check (Step 4's sim-side control): probe live read-back of a
-	// still-recording sample on THIS target. The spike predicts sim (no async_streaming_loader)
-	// resolves READY via the fiber-pump -> RecordingReadSource path.
+	// SR3b Task 4: probe live read-back of a still-recording sample on THIS target. RecordingReadSource
+	// is gone, so this must NOT resolve READY (state=1) anywhere -- a still-recording Sample has no
+	// valid reader. The failed read gets re-queued at lowest priority rather than failed outright (see
+	// loader.cpp's reconstruct_one()), so the acquire is expected to stay LOADING (state=2), not settle
+	// on UNAVAILABLE.
 	uint8_t state = deluge_harness_recorder_probe(/*numChannels=*/1, /*numFrames=*/50, /*pumpDrainTicks=*/10);
 	printf("recorder live-readback probe (sim): state=%u (1=READY 2=LOADING 3=UNAVAILABLE 0=harness-error)\n", state);
 	deluge_harness_recorder_probe_end();
-	if (state != 1) {
-		fprintf(stderr, "  NOTE: sim live-readback probe did not resolve READY (state=%u)\n", state);
+	if (state != 2) {
+		fprintf(stderr, "  NOTE: still-recording live-readback probe did not resolve LOADING (state=%u)\n", state);
 		g_failures++;
 	}
 

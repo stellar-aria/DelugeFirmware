@@ -86,6 +86,7 @@ add_executable(UnitTests
         rgb_tests.cpp
         notes_state_tests.cpp
         waveform_peak_math_tests.cpp
+        waveform_overview_cache_tests.cpp
 )
 add_test(NAME UnitTests
         COMMAND UnitTests)

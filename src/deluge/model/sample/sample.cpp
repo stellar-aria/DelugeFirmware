@@ -98,6 +98,7 @@ Error Sample::initialize(int32_t newNumClusters) {
 
 	try {
 		stream().resize(stream().num_clusters() + newNumClusters);
+		overviewCache_.resize(overviewCache_.size() + newNumClusters);
 	} catch (deluge::exception&) {
 		return Error::INSUFFICIENT_RAM;
 	}
@@ -215,11 +216,11 @@ void Sample::markAsUnloadable() {
 }
 
 void Sample::resetOverviewScan() {
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-		SampleCluster& sampleCluster = stream().entry(c);
-		sampleCluster.investigatedWholeLength = false;
-		sampleCluster.minValue = 127;
-		sampleCluster.maxValue = -128;
+	for (int32_t c = 0; c < static_cast<int32_t>(overviewCacheSize()); c++) {
+		OverviewCacheEntry& cacheEntry = overviewCacheEntry(c);
+		cacheEntry.investigated = false;
+		cacheEntry.min = 127;
+		cacheEntry.max = -128;
 	}
 	overviewScanNextCluster = getFirstClusterIndexWithAudioData();
 	audioFileManager.overviewScanAllDone = false; // This sample now has work to pre-scan again (#4460)

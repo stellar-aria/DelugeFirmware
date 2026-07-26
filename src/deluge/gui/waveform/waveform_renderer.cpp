@@ -22,6 +22,7 @@
 #include "gui/waveform/waveform_peak_math.h"
 #include "gui/waveform/waveform_render_data.h"
 #include "io/debug/log.h"
+#include "model/sample/overview_cache_entry.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "model/voice/voice_sample.h"
@@ -268,7 +269,11 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 	int32_t endClusters;
 	if (recorder) {
 		numValidSamples = recorder->numSamplesCaptured;
-		endClusters = static_cast<int32_t>(sample->stream().num_clusters());
+		// The overview cache's own physical size, NOT stream().num_clusters(): that count is now
+		// derived from the live recorder's captured-cluster count, which can exceed the (un-grown
+		// during recording) overview cache -- see OverviewCacheEntry's docs. Bounding on the
+		// cache's own size keeps every entry(clusterIndexToDo) index below in-bounds by construction.
+		endClusters = static_cast<int32_t>(sample->overviewCacheSize());
 	}
 	else {
 		numValidSamples = sample->lengthInSamples;
@@ -432,13 +437,13 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 			}
 		}
 
-		SampleCluster* sampleCluster = &sample->stream().entry(clusterIndexToDo);
+		OverviewCacheEntry* sampleCluster = &sample->overviewCacheEntry(clusterIndexToDo);
 
 		// If we're wanting to investigate the whole length of one Cluster, and that's already actually been done
 		// previously, we can just reuse those findings!
-		if (investigatingAWholeCluster && sampleCluster->investigatedWholeLength) {
-			data->minPerCol[col] = (int32_t)sampleCluster->minValue << 24;
-			data->maxPerCol[col] = (int32_t)sampleCluster->maxValue << 24;
+		if (investigatingAWholeCluster && sampleCluster->investigated) {
+			data->minPerCol[col] = (int32_t)sampleCluster->min << 24;
+			data->maxPerCol[col] = (int32_t)sampleCluster->max << 24;
 		}
 
 		// Otherwise, do our normal investigation
@@ -526,8 +531,8 @@ cantReadData:
 
 				// See if we want to include any previously captured maximums and minimums, which might have looked at
 				// slightly different values
-				int32_t prevMin = (int32_t)sampleCluster->minValue << 24;
-				int32_t prevMax = (int32_t)sampleCluster->maxValue << 24;
+				int32_t prevMin = (int32_t)sampleCluster->min << 24;
+				int32_t prevMax = (int32_t)sampleCluster->max << 24;
 
 				if (prevMin < minThisCol) {
 					minThisCol = prevMin;
@@ -536,10 +541,10 @@ cantReadData:
 					maxThisCol = prevMax;
 				}
 
-				// And mark the SampleCluster as fully investigated (rounding toward 0)
-				sampleCluster->minValue = toCoarsePeak(minThisCol);
-				sampleCluster->maxValue = toCoarsePeak(maxThisCol);
-				sampleCluster->investigatedWholeLength = true;
+				// And mark the overview cache entry as fully investigated (rounding toward 0)
+				sampleCluster->min = toCoarsePeak(minThisCol);
+				sampleCluster->max = toCoarsePeak(maxThisCol);
+				sampleCluster->investigated = true;
 			}
 
 			// Or, if we only looked at a smaller part of a cluster...
@@ -549,11 +554,11 @@ cantReadData:
 				int8_t smallMin = toCoarsePeak(minThisCol);
 				int8_t smallMax = toCoarsePeak(maxThisCol);
 
-				if (smallMin < sampleCluster->minValue) {
-					sampleCluster->minValue = smallMin;
+				if (smallMin < sampleCluster->min) {
+					sampleCluster->min = smallMin;
 				}
-				if (smallMax > sampleCluster->maxValue) {
-					sampleCluster->maxValue = smallMax;
+				if (smallMax > sampleCluster->max) {
+					sampleCluster->max = smallMax;
 				}
 			}
 
@@ -592,7 +597,7 @@ cantReadData:
 
 // Background "waveform overview" pre-scan (issue #4460). Investigates one whole cluster the same way
 // findPeaksPerCol's whole-cluster branch does, but self-contained so it can run off the render path.
-// Caches the result in the SampleCluster (int8 min/max + investigatedWholeLength) so later zoomed-out
+// Caches the result in the Sample's overview cache entry (int8 min/max + investigated) so later zoomed-out
 // renders get a cache hit and never load this cluster synchronously while the user is scrolling.
 bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIndex) {
 
@@ -601,8 +606,8 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 		return true; // Nothing to do
 	}
 
-	SampleCluster* sampleCluster = &sample->stream().entry(clusterIndex);
-	if (sampleCluster->investigatedWholeLength) {
+	OverviewCacheEntry* sampleCluster = &sample->overviewCacheEntry(clusterIndex);
+	if (sampleCluster->investigated) {
 		return true; // Already cached (perhaps by a previous render)
 	}
 
@@ -656,13 +661,13 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 	                    endByteWithinCluster, sample->byteDepth, sample->numChannels);
 
 	// Fold in anything previously captured for this cluster (same as findPeaksPerCol's whole-cluster path).
-	peak.min = std::min(peak.min, static_cast<int32_t>(sampleCluster->minValue) << 24);
-	peak.max = std::max(peak.max, static_cast<int32_t>(sampleCluster->maxValue) << 24);
+	peak.min = std::min(peak.min, static_cast<int32_t>(sampleCluster->min) << 24);
+	peak.max = std::max(peak.max, static_cast<int32_t>(sampleCluster->max) << 24);
 
 	// Store the coarse (int8) overview, rounding towards 0.
-	sampleCluster->minValue = toCoarsePeak(peak.min);
-	sampleCluster->maxValue = toCoarsePeak(peak.max);
-	sampleCluster->investigatedWholeLength = true;
+	sampleCluster->min = toCoarsePeak(peak.min);
+	sampleCluster->max = toCoarsePeak(peak.max);
+	sampleCluster->investigated = true;
 
 	// Keep the sample's running peak up to date too, so brightness normalisation is pre-warmed.
 	sample->maxValueFound = std::max(sample->maxValueFound, peak.max);
@@ -691,7 +696,7 @@ bool WaveformRenderer::advanceOverviewScan(Sample* sample, int32_t maxClusters) 
 	for (int32_t budget = maxClusters; budget > 0 && sample->overviewScanNextCluster < endClusters;) {
 		const int32_t clusterIndex = sample->overviewScanNextCluster;
 
-		if (sample->stream().entry(clusterIndex).investigatedWholeLength) {
+		if (sample->overviewCacheEntry(clusterIndex).investigated) {
 			sample->overviewScanNextCluster++; // Free; don't spend budget on cache hits
 			continue;
 		}

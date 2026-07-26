@@ -59,7 +59,7 @@ public:
 	                     SampleRecorder* recorder = nullptr, int32_t xStart = 0, int32_t xEnd = kDisplayWidth);
 
 	// Background "waveform overview" pre-scan (issue #4460). Investigates one whole cluster's min/max and
-	// caches it in the SampleCluster (int8 + investigatedWholeLength), so the zoomed-out single-row render
+	// caches it in the Sample's overview cache entry (int8 + investigated), so the zoomed-out single-row render
 	// path finds it already done and never has to load clusters synchronously while scrolling. Returns true
 	// if the cluster is now investigated (or there was nothing to do); false if its data couldn't be loaded.
 	bool investigateWholeCluster(Sample* sample, int32_t clusterIndex);

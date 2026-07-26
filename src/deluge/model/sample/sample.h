@@ -18,6 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "model/sample/overview_cache_entry.h"
 #include "model/sample/sample_cluster.h"
 #include "model/sample/sample_length_sentinel.h"
 #include "model/sample/sample_perc_cache_zone.h"
@@ -28,6 +29,7 @@
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
+#include "util/segmented_vector.h" // deluge::SegmentedVector, for overviewCache_
 #include <array>
 #include <cstdint>
 
@@ -106,6 +108,20 @@ public:
 	/// Const overload -- lets a `const Sample&` consumer reach read-only accessors without dropping
 	/// const.
 	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
+
+	/// @return The physical entry count of the waveform overview cache (`overviewCache_.size()`).
+	[[nodiscard]] size_t overviewCacheSize() const { return overviewCache_.size(); }
+	/// @brief Access the waveform overview cache entry for cluster @p index.
+	[[nodiscard]] OverviewCacheEntry& overviewCacheEntry(uint32_t index) { return overviewCache_[index]; }
+	/// @copydoc overviewCacheEntry(uint32_t)
+	[[nodiscard]] const OverviewCacheEntry& overviewCacheEntry(uint32_t index) const { return overviewCache_[index]; }
+	/// @brief Resize the waveform overview cache to exactly @p n entries.
+	///
+	/// Kept in lockstep with `stream()`'s residency table at the same sizing hooks (initialize,
+	/// finalize-grow, truncate-shrink -- see those call sites), but sized/guarded independently: this
+	/// cache is never grown concurrently with a reader (unlike the residency table during recording),
+	/// so no `reserve()` pre-sizing is needed.
+	void resizeOverviewCache(size_t n) { overviewCache_.resize(n); }
 
 	// Floating point
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }
@@ -194,6 +210,12 @@ public:
 	/// @note ~Sample releases the Asset explicitly, before `stream_` (and so the table it owns)
 	///       destructs -- see ~Sample's definition.
 	deluge::audio::stream::SampleStream stream_{*this};
+
+	/// The waveform overview cache: one `OverviewCacheEntry` per cluster of the file, independent of
+	/// `stream_`'s residency table. A stable-address `SegmentedVector` (matching `stream_.table_`'s
+	/// container choice) even though, unlike that table, this cache is never grown concurrently with a
+	/// reader -- see `resizeOverviewCache()`.
+	deluge::SegmentedVector<OverviewCacheEntry, 256, deluge::memory::fast_allocator> overviewCache_{};
 
 protected:
 	// Project-relevance hooks (the object's hard-lease 0↔1 transitions): toggle the soft-reference on

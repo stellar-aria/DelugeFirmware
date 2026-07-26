@@ -887,6 +887,15 @@ Error SampleRecorder::finalizeRecordedFile() {
 				return Error::INSUFFICIENT_RAM;
 			}
 		}
+		// Parallel grow for the waveform overview cache (sized/guarded independently of table_ -- see
+		// Sample::resizeOverviewCache()'s docs), same final count, same grow-only rationale as above.
+		if (finalClusterCount > sample->overviewCacheSize()) {
+			try {
+				sample->resizeOverviewCache(finalClusterCount);
+			} catch (deluge::exception&) {
+				return Error::INSUFFICIENT_RAM;
+			}
+		}
 	}
 
 	if (sample->tempFilePathForRecording.empty()) {
@@ -1479,6 +1488,11 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 	// shrink (matching the finalize-grow fix in the same file).
 	if (numClustersAfterAction < sample->stream().table_size()) {
 		sample->stream().erase_from(numClustersAfterAction);
+	}
+	// Parallel shrink for the waveform overview cache, guarded on its own physical size for the same
+	// reason as table_ above.
+	if (numClustersAfterAction < sample->overviewCacheSize()) {
+		sample->resizeOverviewCache(numClustersAfterAction);
 	}
 
 	auto truncateResult = file->truncate(newFileSize);

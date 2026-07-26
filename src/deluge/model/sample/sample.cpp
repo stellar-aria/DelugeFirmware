@@ -141,12 +141,12 @@ Sample::~Sample() {
 	// stream_ destructs below (a disengaged optional does nothing; an engaged one destructs its
 	// Stream, closing it).
 
-	// Retire our Asset first (frees any clusters the manager still has resident, via
-	// SampleStream::cluster_evict, which nulls the residency table's entries) so the SampleCluster
-	// destructors (which run when `stream_` -- and so its table -- destructs below) see nothing to
-	// free. No-op if we never defined one. This ordering is load-bearing -- see sample_stream.h's
-	// release_asset() doc comment -- so it's an explicit call
-	// here rather than left to stream_'s own (member-order-dependent) destruction.
+	// Retire our Asset first so the manager frees every backing this sample still has resident
+	// (directly -- there is no evict callback; a StreamedChunk is a trivially-destructible POD in the
+	// manager's slab). No-op if we never defined one. Since SR3d the residency table no longer mirrors
+	// chunk pointers (SampleCluster::cluster is always null), so the SampleCluster destructors below
+	// free nothing regardless -- retiring first is just the clean, explicit ordering (see
+	// sample_stream.h's release_asset() doc) rather than relying on stream_'s member-order destruction.
 	stream_.release_asset();
 
 	deletePercCache(true);

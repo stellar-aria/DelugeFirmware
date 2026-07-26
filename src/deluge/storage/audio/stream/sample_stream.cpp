@@ -211,6 +211,11 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 		void* existing = deluge_resource_peek(mgr, asset, index); // resident (ready-or-not) backing, or null
 		StreamedChunk* cluster;
 		if (existing != nullptr) {
+			// peek -> add_lease is a two-step on an unleased pointer. Safe under the current
+			// cooperative-eviction model: the only preemptor is the audio ISR (which uses try_acquire and
+			// never evicts), and a live write target is dirty/leased so evict_lowest skips it -- nothing can
+			// evict `existing` in this window. Revisit (masked peek+lease, or re-validate) when the Embassy
+			// preemptive evictor lands.
 			deluge_resource_add_lease(mgr, existing);
 			cluster = reinterpret_cast<StreamedChunk*>(existing);
 		}

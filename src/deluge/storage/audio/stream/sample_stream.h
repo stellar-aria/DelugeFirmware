@@ -92,13 +92,13 @@ public:
 	///        setter and the getter above (through `sample->stream()`).
 	void set_resource_asset_id(uint32_t id) { resource_asset_id_ = id; }
 
-	/// @brief Release the Asset, evicting every resident cluster first.
+	/// @brief Release the Asset, freeing every resident cluster's backing first.
 	///
-	/// Releasing runs the manager's evict callback for each resident Chunk, which nulls the
-	/// corresponding `table_[i].cluster`. Idempotent (a no-op if the Asset was never defined or is
-	/// already released).
-	/// @warning The eviction callbacks reach back through `sample->stream()`, so the Asset must be
-	///          released while the `Sample` and this `SampleStream` are both still fully alive.
+	/// Releasing frees the manager's slab slot for each resident Chunk directly — there is no evict
+	/// callback (a `StreamedChunk` is a trivially-destructible POD in the slab). Idempotent (a no-op if
+	/// the Asset was never defined or is already released).
+	/// @warning Release before the `Sample`/`SampleStream` is destroyed so the manager frees this
+	///          asset's resident backings rather than orphaning them; `~Sample` calls it explicitly.
 	///          `~Sample` therefore calls this explicitly, before any `Sample` member (including this
 	///          object, and hence `table_`) is destructed. That ordering is load-bearing and is why the
 	///          call is not left to `~SampleStream` alone.

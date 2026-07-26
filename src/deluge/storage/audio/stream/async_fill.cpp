@@ -89,7 +89,7 @@ StreamingFillDescriptor begin_fill(StreamedChunk& cluster) {
 	int32_t numSectors = Cluster::size >> 9;
 
 	// If this is the last Cluster, and we do know what the audio data length is...
-	if (sample->audioDataLengthBytes && sample->audioDataLengthBytes != 0x8FFFFFFFFFFFFFFF) {
+	if (sample->audioDataLengthBytes != 0 && sample->isLengthKnown()) {
 		uint32_t audioDataEndPosBytes = sample->audioDataLengthBytes + sample->audioDataStartPosBytes;
 		uint32_t startByteThisCluster = clusterIndex << Cluster::size_magnitude;
 		int32_t bytesToRead = audioDataEndPosBytes - startByteThisCluster;

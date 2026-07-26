@@ -117,6 +117,14 @@ public:
 	uint32_t sampleRate{44100};
 	uint32_t audioDataStartPosBytes; // That is, the offset from the start of the WAV file
 	uint64_t audioDataLengthBytes;
+
+	/// @brief Sentinel value for `audioDataLengthBytes` / `lengthInSamples` meaning "not yet known".
+	///
+	/// Set while a recording is in progress and its final length hasn't been determined yet.
+	static constexpr uint64_t kUnknownLengthSentinel = 0x8FFFFFFFFFFFFFFFull;
+	/// @return Whether this Sample's length has been determined (i.e. is not the "unknown" sentinel).
+	[[nodiscard]] bool isLengthKnown() const { return audioDataLengthBytes != kUnknownLengthSentinel; }
+
 	uint32_t bitMask{0};
 
 	uint64_t lengthInSamples;

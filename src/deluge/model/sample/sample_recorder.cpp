@@ -174,9 +174,9 @@ gotError:
 	sample->audioDataStartPosBytes = recordingExtraMargins ? 112 : 44;
 	sample->byteDepth = 3;
 	sample->numChannels = newNumChannels;
-	sample->lengthInSamples = 0x8FFFFFFFFFFFFFFF;
-	sample->audioDataLengthBytes = 0x8FFFFFFFFFFFFFFF; // If you ever change this value, update the check for it in
-	                                                   // SampleStream::read_cluster_data()
+	sample->lengthInSamples = Sample::kUnknownLengthSentinel;
+	sample->audioDataLengthBytes = Sample::kUnknownLengthSentinel; // If you ever change this value, update
+	                                                               // Sample::kUnknownLengthSentinel and its users
 	sample->sampleRate = kSampleRate;
 	sample->workOutBitMask();
 

@@ -24,6 +24,7 @@
 #include "storage/audio/audio_file.h"
 #include "storage/audio/stream/convert.h"
 #include "storage/audio/stream/sample_stream.h"
+#include "storage/cluster/cluster.h" // Cluster::size_magnitude, for geometricClusterCount()
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
@@ -127,6 +128,12 @@ public:
 	static constexpr uint64_t kUnknownLengthSentinel = deluge::sample_length::kUnknownLengthSentinel;
 	/// @return Whether this Sample's length has been determined (i.e. is not the "unknown" sentinel).
 	[[nodiscard]] bool isLengthKnown() const { return audioDataLengthBytes != kUnknownLengthSentinel; }
+
+	/// @return The cluster count implied purely by this sample's audio-data extent (start + length),
+	///         rounded up. Only meaningful once `isLengthKnown()` -- the caller's job to check.
+	[[nodiscard]] uint32_t geometricClusterCount() const {
+		return ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1;
+	}
 
 	uint32_t bitMask{0};
 

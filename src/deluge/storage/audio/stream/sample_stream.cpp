@@ -21,6 +21,7 @@
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_cluster.h"
+#include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/cluster/cluster.h"
 #include <memory>
@@ -34,6 +35,22 @@
 #include "storage/audio/stream/async_fill.h" // deluge_streaming_begin_fill/finish_fill (StreamingFillDescriptor)
 
 namespace deluge::audio::stream {
+
+namespace {
+// While a Sample's length is still unknown (mid-recording), its cluster count isn't geometric --
+// it's however far the live SampleRecorder has actually written. Mirrors the walk in
+// WaveformRenderer::investigateWholeCluster (waveform_renderer.cpp, ~line 618): AudioEngine::firstRecorder
+// via ->next, matching on SampleRecorder::sample.
+size_t liveRecorderClusterCount(const Sample& sample) {
+	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
+		if (recorder->sample == &sample) {
+			int32_t index = recorder->currentRecordClusterIndex.load(std::memory_order_acquire);
+			return index < 0 ? 0 : static_cast<size_t>(index);
+		}
+	}
+	return 0;
+}
+} // namespace
 
 void SampleStream::register_fill_context() {
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
@@ -303,7 +320,7 @@ const SampleCluster& SampleStream::entry(uint32_t index) const {
 }
 
 size_t SampleStream::num_clusters() const {
-	return table_.size();
+	return sample_.isLengthKnown() ? sample_.geometricClusterCount() : liveRecorderClusterCount(sample_);
 }
 void SampleStream::resize(size_t n) {
 	table_.resize(n);

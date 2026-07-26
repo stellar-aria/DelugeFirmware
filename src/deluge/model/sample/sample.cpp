@@ -1084,12 +1084,7 @@ int32_t Sample::getFirstClusterIndexWithAudioData() {
 }
 
 int32_t Sample::getFirstClusterIndexWithNoAudioData() {
-	uint32_t clusterIndex =
-	    ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1; // Rounds up
-	if (clusterIndex > static_cast<int32_t>(stream().num_clusters())) {
-		clusterIndex = static_cast<int32_t>(stream().num_clusters());
-	}
-	return clusterIndex;
+	return static_cast<int32_t>(geometricClusterCount());
 }
 
 void Sample::workOutMIDINote(bool doingSingleCycle, float minFreqHz, float maxFreqHz, bool doPrimeTest) {

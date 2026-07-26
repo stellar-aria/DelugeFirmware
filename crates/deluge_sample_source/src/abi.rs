@@ -801,6 +801,99 @@ mod tests {
         unsafe { deluge_sample_source_close(src) };
     }
 
+    /// SR3f: ports `sample_source_spec.cpp`'s "8b: acquire_ex's READY path is the
+    /// boolean acquire's true, unchanged" (plus the boolean-specific half of
+    /// "acquire on a not-yet-loaded cluster returns false and leaves `out`
+    /// untouched"). [`deluge_sample_region_acquire`] -- the boolean C-ABI
+    /// wrapper -- was previously exercised only by the C++ mirror: every other
+    /// test in this module calls `deluge_sample_region_acquire_ex` directly, and
+    /// `region_differential`'s `RustBackend` drives `SampleSource::acquire_ex`
+    /// below the ABI, never the boolean wrapper itself.
+    #[test]
+    fn boolean_acquire_matches_ready_and_is_false_with_out_untouched_otherwise() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let h = test_manager_handle();
+        let asset = define_ramp_asset(h);
+        mark_index_ready(h, asset, 0);
+        let geo = test_geo(4);
+        set_test_bridge(h, asset);
+        let backing = dummy_stream_backing();
+
+        // SAFETY: `backing` is live for the whole test; `geo` is Copy.
+        let src = unsafe { deluge_sample_source_open(backing, geo) };
+        assert!(!src.is_null());
+
+        let mut via_ex = DelugeSampleRegion {
+            payload_base: core::ptr::null_mut(),
+            region_index: 0,
+            resident_bytes: 0,
+            lease: 0,
+        };
+        // SAFETY: `src` is live; `via_ex` is a valid writable local.
+        let state = unsafe { deluge_sample_region_acquire_ex(src, 0, 1, 0, &mut via_ex) };
+        assert_eq!(state, DelugeRegionState::Ready);
+
+        // A second cursor over the same already-ready index, so the boolean call
+        // below is its own fresh acquire rather than re-acquiring what `via_ex`
+        // already holds.
+        // SAFETY: `backing` is still live.
+        let src_bool = unsafe { deluge_sample_source_open(backing, geo) };
+        assert!(!src_bool.is_null());
+        let mut via_bool = DelugeSampleRegion {
+            payload_base: core::ptr::null_mut(),
+            region_index: 0,
+            resident_bytes: 0,
+            lease: 0,
+        };
+        // SAFETY: `src_bool` is live; `via_bool` is a valid writable local.
+        let ok = unsafe { deluge_sample_region_acquire(src_bool, 0, 1, 0, &mut via_bool) };
+        assert!(ok, "boolean acquire must be true on READY");
+        assert_eq!(via_bool.payload_base, via_ex.payload_base);
+        assert_eq!(via_bool.region_index, via_ex.region_index);
+        assert_eq!(via_bool.resident_bytes, via_ex.resident_bytes);
+        assert_ne!(via_bool.lease, 0);
+
+        // LOADING (index 1 is never marked ready): false, `out` left untouched.
+        let mut probe = DelugeSampleRegion {
+            payload_base: core::ptr::null_mut(),
+            region_index: 999,
+            resident_bytes: 999,
+            lease: 999,
+        };
+        // SAFETY: `src_bool` is live; `probe` is a valid writable local.
+        let ok = unsafe { deluge_sample_region_acquire(src_bool, 1, 1, 0, &mut probe) };
+        assert!(!ok, "boolean acquire must be false on LOADING");
+        assert!(
+            probe.payload_base.is_null(),
+            "LOADING must leave out untouched"
+        );
+        assert_eq!(probe.region_index, 999);
+        assert_eq!(probe.resident_bytes, 999);
+        assert_eq!(probe.lease, 999);
+
+        // UNAVAILABLE (out of range): false, `out` left untouched.
+        let mut probe2 = DelugeSampleRegion {
+            payload_base: core::ptr::null_mut(),
+            region_index: 999,
+            resident_bytes: 999,
+            lease: 999,
+        };
+        // SAFETY: `src` is live; `probe2` is a valid writable local.
+        let ok = unsafe { deluge_sample_region_acquire(src, 100, 1, 0, &mut probe2) };
+        assert!(!ok, "boolean acquire must be false on UNAVAILABLE");
+        assert!(
+            probe2.payload_base.is_null(),
+            "UNAVAILABLE must leave out untouched"
+        );
+        assert_eq!(probe2.region_index, 999);
+
+        // SAFETY: both are live, not yet closed.
+        unsafe {
+            deluge_sample_source_close(src);
+            deluge_sample_source_close(src_bool);
+        }
+    }
+
     #[test]
     fn acquire_ex_with_null_src_is_unavailable_and_does_not_deref() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

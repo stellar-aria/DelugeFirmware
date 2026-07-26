@@ -795,4 +795,139 @@ mod tests {
         src.acquire_ex(2, 1, 0); // fresh acquire (prefetch is empty) -> Ready: fuses pending(2) away,
         assert_distinct(&src); // prefetches(3)=Loading
     }
+
+    /// SR3f: ports `sample_source_spec.cpp`'s "8b: a scheduled-but-unloaded region
+    /// is LOADING and its lease is RETAINED across the call" -- specifically its
+    /// tail ("when the fill lands, the same retry becomes READY and the retained
+    /// lease folds into the current pin -- exactly one lease, no duplicate from
+    /// the retries"). `acquire_loading_retains_pending_and_leaves_current` never
+    /// marks the index ready, and `region_differential`'s harness clusters never
+    /// transition Loading -> Ready mid-run (see `rust_backend.rs`'s doc), so this
+    /// landing fold was previously only exercised by the C++ mirror.
+    #[test]
+    fn loading_retry_that_lands_ready_folds_into_a_single_lease() {
+        let (src, h, asset) = new_source(4);
+
+        // Not yet resident: reserved -> Loading, the lease retained across the call.
+        let (state, out) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state, RegionState::Loading);
+        assert!(out.is_none());
+        assert_eq!(total_leases(h), 1, "pending holds exactly one lease");
+
+        // A defer/retry cycle before the fill lands is idempotent: still Loading,
+        // still exactly one lease.
+        let (state2, out2) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state2, RegionState::Loading);
+        assert!(out2.is_none());
+        assert_eq!(
+            total_leases(h),
+            1,
+            "retrying before landing must stay one lease"
+        );
+
+        // The fill lands; the same retry now reports Ready and folds the retained
+        // pending lease into `current` -- no duplicate from the retries. The READY
+        // path's own neighbour prefetch (direction=1) adds the only other lease.
+        mark_index_ready(h, asset, 1);
+        let (state3, out3) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state3, RegionState::Ready);
+        let out3 = out3.expect("ready must fill out");
+        assert_eq!(out3.region_index, 1);
+        assert_eq!(
+            total_leases(h),
+            2,
+            "current(1), folded from the retained pending, plus the fresh prefetch(2)"
+        );
+    }
+
+    /// SR3f: ports `sample_source_spec.cpp`'s "8b: a pending LOADING region that
+    /// becomes unreservable is dropped, not stranded" -- exercises the
+    /// `Get::Unavailable` arm's `release_pending()` with a REAL outstanding
+    /// pending lease already in hand, unlike the zero-baseline
+    /// `acquire_unavailable_leaves_nothing_leased`. The real `ManagerResidency`
+    /// has no lever to make an ALREADY-reserved (leased) index turn unreservable
+    /// mid-flight -- a live lease can't be evicted -- so an out-of-range index
+    /// stands in for "the next acquire reports Unavailable"; the load-bearing
+    /// claim (an outstanding pending lease is released, not stranded) is the
+    /// same either way. Also locks in the C++ spec's "lease == 0 is a no-op"
+    /// case for `retain`/`release` against a live (here, zero) balance.
+    #[test]
+    fn pending_lease_is_dropped_not_stranded_when_the_next_acquire_is_unavailable() {
+        let (src, h, _asset) = new_source(4);
+
+        let (state, out) = src.acquire_ex(1, 1, 0); // not resident -> Loading, pending=1
+        assert_eq!(state, RegionState::Loading);
+        assert!(out.is_none());
+        assert_eq!(total_leases(h), 1, "pending holds exactly one lease");
+
+        let (state2, out2) = src.acquire_ex(100, 1, 0); // out of range -> Unavailable
+        assert_eq!(state2, RegionState::Unavailable);
+        assert!(out2.is_none());
+        assert_eq!(
+            total_leases(h),
+            0,
+            "the outstanding pending lease is released, not stranded"
+        );
+
+        // lease == 0 is a no-op in both directions and does not disturb the balance.
+        src.retain(0);
+        src.release(0);
+        assert_eq!(total_leases(h), 0);
+    }
+
+    /// SR3f: ports `sample_source_spec.cpp`'s "8b Task 1: a LOADING acquire that
+    /// consumes the standing prefetch still reports a truthful state for that
+    /// same index (the in-flight `pending` reservation, not UNAVAILABLE)".
+    /// `take_promoted`'s "falls through to the Loading arm, which moves it to
+    /// pending" contract (see `acquire_ex`'s step-1 doc) is exercised by
+    /// `slots_never_track_the_same_index`'s sequence, but that test only checks
+    /// the never-same-index invariant there, never that `state()` stays truthful
+    /// (LOADING, not UNAVAILABLE) while the promoted reservation sits in `pending`.
+    #[test]
+    fn promoted_prefetch_that_is_not_yet_ready_lands_in_pending_and_state_stays_truthful() {
+        let (src, h, asset) = new_source(2);
+        mark_index_ready(h, asset, 0);
+
+        // acquire(0) -> Ready, prefetches neighbour 1 (not marked ready -> Loading).
+        let (state0, _out0) = src.acquire_ex(0, 1, 0);
+        assert_eq!(state0, RegionState::Ready);
+        assert_eq!(
+            src.state(1),
+            RegionState::Loading,
+            "standing prefetch, not yet landed"
+        );
+
+        // Acquire exactly the prefetched index while it is still not ready: this
+        // promotes prefetch(1) -- `take_promoted` hits -- but since the pin isn't
+        // ready yet, it falls through to the Loading arm and moves into `pending`,
+        // emptying `prefetch`.
+        let (state1, out1) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state1, RegionState::Loading);
+        assert!(out1.is_none());
+
+        // THE load-bearing assertion: index 1 is now tracked by `pending`, not
+        // lost in the prefetch->pending handoff -- state() must still say
+        // LOADING, never UNAVAILABLE (which would tell a deferring caller nothing
+        // is in flight, when a fill genuinely still is).
+        assert_eq!(src.state(1), RegionState::Loading);
+        assert_eq!(total_leases(h), 2, "current(0) + the promoted pending(1)");
+
+        // It lands -- the same indexed query reports READY, still without acquiring.
+        mark_index_ready(h, asset, 1);
+        assert_eq!(src.state(1), RegionState::Ready);
+
+        // And the retry that actually acquires it lands cleanly: the pending
+        // lease folds into `current`, no leak, no duplicate. num_clusters=2, so
+        // index 1 has no in-range forward neighbour to prefetch, keeping the
+        // final count an unambiguous single lease.
+        let (state1b, out1b) = src.acquire_ex(1, 1, 0);
+        assert_eq!(state1b, RegionState::Ready);
+        let out1b = out1b.expect("ready must fill out");
+        assert_eq!(out1b.region_index, 1);
+        assert_eq!(
+            total_leases(h),
+            1,
+            "current(1) only -- old current(0) fused, pending folded, nothing further to prefetch"
+        );
+    }
 }

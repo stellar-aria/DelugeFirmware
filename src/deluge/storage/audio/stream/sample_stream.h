@@ -72,19 +72,22 @@ public:
 	/// already released it (see release_asset() for why that explicit, earlier release is required).
 	~SampleStream() { release_asset(); }
 
+	/// @return The owning `Sample` (the back-reference this stream was constructed with). Used by the
+	///         region-port cursor bridge (`deluge_sample_stream_asset_id()`, sample_stream.cpp) to reach
+	///         `deluge_streaming_define_asset()`, which takes a `Sample*` rather than a `SampleStream*`.
+	[[nodiscard]] Sample& sample() { return sample_; }
+
 	/// @name Resource-manager Asset lifecycle
 	/// @{
 
-	/// @brief Lazily define this sample's resource-manager Asset, whose Chunks are its SAMPLE clusters.
-	///
-	/// Idempotent: returns the existing id on later calls. The manager is the sole SDRAM evictor, so a
-	/// missing manager or an exhausted asset table is fatal (`FREEZE`) — there is no legacy fallback,
-	/// hence this never returns DELUGE_RESOURCE_NO_ASSET.
-	/// @return The Asset id.
-	uint32_t ensure_resource_asset();
-
 	/// @return This sample's Asset id, or DELUGE_RESOURCE_NO_ASSET if not yet defined.
 	[[nodiscard]] uint32_t resource_asset_id() const { return resource_asset_id_; }
+
+	/// @brief Set this sample's cached Asset id. Storage only -- the id cache stays a `SampleStream`
+	///        member for SR3c even though the asset-*definition* logic that assigns it has moved to
+	///        `deluge_streaming_define_asset()` (chunk_residency.cpp), which reads/writes it via this
+	///        setter and the getter above (through `sample->stream()`).
+	void set_resource_asset_id(uint32_t id) { resource_asset_id_ = id; }
 
 	/// @brief Release the Asset, evicting every resident cluster first.
 	///
@@ -203,18 +206,11 @@ public:
 	/// @brief Register (or refresh) this asset's streaming fill-context with the resource manager.
 	///
 	/// A no-op if the Asset isn't defined yet (`resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET`) or
-	/// there is no manager. Called from ensure_resource_asset() right after the Asset is defined, and
-	/// again from open_read_stream() in case the efatfs handle becomes known only afterwards (see
-	/// their call sites for why both are needed). Public (not just an internal detail) so
-	/// `SampleRecorder` can also re-register once it has finalized this sample's geometry --
-	/// `audioDataStartPosBytes`/`audioDataLengthBytes` (+ the still-recording length sentinel) are set
-	/// well AFTER `ensure_resource_asset()`'s own first registration (`SampleRecorder::setup()`,
-	/// `sample_recorder.cpp`), and again finalized to their real value only at the end of recording
-	/// (`SampleRecorder::finalizeRecordedFile()`) -- both call sites re-register so the native fill's
-	/// consumed geometry (SR2d-4) matches the sample's actual state rather than the stale/default
-	/// values captured by that first, premature registration. Read/write this table back yet or not,
-	/// this call is always additive bookkeeping only -- it does not affect read_cluster_data() or any
-	/// existing behaviour.
+	/// there is no manager. Called from `deluge_streaming_define_asset()` (chunk_residency.cpp) right
+	/// after the Asset is defined, and again from open_read_stream() in case the efatfs handle becomes
+	/// known only afterwards (see their call sites for why both are needed). Kept as a `SampleStream`
+	/// method (not relocated alongside the asset-definition core) because it is stream/geometry-coupled
+	/// -- it reads `efatfs_handle_` directly -- and open_read_stream() needs to call it too.
 	void register_fill_context();
 
 private:

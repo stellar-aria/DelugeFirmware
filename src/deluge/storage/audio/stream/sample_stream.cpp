@@ -35,43 +35,6 @@
 
 namespace deluge::audio::stream {
 
-uint32_t SampleStream::ensure_resource_asset() {
-	if (resource_asset_id_ != DELUGE_RESOURCE_NO_ASSET) {
-		return resource_asset_id_;
-	}
-	// The manager is the sole SDRAM evictor now, so every Sample (playback or recording) is
-	// manager-owned. A missing manager / full asset table is fatal — no legacy fallback.
-	// Cost reflects rebuild expense: a converted sample (float / wrong-endian) costs a read PLUS a
-	// format re-conversion, so it's kept resident longer than a native one (one plain read).
-	uint32_t clusterCost =
-	    (sample_.rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	resource_asset_id_ = (mgr != nullptr)
-	                         ? deluge_resource_define_asset(mgr, &sample_, deluge_streaming_chunk_materialize,
-	                                                        deluge_streaming_chunk_evict, nullptr, clusterCost,
-	                                                        DELUGE_RESOURCE_BACKING_SLAB)
-	                         : DELUGE_RESOURCE_NO_ASSET;
-	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
-		FREEZE_WITH_ERROR("RSA1"); // resource asset table exhausted (raise kAssetCap)
-	}
-	// Attach the async-prefetch path so CLUSTER_ENQUEUE can request (construct now, load later).
-	deluge_resource_set_construct(mgr, resource_asset_id_, deluge_streaming_chunk_construct);
-	// If the sample is already project-relevant (a holder gained it before its first stream), apply the
-	// soft-reference now — numReasonsIncreasedFromZero fired before the asset existed, so it was a no-op.
-	if (sample_.isProjectReferenced()) {
-		deluge_resource_reference(mgr, resource_asset_id_);
-	}
-	// Register this asset's fill-context (SR2d-4 Task 1). Ordering: open_read_stream() is always
-	// called before this point on the only path that ever assigns an efatfs handle
-	// (AudioFileManager::buildAudioFileFromCard opens the stream, then loadFile()'s cluster reads
-	// trigger this method on first use) — so efatfs_handle_ is already whatever it will be for this
-	// stream's life (a real handle for a card-loaded sample, still 0 for a sample under construction
-	// by the recorder, which never opens one). register_fill_context() is called again from
-	// open_read_stream() as a defensive re-registration, in case that ordering ever changes.
-	register_fill_context();
-	return resource_asset_id_;
-}
-
 void SampleStream::register_fill_context() {
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
 		return;
@@ -122,9 +85,10 @@ bool SampleStream::open_read_stream(std::string_view path) {
 	}
 	efatfs_handle_ = handle;
 	// Re-register the fill-context now the handle is known (SR2d-4 Task 1): a no-op today on every
-	// known call site (open_read_stream() always runs before ensure_resource_asset()'s first call —
-	// see that method's comment — so the handle is already registered there), but keeps the table
-	// correct if a future caller ever opens the stream after the asset was already defined.
+	// known call site (open_read_stream() always runs before deluge_streaming_define_asset()'s first
+	// call — see that function's comment, chunk_residency.cpp — so the handle is already registered
+	// there), but keeps the table correct if a future caller ever opens the stream after the asset was
+	// already defined.
 	register_fill_context();
 	return true;
 }
@@ -231,11 +195,11 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 	}
 
 	// Manager-owned residency. The manager is the sole SDRAM evictor: every Sample (playback or
-	// recording) is manager-owned (ensure_resource_asset() FREEZEs if the asset table is exhausted —
-	// no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
+	// recording) is manager-owned (deluge_streaming_define_asset() FREEZEs if the asset table is
+	// exhausted — no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
 	// construct/materialize callback records the slot handle); add_lease/request take the lease.
 	// non-null `cluster` <=> manager-resident (on_evict nulls it).
-	uint32_t asset = ensure_resource_asset();
+	uint32_t asset = deluge_streaming_define_asset(&sample_);
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	bool wasResident = (table_[index].cluster != nullptr);
 
@@ -348,10 +312,12 @@ extern "C" {
 // The region-port open() bridge's stream-backing -> resource-asset accessor (SR2d-5 Task 1;
 // declared in libdeluge/streaming_fill.h alongside its sibling deluge_streaming_resource_manager).
 // The real body: SampleStream is always available wherever this TU compiles, so this just forwards
-// to the lazy-init entry point. The `__attribute__((weak))` no-op fallback for build configs
-// without a real SampleStream lives in async_fill.cpp, mirroring that file's other weak fallbacks.
+// to the relocated asset-definition entry point (chunk_residency.cpp). The `__attribute__((weak))`
+// no-op fallback for build configs without a real SampleStream lives in async_fill.cpp, mirroring
+// that file's other weak fallbacks.
 uint32_t deluge_sample_stream_asset_id(void* stream_backing) {
-	return reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing)->ensure_resource_asset();
+	auto* stream = reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing);
+	return deluge_streaming_define_asset(&stream->sample());
 }
 
 } // extern "C"

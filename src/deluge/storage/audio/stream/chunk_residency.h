@@ -20,15 +20,25 @@
 #include <cstddef>
 #include <cstdint>
 
+class Sample;
+
 /// @file
-/// Resource-manager Source callbacks for SAMPLE (streamed) chunks, relocated out of `SampleStream`
-/// (which registers them in `ensure_resource_asset()`) into their own translation unit. `owner` is
-/// always the `Sample*` registered there; each callback reaches that sample's `SampleStream` via
-/// `sample->stream()` to update the residency table (`table_`) and, for materialize, to read the
+/// Resource-manager Source callbacks for SAMPLE (streamed) chunks, plus the asset-*definition* core,
+/// relocated out of `SampleStream` into their own translation unit. `owner` is always the `Sample*`
+/// registered by `deluge_streaming_define_asset()`; each callback reaches that sample's `SampleStream`
+/// via `sample->stream()` to update the residency table (`table_`) and, for materialize, to read the
 /// cluster's data (`read_cluster_data()`). See sample_stream.h's "Cluster residency" section for the
 /// broader contract these implement.
 
 extern "C" {
+
+/// @brief Lazily define @p sample's resource-manager Asset, whose Chunks are its SAMPLE clusters.
+///
+/// Idempotent: returns the existing id (cached on `sample->stream()`) on later calls. The manager is
+/// the sole SDRAM evictor, so a missing manager or an exhausted asset table is fatal (`FREEZE`) --
+/// there is no legacy fallback, hence this never returns `DELUGE_RESOURCE_NO_ASSET`.
+/// @return The Asset id.
+uint32_t deluge_streaming_define_asset(Sample* sample);
 
 /// @brief Prefetch counterpart to deluge_streaming_chunk_materialize(): construct the `StreamedChunk`
 ///        but do not read it (`loaded` stays false), so the audio thread never blocks — the

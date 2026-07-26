@@ -27,7 +27,6 @@
 #include <span>
 
 class Sample;
-class SampleCluster;
 class SampleCache;
 
 /// @brief Shared FAT-geometry configuration for the cluster payload types.

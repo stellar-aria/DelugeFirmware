@@ -847,48 +847,29 @@ Error SampleRecorder::finalizeRecordedFile() {
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
 
-	// SR3b Task 3 (Critical regression fix): unconditionally restore the invariant the old
-	// per-cluster createNextCluster() resize used to guarantee as a side effect for every completed
-	// cluster -- the shared residency table (SampleStream::table_, used by ALL later playback of
-	// this Sample) sized to the real, final cluster count. This runs for BOTH finalize outcomes:
-	//   - the alterFile branch above no longer touches table_ at all -- the SR3 rewrite made
-	//     alterFile() a positional file->file transform over deluge::io::Stream (read_at_via/
-	//     write_at), with no cluster residency and no get_cluster/table_ involvement whatsoever. So
-	//     table_ is still sitting at the single entry Sample::initialize(1) set in setup() when we
-	//     reach here, and this resize is an ACTUAL grow (1 -> finalClusterCount), not a no-op.
+	// Ensure the waveform overview cache (Sample::overviewCache_, one entry per cluster) is sized to
+	// the real, final cluster count once the recording's true length is known, so later zoomed-out
+	// waveform rendering can index every cluster of the finished file. This runs for BOTH finalize
+	// outcomes:
+	//   - the alterFile branch above never touches overviewCache_ -- alterFile() is a positional
+	//     file->file transform over deluge::io::Stream (read_at_via/write_at), with no overview-cache
+	//     involvement whatsoever. So overviewCache_ is still sitting at the single entry
+	//     Sample::initialize(1) set in setup() when we reach here, and this resize is an ACTUAL grow
+	//     (1 -> finalClusterCount), not a no-op.
 	//   - the common, no-alteration else-branch -- the ONLY path AudioClip recording takes -- never
-	//     touches table_ at all either, so without this it likewise stays that single entry. Any
-	//     later playback of a >1-cluster recording through that stale table --
-	//     including legacy C++ (sample_holder.cpp's claimClusterReasonsForMarker, bounded by
-	//     num_clusters()) and the Rust-cursor port (whose num_clusters is derived independently from
-	//     the finalized audioDataLengthBytes, NOT clamped by table_.size() -- see
-	//     crates/deluge_sample_source/src/abi.rs's num_clusters_for()) -- either silently truncates
-	//     playback to cluster 0, or, on the Rust path, reaches an out-of-bounds table_[index] write
-	//     in cluster_construct()/cluster_materialize() (sample_stream.cpp), which have no bounds
-	//     check of their own.
+	//     touches overviewCache_ either, so without this it likewise stays that single entry.
 	//
 	// Grow-only (never shrink here): SegmentedVector::resize() to a SMALLER size destroys the
-	// removed tail without going through the resource manager's evict callback, which would corrupt
-	// its bookkeeping for any cluster still resident there. In practice table_ is at size 1 for both
-	// finalize outcomes by the time we get here, so this guard is a safety margin rather than
-	// something routinely exercised in the other direction.
+	// removed tail, which would be wrong here -- shrinking is truncateFileDownToSize()'s job, not
+	// finalize's.
 	{
 		uint32_t idealFileSizeAfterAction =
 		    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);
 		uint32_t finalClusterCount = ((idealFileSizeAfterAction - 1) >> Cluster::size_magnitude) + 1;
-		// Guard on the PHYSICAL table size, not num_clusters(): num_clusters() is now derived from the
-		// same geometric formula as finalClusterCount, so guarding on it would be tautologically false
-		// and skip this grow, leaving table_ at its initialize(1) size while derived num_clusters()
-		// reports the true count -- an OOB when later playback/overview indexes entry() up to that count.
-		if (finalClusterCount > sample->stream().table_size()) {
-			try {
-				sample->stream().resize(finalClusterCount);
-			} catch (deluge::exception&) {
-				return Error::INSUFFICIENT_RAM;
-			}
-		}
-		// Parallel grow for the waveform overview cache (sized/guarded independently of table_ -- see
-		// Sample::resizeOverviewCache()'s docs), same final count, same grow-only rationale as above.
+		// Guard on the PHYSICAL cache size, not num_clusters(): num_clusters() is derived from this
+		// same geometric formula, so guarding on it would be tautologically false and skip this grow,
+		// leaving overviewCache_ at its initialize(1) size while derived num_clusters() reports the
+		// true count -- an OOB when later waveform rendering indexes the cache up to that count.
 		if (finalClusterCount > sample->overviewCacheSize()) {
 			try {
 				sample->resizeOverviewCache(finalClusterCount);
@@ -1482,15 +1463,10 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 
 	uint64_t numClustersAfterAction = ((newFileSize - 1) >> Cluster::size_magnitude) + 1;
 
-	// Guard on the PHYSICAL table size, not num_clusters(): erase_from() shrinks the actual table_
-	// storage, so the "am I really shrinking?" test must observe table_size(). num_clusters() is now
-	// derived and no longer tracks the physical table, so comparing against it would mis-gate this
-	// shrink (matching the finalize-grow fix in the same file).
-	if (numClustersAfterAction < sample->stream().table_size()) {
-		sample->stream().erase_from(numClustersAfterAction);
-	}
-	// Parallel shrink for the waveform overview cache, guarded on its own physical size for the same
-	// reason as table_ above.
+	// Guard on the PHYSICAL cache size, not num_clusters(): resizeOverviewCache() shrinks the actual
+	// overviewCache_ storage, so the "am I really shrinking?" test must observe overviewCacheSize().
+	// num_clusters() is derived and doesn't track the cache's physical size, so comparing against it
+	// would mis-gate this shrink (matching the finalize-grow guard in the same file).
 	if (numClustersAfterAction < sample->overviewCacheSize()) {
 		sample->resizeOverviewCache(numClustersAfterAction);
 	}

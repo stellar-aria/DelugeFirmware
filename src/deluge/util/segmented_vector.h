@@ -17,7 +17,7 @@ namespace deluge {
 /// This is the property `std::vector` cannot give (its backing array reallocates
 /// and moves on growth). It exists for state shared across threads where one side
 /// may grow the container while another holds a reference into it — see
-/// `SampleStream::table_` and docs/dev/known-concurrency-bugs.md (B2).
+/// `SampleRecorder::bufferTable_` and docs/dev/known-concurrency-bugs.md (B2).
 ///
 /// @note Single-writer for structural mutation (`resize`). Concurrent readers may
 ///       hold references from `operator[]` across a grow. Shrinking destroys the

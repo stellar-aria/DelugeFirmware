@@ -18,11 +18,8 @@
 #pragma once
 
 #include "definitions_cxx.hpp"                    // Error, ClusterLoad (CLUSTER_ENQUEUE et al.)
-#include "memory/fast_allocator.h"                // deluge::memory::fast_allocator
-#include "model/sample/sample_cluster.h"          // SampleCluster, the residency table's element type
 #include "storage/audio/stream/chunk_residency.h" // deluge_streaming_define_asset() + the chunk Source callbacks
 #include "storage/audio/stream/read_source.h"
-#include "util/segmented_vector.h" // deluge::SegmentedVector
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -38,10 +35,9 @@ namespace deluge::audio::stream {
 ///
 /// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
 /// streaming state:
-///   - the **`table_` vector**: one `SampleCluster` entry per cluster, holding the entry's waveform
-///     min/max overview cache. Its `StreamedChunk*` field is now a DEAD residency mirror — residency
-///     lives entirely in the resource manager, reached via chunk_at()/get_cluster() → the manager
-///     peek; the field + the vector itself are retired in a later slice (SR3e);
+///   - residency itself, which lives entirely in the resource manager and is reached via
+///     chunk_at()/get_cluster() → the manager peek/acquire (SR3e retired the former app-side
+///     residency-table mirror; there is nothing left on `SampleStream` for a caller to index directly);
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** id cache (`resource_asset_id_`); the Asset's
@@ -51,8 +47,7 @@ namespace deluge::audio::stream {
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
 /// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident
-/// one through chunk_at(); no caller indexes the table directly, and none branches on how a cluster's
-/// bytes are read.
+/// one through chunk_at(); none branches on how a cluster's bytes are read.
 ///
 /// @note **Real-time contract.** The audio render thread never calls into `SampleStream` per sample —
 ///       it reads already-resident chunk bytes by pointer from its own lookahead array. It only touches
@@ -98,10 +93,9 @@ public:
 	/// callback (a `StreamedChunk` is a trivially-destructible POD in the slab). Idempotent (a no-op if
 	/// the Asset was never defined or is already released).
 	/// @warning Release before the `Sample`/`SampleStream` is destroyed so the manager frees this
-	///          asset's resident backings rather than orphaning them; `~Sample` calls it explicitly.
-	///          `~Sample` therefore calls this explicitly, before any `Sample` member (including this
-	///          object, and hence `table_`) is destructed. That ordering is load-bearing and is why the
-	///          call is not left to `~SampleStream` alone.
+	///          asset's resident backings rather than orphaning them; `~Sample` calls it explicitly,
+	///          before any `Sample` member is destructed, rather than leaving it to `~SampleStream`
+	///          alone.
 	void release_asset();
 
 	/// @}
@@ -136,8 +130,9 @@ public:
 	/// materialize callback (cluster_materialize()) — no orchestration (leasing, the loading queue) here.
 	/// @warning Must be called on the cluster's OWN sample's stream, i.e. on `cluster.sample->stream()`
 	///          (`this == &cluster.sample->stream()`) — make_read_source(), chunk_at() and num_clusters()
-	///          are called on `*this` below to reach `cluster.sample`'s read source and residency table
-	///          (for the neighbour-edge stitch), not some other sample's. All callers uphold this.
+	///          are called on `*this` below to reach `cluster.sample`'s read source and resident
+	///          neighbour clusters (for the neighbour-edge stitch), not some other sample's. All callers
+	///          uphold this.
 	/// @param cluster           The chunk to reconstruct (already leased/resident, not yet loaded).
 	/// @param min_reasons_after ALPHA/BETA-only: the expected post-call lease-count floor, checked by the
 	///                          freeze sanity-checks below (unused in a release build).
@@ -175,41 +170,14 @@ public:
 	/// @return The resident chunk, or `nullptr` if @p index is not currently resident.
 	[[nodiscard]] StreamedChunk* chunk_at(uint32_t index) const;
 
-	/// @brief Access the raw table entry for @p index (its waveform min/max cache).
-	[[nodiscard]] SampleCluster& entry(uint32_t index);
-	/// @copydoc entry(uint32_t)
-	[[nodiscard]] const SampleCluster& entry(uint32_t index) const;
-
 	/// @return This stream's embedded-fatfs file handle, or 0 if none is open (the flag-off C-FatFS
 	///         path, or a stream not yet opened via the efatfs read path). Set by open_read_stream()
 	///         under the `efatfs_streaming` build; consulted by begin_fill() to route the read.
 	[[nodiscard]] uint32_t efatfs_handle() const { return efatfs_handle_; }
 
 	/// @return The sample's logical cluster count, DERIVED (geometry when the length is known, the live
-	///         recorder's captured-cluster count while recording) — NOT the physical `table_` size. Use
-	///         table_size() when you need the residency table's actual capacity.
+	///         recorder's captured-cluster count while recording).
 	[[nodiscard]] size_t num_clusters() const;
-
-	/// @return The physical entry count of the residency table (`table_.size()`). Distinct from
-	///         num_clusters() since that became derived: callers that size or bounds-check the table's
-	///         backing storage (e.g. the finalize-time grow) must observe this, not the logical count.
-	[[nodiscard]] size_t table_size() const;
-
-	/// @brief Resize the residency table to @p n entries (grows the table as a recording extends).
-	void resize(size_t n);
-
-	/// @brief Reserve the residency table's segment-pointer index for up to @p num_clusters entries.
-	///
-	/// Reserves index capacity only (allocates no cluster entries) so subsequent growth up to
-	/// @p num_clusters will not reallocate the segment-pointer index. Required BEFORE concurrent
-	/// (recording) growth: the recorder's audio thread grows the table via resize() while the fiber
-	/// reads it via chunk_at(); the `SegmentedVector` keeps element addresses stable, but its pointer
-	/// index must be pre-reserved to the final capacity, single-threaded, to stay stable under that
-	/// concurrent growth (see docs/dev/known-concurrency-bugs.md B2).
-	void reserve(size_t num_clusters);
-
-	/// @brief Erase every entry from @p index to the end (shrinks the table on record-stop / truncate).
-	void erase_from(size_t index);
 
 	/// @}
 
@@ -235,16 +203,6 @@ private:
 	/// C-FatFS sector path is unaffected; the `efatfs_streaming` read path (Task 6) sets it in
 	/// open_read_stream() via deluge_efatfs_open() and clears it on close.
 	uint32_t efatfs_handle_ = 0;
-
-	/// The cluster residency table: one passive `SampleCluster` per cluster of the file. This is the
-	/// sole owner of the table. A stable-address `SegmentedVector` (not a `std::vector`) so that growth
-	/// during recording never moves existing entries under a concurrent reader on another thread
-	/// (see docs/dev/known-concurrency-bugs.md, B2). The third template argument pins segment storage to
-	/// the fast/SRAM-preferred heap (`fast_allocator`), matching the retired `fast_vector`'s placement —
-	/// do not drop it back to the `std::allocator` default, which would move the table to SDRAM.
-	/// @warning `~SampleStream` destructs `table_` only after `~Sample`'s explicit release_asset() has
-	///          nulled every entry's `cluster` pointer; see release_asset().
-	deluge::SegmentedVector<SampleCluster, 256, deluge::memory::fast_allocator> table_{};
 };
 
 } // namespace deluge::audio::stream

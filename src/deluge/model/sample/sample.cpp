@@ -97,7 +97,6 @@ Error Sample::initialize(int32_t newNumClusters) {
 	fileExplicitlySpecifiesSelfAsWaveTable = false;
 
 	try {
-		stream().resize(stream().num_clusters() + newNumClusters);
 		overviewCache_.resize(overviewCache_.size() + newNumClusters);
 	} catch (deluge::exception&) {
 		return Error::INSUFFICIENT_RAM;
@@ -144,10 +143,9 @@ Sample::~Sample() {
 
 	// Retire our Asset first so the manager frees every backing this sample still has resident
 	// (directly -- there is no evict callback; a StreamedChunk is a trivially-destructible POD in the
-	// manager's slab). No-op if we never defined one. Since SR3d the residency table no longer mirrors
-	// chunk pointers (SampleCluster::cluster is always null), so the SampleCluster destructors below
-	// free nothing regardless -- retiring first is just the clean, explicit ordering (see
-	// sample_stream.h's release_asset() doc) rather than relying on stream_'s member-order destruction.
+	// manager's slab). No-op if we never defined one. This explicit, early call is the clean ordering
+	// (see sample_stream.h's release_asset() doc); ~SampleStream() also calls it, as an idempotent
+	// backstop, once stream_ destructs below.
 	stream_.release_asset();
 
 	deletePercCache(true);

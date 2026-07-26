@@ -20,7 +20,6 @@
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
-#include "model/sample/sample_cluster.h"
 #include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/cluster/cluster.h"
@@ -203,7 +202,7 @@ bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] in
 	return deluge_streaming_finish_fill(&cluster, status == DELUGE_OK);
 }
 
-// Cluster residency dispatch + table accessors (contract documented in sample_stream.h).
+// Cluster residency dispatch (contract documented in sample_stream.h).
 StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instruction, uint32_t priority_rating,
                                          Error* error) {
 
@@ -216,7 +215,8 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 	// exhausted — no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
 	// construct/materialize callback records the slot handle); add_lease/request take the lease.
 	// Residency lives in the manager; the returned chunk pointer IS the manager backing (a
-	// StreamedChunk placement-new'd into the slab slot). SR3d: no app-side table_ mirror.
+	// StreamedChunk placement-new'd into the slab slot). SR3e retired the former app-side residency
+	// mirror entirely -- there is no other bookkeeping to keep in sync here.
 	uint32_t asset = deluge_streaming_define_asset(&sample_);
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 
@@ -306,35 +306,14 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 
 StreamedChunk* SampleStream::chunk_at(uint32_t index) const {
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
-		return nullptr; // matches a never-resident table entry
+		return nullptr; // no Asset defined yet, so nothing can be resident
 	}
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	return reinterpret_cast<StreamedChunk*>(deluge_resource_peek(mgr, resource_asset_id_, index));
 }
 
-SampleCluster& SampleStream::entry(uint32_t index) {
-	return table_[index];
-}
-const SampleCluster& SampleStream::entry(uint32_t index) const {
-	return table_[index];
-}
-
 size_t SampleStream::num_clusters() const {
 	return sample_.isLengthKnown() ? sample_.geometricClusterCount() : liveRecorderClusterCount(sample_);
-}
-size_t SampleStream::table_size() const {
-	return table_.size();
-}
-void SampleStream::resize(size_t n) {
-	table_.resize(n);
-}
-
-void SampleStream::reserve(size_t num_clusters) {
-	table_.reserve(num_clusters);
-}
-
-void SampleStream::erase_from(size_t index) {
-	table_.resize(index); // SegmentedVector: shrink-to-size destroys the removed tail (same effect as erase-to-end)
 }
 
 } // namespace deluge::audio::stream

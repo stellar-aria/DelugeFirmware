@@ -26,9 +26,10 @@ class Sample;
 /// Resource-manager Source callbacks for SAMPLE (streamed) chunks, plus the asset-*definition* core,
 /// relocated out of `SampleStream` into their own translation unit. `owner` is always the `Sample*`
 /// registered by `deluge_streaming_define_asset()`; each callback reaches that sample's `SampleStream`
-/// via `sample->stream()` to update the residency table (`table_`) and, for materialize, to read the
-/// cluster's data (`read_cluster_data()`). See sample_stream.h's "Cluster residency" section for the
-/// broader contract these implement.
+/// via `sample->stream()` -- residency itself is manager-owned, so these callbacks only construct or
+/// reconstruct a chunk's bytes, and, for materialize, read the cluster's data
+/// (`read_cluster_data()`). See sample_stream.h's "Cluster residency" section for the broader
+/// contract these implement.
 
 extern "C" {
 

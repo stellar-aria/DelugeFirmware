@@ -66,9 +66,12 @@ uint8_t deluge_harness_recorder_probe_poll();
 ///        call even if no probe is open.
 void deluge_harness_recorder_probe_end();
 
-/// @brief SR3b Task 3 regression probe: "shared SampleStream::table_ left under-sized after a
-///        normal recording finishes" (the Critical bug commit 5bb397c2b introduced -- see
-///        finalizeRecordedFile()'s SR3b Task 3 comment in sample_recorder.cpp).
+/// @brief SR3b Task 3 regression probe: "a per-cluster structure finalizeRecordedFile() must grow to
+///        the real cluster count left under-sized after a normal recording finishes" (the Critical
+///        bug commit 5bb397c2b introduced -- see finalizeRecordedFile()'s finalize-grow comment in
+///        sample_recorder.cpp). Originally caught on `SampleStream`'s now-deleted residency table;
+///        the same finalize-time grow-only guard now sizes `Sample::overviewCache_`, which this probe
+///        measures instead (see its `_table_clusters()` accessor below).
 ///
 /// Builds a real `SampleRecorder`, feeds it `numFrames` of deterministic mono ramp audio spanning
 /// several `Cluster::size` clusters, and drives it through `endSyncedRecording()` +
@@ -102,9 +105,13 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels
 ///        probe is open.
 uint8_t deluge_harness_recorder_finalized_multicluster_probe_poll();
 
-/// @return The residency table's `num_clusters()` captured immediately after finalize (before any
-///         acquire) -- the direct assertion for "was table_ left under-sized". 0 if no probe has
-///         run (harness-error state, not a valid measurement).
+/// @return The waveform overview cache's physical entry count (`Sample::overviewCacheSize()`)
+///         captured immediately after finalize (before any acquire) -- the direct assertion for "was
+///         the finalize-time grow left under-sized". Named `_table_clusters()` for its original
+///         target, `SampleStream`'s now-deleted residency table; kept as-is rather than renamed
+///         across this C-ABI's callers (host_recorder_roundtrip_main.cpp,
+///         src/bsp/rust/src/recorder_finalize_probe.rs). 0 if no probe has run (harness-error state,
+///         not a valid measurement).
 uint32_t deluge_harness_recorder_finalized_multicluster_probe_table_clusters();
 
 /// @return The finalized recording's true required cluster count for the same geometry

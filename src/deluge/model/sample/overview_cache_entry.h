@@ -22,11 +22,10 @@
 /// @brief One entry in the per-cluster-index waveform overview cache (issue #4460): the coarse min/max
 ///        peak found while scanning a cluster's whole length, plus whether that scan has completed.
 ///
-/// `Sample`-owned (in `Sample::overviewCache_`, model/sample/sample.h), one entry per cluster,
-/// independent of `SampleStream`'s residency table. Deliberately its own header (rather than a nested
-/// `Sample` type or living alongside `SampleCluster`, model/sample/sample_cluster.h): it has no
-/// dependency beyond `<cstdint>`, so it stays includable from lightweight contexts (e.g. host unit
-/// tests) that can't pull in `sample.h`'s full transitive closure.
+/// `Sample`-owned (in `Sample::overviewCache_`, model/sample/sample.h), one entry per cluster.
+/// Deliberately its own header (rather than a nested `Sample` type): it has no dependency beyond
+/// `<cstdint>`, so it stays includable from lightweight contexts (e.g. host unit tests) that can't
+/// pull in `sample.h`'s full transitive closure.
 struct OverviewCacheEntry {
 	int8_t min = 127;
 	int8_t max = -128;

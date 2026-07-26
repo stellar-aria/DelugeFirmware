@@ -444,8 +444,9 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 		// Otherwise, do our normal investigation
 		else {
 			char const* errorCode;
-			if (sampleCluster->cluster) {
-				if (sampleCluster->cluster->loaded) {
+			StreamedChunk* residentChunk = sample->stream().chunk_at(clusterIndexToDo);
+			if (residentChunk) {
+				if (residentChunk->loaded) {
 					errorCode = "E343";
 				}
 				else {

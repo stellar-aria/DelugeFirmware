@@ -369,29 +369,20 @@ set_target_properties(deluge_rust_sim PROPERTIES IMPORTED_LOCATION ${SIM_RUST_LI
 add_dependencies(deluge_rust_sim sim_deluge_rust_build)
 # Libs the host Rust std staticlib references; linked into the sim executables below.
 #
-# SR3a Task 1: deluge_rust_sim must be linked `$<LINK_LIBRARY:WHOLE_ARCHIVE,...>`, not as a plain
-# (lazily-extracted) static archive. deluge_app (an OBJECT library, above) contributes
-# sample_source.cpp's `__attribute__((weak))` `deluge_sample_source_*` definitions to the link
-# UNCONDITIONALLY (object libraries' .o's are always included, never lazily pulled) and comes
-# BEFORE this archive on the link line, so by the time a plain-static ld reaches
-# libdeluge_rust.a, `deluge_sample_source_open` etc. already have a (weak) definition and are no
-# longer "undefined" -- the ordinary archive-member-extraction rule ("only pull members that
-# resolve a currently-undefined symbol") then never even looks inside libdeluge_rust.a for those
-# symbols, so the strong Rust override never enters the link and the weak C++ fallback silently
-# wins (confirmed empirically: without WHOLE_ARCHIVE, `nm` on deluge_render kept showing all 7 as
-# `W`). WHOLE_ARCHIVE unconditionally extracts every object in the archive regardless of
-# reference/order, which lets ordinary weak/strong symbol resolution (strong always wins once
-# both definitions are actually in the link, no duplicate-symbol error) take over correctly. This
-# differs from the device build (src/bsp/rust/src/main.rs's `extern crate` force-link, SR2d-5 Task
-# 4): there, `deluge_sample_source`'s rlib is processed by rustc's own link line BEFORE the
-# pre-built libdeluge_app.a (a `cargo:rustc-link-lib=static=` native lib, appended last), so the
-# strong symbol is already defined by the time the weak one is seen and no WHOLE_ARCHIVE is
-# needed there. The sim's link order is the reverse (deluge_app first, deluge_rust_sim last), so
-# it needs this extra push. Whole-archiving the WHOLE umbrella (deluge_alloc + deluge_resource +
-# deluge_sample_source) rather than just the cursor crate is deliberate simplicity -- the other
-# two have no C++ weak counterpart to collide with, so this is a no-op for them (their code was
-# already fully pulled in via ordinary undefined-symbol references).
-set(SIM_ALLOC_LINK $<LINK_LIBRARY:WHOLE_ARCHIVE,deluge_rust_sim> pthread dl m)
+# Plain (lazily-extracted) static archive linkage: every `deluge_sample_source_*`/`deluge_resource_*`
+# symbol the Rust umbrella exports is referenced as an *undefined* symbol by deluge_app's C++ (the
+# region-port bridge in sample_low_level_reader.cpp, the resource-manager callers), so ordinary
+# archive-member extraction pulls the Rust definitions from libdeluge_rust.a normally.
+#
+# Historical note (SR3a..SR3f): this link used to need `$<LINK_LIBRARY:WHOLE_ARCHIVE,...>` because
+# the now-deleted C++ mirror storage/audio/stream/sample_source.cpp contributed `__attribute__((weak))`
+# `deluge_sample_source_*` bodies via deluge_app (an OBJECT library, always included) BEFORE this
+# archive -- so those symbols were already (weakly) defined by the time ld reached the archive, and
+# plain extraction never pulled the strong Rust override (empirically all 7 showed as `W` in `nm`).
+# WHOLE_ARCHIVE force-extracted the whole umbrella so strong/weak resolution could pick Rust. SR3f
+# deleted that mirror, so the symbols are genuinely undefined here and the workaround is no longer
+# needed (verified: `nm deluge_render` shows all 7 as `T`, golden byte-identical, without it).
+set(SIM_ALLOC_LINK deluge_rust_sim pthread dl m)
 if(APPLE)
     # host_pcm.c's native CoreAudio (AudioQueue) audio backend.
     list(APPEND SIM_ALLOC_LINK "-framework AudioToolbox")

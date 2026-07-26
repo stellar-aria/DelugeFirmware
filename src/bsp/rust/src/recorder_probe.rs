@@ -1,12 +1,14 @@
 //! SR3b Task 2 Step 4's `host_app` diagnostic: does reading a STILL-RECORDING sample back
 //! resolve on the target where `async_streaming_loader` is on by default?
 //!
-//! `.superpowers/sdd/sr3b-routing-spike.md`'s central finding is that the recording byte-read
-//! routing diverges by target: the C-host sim's fiber `loader::pump()` drains through
-//! `RecordingReadSource` and resolves READY, but device/`host_app` route the fill onto the Rust
+//! `.superpowers/sdd/sr3b-routing-spike.md`'s central finding was that the recording byte-read
+//! routing diverged by target: the C-host sim's fiber `loader::pump()` used to drain through
+//! `RecordingReadSource` and resolve READY, while device/`host_app` route the fill onto the Rust
 //! async task (`streaming_loader.rs`), which reads via `efatfs_fs::read_at(handle=0, ...)` — and a
-//! recording's `efatfs_handle == 0`, predicted to fail. This module is what turns that prediction
-//! into a measurement: it drives `harness/recorder_readback_probe.h`'s C-ABI (a real
+//! recording's `efatfs_handle == 0`, predicted to fail there. SR3b Task 4 acted on that finding and
+//! deleted `RecordingReadSource` outright, so a still-recording sample now resolves LOADING
+//! (re-queued, never READY) uniformly on every target, sim included. This module is what turns
+//! that into a measurement: it drives `harness/recorder_readback_probe.h`'s C-ABI (a real
 //! `SampleRecorder`, fed real audio, never finalized) through the SAME region-port entry point
 //! (`deluge_sample_region_acquire_ex`) real playback uses, on THIS target, and reports what
 //! actually comes back.
@@ -56,8 +58,8 @@ pub struct RecorderProbeResult {
     /// signal `scenario::ScenarioResult::boot_ready` uses).
     pub boot_ready: bool,
     /// The state `deluge_harness_recorder_probe()`'s own bounded C++-side retry loop settled on
-    /// (see that function's doc: on sim this already resolves READY via `loader::pump()`; on
-    /// `host_app` `pump()` early-returns so this is expected to still read LOADING).
+    /// (see that function's doc: with `RecordingReadSource` deleted this is expected to read
+    /// LOADING uniformly, on sim as well as `host_app`).
     pub initial_state: u8,
     /// The state after this task's own poll loop (which lets the REAL async fill task run between
     /// checks, via `Timer::after` yields — the mechanism that actually owns the drain on

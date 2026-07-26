@@ -26,8 +26,9 @@ DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeS
 
 	// DELUGE_STREAM_WRITE_CREATE / _CREATE_NEW / _APPEND. FA_READ rides along so the write context
 	// can also be read back through -- FatFS rejects f_read on a handle opened without it, and
-	// `deluge_stream_read_at` is exactly that read-back (a still-recording sample's evicted cluster,
-	// see RecordingReadSource). Harmless for a write-only caller.
+	// `deluge_stream_read_at` is exactly that read-back (SampleRecorder::alterFile()'s positional
+	// read/write pass and finalizeRecordedFile()'s header patch-back both read through their own
+	// still-open write context this way). Harmless for a write-only caller.
 	FatFS::FileAccessMode fatfsMode = FA_WRITE | FA_READ;
 	if (mode == DELUGE_STREAM_WRITE_CREATE) {
 		fatfsMode |= FA_CREATE_ALWAYS;

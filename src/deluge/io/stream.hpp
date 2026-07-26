@@ -40,10 +40,10 @@ public:
 	///        OWN open write context, bounded by its live (not yet flushed to disk) size.
 	///
 	/// R3: used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open
-	/// write context) and `finalizeRecordedFile()`'s header patch-back. (SR3b deleted the OTHER
-	/// caller this doc used to point to -- `RecordingReadSource`, a still-recording sample's evicted-
-	/// cluster read-back -- as a dead end on the real device; see
-	/// storage/audio/stream/read_source.h.) Both backends implement it:
+	/// write context) and `finalizeRecordedFile()`'s header patch-back. (SR3b deleted this doc's
+	/// other former caller, `RecordingReadSource` -- a still-recording sample's evicted-cluster
+	/// read-back -- as a dead end on the real device; see storage/audio/stream/read_source.h.) Both
+	/// backends implement it:
 	/// `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on C-FatFS. EOF-honest --
 	/// the returned count may be short of @p dst.size().
 	std::expected<uint32_t, Status> read_at_via(uint32_t byte_offset, std::span<std::byte> dst);

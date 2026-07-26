@@ -919,9 +919,10 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
 // final flush+close making the whole file visible byte-exact to an independent C-FatFS reader.
 
 /// R3 Task 6 (brief-verbatim): a recording-shaped sequential write via the efatfs
-/// persistent-context write primitives, no flush between clusters, then -- mirroring the sample
-/// recorder's `RecordingReadSource` reading an evicted cluster back while still recording -- every
-/// EARLIER cluster read back byte-exact through the SAME still-open write context via
+/// persistent-context write primitives, no flush between clusters, then -- mirroring how the
+/// sample recorder's `alterFile()`/finalize header patch-back read their own still-open write
+/// context back via `read_at_via` -- every EARLIER cluster read back byte-exact through the SAME
+/// still-open write context via
 /// `read_at_via_context`, all while the on-disk directory entry is still stale (proving the
 /// write context's IN-MEMORY size, not the stale on-disk size, is what bounds the read). Finally
 /// closed+flushed and read back byte-exact via an independent C-FatFS read, proving the

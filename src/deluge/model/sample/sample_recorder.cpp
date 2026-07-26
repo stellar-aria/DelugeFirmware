@@ -826,8 +826,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// SR3b: the buffer that held the header (bufferTable_[0]) may have already been recycled --
 		// it was flushed to disk before we ever reach here (the pending-cluster flush above always
 		// runs first), so its physical memory could be reused for a later index by now. Read the
-		// header sector BACK from our own still-open write context instead (read_at_via -- the same
-		// mechanism RecordingReadSource uses), patch it, and write it right back. EOF-honest: reads
+		// header sector BACK from our own still-open write context instead (positional read_at_via
+		// on the deluge::io::Stream), patch it, and write it right back. EOF-honest: reads
 		// (and so re-writes) only as many bytes as actually exist on disk, never padding past the
 		// real file extent.
 		//
@@ -866,16 +866,14 @@ Error SampleRecorder::finalizeRecordedFile() {
 	// per-cluster createNextCluster() resize used to guarantee as a side effect for every completed
 	// cluster -- the shared residency table (SampleStream::table_, used by ALL later playback of
 	// this Sample) sized to the real, final cluster count. This runs for BOTH finalize outcomes:
-	//   - the alterFile branch above already leaves table_ correctly sized on its own -- its own
-	//     pre-call resize(numClustersBeforeAction) satisfies alterFile()'s read-the-ORIGINAL-file
-	//     requirement (it must see every pre-alteration cluster, e.g. both channels before a
-	//     channel-removal downmix, so it needs the LARGER pre-action count, not this smaller
-	//     final one), and truncateFileDownToSize()'s erase_from() already trims table_ back down to
-	//     the exact final count whenever the file actually shrank. So for that branch this is a
-	//     grow-only no-op (finalClusterCount <= what's already there).
+	//   - the alterFile branch above no longer touches table_ at all -- the SR3 rewrite made
+	//     alterFile() a positional file->file transform over deluge::io::Stream (read_at_via/
+	//     write_at), with no cluster residency and no get_cluster/table_ involvement whatsoever. So
+	//     table_ is still sitting at the single entry Sample::initialize(1) set in setup() when we
+	//     reach here, and this resize is an ACTUAL grow (1 -> finalClusterCount), not a no-op.
 	//   - the common, no-alteration else-branch -- the ONLY path AudioClip recording takes -- never
-	//     touches table_ at all, so without this it stays the single entry Sample::initialize(1) set
-	//     in setup(). Any later playback of a >1-cluster recording through that stale table --
+	//     touches table_ at all either, so without this it likewise stays that single entry. Any
+	//     later playback of a >1-cluster recording through that stale table --
 	//     including legacy C++ (sample_holder.cpp's claimClusterReasonsForMarker, bounded by
 	//     num_clusters()) and the Rust-cursor port (whose num_clusters is derived independently from
 	//     the finalized audioDataLengthBytes, NOT clamped by table_.size() -- see
@@ -884,10 +882,11 @@ Error SampleRecorder::finalizeRecordedFile() {
 	//     in cluster_construct()/cluster_materialize() (sample_stream.cpp), which have no bounds
 	//     check of their own.
 	//
-	// Grow-only (never shrink here): this must never destroy entries the alterFile branch already
-	// established at the correct (possibly larger) size -- SegmentedVector::resize() to a SMALLER
-	// size destroys the removed tail without going through the resource manager's evict callback,
-	// which would corrupt its bookkeeping for any cluster still resident there.
+	// Grow-only (never shrink here): SegmentedVector::resize() to a SMALLER size destroys the
+	// removed tail without going through the resource manager's evict callback, which would corrupt
+	// its bookkeeping for any cluster still resident there. In practice table_ is at size 1 for both
+	// finalize outcomes by the time we get here, so this guard is a safety margin rather than
+	// something routinely exercised in the other direction.
 	{
 		uint32_t idealFileSizeAfterAction =
 		    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);

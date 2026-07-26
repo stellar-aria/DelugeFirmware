@@ -49,7 +49,6 @@ enum class RecorderStatus {
 };
 
 class Sample;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class AudioClip;
 class Output;
 struct RecorderConfig {
@@ -67,6 +66,13 @@ public:
 	void feedAudio(std::span<StereoSample> input, bool applyGain = false, uint8_t gainToApply = 5);
 	Error cardRoutine();
 	void endSyncedRecording(int32_t buttonLatencyForTempolessRecording);
+	// Public (rather than an internal helper finalizeRecordedFile() alone calls) so the host-sim
+	// byte-exact characterization harness (host_recorder_roundtrip_main.cpp) can drive this
+	// post-capture file transform directly, with an explicit action/lshiftAmount/geometry, bypassing
+	// finalizeRecordedFile()'s auto-detection heuristics -- SUBTRACT_RIGHT_CHANNEL in particular needs
+	// a plugged-in line-input jack the host sim can't simulate.
+	Error alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
+	                uint64_t dataLengthAfterAction);
 	bool inputLooksDifferential();
 	bool inputHasNoRightChannel();
 	void removeFromOutput() {
@@ -172,11 +178,7 @@ public:
 	std::optional<deluge::io::Stream> file;
 
 private:
-	void setExtraBytesOnPreviousCluster(StreamedChunk* currentCluster, int32_t currentClusterIndex);
 	Error writeCluster(int32_t clusterIndex, size_t numBytes);
-	Error alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
-
-	                uint64_t dataLengthAfterAction);
 	Error finalizeRecordedFile();
 	Error createNextCluster();
 	Error writeAnyCompletedClusters();

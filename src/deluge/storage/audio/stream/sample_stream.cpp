@@ -40,6 +40,13 @@ namespace {
 // it's however far the live SampleRecorder has actually written. Mirrors the walk in
 // WaveformRenderer::investigateWholeCluster (waveform_renderer.cpp, ~line 618): AudioEngine::firstRecorder
 // via ->next, matching on SampleRecorder::sample.
+//
+// PRECONDITION: this unsynchronized list walk is safe only because num_clusters() reaches it just for
+// still-recording samples (isLengthKnown() == false), which are never consumed by the preemptive
+// streaming/region-port playback path (a recording target never opens a read stream). Its callers run
+// in the same cooperative/UI/diagnostic context as firstRecorder's structural mutation. If a future
+// change lets num_clusters() run on a recording sample from a truly preemptive context, this walk would
+// need synchronization against the card-routine add/remove.
 size_t liveRecorderClusterCount(const Sample& sample) {
 	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
 		if (recorder->sample == &sample) {

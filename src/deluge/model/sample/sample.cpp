@@ -1083,6 +1083,13 @@ int32_t Sample::getFirstClusterIndexWithAudioData() {
 }
 
 int32_t Sample::getFirstClusterIndexWithNoAudioData() {
+	// Pure geometric count, unclamped: for a loaded sample finalizeAfterLoad() guarantees
+	// audioDataStartPosBytes + audioDataLengthBytes <= fileSize, so this is <= the overview cache's
+	// physical size. It is also reached for a still-recording sample (via advanceOverviewScan's
+	// background scan), where audioDataLengthBytes is the kUnknownLengthSentinel; the sentinel's
+	// bit-pattern deliberately makes this expression truncate (in the uint32 geometricClusterCount())
+	// to 1 for every realistic cluster-size magnitude, so the scan stays bounded to cluster 0. Keep
+	// that property in mind before changing the sentinel value.
 	return static_cast<int32_t>(geometricClusterCount());
 }
 

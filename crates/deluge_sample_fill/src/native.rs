@@ -166,8 +166,8 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 /// `fill_once`'s current calling convention.
 ///
 /// Looks up the live singleton resource manager itself, exactly like [`native_begin`] — see that
-/// function's doc for why (both are meant to be callable from the async task AND, from Task 3/4
-/// on, the synchronous C++ fill path via a shared C-ABI wrapper).
+/// function's doc for why (both are callable from the async task AND from the synchronous C++ fill
+/// path, via the strong `deluge_streaming_finish_fill` wrapper below).
 ///
 /// ## Sync-context safety
 ///

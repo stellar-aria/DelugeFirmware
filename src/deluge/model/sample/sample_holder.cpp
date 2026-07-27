@@ -22,6 +22,7 @@
 #include "model/sample/sample.h"
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 
@@ -217,7 +218,7 @@ void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32
 		// Boundary-crossing lease: one stream() hop per lookahead slot here, not per-sample -- this
 		// runs only when (re)claiming the head/loop-start lookahead window, never in the per-sample
 		// hot loop.
-		newClusters[l] = ((Sample*)audioFile)->stream().get_cluster(clusterIndex, clusterLoadInstruction);
+		newClusters[l] = deluge::audio::stream::request(*(Sample*)audioFile, clusterIndex, clusterLoadInstruction);
 
 		if (!newClusters[l]) {
 			D_PRINTLN("NULL!!");

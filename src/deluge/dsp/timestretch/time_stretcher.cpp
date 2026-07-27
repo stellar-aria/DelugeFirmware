@@ -1142,7 +1142,7 @@ void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sour
 			    || nextClusterIndex >= sample->getFirstClusterIndexWithNoAudioData()) {
 				break; // If no more Clusters
 			}
-			clustersForPercLookahead[l] = sample->stream().get_cluster(nextClusterIndex, CLUSTER_ENQUEUE);
+			clustersForPercLookahead[l] = deluge::audio::stream::prefetch(*sample, nextClusterIndex);
 			if (!clustersForPercLookahead[l]) {
 				break;
 			}

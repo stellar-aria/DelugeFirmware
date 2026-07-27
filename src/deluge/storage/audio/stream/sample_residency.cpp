@@ -17,6 +17,7 @@
 
 #include "storage/audio/stream/sample_residency.h"
 
+#include "definitions_cxx.hpp"
 #include "deluge_resource.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
@@ -31,6 +32,14 @@ StreamedChunk* peek(const Sample& sample, uint32_t clusterIndex) {
 	}
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	return reinterpret_cast<StreamedChunk*>(deluge_resource_peek(mgr, assetId, clusterIndex));
+}
+
+StreamedChunk* prefetch(Sample& sample, uint32_t clusterIndex) {
+	return sample.stream().get_cluster(clusterIndex, CLUSTER_ENQUEUE);
+}
+
+StreamedChunk* request(Sample& sample, uint32_t clusterIndex, int32_t loadInstruction) {
+	return sample.stream().get_cluster(clusterIndex, loadInstruction);
 }
 
 } // namespace deluge::audio::stream

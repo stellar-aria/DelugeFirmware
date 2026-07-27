@@ -303,24 +303,81 @@ impl Reader {
         Some(lease)
     }
 
+    /// Transiently `acquire_and_fill` cluster `index`, dropping the lease immediately (never
+    /// self-pinned — only [`Self::window`]'s OWN cluster is). See `window`'s "boundary straddle"
+    /// doc for why this call exists: it exists purely to trigger `index`'s own `native_finish`
+    /// (on a miss) so that, if the currently-self-pinned cluster is its immediate predecessor, the
+    /// UNCONDITIONAL "give extra bytes to the previous cluster" step in `stitch_prev`
+    /// (`stitch.cpp:15-23`, mirrored by `deluge_sample_convert::stitch_boundaries`) copies `index`'s
+    /// own head bytes into that predecessor's trailing slack. `true` iff `index` ended up resident
+    /// (cache hit or a successful fresh fill) — this does NOT independently confirm the stitch
+    /// happened (see `window`'s doc for the residual gap when `index` was already resident from an
+    /// unrelated earlier fill).
+    fn ensure_neighbour_resident(&self, index: u32) -> bool {
+        self.acquire_and_fill(index).is_some()
+    }
+
     /// The contiguous run of valid, already-converted frames at the cursor. See the header doc for
     /// `deluge_sample_reader_window`'s full contract.
     ///
     /// Maps `current_frame` to its `(cluster_index, byte_offset, resident_bytes)` via [`locate`];
-    /// `byte_offset >= resident_bytes` is end-of-audio (`{null, 0}`, `ok` untouched — this is the
-    /// ordinary, expected way a forward/backward scan terminates, not a failure). Otherwise
-    /// must-load-now acquires (and, on a miss, synchronously fills) the cluster via
-    /// [`Self::acquire_and_fill`], replacing any prior held lease (ONE held pin — the self-pin
-    /// invariant), and returns a pointer into it plus how many WHOLE frames remain resident in the
-    /// reader's own `direction` from here — forward: to the end of this cluster's valid audio data;
-    /// backward: back to the start of this cluster. Deliberately conservative: this never reaches
-    /// into a cluster's trailing stitch-slack even where the boundary stitch would make a
-    /// straddling frame safe to read from here (a real optimization the byte-identity differential,
-    /// Task 5, may motivate later) — every frame this reports is wholly inside `resident_bytes`, so
-    /// it's correct regardless of whether a neighbour has been stitched yet.
+    /// `byte_offset >= resident_bytes` is unambiguous end-of-audio (`{null, 0}`, `ok` untouched —
+    /// the ordinary, expected way a scan terminates, not a failure) — there is no more real audio
+    /// data starting here, in either direction.
     ///
-    /// An acquire/fill failure sets `ok = false` and returns `{null, 0}` — distinct from the EOF
-    /// case above (which leaves `ok` alone).
+    /// # Boundary straddle: a frame's bytes can span two clusters
+    /// `frame_stride` (`byte_depth * num_channels`) does not generally divide `cluster_size_bytes`
+    /// evenly — the common real case: 24-bit audio (`byte_depth == 3`, set by `sample_recorder.cpp`)
+    /// against a power-of-two cluster size. So the LAST frame of a non-final cluster can have bytes
+    /// past `cluster_size_bytes`, in the next cluster. The current C++ read path serves exactly this
+    /// through each chunk's `payload_with_trailing_slack()` span (`cluster_size_bytes + 7` bytes,
+    /// `cluster.h`) — `native_finish`'s `stitch_boundaries` call (`stitch.cpp`) keeps that trailing
+    /// slack in sync with the true next-cluster bytes via TWO complementary, unconditional (i.e.
+    /// format-independent) copies: `stitch_next` (self's own finish, when the next cluster is
+    /// ALREADY resident, copies the next cluster's own head into self's trailing slack directly —
+    /// `stitch.cpp:145-148`'s `need_copy7` "NATIVE" fallthrough) and `stitch_prev` (the mirror: the
+    /// LATER-filled neighbour's own finish copies ITS OWN head into the EARLIER cluster's trailing
+    /// slack — `stitch.cpp:20-23`). Either one suffices, whichever cluster's `native_finish` runs
+    /// while the other is already resident — so a boundary between two resident clusters is stitched
+    /// regardless of fill order. Reproducing this: a window whose run includes a straddling frame
+    /// [`Self::ensure_neighbour_resident`]s the next cluster FIRST (after this cluster is already
+    /// self-pinned resident, so whichever of the two finish calls runs next performs the copy),
+    /// reading the frame's overflow bytes from the (now-stitched) trailing slack — max overhang is
+    /// `frame_stride - 1` bytes, always < 7 for every real `byte_depth`/`num_channels` combination,
+    /// so it never reaches past the slack's own end.
+    ///
+    /// This ONLY applies when the straddling frame is REAL audio — i.e. the current cluster is FULL
+    /// (`resident_bytes == cluster_size_bytes`) and the next cluster actually has more data
+    /// (`resident_bytes_for(cluster_index + 1) > 0`); otherwise the partial tail bytes are past the
+    /// true end of the audio (a short/last cluster) and are dropped, not read. Frames strictly
+    /// BEFORE a straddling one never need this (their own bytes stay within this cluster), and
+    /// backward reads only ever need it for the single frame AT the cursor (every earlier frame,
+    /// walking back toward byte 0, moves further from the boundary) — there is no equivalent
+    /// "leading slack" for a frame straddling INTO a cluster from its predecessor (`frame_read_
+    /// origin`'s own front guard is explicitly don't-care bytes, `cluster.h`), so a backward window
+    /// never needs one.
+    ///
+    /// If [`Self::ensure_neighbour_resident`] fails (the neighbour can't be made resident), the
+    /// straddling frame is dropped from the count rather than failing the whole reader — a
+    /// transient neighbour-acquire failure doesn't invalidate the cluster this reader is already
+    /// validly pinned to, and a later `window()` call may still succeed once the failure clears
+    /// (e.g. eviction pressure eases).
+    ///
+    /// **Residual, derived (not invented) limitation**: if the next cluster was already resident
+    /// from an EARLIER, unrelated fill (e.g. another reader/the voice warmed it before this cluster
+    /// ever existed), `ensure_neighbour_resident`'s cache hit does not re-run `native_finish` and so
+    /// cannot retroactively trigger the stitch. This is a property of the underlying stitch
+    /// mechanism itself (the same one the current C++ consumers rely on), not a gap this reader
+    /// introduces; the byte-identity differential (a later task) is the right place to prove this
+    /// doesn't matter in practice for this reader's own (sequential) access pattern.
+    ///
+    /// Otherwise: must-load-now acquires (and, on a miss, synchronously fills) the cluster via
+    /// [`Self::acquire_and_fill`], replacing any prior held lease (ONE held pin — the self-pin
+    /// invariant), and returns a pointer into it plus how many WHOLE (possibly straddling) frames
+    /// are valid in the reader's own `direction` from here.
+    ///
+    /// An acquire/fill failure for THIS cluster sets `ok = false` and returns `{null, 0}` — distinct
+    /// from the EOF case above (which leaves `ok` alone).
     pub fn window(&mut self) -> (*const u8, u32) {
         if !self.ok {
             return (core::ptr::null(), 0);
@@ -334,15 +391,51 @@ impl Reader {
         if byte_offset >= resident {
             return (core::ptr::null(), 0); // End-of-audio; not a failure.
         }
-        let frame_stride = (self.geometry.byte_depth as u32) * (self.geometry.num_channels as u32);
-        let frame_count = if self.direction >= 0 {
-            (resident - byte_offset) / frame_stride
+        let frame_stride = self.geometry.byte_depth as u32 * self.geometry.num_channels as u32;
+        if frame_stride == 0 {
+            self.ok = false;
+            return (core::ptr::null(), 0);
+        }
+
+        // Is a boundary straddle at this cluster's tail REAL, readable audio? Only true for a FULL
+        // (non-last) cluster whose successor genuinely has more data — see this fn's own doc.
+        let straddle_is_real_audio = || {
+            resident == self.geometry.cluster_size_bytes
+                && cluster_index
+                    .checked_add(1)
+                    .map(|next| resident_bytes_for(next, &self.geometry))
+                    .unwrap_or(0)
+                    > 0
+        };
+
+        let (mut frame_count, needs_next) = if self.direction >= 0 {
+            let bytes_available = resident - byte_offset;
+            let whole = bytes_available / frame_stride;
+            let remainder = bytes_available % frame_stride;
+            if remainder > 0 && straddle_is_real_audio() {
+                (whole + 1, true)
+            } else {
+                (whole, false)
+            }
         } else {
-            byte_offset / frame_stride + 1
+            // Backward: only the frame AT the cursor (byte_offset) can possibly straddle -- every
+            // earlier one (byte_offset - k*frame_stride, k >= 1) is strictly further from the
+            // cluster's own end, never straddling.
+            if byte_offset + frame_stride > resident {
+                if straddle_is_real_audio() {
+                    (byte_offset / frame_stride + 1, true)
+                } else {
+                    // The frame at the cursor itself isn't fully valid audio -- EOF.
+                    return (core::ptr::null(), 0);
+                }
+            } else {
+                (byte_offset / frame_stride + 1, false)
+            }
         };
         if frame_count == 0 {
-            return (core::ptr::null(), 0); // Only a partial trailing frame remains; treat as EOF.
+            return (core::ptr::null(), 0); // No whole (or validly straddling) frame remains -- EOF.
         }
+
         if self.held_cluster != Some(cluster_index) {
             let Some(lease) = self.acquire_and_fill(cluster_index) else {
                 self.ok = false;
@@ -353,6 +446,20 @@ impl Reader {
             self.held_lease = Some(lease);
             self.held_cluster = Some(cluster_index);
         }
+
+        if needs_next {
+            // `cluster_index + 1` cannot overflow here: `needs_next` is only ever set via
+            // `straddle_is_real_audio`, which itself only returns `true` when its own
+            // `checked_add(1)` succeeded.
+            if !self.ensure_neighbour_resident(cluster_index + 1) {
+                // Degrade: drop the unstitched straddling frame rather than fail the whole reader.
+                frame_count -= 1;
+                if frame_count == 0 {
+                    return (core::ptr::null(), 0);
+                }
+            }
+        }
+
         // SAFETY: `held_lease` (just confirmed `Some` above) pins a resident chunk for as long as
         // this reader holds it; `deluge_streaming_chunk_payload` returns that chunk's payload base.
         let payload_base = unsafe {
@@ -360,8 +467,12 @@ impl Reader {
                 self.held_lease.as_ref().unwrap().chunk().as_ptr() as *mut c_void
             )
         };
-        // SAFETY: `byte_offset < resident <= cluster_size_bytes`, so this stays within the pinned
-        // chunk's own payload span.
+        // SAFETY: without a straddle, `byte_offset + frame_count*frame_stride <= resident <=
+        // cluster_size_bytes`. With one, the straddling frame's last byte lands at
+        // `resident + (frame_stride - 1 - remainder) <= cluster_size_bytes + frame_stride - 2`,
+        // which stays inside the `cluster_size_bytes + 7`-byte `payload_with_trailing_slack()` span
+        // for every real `frame_stride` (<= 8; see this fn's own doc) — never reaching past the
+        // trailing slack `native_finish`/`ensure_neighbour_resident` just stitched.
         let frames = unsafe { payload_base.add(byte_offset as usize) };
         (frames as *const u8, frame_count)
     }
@@ -883,6 +994,141 @@ mod tests {
             );
 
             set_force_read_failure(false); // restore for other tests sharing this thread
+        }
+
+        // ── The boundary-straddle fix ────────────────────────────────────────────────────────
+        //
+        // 24-bit mono (`byte_depth: 3, num_channels: 1` -> `frame_stride == 3`) does NOT divide
+        // `CLUSTER_SIZE` (512 % 3 == 2) -- the real case `sample_recorder.cpp` sets (`byteDepth =
+        // 3`). Frame 170 (absolute bytes [510, 513)) straddles cluster 0/1's boundary: bytes
+        // 510-511 are cluster 0's own payload, byte 512 only exists (correctly) after
+        // `native_finish`'s stitch (`stitch.cpp`) copies cluster 1's own head into cluster 0's
+        // trailing slack. Cluster 1's head (absolute file bytes 512..519, the synthetic fill's
+        // ramp) is `[(512 + i) as u8 for i in 0..7]` == `[0, 1, 2, 3, 4, 5, 6]` (512 wraps to 0
+        // mod 256) -- so the straddling frame's expected bytes are `[510, 511, 0]`.
+
+        /// A 24-bit mono geometry: `byte_depth: 3, num_channels: 1` -> `frame_stride == 3`, which
+        /// does not divide `CLUSTER_SIZE` -- see the section doc above.
+        fn geo24(audio_data_length_bytes: u64) -> FillContext {
+            FillContext {
+                efatfs_handle: 0,
+                audio_data_start_pos_bytes: 0,
+                audio_data_length_bytes,
+                first_cluster_index_with_no_audio_data: -1,
+                cluster_size: CLUSTER_SIZE,
+                cluster_size_magnitude: CLUSTER_MAGNITUDE,
+                raw_data_format: 0, // Native
+                byte_depth: 3,
+                num_channels: 1,
+            }
+        }
+
+        #[test]
+        fn window_straddles_a_cluster_boundary_forward_with_24bit_stride() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            // 3 full clusters (1536 bytes): cluster 1 genuinely has more data past cluster 0's
+            // tail, so the straddle at cluster 0's end is real, readable audio.
+            let (_handle, asset) = harness(geo24(3 * CLUSTER_SIZE as u64));
+
+            // Frame 170 -> abs byte pos 510 -> cluster 0, offset 510: bytes_available =
+            // 512-510 = 2 < stride(3) -- a real straddle, not a whole-frame-aligned boundary.
+            let mut reader = Reader::open(asset, 170, 1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(
+                !ptr.is_null(),
+                "a mid-stream straddling frame must NOT report EOF"
+            );
+            assert_eq!(
+                frame_count, 1,
+                "exactly the one straddling frame is servable from cluster 0's \
+                 (now-stitched) trailing slack -- not a false EOF"
+            );
+            assert!(reader.ok(), "a straddling-but-real frame is not a failure");
+
+            // SAFETY: `ptr` is cluster 0's pinned `payload_with_trailing_slack()`, valid for
+            // these 3 bytes (byte_offset 510, 511 in the main payload; 512 in the trailing slack,
+            // per `window`'s own safety derivation).
+            let got = unsafe { [*ptr, *ptr.add(1), *ptr.add(2)] };
+            assert_eq!(
+                got,
+                [254u8, 255u8, 0u8],
+                "bytes 510/511 are cluster 0's own ramp; byte 512 is cluster 1's stitched head[0]"
+            );
+        }
+
+        #[test]
+        fn window_straddles_a_cluster_boundary_backward_with_24bit_stride() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            let (_handle, asset) = harness(geo24(3 * CLUSTER_SIZE as u64));
+
+            // Same straddling frame (170), approached backward: the cursor's OWN frame is the
+            // one that straddles -- every earlier frame (walking back toward byte 0) does not.
+            let mut reader = Reader::open(asset, 170, -1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(
+                !ptr.is_null(),
+                "a mid-stream straddling frame must NOT report EOF (backward)"
+            );
+            assert_eq!(
+                frame_count, 171,
+                "frames 0..=170 (byte_offset/stride + 1) are all safely servable backward \
+                 from here, including the straddling frame at the cursor"
+            );
+            assert!(reader.ok());
+
+            // Same pointer position as the forward case (the cursor's OWN frame) -- same bytes.
+            // SAFETY: see the forward test above.
+            let got = unsafe { [*ptr, *ptr.add(1), *ptr.add(2)] };
+            assert_eq!(got, [254u8, 255u8, 0u8]);
+        }
+
+        #[test]
+        fn window_true_eof_with_24bit_stride_does_not_falsely_straddle() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            // 511 bytes of real audio: cluster 0 is genuinely short (resident 511 < 512), so its
+            // own tail is NOT a real straddle -- there is no cluster 1 with more data to pull.
+            let (_handle, asset) = harness(geo24(511));
+
+            // Frame 170 -> abs byte pos 510 -> byte_offset 510, resident 511: only 1 byte
+            // remains, less than one whole frame (stride 3) -- genuinely no more complete
+            // frames, not a straddle.
+            let mut reader = Reader::open(asset, 170, 1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(ptr.is_null(), "true EOF must return a null pointer");
+            assert_eq!(
+                frame_count, 0,
+                "the short last cluster's partial tail must NOT be falsely counted as a \
+                 straddling frame"
+            );
+            assert!(
+                reader.ok(),
+                "genuine end-of-audio is not a failure, even with a non-dividing stride"
+            );
+        }
+
+        #[test]
+        fn advance_saturates_at_total_frames_near_eof() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64)); // byte_depth 2 -> stride 2
+            let total_frames = (3 * CLUSTER_SIZE as u64) / 2; // 768
+
+            let mut reader = Reader::open(asset, total_frames - 10, 1, ReadHint::Cached);
+            reader.advance(u32::MAX); // a huge forward advance from near-EOF
+            assert_eq!(
+                reader.current_frame(),
+                total_frames,
+                "advance must clamp at the sample's own total frame count, not overrun/wrap past it"
+            );
         }
     }
 }

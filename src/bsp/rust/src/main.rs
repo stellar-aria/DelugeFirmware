@@ -157,14 +157,6 @@ mod ffi_extra;
 /// The worker fiber: a stackful coroutine for the long synchronous C++ operations
 /// that pause via `yield()`. This module is the context-switch primitive.
 mod fiber;
-/// Pure cluster-fill logic for the native fill (SR2d-4 Task 4 + Task 5): `begin` reimplements
-/// `begin_fill`'s last-cluster short-read sector-count calc, `finish_convert_stitch` reimplements
-/// `finish_fill`'s convert + stitch tail (over `deluge_sample_convert`), both from geometry/buffers
-/// alone. No FFI/statics, so it needs no `#[cfg]` gate — same tier as `fiber`/`scheduler` above,
-/// compiled everywhere. Wired into `streaming_loader::prod::ProdOps::begin`/`finish`. Its host tests
-/// run via `tests/fill_logic_host.rs` (same `#[path]` convention `tests/streaming_fill_host.rs`
-/// also uses), not a plain `cargo test` of this bin (which is `test = false` — see `Cargo.toml`).
-mod fill_logic;
 /// flash.h — persistent settings flash over deluge_bsp::flash / spibsc.
 mod flash;
 /// Host-only no-op stubs for the peripheral (MIDI/audio/CV-gate/signals) C ABI

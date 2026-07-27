@@ -506,8 +506,8 @@ mod prod {
     /// `_set_convert_state` cross) -> `fill_logic::ConvertState`: the two are separate types with the
     /// identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the same
     /// type) -- a trivial field-for-field copy at the one tier where both exist.
-    fn to_logic_state(s: DelugeChunkConvertState) -> crate::fill_logic::ConvertState {
-        crate::fill_logic::ConvertState {
+    fn to_logic_state(s: DelugeChunkConvertState) -> deluge_sample_fill::fill_logic::ConvertState {
+        deluge_sample_fill::fill_logic::ConvertState {
             first_three_bytes: s.first_three_bytes,
             start_converted: s.start_converted,
             end_converted: s.end_converted,
@@ -516,7 +516,9 @@ mod prod {
 
     /// The inverse of [`to_logic_state`], for writing `finish_convert_stitch`'s (possibly updated)
     /// output back onto the `StreamedChunk` via `deluge_streaming_chunk_set_convert_state`.
-    fn from_logic_state(s: crate::fill_logic::ConvertState) -> DelugeChunkConvertState {
+    fn from_logic_state(
+        s: deluge_sample_fill::fill_logic::ConvertState,
+    ) -> DelugeChunkConvertState {
         DelugeChunkConvertState {
             first_three_bytes: s.first_three_bytes,
             start_converted: s.start_converted,
@@ -527,8 +529,8 @@ mod prod {
     /// `FillContext` (the C-ABI-mirroring registration record) -> `FillGeometry` (`fill_logic`'s
     /// pure-arithmetic input) -- a plain field subset (drops `efatfs_handle`, which `begin` threads
     /// through separately into the descriptor's own `handle` field, not through the geometry).
-    fn to_fill_geometry(ctx: &super::FillContext) -> crate::fill_logic::FillGeometry {
-        crate::fill_logic::FillGeometry {
+    fn to_fill_geometry(ctx: &super::FillContext) -> deluge_sample_fill::fill_logic::FillGeometry {
+        deluge_sample_fill::fill_logic::FillGeometry {
             audio_data_start_pos_bytes: ctx.audio_data_start_pos_bytes,
             audio_data_length_bytes: ctx.audio_data_length_bytes,
             first_cluster_index_with_no_audio_data: ctx.first_cluster_index_with_no_audio_data,
@@ -556,7 +558,7 @@ mod prod {
             return geometry_error();
         };
         let geo = to_fill_geometry(&ctx);
-        let r = crate::fill_logic::begin(index, &geo);
+        let r = deluge_sample_fill::fill_logic::begin(index, &geo);
         if !r.ok {
             return geometry_error();
         }
@@ -656,7 +658,7 @@ mod prod {
         // `prevCluster`/`nextCluster`, just made eviction-safe under the manager's real
         // lease/evict machinery, which the synchronous C++ path never had to contend with).
         let mut prev_lease: Option<*mut u8> = None;
-        let mut prev_state = crate::fill_logic::ConvertState::default();
+        let mut prev_state = deluge_sample_fill::fill_logic::ConvertState::default();
         if let Some(prev_index) = index.checked_sub(1) {
             // SAFETY: `mgr` is the live manager; `asset`/`prev_index` are a plain lookup.
             let p = unsafe { deluge_resource_try_acquire(mgr, asset, prev_index) };
@@ -668,7 +670,7 @@ mod prod {
                 prev_lease = Some(p);
             }
         }
-        let prev_view = prev_lease.map(|p| crate::fill_logic::NeighbourView {
+        let prev_view = prev_lease.map(|p| deluge_sample_fill::fill_logic::NeighbourView {
             // SAFETY: `p` was just leased+validated resident by `try_acquire` above, but `p`
             // itself is the neighbour's BACKING pointer (`== StreamedChunk*`), not its payload --
             // same distinction as `chunk_backing` vs `self_payload` above.
@@ -687,7 +689,7 @@ mod prod {
         });
 
         let mut next_lease: Option<*mut u8> = None;
-        let mut next_state = crate::fill_logic::ConvertState::default();
+        let mut next_state = deluge_sample_fill::fill_logic::ConvertState::default();
         if let Some(next_index) = index.checked_add(1) {
             // SAFETY: `mgr` is the live manager; `asset`/`next_index` are a plain lookup.
             let p = unsafe { deluge_resource_try_acquire(mgr, asset, next_index) };
@@ -699,7 +701,7 @@ mod prod {
                 next_lease = Some(p);
             }
         }
-        let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
+        let next_view = next_lease.map(|p| deluge_sample_fill::fill_logic::NeighbourView {
             // SAFETY: same as the prev branch above.
             payload: unsafe {
                 core::slice::from_raw_parts_mut(
@@ -712,7 +714,7 @@ mod prod {
             end_converted: &mut next_state.end_converted,
         });
 
-        crate::fill_logic::finish_convert_stitch(
+        deluge_sample_fill::fill_logic::finish_convert_stitch(
             self_payload,
             index,
             &geo,

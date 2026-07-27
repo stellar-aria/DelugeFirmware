@@ -6,7 +6,7 @@
 # they compose cleanly into the one umbrella without duplicate-symbol collisions.
 [workspace]
 resolver = "2"
-members = ["deluge_alloc", "deluge_resource", "deluge_rust", "deluge_sample_source"]
+members = ["deluge_alloc", "deluge_resource", "deluge_rust", "deluge_sample_source", "deluge_sample_fill"]
 # cargo-fuzz crate has its own [profile] + is nightly/standalone — keep it out of
 # the workspace (it still path-deps deluge_alloc directly).
 exclude = ["deluge_alloc/fuzz"]

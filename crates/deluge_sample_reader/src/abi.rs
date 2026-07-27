@@ -153,6 +153,32 @@ pub unsafe extern "C" fn deluge_sample_reader_ok(reader: *const DelugeSampleRead
     r.ok()
 }
 
+/// The stateless copy-out convenience. See the header doc (`deluge_sample_read`) and
+/// [`Reader::read`] for the full contract -- this is a thin type-cast shim over it, matching every
+/// other `abi.rs` wrapper in this module.
+///
+/// # Safety
+/// `dest`, if `dest_bytes > 0`, must be valid for at least `dest_bytes` writable bytes.
+#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+pub unsafe extern "C" fn deluge_sample_read(
+    source_id: u32,
+    start_frame: u64,
+    num_frames: u32,
+    dest: *mut c_void,
+    dest_bytes: usize,
+) -> u32 {
+    // SAFETY: forwarded from this fn's own contract.
+    unsafe {
+        Reader::read(
+            source_id,
+            start_frame,
+            num_frames,
+            dest as *mut u8,
+            dest_bytes,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -546,6 +546,73 @@ impl Reader {
             }
         }
     }
+
+    /// The stateless copy-out convenience (`deluge_sample_read`, header doc): copy up to
+    /// `num_frames` native-format frames of `asset`, starting at `start_frame`, into `dest`.
+    /// Internally an `open` -> `window`/`advance` loop -> drop (ordinary `Drop`, the same "close"
+    /// Task 1's lifecycle tests exercise at the `Box`/`Drop` level — see `abi::deluge_sample_reader_close`'s
+    /// own doc) -- ONE residency path, not a second implementation. Always forward (`direction ==
+    /// 1`) with [`ReadHint::Cached`], matching the header's own "equivalent to driving the handle
+    /// API by hand with `DELUGE_READ_CACHED`" contract.
+    ///
+    /// `stride` (the geometry's own `byte_depth * num_channels`) is resolved from `asset`'s
+    /// geometry, exactly like [`Self::window`]'s own frame-stride math -- not passed by the caller.
+    /// Each loop iteration copies `min(window's frame_count, frames still wanted, dest bytes still
+    /// available / stride)` frames, so the copy is bounded by BOTH `num_frames` and `dest_bytes` on
+    /// every iteration, not just the first. Stops at end-of-audio (`window`'s `frame_count == 0`),
+    /// once `num_frames` frames are written, or once `dest_bytes` is exhausted (whichever comes
+    /// first) -- returns the number of frames actually written, short in the first and last cases.
+    ///
+    /// A malformed/unresolved geometry (`stride == 0` -- e.g. `asset` has no registered
+    /// fill-context, mirroring [`Self::open`]'s own not-ok case) returns `0` without ever calling
+    /// `window()` -- there is no frame stride to divide `dest_bytes` by, and `window()` would
+    /// report the same "nothing servable" outcome anyway (`ok() == false`) once reached.
+    ///
+    /// # Safety
+    /// `dest` must be valid for at least `dest_bytes` writable bytes (this fn never writes past
+    /// `dest_bytes`, but the caller must supply a real allocation of at least that size).
+    pub unsafe fn read(
+        asset: u32,
+        start_frame: u64,
+        num_frames: u32,
+        dest: *mut u8,
+        dest_bytes: usize,
+    ) -> u32 {
+        let mut reader = Reader::open(asset, start_frame, 1, ReadHint::Cached);
+        let geo = reader.geometry();
+        let stride = geo.byte_depth as usize * geo.num_channels as usize;
+        if stride == 0 {
+            return 0;
+        }
+
+        let mut written_frames: u32 = 0;
+        let mut written_bytes: usize = 0;
+        while written_frames < num_frames {
+            let (frames, frame_count) = reader.window();
+            if frame_count == 0 {
+                break; // End-of-audio (or a hard failure -- either way, nothing more to copy).
+            }
+            let frames_remaining = num_frames - written_frames;
+            let max_by_dest = ((dest_bytes - written_bytes) / stride) as u32;
+            let n = frame_count.min(frames_remaining).min(max_by_dest);
+            if n == 0 {
+                break; // `dest_bytes` is exhausted -- less than one whole frame's room remains.
+            }
+            let copy_bytes = n as usize * stride;
+            // SAFETY: `frames` points into `window`'s pinned, resident chunk, valid for at least
+            // `frame_count * stride` bytes (`window`'s own contract) and `n <= frame_count`, so
+            // `copy_bytes` stays within it; `dest.add(written_bytes)` plus `copy_bytes` stays
+            // within `dest_bytes` by construction of `max_by_dest` above, and `dest` is valid for
+            // `dest_bytes` bytes per this fn's own SAFETY contract.
+            unsafe {
+                core::ptr::copy_nonoverlapping(frames, dest.add(written_bytes), copy_bytes);
+            }
+            reader.advance(n);
+            written_frames += n;
+            written_bytes += copy_bytes;
+        }
+        written_frames
+    }
 }
 
 #[cfg(test)]
@@ -1311,6 +1378,136 @@ mod tests {
                 "the straddling frame at the cursor was the ONLY servable one and couldn't be \
                  confirmed -- a failure (retry later), not true end-of-audio"
             );
+        }
+
+        // ── Task 4: `Reader::read`, the stateless copy-out over the SAME handle ─────────────────
+        //
+        // Nested inside `window_tests` (rather than a sibling module) purely to reuse its harness
+        // (`harness`/`geo`/`CLUSTER_SIZE`/`expected_cluster_bytes`) directly via `use super::*` --
+        // a child module can see its parent's private items, so no re-derivation/duplication is
+        // needed here, unlike `abi.rs`'s tests (a different FILE, which keeps its own small copy
+        // per this crate's established convention).
+        mod read_tests {
+            use super::*;
+
+            const STRIDE: usize = 2; // byte_depth 2 * num_channels 1, this module's `geo()` shape
+
+            #[test]
+            fn read_matches_a_manual_open_window_advance_loop_across_a_cluster_boundary() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+                // 300 frames: all of cluster 0 (256 frames) plus 44 frames into cluster 1 --
+                // spans the self-pin release/re-acquire `advance` performs across the boundary.
+                let num_frames: u32 = 300;
+                let dest_bytes = num_frames as usize * STRIDE;
+
+                let mut via_read = std::vec![0xAAu8; dest_bytes];
+                // SAFETY: `via_read` is exactly `dest_bytes` bytes long.
+                let written = unsafe {
+                    Reader::read(asset, 0, num_frames, via_read.as_mut_ptr(), dest_bytes)
+                };
+                assert_eq!(
+                    written, num_frames,
+                    "plenty of real audio exists (768 frames) -- the whole range is servable"
+                );
+
+                // The SAME range, driven by hand over the same handle primitives `read` composes
+                // -- proves `read` is not a second implementation of the frame-mapping/fill logic.
+                let mut manual: Vec<u8> = Vec::with_capacity(dest_bytes);
+                let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
+                let mut remaining = num_frames;
+                while remaining > 0 {
+                    let (ptr, frame_count) = reader.window();
+                    if frame_count == 0 {
+                        break;
+                    }
+                    let n = frame_count.min(remaining);
+                    for i in 0..(n as usize * STRIDE) {
+                        // SAFETY: `ptr` is `window`'s own pinned, resident chunk, valid for at
+                        // least `frame_count * STRIDE` bytes, and `i < n * STRIDE <= frame_count *
+                        // STRIDE`.
+                        manual.push(unsafe { *ptr.add(i) });
+                    }
+                    reader.advance(n);
+                    remaining -= n;
+                }
+
+                assert_eq!(
+                    via_read, manual,
+                    "deluge_sample_read must be byte-identical to a manual open+window+memcpy+\
+                     advance loop over the same range"
+                );
+            }
+
+            #[test]
+            fn read_past_end_of_audio_returns_a_short_count_and_does_not_overrun_dest() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                // 10 bytes of real audio -> exactly 5 frames of stride 2; cluster 0 is short.
+                let (_handle, asset) = harness(geo(10));
+
+                let num_frames: u32 = 100; // far past the 5 real frames
+                let dest_bytes = num_frames as usize * STRIDE;
+                let mut dest = std::vec![0xAAu8; dest_bytes];
+
+                // SAFETY: `dest` is exactly `dest_bytes` bytes long.
+                let written =
+                    unsafe { Reader::read(asset, 0, num_frames, dest.as_mut_ptr(), dest_bytes) };
+
+                assert_eq!(written, 5, "only 5 real frames of audio exist");
+                assert_eq!(
+                    &dest[0..10],
+                    &expected_cluster_bytes(0)[0..10],
+                    "the 5 real frames actually written must match the synthetic fill"
+                );
+                assert!(
+                    dest[10..].iter().all(|&b| b == 0xAA),
+                    "must not write a single byte past the real audio into the rest of dest"
+                );
+            }
+
+            #[test]
+            fn read_bounds_the_write_to_dest_bytes_when_smaller_than_num_frames_times_stride() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                // 3 full clusters -- plenty of real audio (768 frames); `dest_bytes` alone must
+                // be the bounding factor here, not end-of-audio.
+                let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+                let num_frames: u32 = 300;
+                // Deliberately not an even multiple of STRIDE, and far smaller than
+                // `num_frames * STRIDE` (600): exercises both the frame-count bound AND the
+                // "leftover partial-frame byte" truncation in the same call. `dest`'s backing
+                // `Vec` is allocated at EXACTLY this length, so an out-of-bounds write would
+                // corrupt the allocation, not just an assertion.
+                let dest_bytes: usize = 101;
+                let mut dest = std::vec![0xAAu8; dest_bytes];
+
+                // SAFETY: `dest` is exactly `dest_bytes` bytes long.
+                let written =
+                    unsafe { Reader::read(asset, 0, num_frames, dest.as_mut_ptr(), dest_bytes) };
+
+                let max_frames = (dest_bytes / STRIDE) as u32; // 50
+                assert_eq!(
+                    written, max_frames,
+                    "dest_bytes (101 -> 50 whole frames) must bound the write, not num_frames (300)"
+                );
+                let written_bytes = max_frames as usize * STRIDE; // 100
+                assert_eq!(
+                    &dest[0..written_bytes],
+                    &expected_cluster_bytes(0)[0..written_bytes],
+                    "the bytes actually written must match the synthetic fill"
+                );
+                assert_eq!(
+                    dest[written_bytes], 0xAA,
+                    "the one leftover byte (100..101, less than one whole frame) must be untouched"
+                );
+            }
         }
     }
 }

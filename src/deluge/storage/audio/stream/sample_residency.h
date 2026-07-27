@@ -26,11 +26,11 @@ enum class Error;
 namespace deluge::audio::stream {
 
 /// Non-leasing, non-blocking residency peek: the resident StreamedChunk for @p clusterIndex, or
-/// nullptr if no Asset is defined yet or the index isn't resident. Byte-for-byte the logic
-/// SampleStream::chunk_at() has today -- the single place that reaches the sample's peek internals,
-/// so callers stop depending on the SampleStream method surface (when SampleStream later dissolves,
-/// only this body changes, not the call sites). The returned chunk may be resident-but-not-yet-loaded;
-/// callers must check `->loaded` before reading bytes.
+/// nullptr if no Asset is defined yet or the index isn't resident. The single place that reaches the
+/// sample's peek internals (it took over the former SampleStream::chunk_at(), now deleted), so callers
+/// don't depend on the SampleStream method surface (when SampleStream later dissolves, only this body
+/// changes, not the call sites). The returned chunk may be resident-but-not-yet-loaded; callers must
+/// check `->loaded` before reading bytes.
 [[nodiscard]] StreamedChunk* peek(const Sample& sample, uint32_t clusterIndex);
 
 /// Intent-named prefetch: construct + lease the chunk for @p clusterIndex now and schedule its read,

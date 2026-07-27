@@ -24,6 +24,8 @@ fn sample_ctx() -> FillContext {
         cluster_size: 4096,
         cluster_size_magnitude: 12,
         raw_data_format: 0,
+        byte_depth: 2,
+        num_channels: 2,
     }
 }
 
@@ -32,7 +34,14 @@ fn sample_ctx() -> FillContext {
 fn registered_asset_round_trips() {
     let ctx = sample_ctx();
     deluge_streaming_set_fill_context(ptr::null_mut(), 3, ctx);
-    assert_eq!(fill_context_for(3), Some(ctx));
+    let got = fill_context_for(3);
+    assert_eq!(got, Some(ctx));
+    // byte_depth/num_channels explicitly, on top of the whole-struct equality above: these are
+    // the two fields this task adds, and the fill itself never reads them back (`to_fill_geometry`
+    // drops them), so this test is their only coverage.
+    let got = got.unwrap();
+    assert_eq!(got.byte_depth, ctx.byte_depth);
+    assert_eq!(got.num_channels, ctx.num_channels);
 }
 
 /// An asset id nothing has ever registered reports `None`, not a stale/zeroed context.

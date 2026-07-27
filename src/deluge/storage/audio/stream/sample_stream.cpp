@@ -51,6 +51,8 @@ void SampleStream::register_fill_context() {
 	    .cluster_size = static_cast<uint32_t>(Cluster::size),
 	    .cluster_size_magnitude = static_cast<uint32_t>(Cluster::size_magnitude),
 	    .raw_data_format = static_cast<uint8_t>(sample_.rawDataFormat),
+	    .byte_depth = static_cast<uint8_t>(sample_.byteDepth),
+	    .num_channels = static_cast<uint8_t>(sample_.numChannels),
 	};
 	deluge_streaming_set_fill_context(mgr, resource_asset_id_, ctx);
 }

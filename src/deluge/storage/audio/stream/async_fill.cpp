@@ -65,6 +65,8 @@ static_assert(offsetof(DelugeStreamingFillContext, first_cluster_index_with_no_a
 static_assert(offsetof(DelugeStreamingFillContext, cluster_size) == 20);
 static_assert(offsetof(DelugeStreamingFillContext, cluster_size_magnitude) == 24);
 static_assert(offsetof(DelugeStreamingFillContext, raw_data_format) == 28);
+static_assert(offsetof(DelugeStreamingFillContext, byte_depth) == 29);
+static_assert(offsetof(DelugeStreamingFillContext, num_channels) == 30);
 static_assert(sizeof(DelugeStreamingFillContext) == 32);
 
 // FFI layout guard for DelugeChunkConvertState (SR2d-4 Task 1), mirroring ConvertState's own

@@ -249,6 +249,8 @@ typedef struct DelugeStreamingFillContext {
 	uint32_t cluster_size;                          ///< Cluster::size — bytes per (non-final) cluster.
 	uint32_t cluster_size_magnitude;                ///< Cluster::size_magnitude — log2(cluster_size).
 	uint8_t raw_data_format;                        ///< Sample::rawDataFormat (RawDataFormat's uint8_t representation).
+	uint8_t byte_depth;   ///< Sample::byteDepth — bytes per channel-sample (e.g. 2 for 16-bit).
+	uint8_t num_channels; ///< Sample::numChannels — channel count (1 = mono, 2 = stereo).
 } DelugeStreamingFillContext;
 
 /// @brief Register (or replace) asset @p asset's streaming fill-context.

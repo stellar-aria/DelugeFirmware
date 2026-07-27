@@ -178,6 +178,8 @@ fn geo() -> FillContext {
         cluster_size: CLUSTER_SIZE,
         cluster_size_magnitude: CLUSTER_MAGNITUDE,
         raw_data_format: 2, // Unsigned8
+        byte_depth: 1,      // matches raw_data_format: Unsigned8
+        num_channels: 1,
     }
 }
 

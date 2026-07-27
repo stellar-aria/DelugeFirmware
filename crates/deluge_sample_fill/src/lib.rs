@@ -50,6 +50,13 @@ pub struct FillContext {
     pub cluster_size: u32,
     pub cluster_size_magnitude: u32,
     pub raw_data_format: u8,
+    /// Bytes per channel-sample (e.g. 2 for 16-bit, 3 for 24-bit). Not read by the fill
+    /// (`to_fill_geometry` drops it) — carried here so the reader (Task 3) can resolve frame
+    /// stride Rust-side, by asset.
+    pub byte_depth: u8,
+    /// Channel count (1 = mono, 2 = stereo). Not read by the fill (`to_fill_geometry` drops
+    /// it) — carried here so the reader (Task 3) can resolve frame stride Rust-side, by asset.
+    pub num_channels: u8,
 }
 
 impl FillContext {
@@ -67,6 +74,8 @@ impl FillContext {
         cluster_size: 0,
         cluster_size_magnitude: 0,
         raw_data_format: 0,
+        byte_depth: 0,
+        num_channels: 0,
     };
 }
 
@@ -83,6 +92,8 @@ const _: () = {
     assert!(core::mem::offset_of!(FillContext, cluster_size) == 20);
     assert!(core::mem::offset_of!(FillContext, cluster_size_magnitude) == 24);
     assert!(core::mem::offset_of!(FillContext, raw_data_format) == 28);
+    assert!(core::mem::offset_of!(FillContext, byte_depth) == 29);
+    assert!(core::mem::offset_of!(FillContext, num_channels) == 30);
     assert!(size_of::<FillContext>() == 32);
 };
 

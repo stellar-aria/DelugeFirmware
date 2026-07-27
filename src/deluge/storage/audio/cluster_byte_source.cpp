@@ -17,6 +17,7 @@
 
 #include "storage/audio/cluster_byte_source.h"
 #include "model/sample/sample.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 
 ClusterByteSource::ClusterByteSource(Sample& sample, uint32_t fileSize)
@@ -48,7 +49,7 @@ Error ClusterByteSource::advanceClustersIfNecessary() {
 	if (currentCluster_ != nullptr) {
 		deluge::cluster::remove_reason(*currentCluster_, "E031");
 	}
-	currentCluster_ = sample_.stream().get_cluster(currentClusterIndex_, CLUSTER_LOAD_IMMEDIATELY);
+	currentCluster_ = deluge::audio::stream::load_now(sample_, currentClusterIndex_);
 	if (currentCluster_ == nullptr) {
 		return Error::SD_CARD; // Failed to load cluster from card.
 	}

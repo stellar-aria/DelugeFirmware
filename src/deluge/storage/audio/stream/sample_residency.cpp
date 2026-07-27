@@ -42,4 +42,13 @@ StreamedChunk* request(Sample& sample, uint32_t clusterIndex, int32_t loadInstru
 	return sample.stream().get_cluster(clusterIndex, loadInstruction);
 }
 
+StreamedChunk* load_now(Sample& sample, uint32_t clusterIndex, Error* error) {
+	// priority_rating is unused on the LOAD_IMMEDIATELY path; pass get_cluster's own default (0xFFFFFFFF).
+	return sample.stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0xFFFFFFFF, error);
+}
+
+void dequeue(StreamedChunk& chunk) {
+	deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), chunk.resource_slot);
+}
+
 } // namespace deluge::audio::stream

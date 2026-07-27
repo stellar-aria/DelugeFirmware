@@ -27,6 +27,7 @@
 #include "processing/engines/audio_engine.h"
 #include "processing/render_wave.h"
 #include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "util/fixedpoint.h"
@@ -419,7 +420,7 @@ tryGettingFFTConfig:
 						deluge::cluster::remove_reason(*cluster, "E385");
 					}
 
-					cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0, &error);
+					cluster = deluge::audio::stream::load_now(*sample, clusterIndex, &error);
 					if (!cluster) {
 						return error; // allocGuard frees both temp buffers + the bands.
 					}

@@ -204,12 +204,11 @@ void Sample::markAsUnloadable() {
 	resetOverviewScan();
 
 	// If any Clusters in the load-queue, remove them from there
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-		StreamedChunk* cluster = stream().chunk_at(c);
+		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 		if (cluster != nullptr) {
 			cluster->unloadable = true;
-			deluge_resource_loader_remove(mgr, cluster->resource_slot);
+			deluge::audio::stream::dequeue(*cluster);
 		}
 	}
 }
@@ -1410,7 +1409,7 @@ startAgain:
 	uint32_t currentClusterIndex = currentOffset >> Cluster::size_magnitude;
 	int32_t writeIndex = 0;
 
-	StreamedChunk* cluster = stream().get_cluster(currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
+	StreamedChunk* cluster = deluge::audio::stream::load_now(*this, currentClusterIndex);
 	if (!cluster) {
 		D_PRINTLN("failed to load first");
 getOut:
@@ -1435,7 +1434,7 @@ getOut:
 continueWhileLoop:
 		// If there's no "next" Cluster, load it now
 		if (!nextCluster && currentClusterIndex + 1 < getFirstClusterIndexWithNoAudioData()) {
-			nextCluster = stream().get_cluster(currentClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY);
+			nextCluster = deluge::audio::stream::load_now(*this, currentClusterIndex + 1);
 			if (!nextCluster) {
 				deluge::cluster::remove_reason(*cluster, "imcwn4o");
 				D_PRINTLN("failed to load next");

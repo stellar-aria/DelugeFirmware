@@ -21,6 +21,7 @@
 
 class Sample;
 struct StreamedChunk;
+enum class Error;
 
 namespace deluge::audio::stream {
 
@@ -44,5 +45,16 @@ namespace deluge::audio::stream {
 /// SampleStream::get_cluster(index, loadInstruction). The intent-named prefetch()/load_now() wrappers
 /// are for the statically-known callers; this is the escape hatch for the one runtime-variable caller.
 [[nodiscard]] StreamedChunk* request(Sample& sample, uint32_t clusterIndex, int32_t loadInstruction);
+
+/// Blocking load-now: acquire + materialize the chunk for @p clusterIndex, reading from the card on a
+/// miss (may block on I/O -- the must-load-now contract). If @p error is non-null it is set on failure.
+/// Byte-for-byte SampleStream::get_cluster(index, CLUSTER_LOAD_IMMEDIATELY, <priority>, error). NOT for
+/// the audio ISR -- for load-time / UI paths permitted to block. Returned chunk is leased and (on
+/// success) loaded; nullptr on failure.
+[[nodiscard]] StreamedChunk* load_now(Sample& sample, uint32_t clusterIndex, Error* error = nullptr);
+
+/// Cancel any pending async read of @p chunk by removing it from the loader queue. Used when the chunk's
+/// on-disk data is no longer valid (file invalidation), so a queued fill must not run against stale data.
+void dequeue(StreamedChunk& chunk);
 
 } // namespace deluge::audio::stream

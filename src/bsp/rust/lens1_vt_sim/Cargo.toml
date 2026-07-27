@@ -67,6 +67,14 @@ deluge-bsp = { path = "../../../../../deluge-sdk/crates/deluge-bsp", features = 
 # which carries its own #[panic_handler]).
 deluge_resource = { path = "../../../../crates/deluge_resource" }
 
+# C2a Task 3: `#[path]`-included `streaming_loader.rs` (see src/main.rs) now sources
+# `StreamingFillDescriptor` and `ProdOps::begin`/`finish`'s `native_begin`/`native_finish`
+# straight from this crate (the manager-reaching sync fill core moved out of
+# `streaming_loader.rs::prod` in that task) instead of defining them itself — so this
+# package needs the same dependency `deluge-bsp-rust`/`region_fill_differential` do,
+# with `native_fill` on (this package recompiles `ProdOps`, which calls both).
+deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features = ["native_fill"] }
+
 # R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
 # `deluge-bsp-rust`'s own `host_app` feature pulls in (see its Cargo.toml
 # comment) — `efatfs_host_shim.rs`/`efatfs_core.rs` (path-included above) need

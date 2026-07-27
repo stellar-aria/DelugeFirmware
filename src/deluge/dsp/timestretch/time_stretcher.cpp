@@ -27,6 +27,7 @@
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 #include <cmath>
@@ -723,7 +724,7 @@ startSearch:
 				}
 
 				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				StreamedChunk* cluster = sample->stream().chunk_at(whichCluster);
+				StreamedChunk* cluster = deluge::audio::stream::peek(*sample, whichCluster);
 				if (!cluster || !cluster->loaded) {
 					goto skipSearch;
 				}

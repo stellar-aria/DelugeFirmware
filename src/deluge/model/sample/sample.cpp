@@ -26,6 +26,7 @@
 #include "model/sample/sample_perc_cache_zone.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <cmath>
@@ -646,7 +647,7 @@ doLoading:
 		}
 
 		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff.
-		StreamedChunk* cluster = stream().chunk_at(sourceClusterIndex);
+		StreamedChunk* cluster = deluge::audio::stream::peek(*this, sourceClusterIndex);
 		if (!cluster || !cluster->loaded) {
 			goto getOut;
 		}
@@ -869,7 +870,7 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				FREEZE_WITH_ERROR("EEEE");
 			}
 
-			StreamedChunk* cluster = stream().chunk_at(whichCluster);
+			StreamedChunk* cluster = deluge::audio::stream::peek(*this, whichCluster);
 			if (!cluster || !cluster->loaded) {
 				return false;
 			}
@@ -1851,7 +1852,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 	int32_t numClusterReasons = 0;
 	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
 
-		StreamedChunk* cluster = stream().chunk_at(c);
+		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 		if (cluster) {
 
 			if (cluster->cluster_index != c) {
@@ -1867,7 +1868,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 		D_PRINTLN("reason dump---");
 		for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
 
-			StreamedChunk* cluster = stream().chunk_at(c);
+			StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 			if (cluster) {
 				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
 

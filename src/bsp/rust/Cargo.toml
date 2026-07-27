@@ -115,6 +115,14 @@ deluge_resource = { path = "../../../crates/deluge_resource" }
 # duplicate-symbol conflict.
 deluge_sample_source = { path = "../../../crates/deluge_sample_source" }
 
+# U1 Task 1: the sample range-reader C ABI (`deluge_sample_reader_*`/`deluge_sample_read`,
+# include/libdeluge/sample_reader.h) -- the non-voice twin of the region-port cursor just above.
+# Depends on the SAME `deluge_resource` handle directly (its `Reader::held_lease` is a typed
+# `deluge_resource::facade::Lease`), not through a second manager. This task lands lifecycle only
+# (open/seek/close); `window`/`advance`/`ok`/`deluge_sample_read` are later tasks, already declared
+# in the header but not yet backed by a strong symbol here.
+deluge_sample_reader = { path = "../../../crates/deluge_sample_reader" }
+
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
@@ -151,6 +159,11 @@ deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 # just above is, so a plain host build never pulls it in (and never exports its no_mangle symbols; see
 # abi.rs's cfg_attr gate).
 deluge_sample_source = { path = "../../../crates/deluge_sample_source", optional = true }
+
+# U1 Task 1: host-side sibling of the device dep above. Same `host_app`-gated pattern (its own
+# `host_app` feature is forwarded below, widening its `abi.rs` cfg_attr gate) so a plain host build
+# never pulls it in.
+deluge_sample_reader = { path = "../../../crates/deluge_sample_reader", optional = true }
 
 # R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack the
 # device path (above) uses, made available on host too — `efatfs_host_shim.rs`
@@ -189,6 +202,8 @@ host_app = [
     "dep:deluge_resource",
     "dep:deluge_sample_source",
     "deluge_sample_source/host_app",
+    "dep:deluge_sample_reader",
+    "deluge_sample_reader/host_app",
     "dep:block-device-driver",
     "dep:block-device-adapters",
     "dep:aligned",

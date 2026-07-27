@@ -99,6 +99,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "deluge_sample_reader"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "deluge_alloc",
+ "deluge_resource",
+]
+
+[[package]]
 name = "deluge_sample_source"
 version = "0.1.0"
 dependencies = [

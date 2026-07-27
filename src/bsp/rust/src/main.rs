@@ -58,6 +58,17 @@ extern crate deluge_sample_source;
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_sample_source;
 
+// U1 Task 1: link-only, same reasoning as the `deluge_sample_source` pair above. Its `abi.rs`
+// defines the lifecycle trio of the `deluge_sample_reader_*` C ABI (`include/libdeluge/
+// sample_reader.h`), gated identically. Nothing calls it yet in U1 (no consumer migrates — that is
+// U2), so without this `extern crate` rustc/lld would drop the whole rlib from the link; this just
+// proves the symbols are present and compile clean end-to-end ahead of U2 wiring a real caller.
+#[cfg(target_os = "none")]
+extern crate deluge_sample_reader;
+/// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_sample_reader;
+
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
 /// service functions are defined in [`ffi`]). No C++ app is linked on host
 /// unless `host_app` is enabled (see build.rs), so there is no bindgen output

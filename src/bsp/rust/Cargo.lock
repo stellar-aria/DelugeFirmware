@@ -423,6 +423,7 @@ dependencies = [
  "deluge_resource",
  "deluge_sample_convert",
  "deluge_sample_fill",
+ "deluge_sample_reader",
  "deluge_sample_source",
  "embassy-executor",
  "embassy-futures",
@@ -463,6 +464,13 @@ version = "0.1.0"
 dependencies = [
  "deluge_sample_convert",
  "embassy-sync",
+]
+
+[[package]]
+name = "deluge_sample_reader"
+version = "0.1.0"
+dependencies = [
+ "deluge_resource",
 ]
 
 [[package]]

@@ -1,0 +1,50 @@
+# deluge_sample_reader — the sample range-reader C-ABI (U1): a zero-copy streaming reader-handle
+# (plus a stateless copy convenience, later tasks) over a sample's source residency, for non-voice
+# consumers (pitch detect, waveform overview, crossfade averages, perc-cache, wavetable build, hop
+# search) that read raw-PCM frame RANGES without reaching `StreamedChunk` internals — the non-voice
+# twin of the voice region port (`deluge_sample_source`). See
+# docs/superpowers/specs/2026-07-27-u1-sample-range-reader-design.md.
+#
+# A SIBLING of `deluge_sample_fill`, not folded into it: `Reader::held_lease` needs the typed RAII
+# `deluge_resource::facade::Lease` guard (the same choice `deluge_sample_source` already made for
+# its own cursor slots), which means a direct Rust dependency on `deluge_resource` — exactly what
+# `deluge_sample_fill` deliberately does NOT have (its `native_fill` module reaches the manager
+# only through late-bound `unsafe extern "C"` symbols, precisely so it stays a lean,
+# `deluge_sample_convert`-only, sim-linkable core). Forcing that dependency onto `deluge_sample_fill`
+# for the reader's sake alone would be exactly the "unwanted dep" this crate's own design doc warns
+# against, so this crate stands alone instead and depends on `deluge_resource` directly, like
+# `deluge_sample_source` does.
+#
+# A plain `no_std` rlib: no `#[panic_handler]` of its own (the final artifact — `deluge_rust`'s
+# umbrella / `deluge-bsp-rust`'s bin — provides one), composing without duplicate-symbol clashes,
+# exactly like `deluge_resource`/`deluge_sample_source`.
+[package]
+name = "deluge_sample_reader"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "deluge_sample_reader"
+crate-type = ["rlib"]
+
+[dependencies]
+# The typed RAII `Lease`/`Resource` facade over the residency manager — `Reader::held_lease` stores
+# a `deluge_resource::facade::Lease` directly (not a locally reinvented lease type), mirroring
+# `deluge_sample_source`'s own choice for its cursor slots.
+deluge_resource = { path = "../deluge_resource" }
+
+[dev-dependencies]
+deluge_alloc = { path = "../deluge_alloc" }
+critical-section = { version = "1", features = ["std"] }
+
+[features]
+# Task 1 (SR-U1): mirrors `deluge_sample_source`'s own `host_app` selector (see its Cargo.toml) —
+# lets `abi.rs`'s `cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))` gate
+# tell "device, or host standing in for it via the host-built C++ app closure" apart from a plain
+# `cargo test`/`cargo build` on this crate alone, which must NOT export these symbols (dead weight
+# with nothing to link against). No `sim` feature yet: U1 does not wire the C-host sim (that is a
+# later, separate rung — see the U1 Task 1 report) — a future sim-link task adds it the same way
+# `deluge_sample_source` did, not invented ahead of need here.
+host_app = []

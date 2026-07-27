@@ -129,8 +129,9 @@ public:
 	/// @brief Reconstruct @p cluster's data: read its sectors from the read source, convert if the
 	///        sample's raw format isn't native, and stitch in the neighbouring clusters' boundary bytes.
 	///
-	/// The pure per-cluster reconstruction primitive underneath get_cluster() and the resource-manager
-	/// materialize callback (cluster_materialize()) — no orchestration (leasing, the loading queue) here.
+	/// The pure per-cluster reconstruction primitive underneath the residency dispatch and the
+	/// resource-manager materialize callback (cluster_materialize()) — no orchestration (leasing, the
+	/// loading queue) here.
 	/// @warning Must be called on the cluster's OWN sample's stream, i.e. on `cluster.sample->stream()`
 	///          (`this == &cluster.sample->stream()`) — make_read_source() is called on `*this` below,
 	///          and the finish-fill step it hands off to peeks `cluster.sample`'s resident neighbour

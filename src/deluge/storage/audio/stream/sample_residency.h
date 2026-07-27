@@ -34,23 +34,24 @@ namespace deluge::audio::stream {
 [[nodiscard]] StreamedChunk* peek(const Sample& sample, uint32_t clusterIndex);
 
 /// Intent-named prefetch: construct + lease the chunk for @p clusterIndex now and schedule its read,
-/// never blocking on I/O (CLUSTER_ENQUEUE semantics). Byte-for-byte SampleStream::get_cluster(index,
-/// CLUSTER_ENQUEUE) -- the single place the enqueue path reaches SampleStream's lease internals. The
+/// never blocking on I/O (CLUSTER_ENQUEUE semantics). The single place the enqueue path reaches the
+/// resource manager's lease internals (the residency dispatch, `acquire_cluster` in the .cpp). The
 /// returned chunk is leased but may not yet be loaded; callers check `->loaded` before reading bytes.
 [[nodiscard]] StreamedChunk* prefetch(Sample& sample, uint32_t clusterIndex);
 
 /// General residency request forwarding a runtime @p loadInstruction. Its sole caller -- the head/
 /// loop-start marker lookahead -- is polymorphic across CLUSTER_ENQUEUE / CLUSTER_LOAD_IMMEDIATELY /
-/// CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE (the sample-preview path passes LOAD_IMMEDIATELY). Byte-for-byte
-/// SampleStream::get_cluster(index, loadInstruction). The intent-named prefetch()/load_now() wrappers
-/// are for the statically-known callers; this is the escape hatch for the one runtime-variable caller.
+/// CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE (the sample-preview path passes LOAD_IMMEDIATELY). Routes to the
+/// residency dispatch (`acquire_cluster`) with the runtime instruction. The intent-named
+/// prefetch()/load_now() wrappers are for the statically-known callers; this is the escape hatch for the
+/// one runtime-variable caller.
 [[nodiscard]] StreamedChunk* request(Sample& sample, uint32_t clusterIndex, int32_t loadInstruction);
 
 /// Blocking load-now: acquire + materialize the chunk for @p clusterIndex, reading from the card on a
 /// miss (may block on I/O -- the must-load-now contract). If @p error is non-null it is set on failure.
-/// Byte-for-byte SampleStream::get_cluster(index, CLUSTER_LOAD_IMMEDIATELY, <priority>, error). NOT for
-/// the audio ISR -- for load-time / UI paths permitted to block. Returned chunk is leased and (on
-/// success) loaded; nullptr on failure.
+/// Routes to the residency dispatch (`acquire_cluster`) with CLUSTER_LOAD_IMMEDIATELY. NOT for the audio
+/// ISR -- for load-time / UI paths permitted to block. Returned chunk is leased and (on success) loaded;
+/// nullptr on failure.
 [[nodiscard]] StreamedChunk* load_now(Sample& sample, uint32_t clusterIndex, Error* error = nullptr);
 
 /// Cancel any pending async read of @p chunk by removing it from the loader queue. Used when the chunk's

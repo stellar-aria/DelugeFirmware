@@ -930,4 +930,173 @@ mod tests {
             "current(1) only -- old current(0) fused, pending folded, nothing further to prefetch"
         );
     }
+
+    /// Splitmix64: a tiny, dependency-free PRNG (no `rand`/`proptest` dev-dep
+    /// exists on this crate) used only to pick deterministic op sequences below --
+    /// NOT for anything security- or distribution-sensitive.
+    fn splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Restores what the retired `region_differential` crate's randomized
+    /// lease-balance cross-check covered (fuzzed forward-walks / jumps / state
+    /// queries against a leak/double-free oracle) minus its C++ oracle half, which
+    /// no longer exists: a deterministic random walk of cursor operations over
+    /// MANY seeds, asserting the cursor's own lease bookkeeping is self-consistent
+    /// throughout and net-zero on close, never panicking, double-freeing, or
+    /// running any slot out of the manager's tracked range.
+    ///
+    /// Two invariants are checked, not one:
+    /// - PER-STEP (the strong one): a cursor's `current`/`pending`/`prefetch`
+    ///   slots hold at most one lease each, so at every point in the walk
+    ///   `total_leases(h)` can only be explained by "at most 3 cursor-owned
+    ///   leases" plus whatever this test has explicitly `retain`ed and not yet
+    ///   `release`d. Any excess is a leak (or a double-lease) caught the INSTANT
+    ///   it happens, not just at the end.
+    /// - END-OF-SEED: after releasing every outstanding explicit retain and
+    ///   calling `close()`, the manager's total lease count must return to
+    ///   exactly the pre-walk baseline (0) -- no leak, no double-free survives a
+    ///   full teardown.
+    #[test]
+    fn random_walk_lease_balance_is_net_zero_across_many_seeds() {
+        use std::collections::HashMap;
+        use std::vec::Vec;
+
+        const OPS_PER_SEED: u32 = 150;
+        const MAX_CURSOR_OWNED_LEASES: u64 = 3; // current + pending + prefetch, at most one lease each
+
+        for seed in 0..256u64 {
+            let mut rng = seed ^ 0xD1B5_4A32_D192_ED03;
+
+            // A fresh manager per seed keeps seeds fully independent (no leakage
+            // of one seed's leases into another's baseline).
+            let (mut src, h, asset) = new_source(6);
+            let num_clusters = 6u32;
+
+            let mut pos: u32 = 0;
+            let mut known_tokens: Vec<u64> = Vec::new();
+            let mut retained: HashMap<u64, u32> = HashMap::new();
+
+            let outstanding_retains =
+                |m: &HashMap<u64, u32>| -> u64 { m.values().map(|&c| u64::from(c)).sum() };
+
+            for _ in 0..OPS_PER_SEED {
+                let r = splitmix64(&mut rng);
+                match r % 7 {
+                    0 => {
+                        // Forward playback step.
+                        pos = (pos + 1) % num_clusters;
+                        let (_state, out) = src.acquire_ex(pos, 1, 0);
+                        if let Some(out) = out {
+                            known_tokens.push(out.lease);
+                        }
+                    }
+                    1 => {
+                        // Backward playback step.
+                        pos = (pos + num_clusters - 1) % num_clusters;
+                        let (_state, out) = src.acquire_ex(pos, -1, 0);
+                        if let Some(out) = out {
+                            known_tokens.push(out.lease);
+                        }
+                    }
+                    2 => {
+                        // Jump to an arbitrary in-range index, either direction.
+                        let idx = (splitmix64(&mut rng) % u64::from(num_clusters)) as u32;
+                        let dir: i8 = if splitmix64(&mut rng) & 1 == 0 { 1 } else { -1 };
+                        pos = idx;
+                        let (_state, out) = src.acquire_ex(idx, dir, 0);
+                        if let Some(out) = out {
+                            known_tokens.push(out.lease);
+                        }
+                    }
+                    3 => {
+                        // Pure state query -- must never acquire or mutate.
+                        let idx = (splitmix64(&mut rng) % u64::from(num_clusters)) as u32;
+                        let _ = src.state(idx);
+                    }
+                    4 => {
+                        // Stand in for the loader landing a fill, unlocking Ready
+                        // transitions/promotions the walk would otherwise never
+                        // reach.
+                        let idx = (splitmix64(&mut rng) % u64::from(num_clusters)) as u32;
+                        mark_index_ready(h, asset, idx);
+                    }
+                    5 => {
+                        // Retain a random previously-seen token (independent of
+                        // the cursor's own slots -- may be stale/superseded,
+                        // which the provider tolerates as a no-op).
+                        if !known_tokens.is_empty() {
+                            let i = (splitmix64(&mut rng) as usize) % known_tokens.len();
+                            let token = known_tokens[i];
+                            src.retain(token);
+                            *retained.entry(token).or_insert(0) += 1;
+                        }
+                    }
+                    6 => {
+                        // Release one outstanding explicit retain, if any.
+                        let live: Vec<u64> = retained
+                            .iter()
+                            .filter(|&(_, &c)| c > 0)
+                            .map(|(&t, _)| t)
+                            .collect();
+                        if !live.is_empty() {
+                            let i = (splitmix64(&mut rng) as usize) % live.len();
+                            let token = live[i];
+                            src.release(token);
+                            *retained.get_mut(&token).expect("just selected as live") -= 1;
+                        }
+                    }
+                    _ => unreachable!("r % 7 is in 0..7"),
+                }
+
+                // PER-STEP invariant: nothing beyond "the cursor's own <=3 slot
+                // leases, plus whatever this test still holds retained" is ever
+                // outstanding. A leak (or double-free that inflates the count)
+                // trips this on the very step that causes it.
+                let budget = MAX_CURSOR_OWNED_LEASES + outstanding_retains(&retained);
+                assert!(
+                    total_leases(h) <= budget,
+                    "seed {seed}: total_leases({}) exceeds the max-possible budget ({budget}) -- \
+                     cursor slots hold at most {MAX_CURSOR_OWNED_LEASES} leases, so this can only \
+                     be a leak or a double-lease",
+                    total_leases(h)
+                );
+
+                // Occasionally close and reopen a fresh cursor over the SAME
+                // manager/asset mid-walk -- `close()` must drop exactly the
+                // cursor's own slots (any outstanding explicit retains are
+                // independent and survive it), never more, never less.
+                if r.is_multiple_of(37) {
+                    src.close();
+                    known_tokens.clear();
+                    // SAFETY: `h` is the same live handle `new_source` created;
+                    // reopening a fresh cursor over it mirrors a real reader
+                    // being torn down and a new one taking its place.
+                    let residency =
+                        unsafe { ManagerResidency::new(h, asset, CLUSTER_SIZE, num_clusters) };
+                    src = SampleSource::new(residency, test_geo(num_clusters));
+                    pos = 0;
+                }
+            }
+
+            // Explicit release of everything this seed still holds retained...
+            for (token, count) in retained.drain() {
+                for _ in 0..count {
+                    src.release(token);
+                }
+            }
+            // ...then close, dropping the cursor's own current/pending/prefetch
+            // pins -- together, net-zero: no leak, no double-free.
+            src.close();
+            assert_eq!(
+                total_leases(h),
+                0,
+                "seed {seed}: leaked leases after full release+close"
+            );
+        }
+    }
 }

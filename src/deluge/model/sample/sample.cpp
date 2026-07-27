@@ -1756,7 +1756,7 @@ doneReading:
 void Sample::convertDataOnAnyClustersIfNecessary() {
 	if (rawDataFormat != RawDataFormat::NATIVE) {
 		for (int32_t c = getFirstClusterIndexWithAudioData(); c < getFirstClusterIndexWithNoAudioData(); c++) {
-			StreamedChunk* cluster = stream().chunk_at(c);
+			StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 			if (cluster != nullptr) {
 
 				// Add reason in case it would get stolen

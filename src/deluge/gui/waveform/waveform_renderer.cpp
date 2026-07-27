@@ -28,6 +28,7 @@
 #include "model/voice/voice_sample.h"
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <algorithm>
@@ -449,7 +450,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 		// Otherwise, do our normal investigation
 		else {
 			char const* errorCode;
-			StreamedChunk* residentChunk = sample->stream().chunk_at(clusterIndexToDo);
+			StreamedChunk* residentChunk = deluge::audio::stream::peek(*sample, clusterIndexToDo);
 			if (residentChunk) {
 				if (residentChunk->loaded) {
 					errorCode = "E343";
@@ -463,7 +464,7 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 				                    // Malte P.
 			}
 
-			StreamedChunk* cluster = sample->stream().get_cluster(clusterIndexToDo, CLUSTER_LOAD_IMMEDIATELY);
+			StreamedChunk* cluster = deluge::audio::stream::load_now(*sample, clusterIndexToDo);
 			if (!cluster) {
 cantReadData:
 				D_PRINTLN("cant read");
@@ -492,7 +493,7 @@ cantReadData:
 				// clusterIndexToDo. The old two-argument getCluster(sample, index, ...) call let the
 				// looked-up entry and the index argument drift out of sync; get_cluster() takes a single
 				// index for both, so fetching the next cluster means indexing by clusterIndexToDo + 1.
-				nextCluster = sample->stream().get_cluster(clusterIndexToDo + 1, CLUSTER_LOAD_IMMEDIATELY);
+				nextCluster = deluge::audio::stream::load_now(*sample, clusterIndexToDo + 1);
 
 				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
 					FREEZE_WITH_ERROR("E342"); // Trying to catch E340 below, which Ron R got while recording
@@ -651,7 +652,7 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 		return true;
 	}
 
-	StreamedChunk* cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY);
+	StreamedChunk* cluster = deluge::audio::stream::load_now(*sample, clusterIndex);
 	if (cluster == nullptr) {
 		return false; // Card busy / couldn't read - caller will retry later
 	}

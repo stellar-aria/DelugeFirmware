@@ -7,9 +7,10 @@
 //! facade (`peek`/`prefetch`/`load_now`/`request`/`dequeue`); no consumer migrates in U1 (that is
 //! U2) — see the design doc this crate's Cargo.toml references.
 //!
-//! Task 1 (this landing) is lifecycle-only: `open`/`seek`/`close`. `window`/`advance`/`ok` and the
-//! stateless `deluge_sample_read` copy — the actual streaming reads — land in later tasks; their
-//! signatures already exist in the header (the header is the contract), just not yet backed here.
+//! Task 1 landed the lifecycle trio (`open`/`seek`/`close`); Task 3 (this landing) fills in the
+//! read core — `window`/`advance`/`ok`, plus `open`'s own Rust-side geometry resolution. The
+//! stateless `deluge_sample_read` copy is a later task; its signature already exists in the header
+//! (the header is the contract), just not yet backed here.
 #![no_std]
 
 extern crate alloc;
@@ -70,5 +71,143 @@ mod host_critical_section_stubs {
     #[unsafe(no_mangle)]
     extern "C" fn deluge_in_interrupt() -> bool {
         false
+    }
+}
+
+// `reader.rs`'s `fill_now`/`window()` (Task 3) reach the app-provided `StreamedChunk`
+// accessors + the synchronous card read through `unsafe extern "C"` declarations — real C++
+// symbols in production (`async_fill.cpp`/`efatfs_fs.rs`), which this crate's own `cargo test`
+// binary does not link. Mirrors `host_critical_section_stubs` above: ONE crate-level
+// `#[cfg(test)]` module providing every stub `#[unsafe(no_mangle)]` definition this crate's test
+// binary needs (never duplicated per-test-module — a `#[no_mangle]` symbol may only be defined
+// once in a linked binary), used by both `reader::tests` and `abi::tests`.
+//
+// Deliberately NOT payload == backing (the SR2d-4 lesson `manager_residency.rs`'s own
+// `host_streaming_stubs` flags: an identity stub can't catch an offset bug) — `PAYLOAD_OFFSET`
+// is a nonzero front guard, matching the shape (if not the exact mechanism) of the real
+// `kChunkPayloadOffset` this crate's own chunks don't have without a real `StreamedChunk`.
+#[cfg(test)]
+pub(crate) mod host_streaming_stubs {
+    extern crate std;
+    use core::cell::Cell;
+    use core::ffi::c_void;
+
+    /// Nonzero front guard between a chunk's backing (`request`'s returned pointer) and its
+    /// payload — see the module doc. Large enough to hold the 5-byte `DelugeChunkConvertState`
+    /// this module's own convert-state accessors store at the chunk's backing base.
+    pub(crate) const PAYLOAD_OFFSET: usize = 16;
+
+    std::thread_local! {
+        static ACTIVE_MANAGER: Cell<*mut c_void> = const { Cell::new(core::ptr::null_mut()) };
+        static FORCE_READ_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Serializes every test that touches `deluge_sample_fill`'s per-asset fill-context table
+    /// (`FILL_CONTEXTS`) — a GLOBAL, process-wide static keyed by bare asset id, NOT scoped per
+    /// manager instance. Since every test builds its own fresh manager, and `Manager::define_asset`
+    /// hands out ids starting from 0 for each one, two tests running concurrently (the `cargo test`
+    /// default) can easily both define asset id 0 in their own manager and then race registering
+    /// DIFFERENT fill-contexts for that same global slot. Mirrors
+    /// `deluge_sample_source::abi::tests`'s own `TEST_LOCK` for its shared `POOL`/`ACTIVE_MANAGER`
+    /// statics — the identical hazard, the identical fix. Every test that calls
+    /// `deluge_streaming_set_fill_context`/`Reader::open` (both `reader::tests` and `abi::tests`)
+    /// must take this lock for its whole run.
+    pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Route `deluge_streaming_resource_manager()` (below) to `handle` for the calling thread —
+    /// `cargo test`'s default per-test thread gives each test its own manager without a shared
+    /// mutex (unlike `deluge_sample_source::abi`'s tests, which serialize over real `static`s;
+    /// this crate's manager is built fresh per test, so plain `thread_local` suffices).
+    pub(crate) fn set_active_manager(handle: *mut c_void) {
+        ACTIVE_MANAGER.with(|m| m.set(handle));
+    }
+
+    /// Make the next (and every subsequent, until reset) `deluge_efatfs_read_at` call on this
+    /// thread fail without writing `dst` — the forced-failure half of the self-pin/failure test
+    /// matrix (`reader::tests`'s `reader_ok` coverage).
+    pub(crate) fn set_force_read_failure(force: bool) {
+        FORCE_READ_FAILURE.with(|f| f.set(force));
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_resource_manager() -> *mut c_void {
+        ACTIVE_MANAGER.with(|m| m.get())
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8 {
+        // SAFETY: every chunk this test binary ever constructs is sized `PAYLOAD_OFFSET +
+        // cluster_size + 7` bytes (see `reader::tests`'s harness) — `chunk_backing +
+        // PAYLOAD_OFFSET` stays within that allocation.
+        unsafe { (chunk_backing as *mut u8).add(PAYLOAD_OFFSET) }
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_set_loaded(_chunk_backing: *mut c_void) {
+        // No `loaded` flag on this test binary's synthetic chunks (no real `StreamedChunk`) —
+        // residency readiness is tracked by the manager's own `mark_ready`, which
+        // `Reader::acquire_and_fill` calls independently; nothing here needs this bit.
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_convert_state(
+        chunk_backing: *mut c_void,
+    ) -> deluge_sample_fill::DelugeChunkConvertState {
+        // SAFETY: the chunk's backing base has at least 5 bytes before `PAYLOAD_OFFSET` (16),
+        // reserved by this module for exactly this state — see the module doc.
+        unsafe {
+            let p = chunk_backing as *const u8;
+            deluge_sample_fill::DelugeChunkConvertState {
+                first_three_bytes: [*p, *p.add(1), *p.add(2)],
+                start_converted: *p.add(3) != 0,
+                end_converted: *p.add(4) != 0,
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_set_convert_state(
+        chunk_backing: *mut c_void,
+        state: deluge_sample_fill::DelugeChunkConvertState,
+    ) {
+        // SAFETY: see `deluge_streaming_chunk_convert_state` above.
+        unsafe {
+            let p = chunk_backing as *mut u8;
+            *p = state.first_three_bytes[0];
+            *p.add(1) = state.first_three_bytes[1];
+            *p.add(2) = state.first_three_bytes[2];
+            *p.add(3) = state.start_converted as u8;
+            *p.add(4) = state.end_converted as u8;
+        }
+    }
+
+    /// Synthetic card read: deterministic content keyed on the ABSOLUTE file byte offset
+    /// (`dst[i] = (byte_offset + i) as u8`), so a test can compute a cluster's expected
+    /// post-fill bytes independently of this stub — the "synthetic sample with known converted
+    /// cluster bytes" the Task 3 brief calls for. `set_force_read_failure(true)` makes this
+    /// fail closed (returns `false`, `dst`/`out_read` untouched) instead, for the forced-failure
+    /// coverage.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_efatfs_read_at(
+        _handle: u32,
+        byte_offset: u32,
+        dst: *mut c_void,
+        count: u32,
+        out_read: *mut u32,
+    ) -> bool {
+        if FORCE_READ_FAILURE.with(|f| f.get()) {
+            return false;
+        }
+        // SAFETY: `dst` is the caller's just-allocated destination buffer, valid for at least
+        // `count` bytes (this crate's own `fill_now`, the only caller); `out_read` is a valid
+        // out-param.
+        unsafe {
+            let d = dst as *mut u8;
+            for i in 0..count {
+                *d.add(i as usize) = byte_offset.wrapping_add(i) as u8;
+            }
+            *out_read = count;
+        }
+        true
     }
 }

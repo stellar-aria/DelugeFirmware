@@ -34,6 +34,12 @@ crate-type = ["rlib"]
 # a `deluge_resource::facade::Lease` directly (not a locally reinvented lease type), mirroring
 # `deluge_sample_source`'s own choice for its cursor slots.
 deluge_resource = { path = "../deluge_resource" }
+# `fill_context_for` resolves a reader's geometry from the per-asset table C++ registers once at
+# sample-load (Task 3 Step 0); `native_begin`/`native_finish` (behind `native_fill`) are `window()`'s
+# `fill_now` primitives — this reader composes its own synchronous fill from them (C2a provided the
+# primitives, not the compose). Always-on, not a `[dev-dependencies]`: both are needed by this
+# crate's OWN production code (`reader.rs`), not just its tests.
+deluge_sample_fill = { path = "../deluge_sample_fill", features = ["native_fill"] }
 
 [dev-dependencies]
 deluge_alloc = { path = "../deluge_alloc" }

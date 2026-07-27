@@ -1,22 +1,19 @@
-//! Host round-trip test for the per-asset streaming fill-context table (SR2d-4 Task 1):
-//! `deluge_streaming_set_fill_context` (the main/load-thread write, called from C++ at sample-load)
-//! → `fill_context_for` (the read side a later task wires into the native fill task). Always-compiled
-//! tier (see `src/streaming_loader.rs`'s module doc "Two compilation tiers") — unlike
-//! `tests/streaming_fill_host.rs`, this does NOT need `async_streaming_loader` (the fill-context table
-//! isn't gated on it) or `host_app` (it doesn't touch `deluge_resource` — see the table's own doc in
-//! `streaming_loader.rs`).
+//! Host round-trip test for the per-asset streaming fill-context table (SR2d-4 Task 1, relocated to
+//! `deluge_sample_fill` in C2a Task 2): `deluge_streaming_set_fill_context` (the main/load-thread
+//! write, called from C++ at sample-load) → `fill_context_for` (the read side the native fill task
+//! wires in). Always-compiled tier (see the crate's `lib.rs` doc) — unlike
+//! `deluge-bsp-rust`'s `tests/streaming_fill_host.rs`, this does NOT need `async_streaming_loader`
+//! (the fill-context table isn't gated on it) or `host_app` (it doesn't touch `deluge_resource` — see
+//! the table's own doc in `lib.rs`).
 //!
-//! `deluge-bsp-rust` is bin-only (no `[lib]` target — see `Cargo.toml`), so this recompiles
-//! `src/streaming_loader.rs` unmodified into this test binary via `#[path]`, same convention as
-//! `tests/streaming_fill_host.rs`.
+//! A normal integration test for this crate: exercises `deluge_sample_fill`'s public API as an
+//! ordinary dependent, no `#[path]` recompilation needed (unlike `deluge-bsp-rust`'s bin-only
+//! tests, which recompile `src/streaming_loader.rs` directly since that crate has no `[lib]` target).
 #![cfg(not(target_os = "none"))]
 
 use core::ptr;
 
-#[path = "../src/streaming_loader.rs"]
-mod streaming_loader;
-
-use streaming_loader::{FillContext, deluge_streaming_set_fill_context, fill_context_for};
+use deluge_sample_fill::{FillContext, deluge_streaming_set_fill_context, fill_context_for};
 
 fn sample_ctx() -> FillContext {
     FillContext {

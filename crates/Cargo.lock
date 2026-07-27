@@ -93,6 +93,7 @@ dependencies = [
 name = "deluge_sample_fill"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "deluge_sample_convert",
  "embassy-sync",
 ]

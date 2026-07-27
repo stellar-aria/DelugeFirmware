@@ -26,6 +26,13 @@ deluge_sample_convert = { path = "../../src/bsp/rust/sample_convert" }
 # primitive only — no embassy-executor.
 embassy-sync = "0.8.0"
 
+[dev-dependencies]
+# `FILL_CONTEXTS`'s `CriticalSectionRawMutex` needs a registered `critical-section` impl to
+# link; the device/`host_app` builds get one from `deluge-bsp-rust`'s own dependency tree, but
+# this crate's own `cargo test` (e.g. `tests/fill_context_host.rs`) links standalone, so it
+# needs its own — same std-backed impl `deluge_resource`'s dev-dependencies already use.
+critical-section = { version = "1", features = ["std"] }
+
 [features]
 # Default-off. Gates the manager-reaching fill (native_begin/native_finish + the strong
 # deluge_streaming_begin_fill/_finish_fill overrides), which reference undefined

@@ -9,21 +9,15 @@ license = "GPL-3.0-or-later"
 # `region_differential`/`sample_convert`): it `cc`-compiles a slice of the app's C++ into its own test
 # binary and must not perturb the firmware/BSP Cargo graph.
 #
-# `edition = "2024"` (not the sibling harnesses' "2021"): unlike `region_differential` (which only
-# depends on OTHER crates normally), this crate's test files pull `deluge-bsp-rust`'s own
-# `src/fill_logic.rs` in unmodified via `#[path]` (that crate is bin-only, no
-# `[lib]` target — see its own Cargo.toml doc). `#[path]`-included source is parsed under the
-# INCLUDING crate's edition, and `deluge-bsp-rust` itself is `edition = "2024"` (its files use
-# `unsafe extern "C"` blocks / `#[unsafe(no_mangle)]`) — so this crate must match to parse them
-# identically, the same way `tests/fill_logic_host.rs` does from inside that crate.
+# `edition = "2024"`: this crate's test files use `unsafe extern "C"` blocks (matching the shared
+# `deluge_sample_fill`/`deluge_resource` crates they depend on, both `edition = "2024"` too).
 
 [dependencies]
-# `fill_logic::finish_convert_stitch` (pulled in via `#[path]` in the test files) calls
-# `deluge_sample_convert::{convert_cluster,stitch_boundaries}` unqualified — this dependency is what
-# resolves that when the module is recompiled into THIS crate. Also supplies the already-`cc`-compiled
-# `convert_word`/`stitch_boundaries` object code the C++ reference slice (`cpp/harness_shim.cpp`) links
-# against — see build.rs's doc for why this crate deliberately does NOT recompile convert.cpp/stitch.cpp
-# itself.
+# `fill_logic::finish_convert_stitch` (used by the test files via `deluge_sample_fill::fill_logic`)
+# calls `deluge_sample_convert::{convert_cluster,stitch_boundaries}` unqualified. Also supplies the
+# already-`cc`-compiled `convert_word`/`stitch_boundaries` object code the C++ reference slice
+# (`cpp/harness_shim.cpp`) links against — see build.rs's doc for why this crate deliberately does
+# NOT recompile convert.cpp/stitch.cpp itself.
 deluge_sample_convert = { path = "../sample_convert" }
 
 [dev-dependencies]
@@ -31,43 +25,16 @@ deluge_sample_convert = { path = "../sample_convert" }
 # built over.
 deluge_resource = { path = "../../../../crates/deluge_resource" }
 fs_alloc = { package = "deluge_alloc", path = "../../../../crates/deluge_alloc" }
-# `tests/native_finish_glue.rs` pulls `deluge-bsp-rust`'s `src/streaming_loader.rs` in via `#[path]`
-# (see that test's module doc) — it unconditionally uses `embassy_sync::{blocking_mutex, signal}`
-# and (in `mod prod`, which this test's Cargo features turn on) `#[embassy_executor::task]`. Plain
-# crates.io versions, NOT `deluge-bsp-rust`'s `[patch.crates-io]`-redirected fork (that patch only
-# applies within ITS OWN dependency graph/Cargo.lock — this is a standalone crate with its own,
-# unpatched one): this test never spawns/runs the executor (it calls `ProdOps`'s `FillOps` methods
-# as plain fn calls, never `streaming_fill_task` itself), so the vanilla crate satisfying the
-# `#[task]` macro's compile-time expansion is all that's needed.
-embassy-sync = "0.8.0"
-embassy-executor = { version = "0.10.0", features = ["nightly", "platform-std", "executor-thread"] }
-# `embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex` (used by `streaming_loader.rs`'s
-# `FILL_CONTEXTS` table) needs a `critical-section` IMPLEMENTATION at link time; the host one comes
-# from this crate's own `std` feature, same as `deluge-bsp-rust`'s host target dependency.
+# `tests/differential.rs`/`host_end_to_end.rs` use `deluge_sample_fill::fill_logic`; `native_finish_glue.rs`
+# drives `deluge_sample_fill::native_begin`/`native_finish` directly (C2a Task 3 -- the manager-reaching
+# sync fill core moved out of `deluge-bsp-rust`'s `streaming_loader.rs::prod` into this shared crate).
+# `native_fill` gates that core (fill_logic itself is always compiled).
+deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features = ["native_fill"] }
+# `deluge_sample_fill`'s `FILL_CONTEXTS` static (used by `native_finish_glue.rs`'s
+# `deluge_streaming_set_fill_context` call) is an `embassy_sync` blocking `Mutex<CriticalSectionRawMutex,
+# _>`, which needs a registered `critical-section` IMPLEMENTATION at final link time -- same std-backed
+# impl `deluge_sample_fill`'s own `cargo test` and `deluge-bsp-rust`'s host build already use.
 critical-section = { version = "1", features = ["std"] }
 
 [build-dependencies]
 cc = "1"
-
-[features]
-# Task 6's native_finish glue test (`tests/native_finish_glue.rs`) pulls `deluge-bsp-rust`'s
-# `src/streaming_loader.rs` in unmodified via `#[path]`, same convention as `fill_logic.rs` above.
-# That file's `mod prod` (which holds `native_finish`/`native_begin`/`ProdOps`) is gated
-# `#[cfg(all(feature = "async_streaming_loader", any(target_os = "none", feature = "host_app")))]` —
-# feature names it expects to find on WHATEVER crate is compiling it. On a plain x86-64 host
-# (`target_os` is NOT "none"), that means THIS crate needs to declare matching features so the `cfg`
-# resolves true when recompiled here — `deluge-bsp-rust`'s own `host_app` feature does far more
-# there (archives the whole host-built C++ `deluge_app` closure — see `tests/host_end_to_end.rs`'s
-# module doc), but here the names are just what makes `mod prod` compile; this crate never actually
-# links that closure. Default-on: this crate is a standalone test harness (never part of the
-# firmware/BSP Cargo graph — see `Cargo.toml`'s own header doc), so there's no cost to always
-# exercising the real glue under plain `cargo test`.
-default = ["async_streaming_loader", "host_app"]
-async_streaming_loader = []
-host_app = []
-# Declared but never enabled: `streaming_loader.rs`'s `ProdOps::read` checks
-# `cfg(feature = "efatfs_streaming")` — this test never calls `read()` (see
-# `tests/native_finish_glue.rs`'s module doc, "What this test does NOT exercise"), so the feature
-# stays off; declaring the name here only silences cargo's unknown-feature `cfg` lint under `-D
-# warnings`.
-efatfs_streaming = []

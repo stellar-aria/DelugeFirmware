@@ -4,10 +4,11 @@
 //! `tests/fill_logic_host.rs`) or `streaming_loader::fill_once`/`FillOps` against a fully FAKE
 //! `FillOps` (`tests/streaming_fill_host.rs`, in `deluge-bsp-rust`), or `ProdOps::begin`/`finish`'s
 //! ORCHESTRATION only, with plain local `ConvertState` values standing in for the real store
-//! (`tests/host_end_to_end.rs`, this crate). None of them drive `streaming_loader::prod::native_finish`
-//! itself — its `try_acquire` → payload-accessor → convert-state-accessor → stitch → write-back chain —
-//! over the REAL `StreamedChunk` accessors. That gap is exactly where SR2d-4's Task 2 review found TWO
-//! real, silent-corruption Criticals (see `.superpowers/sdd/progress.md`'s "SR2d-4-UNIFY execution"):
+//! (`tests/host_end_to_end.rs`, this crate). None of them drive
+//! `deluge_sample_fill::native_finish` itself — its `try_acquire` → payload-accessor →
+//! convert-state-accessor → stitch → write-back chain — over the REAL `StreamedChunk` accessors.
+//! That gap is exactly where SR2d-4's Task 2 review found TWO real, silent-corruption Criticals (see
+//! `.superpowers/sdd/progress.md`'s "SR2d-4-UNIFY execution"):
 //!
 //!  1. **The convert-state double-store**: before this arc's unification (commits c8be0f8ae..66e584de2),
 //!     the synchronous C++ fill path (`read_cluster_data` → `finish_fill`) wrote convert-state directly
@@ -26,27 +27,26 @@
 //!
 //! ## How this test drives the REAL glue
 //!
-//! `deluge-bsp-rust` is bin-only, so `src/streaming_loader.rs` (like `src/fill_logic.rs` elsewhere in
-//! this crate) is pulled in unmodified via `#[path]`. Its `mod prod` — which holds `native_finish`,
-//! `native_begin`, and `ProdOps` — only compiles under `cfg(any(target_os = "none", feature =
-//! "host_app"))` (plus `async_streaming_loader`); this crate's `Cargo.toml` declares BOTH features
-//! (default-on) so `mod prod` recompiles here on a plain x86-64 host, unmodified. `native_finish`
-//! itself stays private — this test never needed it `pub`: `ProdOps` (which owns it) and the `FillOps`
-//! trait are already `pub`, and `<ProdOps as FillOps>::finish` is a one-line call straight into
-//! `native_finish`, so driving `ops.finish(chunk, true)` on a real `ProdOps` IS driving the real
-//! function. **No visibility change to `streaming_loader.rs` was needed or made.**
+//! `native_finish`/`native_begin` (SR2d-4 Tasks 2-5) moved out of `deluge-bsp-rust`'s
+//! `streaming_loader.rs::prod` module into the shared `deluge_sample_fill` crate (C2a Task 3), `pub`
+//! and behind that crate's `native_fill` feature (this crate's `Cargo.toml` turns it on as a
+//! dev-dependency). So this test calls `deluge_sample_fill::native_begin`/`native_finish` directly —
+//! no more `#[path]`-recompiling `deluge-bsp-rust`'s `streaming_loader.rs`/`fill_logic.rs`, no more
+//! `ProdOps`/`FillOps` indirection. Driving `deluge_sample_fill::native_finish(chunk, true)` directly
+//! IS driving the real function — the same one `deluge-bsp-rust`'s `ProdOps::finish` (a one-line call
+//! straight into it) and the strong `deluge_streaming_finish_fill` C-ABI override both call.
 //!
-//! `mod prod`'s `unsafe extern "C"` block declares 14 symbols this test must supply. Eight
-//! (`deluge_resource_loader_next`/`_enqueue`, `_slot_of`, `_lease_count_by_slot`, `_chunk_ident`,
-//! `_try_acquire`, `_release`, `_mark_ready`) are real `#[no_mangle]` Rust symbols from the
-//! `deluge_resource` crate (already a dev-dependency) — genuinely real, no test double. The remaining
-//! six are C++-defined in production (`async_fill.cpp`). Compiling THAT file directly was rejected: it
-//! is one translation unit whose OTHER functions (the legacy `begin_fill`/`finish_fill` bodies, ~25 weak
-//! efatfs fallbacks) reference `Sample`/`SampleStream`/`GeneralMemoryAllocator` and the rest of the
-//! app's storage/model closure — the exact "large C++ closure" trap `tests/host_end_to_end.rs`'s module
-//! doc already documents empirically for the `host_app` feature (20+ undefined boot-surface symbols).
-//! Since a `cc`-compiled `.cpp` is ONE link-time object, pulling in even one symbol from it would drag
-//! in every other undefined reference in the same file.
+//! `deluge_sample_fill::native`'s `unsafe extern "C"` block (gated `native_fill`) declares 9 symbols
+//! this test must supply. Four (`deluge_resource_chunk_ident`, `_try_acquire`, `_release`,
+//! `_mark_ready`) are real `#[no_mangle]` Rust symbols from the `deluge_resource` crate (already a
+//! dev-dependency) — genuinely real, no test double. The remaining five are C++-defined in production
+//! (`async_fill.cpp`). Compiling THAT file directly was rejected: it is one translation unit whose
+//! OTHER functions (the legacy `begin_fill`/`finish_fill` bodies, ~25 weak efatfs fallbacks) reference
+//! `Sample`/`SampleStream`/`GeneralMemoryAllocator` and the rest of the app's storage/model closure —
+//! the exact "large C++ closure" trap `tests/host_end_to_end.rs`'s module doc already documents
+//! empirically for the `host_app` feature (20+ undefined boot-surface symbols). Since a `cc`-compiled
+//! `.cpp` is ONE link-time object, pulling in even one symbol from it would drag in every other
+//! undefined reference in the same file.
 //!
 //! So `cpp/native_finish_shim.cpp` (this crate's own `cc`-compiled slice, built by `build.rs`) is the
 //! MINIMAL testable seam: it includes ONLY the real, unmodified `storage/cluster/cluster.h` — so
@@ -55,11 +55,13 @@
 //! (`deluge_streaming_chunk_payload`/`_set_loaded`/`_convert_state`/`_set_convert_state`)
 //! CHARACTER-FOR-CHARACTER identical to `async_fill.cpp`'s own definitions (see
 //! `accessor_bodies_match_async_fill_cpp_verbatim` below, which greps the live source and fails loudly
-//! on drift). The other two symbols the extern block needs (`deluge_streaming_resource_manager`,
-//! `deluge_streaming_chunk_unloadable`) are NOT part of either Critical's bug surface (both bugs were in
-//! `native_finish`'s own neighbour-payload/convert-state wiring, not in "which manager is the global
-//! one") — test-local stand-ins, the same tier `tests/host_end_to_end.rs` already uses for its own
-//! `ENTER_CRITICAL_SECTION`/`EXIT_CRITICAL_SECTION`/`deluge_in_interrupt`.
+//! on drift). The fifth symbol the extern block needs (`deluge_streaming_resource_manager`) is NOT
+//! part of either Critical's bug surface (both bugs were in `native_finish`'s own
+//! neighbour-payload/convert-state wiring, not in "which manager is the global one") — a test-local
+//! stand-in, the same tier `tests/host_end_to_end.rs` already uses for its own
+//! `ENTER_CRITICAL_SECTION`/`EXIT_CRITICAL_SECTION`/`deluge_in_interrupt`. (The shim also still
+//! defines `deluge_streaming_chunk_unloadable`, a leftover from when this test drove the fill through
+//! `ProdOps`; harmless, just unreferenced by this test now.)
 //!
 //! ## What this test does NOT exercise
 //!
@@ -70,8 +72,8 @@
 //! - The real C++ legacy `begin_fill`/`finish_fill` bodies, `Sample`/`SampleStream`, or
 //!   `GeneralMemoryAllocator` — deliberately out of reach (see above); `cluster.sample`/`resource_slot`
 //!   are never dereferenced by anything this test calls.
-//! - The efatfs read (`ProdOps::read`) — this test never calls it; covered elsewhere
-//!   (`fs_differential`, `streaming_fill_host.rs`'s descriptor-plumbing test).
+//! - The efatfs read (`ProdOps::read`, in `deluge-bsp-rust`) — this test never calls it; covered
+//!   elsewhere (`fs_differential`, `streaming_fill_host.rs`'s descriptor-plumbing test).
 //! - On-device timing/DMA — this is a host, single-threaded, synchronous exercise of the same calls
 //!   the async task and the sync fill path make; the real hardware validation is Kate's on-device gate
 //!   (non-native-format playback across note-on/seek/loop — see the task brief).
@@ -104,12 +106,6 @@
 //!   proving the WRITE side (the flags really do land in the shared store, non-default), but the
 //!   reload re-`finish` is what proves the READ side actually depends on it.
 #![cfg(not(target_os = "none"))]
-// `mod prod`'s `streaming_fill_task` (compiled unconditionally once this crate's
-// `async_streaming_loader`/`host_app` features are on — see the module doc) carries
-// `#[embassy_executor::task]`, whose expansion needs this nightly feature — same as
-// `deluge-bsp-rust`'s own `src/main.rs`. This test never spawns/runs that task; the attribute just
-// needs to expand to compile `mod prod` at all.
-#![feature(impl_trait_in_assoc_type)]
 
 use core::ffi::c_void;
 use core::ptr;
@@ -118,23 +114,7 @@ use deluge_resource::{
     BACKING_HEAP, DelugeResource, deluge_resource_create, deluge_resource_define_asset,
     deluge_resource_request, deluge_resource_set_construct,
 };
-
-#[path = "../../src/fill_logic.rs"]
-mod fill_logic;
-// `#[allow(dead_code)]`: this test drives `native_finish` through `ops.finish(...)` directly (a
-// plain fn call — see the module doc's "How this test drives the REAL glue"), never through
-// `fill_once`/`streaming_fill_task` — so several items `mod prod` needs to compile as a whole (the
-// `FillOps` trait's `next`/`is_unloadable`/`begin`/`read`/`lease_count`/`enqueue_lowest`,
-// `fill_once` itself, `LOWEST_PRIORITY`, `ProdOps::mgr`, and a few extern declarations only
-// `fill_once`'s callers reach) go unused in THIS crate's recompilation, unlike `deluge-bsp-rust`'s
-// own binary where `main.rs` wires all of it up. Scoped to this one `mod` item (not a blanket
-// crate-level allow) — `streaming_loader.rs` itself is untouched (see the module doc: no
-// visibility/behavioural change was made to it).
-#[allow(dead_code)]
-#[path = "../../src/streaming_loader.rs"]
-mod streaming_loader;
-
-use streaming_loader::{FillContext, FillOps, ProdOps};
+use deluge_sample_fill::FillContext;
 
 // Single-threaded-per-test critical section: `deluge_resource`'s `sync::Masked` calls these three
 // C-ABI symbols; this test never models the audio-ISR context, so inert no-op stand-ins are
@@ -152,7 +132,7 @@ extern "C" fn deluge_in_interrupt() -> bool {
 /// The C++ shim's (`cpp/native_finish_shim.cpp`) test-only entry points: real `StreamedChunk`
 /// construction/introspection plus the two non-Critical-surface plumbing setters (see the module
 /// doc). NOT the four accessors under test themselves — those are called only indirectly, through
-/// `native_finish`'s own `unsafe extern "C"` block in `mod streaming_loader::prod` — EXCEPT
+/// `deluge_sample_fill::native`'s own `unsafe extern "C"` block — EXCEPT
 /// `deluge_streaming_chunk_convert_state`, independently re-declared here too (same real C++
 /// symbol, same signature) so a test can read a chunk's convert-state back WITHOUT going through
 /// `native_finish` again — see `neighbour_convert_state_is_read_back_through_the_shared_store`.
@@ -175,7 +155,7 @@ mod shim {
         // `native_finish_shim.cpp`) — used only for read-back assertions, never to drive the fill.
         pub fn deluge_streaming_chunk_convert_state(
             chunk_backing: *mut c_void,
-        ) -> super::streaming_loader::DelugeChunkConvertState;
+        ) -> deluge_sample_fill::DelugeChunkConvertState;
     }
 }
 
@@ -271,14 +251,14 @@ impl ChunkHarness {
         };
         // SAFETY: `handle` is the live manager just created; `region_fill_diff_set_active_manager`
         // stores it for `deluge_streaming_resource_manager` to hand back — must happen before
-        // `ProdOps::new()` reads it.
+        // any `native_begin`/`native_finish` call reads it.
         unsafe { shim::region_fill_diff_set_active_manager(handle as *mut c_void) };
 
         // Register this asset's fill-context — `native_finish`'s `resolve()` looks this up via
-        // `fill_context_for(asset)` (see `streaming_loader.rs`'s `mod prod`); without it every
-        // `finish` call fails closed (`resolve` returns `None`) before ever reaching the neighbour
-        // gather this test is here to exercise.
-        streaming_loader::deluge_streaming_set_fill_context(ptr::null_mut(), asset, geo());
+        // `deluge_sample_fill::fill_context_for(asset)`; without it every `finish` call fails
+        // closed (`resolve` returns `None`) before ever reaching the neighbour gather this test is
+        // here to exercise.
+        deluge_sample_fill::deluge_streaming_set_fill_context(ptr::null_mut(), asset, geo());
 
         ChunkHarness {
             handle,
@@ -331,7 +311,7 @@ impl ChunkHarness {
 }
 
 /// One neighbour/self chunk's request + seeded payload + captured front-guard snapshot, threading
-/// everything a test needs to drive `ops.finish` and later assert on it.
+/// everything a test needs to drive `native_finish` and later assert on it.
 struct SeededChunk {
     backing: *mut u8,
     front_guard_before: Vec<u8>,
@@ -341,7 +321,7 @@ fn seed(h: &ChunkHarness, index: u32, tag: u32) -> SeededChunk {
     let backing = h.request(index);
     assert!(!backing.is_null(), "request failed for index {index}");
     // SAFETY: `backing` was just resident-constructed by `request`, exclusively held here (nothing
-    // else touches it until `ops.finish` is called on it below).
+    // else touches it until `native_finish` is called on it below).
     let payload = unsafe { h.payload_of(backing) };
     payload.copy_from_slice(&region_fill_differential::ramp(
         tag,
@@ -360,7 +340,7 @@ fn seed(h: &ChunkHarness, index: u32, tag: u32) -> SeededChunk {
 }
 
 /// Full cross-path scenario: three real `StreamedChunk`-backed clusters (prev=0, self=1, next=2)
-/// over one real `deluge_resource` manager. `ops.finish` is called on prev, then next, then self —
+/// over one real `deluge_resource` manager. `native_finish` is called on prev, then next, then self —
 /// by the time self's `finish` runs, BOTH neighbours are already resident+ready (their own `finish`
 /// already published them via `deluge_resource_mark_ready`), so self's `native_finish` genuinely
 /// exercises `try_acquire` → the payload accessor → the convert-state accessor → stitch →
@@ -379,15 +359,20 @@ fn cross_path_finish_matches_cpp_reference_over_real_streamed_chunks() {
     let self_c = seed(&h, 1, 1);
     let next = seed(&h, 2, 2000);
 
-    // `ProdOps::new()` is a safe fn (its own body is what needs `unsafe`, internally, to call
-    // `deluge_streaming_resource_manager` — already set to `h.handle` by `ChunkHarness::new()`).
-    let ops = ProdOps::new();
-
     // -- Real cross-path drive: prev, then next (each with no ready neighbour yet), then self
     // (both neighbours now resident+ready). --
-    assert!(ops.finish(prev.backing as *mut c_void, true));
-    assert!(ops.finish(next.backing as *mut c_void, true));
-    assert!(ops.finish(self_c.backing as *mut c_void, true));
+    assert!(deluge_sample_fill::native_finish(
+        prev.backing as *mut c_void,
+        true
+    ));
+    assert!(deluge_sample_fill::native_finish(
+        next.backing as *mut c_void,
+        true
+    ));
+    assert!(deluge_sample_fill::native_finish(
+        self_c.backing as *mut c_void,
+        true
+    ));
 
     // -- Read back the real StreamedChunk state after the full sequence. --
     // SAFETY: all three backings are still resident (never released/evicted).
@@ -496,7 +481,10 @@ fn cross_path_finish_matches_cpp_reference_over_real_streamed_chunks() {
             prev_reload_tag,
             CLUSTER_SIZE as usize + 7,
         ));
-        assert!(ops.finish(prev.backing as *mut c_void, true));
+        assert!(deluge_sample_fill::native_finish(
+            prev.backing as *mut c_void,
+            true
+        ));
         // SAFETY: `prev.backing` is still resident.
         let prev_reloaded_after = unsafe { h.payload_of(prev.backing) }.to_vec();
 

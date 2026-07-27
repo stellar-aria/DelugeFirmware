@@ -52,9 +52,7 @@ use deluge_resource::{
     deluge_resource_set_construct, deluge_resource_try_acquire,
 };
 
-#[path = "../../src/fill_logic.rs"]
-mod fill_logic;
-
+use deluge_sample_fill::fill_logic;
 use fill_logic::{FillGeometry, NeighbourView, begin, finish_convert_stitch};
 
 // Single-threaded-per-test critical section: `deluge_resource`'s `sync::Masked` calls these three

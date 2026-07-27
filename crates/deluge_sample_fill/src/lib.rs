@@ -1,6 +1,6 @@
 //! The shared cluster-fill core (C2a). See Cargo.toml's header for the crate's role.
 //! Task 1 lands `fill_logic`; the fill-context table (Task 2) is added below; the
-//! `native_fill`-gated sync fill (Task 3) follows in a later task.
+//! `native_fill`-gated sync fill core (Task 3) is `mod native` at the bottom of this file.
 #![no_std]
 
 use core::cell::RefCell;
@@ -193,3 +193,12 @@ const _: () = {
     assert!(core::mem::offset_of!(DelugeChunkConvertState, end_converted) == 4);
     assert!(size_of::<DelugeChunkConvertState>() == 5);
 };
+
+// ── native_fill-gated sync fill core (C2a Task 3) ───────────────────────────
+// Moved verbatim from `deluge-bsp-rust`'s `streaming_loader.rs::prod` module (SR2d-4 Tasks 2-5) --
+// see `native`'s own module doc for what/why. Default-off (see this crate's Cargo.toml
+// `[features]` doc); `deluge-bsp-rust` and `region_fill_differential` both turn it on.
+#[cfg(feature = "native_fill")]
+mod native;
+#[cfg(feature = "native_fill")]
+pub use native::{native_begin, native_finish};

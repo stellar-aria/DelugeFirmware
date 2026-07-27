@@ -4,10 +4,10 @@
 //! `fill_logic::finish_convert_stitch` (SR2d-4 Task 5), and asserts byte-identical converted+stitched
 //! output — the self payload, both neighbours' mutated boundary bytes, and all four boundary flags.
 //!
-//! `deluge-bsp-rust` is bin-only (no `[lib]` target), so `src/fill_logic.rs` is pulled in unmodified
-//! via `#[path]`, same convention as `tests/fill_logic_host.rs` (from inside that crate) — this crate
-//! does it from a sibling directory instead. `fill_logic.rs` has no CS/extern dependencies of its own
-//! (pure buffer arithmetic plus calls into `deluge_sample_convert`, which has none either), so unlike
+//! `fill_logic` now lives in the shared `deluge_sample_fill` crate (C2a Task 1 relocated it out of
+//! `deluge-bsp-rust`'s `src/fill_logic.rs`), so this test depends on the crate directly rather than
+//! pulling the old file in via `#[path]`. `fill_logic` has no CS/extern dependencies of its own (pure
+//! buffer arithmetic plus calls into `deluge_sample_convert`, which has none either), so unlike
 //! `region_differential`/`tests/host_end_to_end.rs` this file needs no critical-section stubs.
 //!
 //! Two validating shapes, mirroring `region_differential`'s own tests/differential.rs:
@@ -16,9 +16,7 @@
 //!   2. NON-VACUITY: the Rust side's OWN output is deliberately perturbed (one output byte flipped)
 //!      after both sides have run, and the SAME comparison that passed on the real output must now
 //!      fail — proving the comparison actually has teeth, not just that it never fires.
-#[path = "../../src/fill_logic.rs"]
-mod fill_logic;
-
+use deluge_sample_fill::fill_logic;
 use fill_logic::{ConvertState as RustState, FillGeometry, NeighbourView, finish_convert_stitch};
 use region_fill_differential::cpp_ref::{
     self, ConvertState as CppState, Geometry as CppGeometry, Neighbour as CppNeighbour,

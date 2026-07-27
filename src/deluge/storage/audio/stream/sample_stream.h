@@ -35,10 +35,11 @@ namespace deluge::audio::stream {
 ///
 /// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
 /// streaming state:
-///   - residency itself, which lives entirely in the resource manager and is reached via
-///     get_cluster() (leasing dispatch) or the `deluge::audio::stream::peek()` free function
-///     (non-leasing peek) → the manager peek/acquire (SR3e retired the former app-side
-///     residency-table mirror; there is nothing left on `SampleStream` for a caller to index directly);
+///   - residency itself, which lives entirely in the resource manager and is reached via the
+///     `deluge::audio::stream` facade's prefetch()/load_now()/request() (leasing dispatch) or its
+///     peek() free function (non-leasing peek) → the manager peek/acquire (SR3e retired the former
+///     app-side residency-table mirror; there is nothing left on `SampleStream` for a caller to index
+///     directly);
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** id cache (`resource_asset_id_`); the Asset's
@@ -47,14 +48,14 @@ namespace deluge::audio::stream {
 ///     the manager frees the trivially-destructible slab chunk itself);
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
-/// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident
-/// one through the `deluge::audio::stream::peek()` free function (no lease); none branches on how a
-/// cluster's bytes are read.
+/// Callers obtain a cluster through the `deluge::audio::stream` facade's prefetch()/load_now()/request()
+/// (which take a manager lease) or peek at a resident one through its peek() free function (no lease);
+/// none branches on how a cluster's bytes are read.
 ///
 /// @note **Real-time contract.** The audio render thread never calls into `SampleStream` per sample —
 ///       it reads already-resident chunk bytes by pointer from its own lookahead array. It only touches
-///       this class at cluster-boundary crossings, to enqueue the next cluster, and get_cluster() with
-///       CLUSTER_ENQUEUE never blocks on I/O.
+///       this class at cluster-boundary crossings, to enqueue the next cluster, and the facade's
+///       prefetch() (CLUSTER_ENQUEUE) never blocks on I/O.
 ///
 /// @warning Non-copyable and non-movable: it holds a back-reference to its owning `Sample` and owns the
 ///          read stream and Asset. This transitively makes `Sample` non-movable.
@@ -141,29 +142,6 @@ public:
 	/// @return `true` if the cluster was successfully read and stitched; `false` on a read failure (the
 	///         cluster is left unloaded).
 	bool read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after);
-
-	/// @brief Ensure cluster @p index is resident (or scheduled to load) and return it, taking a lease.
-	///
-	/// The dispatch always takes a manager lease on a non-null return; the caller is responsible for
-	/// releasing it. Behaviour depends on @p load_instruction:
-	///   - CLUSTER_DONT_LOAD — pin or construct the cluster without any I/O and hold it *dirty* (the
-	///     recorder / convert write target); the manager will not evict the unflushed data until it is
-	///     written to the card.
-	///   - CLUSTER_ENQUEUE — construct and lease immediately with no I/O, then schedule the read on the
-	///     background loader. Returns at once; the returned chunk may still be unloaded. Never blocks —
-	///     this is the real-time-safe path.
-	///   - CLUSTER_LOAD_IMMEDIATELY / CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE — acquire the cluster,
-	///     materializing it on a miss (which may block on I/O), and read a prefetched-but-unloaded hit
-	///     synchronously. On a read failure the `_OR_ENQUEUE` form falls back to the loader; the plain
-	///     form returns `nullptr`, leaving the cluster resident and leased so the caller can retry.
-	/// @param index           Cluster index within the sample.
-	/// @param load_instruction One of the `CLUSTER_*` load modes above.
-	/// @param priority_rating  Loader priority; used only when the read is enqueued.
-	/// @param error            If non-null, set to `Error::NONE` on entry and overwritten only on a
-	///                         failure path.
-	/// @return The resident (or scheduled) chunk, leased; `nullptr` on failure.
-	StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction = CLUSTER_ENQUEUE,
-	                           uint32_t priority_rating = 0xFFFFFFFF, Error* error = nullptr);
 
 	/// @return This stream's embedded-fatfs file handle, or 0 if none is open (the flag-off C-FatFS
 	///         path, or a stream not yet opened via the efatfs read path). Set by open_read_stream()

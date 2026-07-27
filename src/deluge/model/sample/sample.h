@@ -149,6 +149,11 @@ public:
 		return ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1;
 	}
 
+	/// @return The sample's logical cluster count, DERIVED: the geometry implied by its audio-data extent
+	///         once `isLengthKnown()`, else the live recorder's captured-cluster count while recording.
+	///         (Relocated off SampleStream -- pure Sample geometry, not residency dispatch.)
+	[[nodiscard]] size_t num_clusters() const;
+
 	uint32_t bitMask{0};
 
 	uint64_t lengthInSamples;

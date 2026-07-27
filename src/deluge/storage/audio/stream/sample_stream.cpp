@@ -35,29 +35,6 @@
 
 namespace deluge::audio::stream {
 
-namespace {
-// While a Sample's length is still unknown (mid-recording), its cluster count isn't geometric --
-// it's however far the live SampleRecorder has actually written. Mirrors the walk in
-// WaveformRenderer::investigateWholeCluster (waveform_renderer.cpp, ~line 618): AudioEngine::firstRecorder
-// via ->next, matching on SampleRecorder::sample.
-//
-// PRECONDITION: this unsynchronized list walk is safe only because num_clusters() reaches it just for
-// still-recording samples (isLengthKnown() == false), which are never consumed by the preemptive
-// streaming/region-port playback path (a recording target never opens a read stream). Its callers run
-// in the same cooperative/UI/diagnostic context as firstRecorder's structural mutation. If a future
-// change lets num_clusters() run on a recording sample from a truly preemptive context, this walk would
-// need synchronization against the card-routine add/remove.
-size_t liveRecorderClusterCount(const Sample& sample) {
-	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
-		if (recorder->sample == &sample) {
-			int32_t index = recorder->currentRecordClusterIndex.load(std::memory_order_acquire);
-			return index < 0 ? 0 : static_cast<size_t>(index);
-		}
-	}
-	return 0;
-}
-} // namespace
-
 void SampleStream::register_fill_context() {
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
 		return;
@@ -317,10 +294,6 @@ StreamedChunk* SampleStream::chunk_at(uint32_t index) const {
 	}
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	return reinterpret_cast<StreamedChunk*>(deluge_resource_peek(mgr, resource_asset_id_, index));
-}
-
-size_t SampleStream::num_clusters() const {
-	return sample_.isLengthKnown() ? sample_.geometricClusterCount() : liveRecorderClusterCount(sample_);
 }
 
 } // namespace deluge::audio::stream

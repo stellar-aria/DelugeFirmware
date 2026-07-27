@@ -152,7 +152,7 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
 
 	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
-	if (clusterIndex < static_cast<int32_t>(stream.num_clusters()) - 1) {
+	if (clusterIndex < static_cast<int32_t>(sample->num_clusters()) - 1) {
 		StreamedChunk* nextCluster = stream.chunk_at(cluster.cluster_index + 1);
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{

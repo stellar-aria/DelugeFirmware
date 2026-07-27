@@ -24,6 +24,7 @@
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_perc_cache_zone.h"
+#include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
 #include "storage/audio/stream/sample_residency.h"
@@ -34,6 +35,24 @@
 #include <new>
 
 #include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+
+namespace {
+// PRECONDITION: this unsynchronized list walk is safe only because num_clusters() reaches it just for
+// still-recording samples (isLengthKnown() == false), which are never consumed by the preemptive
+// streaming/region-port playback path (a recording target never opens a read stream). Its callers run
+// in the same cooperative/UI/diagnostic context as firstRecorder's structural mutation. If a future
+// change lets num_clusters() run on a recording sample from a truly preemptive context, this walk would
+// need synchronization against the card-routine add/remove.
+size_t liveRecorderClusterCount(const Sample& sample) {
+	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
+		if (recorder->sample == &sample) {
+			int32_t index = recorder->currentRecordClusterIndex.load(std::memory_order_acquire);
+			return index < 0 ? 0 : static_cast<size_t>(index);
+		}
+	}
+	return 0;
+}
+} // namespace
 
 #if SAMPLE_DO_LOCKS
 #define LOCK_ENTRY                                                                                                     \
@@ -193,6 +212,10 @@ void Sample::deletePercCache(bool beingDestructed) {
 	}
 }
 
+size_t Sample::num_clusters() const {
+	return isLengthKnown() ? geometricClusterCount() : liveRecorderClusterCount(*this);
+}
+
 void Sample::workOutBitMask() {
 	bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 }
@@ -204,7 +227,7 @@ void Sample::markAsUnloadable() {
 	resetOverviewScan();
 
 	// If any Clusters in the load-queue, remove them from there
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
+	for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
 		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 		if (cluster != nullptr) {
 			cluster->unloadable = true;
@@ -1849,7 +1872,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 #if ALPHA_OR_BETA_VERSION
 	// Count up the individual reasons, as a bug check
 	int32_t numClusterReasons = 0;
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
+	for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
 
 		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 		if (cluster) {
@@ -1865,7 +1888,7 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 
 	if (numClusterReasons) {
 		D_PRINTLN("reason dump---");
-		for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
+		for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
 
 			StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
 			if (cluster) {

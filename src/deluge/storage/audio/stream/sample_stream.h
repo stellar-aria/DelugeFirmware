@@ -175,10 +175,6 @@ public:
 	///         under the `efatfs_streaming` build; consulted by begin_fill() to route the read.
 	[[nodiscard]] uint32_t efatfs_handle() const { return efatfs_handle_; }
 
-	/// @return The sample's logical cluster count, DERIVED (geometry when the length is known, the live
-	///         recorder's captured-cluster count while recording).
-	[[nodiscard]] size_t num_clusters() const;
-
 	/// @}
 
 	/// @brief Register (or refresh) this asset's streaming fill-context with the resource manager.

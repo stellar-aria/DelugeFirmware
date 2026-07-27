@@ -36,7 +36,8 @@ namespace deluge::audio::stream {
 /// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
 /// streaming state:
 ///   - residency itself, which lives entirely in the resource manager and is reached via
-///     chunk_at()/get_cluster() → the manager peek/acquire (SR3e retired the former app-side
+///     get_cluster() (leasing dispatch) or the `deluge::audio::stream::peek()` free function
+///     (non-leasing peek) → the manager peek/acquire (SR3e retired the former app-side
 ///     residency-table mirror; there is nothing left on `SampleStream` for a caller to index directly);
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
@@ -47,7 +48,8 @@ namespace deluge::audio::stream {
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
 /// Callers obtain a cluster through get_cluster() (which takes a manager lease) or peek at a resident
-/// one through chunk_at(); none branches on how a cluster's bytes are read.
+/// one through the `deluge::audio::stream::peek()` free function (no lease); none branches on how a
+/// cluster's bytes are read.
 ///
 /// @note **Real-time contract.** The audio render thread never calls into `SampleStream` per sample —
 ///       it reads already-resident chunk bytes by pointer from its own lookahead array. It only touches
@@ -129,10 +131,10 @@ public:
 	/// The pure per-cluster reconstruction primitive underneath get_cluster() and the resource-manager
 	/// materialize callback (cluster_materialize()) — no orchestration (leasing, the loading queue) here.
 	/// @warning Must be called on the cluster's OWN sample's stream, i.e. on `cluster.sample->stream()`
-	///          (`this == &cluster.sample->stream()`) — make_read_source(), chunk_at() and num_clusters()
-	///          are called on `*this` below to reach `cluster.sample`'s read source and resident
-	///          neighbour clusters (for the neighbour-edge stitch), not some other sample's. All callers
-	///          uphold this.
+	///          (`this == &cluster.sample->stream()`) — make_read_source() is called on `*this` below,
+	///          and the finish-fill step it hands off to peeks `cluster.sample`'s resident neighbour
+	///          clusters (for the neighbour-edge stitch), not some other sample's. All callers uphold
+	///          this.
 	/// @param cluster           The chunk to reconstruct (already leased/resident, not yet loaded).
 	/// @param min_reasons_after ALPHA/BETA-only: the expected post-call lease-count floor, checked by the
 	///                          freeze sanity-checks below (unused in a release build).
@@ -162,13 +164,6 @@ public:
 	/// @return The resident (or scheduled) chunk, leased; `nullptr` on failure.
 	StreamedChunk* get_cluster(uint32_t index, int32_t load_instruction = CLUSTER_ENQUEUE,
 	                           uint32_t priority_rating = 0xFFFFFFFF, Error* error = nullptr);
-
-	/// @brief Peek at the resident chunk for @p index without taking a lease.
-	///
-	/// For read-only, non-owning uses (stitching neighbouring cluster edges, perc-cache fills, crossfade
-	/// sampling, debug checks).
-	/// @return The resident chunk, or `nullptr` if @p index is not currently resident.
-	[[nodiscard]] StreamedChunk* chunk_at(uint32_t index) const;
 
 	/// @return This stream's embedded-fatfs file handle, or 0 if none is open (the flag-off C-FatFS
 	///         path, or a stream not yet opened via the efatfs read path). Set by open_read_stream()

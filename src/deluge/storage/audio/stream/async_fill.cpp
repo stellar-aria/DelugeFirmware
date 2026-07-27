@@ -23,6 +23,7 @@
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
+#include "storage/audio/stream/sample_residency.h"
 #include "storage/audio/stream/sample_stream.h"
 #include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"
@@ -120,7 +121,6 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 
 	Sample* sample = cluster.sample;
 	int32_t clusterIndex = cluster.cluster_index;
-	deluge::audio::stream::SampleStream& stream = sample->stream();
 
 	cluster.convert_data_if_necessary();
 
@@ -141,7 +141,7 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 	// passed when it is both present and loaded.
 	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
 	if (clusterIndex > 0) {
-		StreamedChunk* prevCluster = stream.chunk_at(cluster.cluster_index - 1);
+		StreamedChunk* prevCluster = deluge::audio::stream::peek(*sample, cluster.cluster_index - 1);
 		if (prevCluster && prevCluster->loaded) {
 			prev_edge = deluge::audio::stream::StitchPrevEdge{
 			    .tail = std::span<std::byte>(prevCluster->payload().data() + (Cluster::size - 4), 11),
@@ -153,7 +153,7 @@ bool finish_fill(StreamedChunk& cluster, bool read_ok) {
 
 	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
 	if (clusterIndex < static_cast<int32_t>(sample->num_clusters()) - 1) {
-		StreamedChunk* nextCluster = stream.chunk_at(cluster.cluster_index + 1);
+		StreamedChunk* nextCluster = deluge::audio::stream::peek(*sample, cluster.cluster_index + 1);
 		if (nextCluster && nextCluster->loaded) {
 			next_edge = deluge::audio::stream::StitchNextEdge{
 			    .head = std::span<std::byte>(nextCluster->payload().data(), 7),

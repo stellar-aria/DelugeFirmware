@@ -37,6 +37,10 @@
 #include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
 
 namespace {
+// While a Sample's length is still unknown (mid-recording), its cluster count is the number of clusters
+// the recorder has captured so far. Mirrors the unsynchronized walk in
+// WaveformRenderer::investigateWholeCluster (waveform_renderer.cpp).
+//
 // PRECONDITION: this unsynchronized list walk is safe only because num_clusters() reaches it just for
 // still-recording samples (isLengthKnown() == false), which are never consumed by the preemptive
 // streaming/region-port playback path (a recording target never opens a read stream). Its callers run

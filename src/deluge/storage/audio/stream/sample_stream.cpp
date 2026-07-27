@@ -288,14 +288,6 @@ StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instructio
 	return cluster;
 }
 
-StreamedChunk* SampleStream::chunk_at(uint32_t index) const {
-	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
-		return nullptr; // no Asset defined yet, so nothing can be resident
-	}
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	return reinterpret_cast<StreamedChunk*>(deluge_resource_peek(mgr, resource_asset_id_, index));
-}
-
 } // namespace deluge::audio::stream
 
 extern "C" {

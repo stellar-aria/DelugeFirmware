@@ -358,10 +358,20 @@ impl Reader {
     /// never needs one.
     ///
     /// If [`Self::ensure_neighbour_resident`] fails (the neighbour can't be made resident), the
-    /// straddling frame is dropped from the count rather than failing the whole reader — a
-    /// transient neighbour-acquire failure doesn't invalidate the cluster this reader is already
-    /// validly pinned to, and a later `window()` call may still succeed once the failure clears
-    /// (e.g. eviction pressure eases).
+    /// straddling frame is dropped rather than failing the whole reader — a transient
+    /// neighbour-acquire failure doesn't invalidate the cluster this reader is already validly
+    /// pinned to, and a later `window()` call may still succeed once the failure clears (e.g.
+    /// eviction pressure eases). WHICH frame that is, and which end of the window it's dropped
+    /// from, differs by direction — the straddling frame is always the one nearest the boundary,
+    /// but "nearest the boundary" is the LAST frame in a forward run (`ptr`, unchanged, already
+    /// excludes it once the count shrinks) and the FIRST frame — the one AT the cursor itself,
+    /// where `ptr` points — in a backward run, so a backward degrade must retreat `ptr` one
+    /// `frame_stride` earlier (never just shrink the count) or the caller would still be handed a
+    /// pointer straight at the unconfirmed straddling bytes. If dropping it leaves zero servable
+    /// frames (it was the only one), that is reported as a FAILURE (`ok = false`), not EOF — real
+    /// audio exists here; it just couldn't be confirmed safe this call — so `frame_count == 0 &&
+    /// !reader_ok()` (retry later) stays distinguishable from `frame_count == 0 && reader_ok()`
+    /// (true end-of-audio), exactly as the header's `deluge_sample_reader_ok` contract promises.
     ///
     /// **Residual, derived (not invented) limitation**: if the next cluster was already resident
     /// from an EARLIER, unrelated fill (e.g. another reader/the voice warmed it before this cluster
@@ -447,6 +457,7 @@ impl Reader {
             self.held_cluster = Some(cluster_index);
         }
 
+        let mut window_byte_offset = byte_offset;
         if needs_next {
             // `cluster_index + 1` cannot overflow here: `needs_next` is only ever set via
             // `straddle_is_real_audio`, which itself only returns `true` when its own
@@ -455,8 +466,24 @@ impl Reader {
                 // Degrade: drop the unstitched straddling frame rather than fail the whole reader.
                 frame_count -= 1;
                 if frame_count == 0 {
+                    // The straddling frame was the ONLY one -- real audio exists here, but
+                    // couldn't be confirmed safe this call. A failure, not EOF (see this fn's
+                    // own "boundary straddle" doc).
+                    self.ok = false;
                     return (core::ptr::null(), 0);
                 }
+                if self.direction < 0 {
+                    // Backward: the straddling frame is the one AT the cursor (byte_offset) --
+                    // `ptr` points straight at it, so shrinking `frame_count` alone (forward's
+                    // fix) does nothing here; retreat the window's start one `frame_stride`
+                    // EARLIER (further from the boundary) so `ptr` lands on the next frame back,
+                    // fully inside this cluster. Safe: `frame_count` (post-decrement) > 0 here
+                    // implies the PRE-decrement count was > 1, i.e. `byte_offset / frame_stride
+                    // >= 1`, i.e. `byte_offset >= frame_stride` -- no underflow.
+                    window_byte_offset -= frame_stride;
+                }
+                // Forward: the straddling frame is the LAST index in the run; `ptr` (unchanged,
+                // still at byte_offset) already excludes it once the count above shrank.
             }
         }
 
@@ -467,13 +494,17 @@ impl Reader {
                 self.held_lease.as_ref().unwrap().chunk().as_ptr() as *mut c_void
             )
         };
-        // SAFETY: without a straddle, `byte_offset + frame_count*frame_stride <= resident <=
-        // cluster_size_bytes`. With one, the straddling frame's last byte lands at
-        // `resident + (frame_stride - 1 - remainder) <= cluster_size_bytes + frame_stride - 2`,
-        // which stays inside the `cluster_size_bytes + 7`-byte `payload_with_trailing_slack()` span
-        // for every real `frame_stride` (<= 8; see this fn's own doc) — never reaching past the
-        // trailing slack `native_finish`/`ensure_neighbour_resident` just stitched.
-        let frames = unsafe { payload_base.add(byte_offset as usize) };
+        // SAFETY: the only frame that can ever extend past `resident` is the single one nearest
+        // the boundary -- the LAST frame of a forward run, or the FIRST (the one AT
+        // `window_byte_offset` itself) of a backward run -- and only when `needs_next` held AND
+        // the neighbour was confirmed resident (the un-degraded path): that frame's last byte
+        // lands at `resident + (frame_stride - 1 - remainder) <= cluster_size_bytes + frame_stride
+        // - 2`, which stays inside the `cluster_size_bytes + 7`-byte `payload_with_trailing_slack()`
+        // span for every real `frame_stride` (<= 8; see this fn's own doc). In the degraded case
+        // that boundary-adjacent frame is excluded from the window entirely (forward: dropped off
+        // the end; backward: `window_byte_offset` retreated past it above), so every byte this
+        // window can ever expose without a confirmed stitch stays within `[0, resident)`.
+        let frames = unsafe { payload_base.add(window_byte_offset as usize) };
         (frames as *const u8, frame_count)
     }
 
@@ -744,7 +775,9 @@ mod tests {
     // lesson this task's brief calls out.
     mod window_tests {
         use super::*;
-        use crate::host_streaming_stubs::{set_force_read_failure, PAYLOAD_OFFSET};
+        use crate::host_streaming_stubs::{
+            set_fail_at_byte_offset, set_force_read_failure, PAYLOAD_OFFSET,
+        };
 
         // 512, not a smaller power of two: `fill_logic::begin`'s sector math is
         // `cluster_size >> 9` (512-byte sectors, mirroring the real `deluge_efatfs_read_at`
@@ -854,6 +887,7 @@ mod tests {
         fn window_at_frame_zero_matches_the_synthetic_fill_and_reports_frames_to_backing_end() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64)); // 3 full clusters
 
             let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
@@ -891,6 +925,7 @@ mod tests {
         fn window_past_the_last_audio_frame_is_eof_not_a_failure() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             // 10 bytes of real audio (5 frames of stride 2): cluster 0 is short.
             let (_handle, asset) = harness(geo(10));
             // Frame 5 -> abs byte pos 10 -> exactly the end of the real audio data.
@@ -910,6 +945,7 @@ mod tests {
         fn window_self_pins_and_advance_releases_across_a_boundary_but_not_within_it() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             let (handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
             // SAFETY: `handle` is live for the test's duration.
             let resource = unsafe { Resource::from_handle(handle) };
@@ -994,6 +1030,7 @@ mod tests {
             );
 
             set_force_read_failure(false); // restore for other tests sharing this thread
+            set_fail_at_byte_offset(None);
         }
 
         // ── The boundary-straddle fix ────────────────────────────────────────────────────────
@@ -1027,6 +1064,7 @@ mod tests {
         fn window_straddles_a_cluster_boundary_forward_with_24bit_stride() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             // 3 full clusters (1536 bytes): cluster 1 genuinely has more data past cluster 0's
             // tail, so the straddle at cluster 0's end is real, readable audio.
             let (_handle, asset) = harness(geo24(3 * CLUSTER_SIZE as u64));
@@ -1063,6 +1101,7 @@ mod tests {
         fn window_straddles_a_cluster_boundary_backward_with_24bit_stride() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             let (_handle, asset) = harness(geo24(3 * CLUSTER_SIZE as u64));
 
             // Same straddling frame (170), approached backward: the cursor's OWN frame is the
@@ -1092,6 +1131,7 @@ mod tests {
         fn window_true_eof_with_24bit_stride_does_not_falsely_straddle() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             // 511 bytes of real audio: cluster 0 is genuinely short (resident 511 < 512), so its
             // own tail is NOT a real straddle -- there is no cluster 1 with more data to pull.
             let (_handle, asset) = harness(geo24(511));
@@ -1119,6 +1159,7 @@ mod tests {
         fn advance_saturates_at_total_frames_near_eof() {
             let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
             let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64)); // byte_depth 2 -> stride 2
             let total_frames = (3 * CLUSTER_SIZE as u64) / 2; // 768
 
@@ -1128,6 +1169,147 @@ mod tests {
                 reader.current_frame(),
                 total_frames,
                 "advance must clamp at the sample's own total frame count, not overrun/wrap past it"
+            );
+        }
+
+        // ── The degrade-path fix: a transient NEIGHBOUR-fill failure must not expose an
+        // ── unconfirmed straddling frame, and must not be confused with true EOF ─────────────
+        //
+        // These use `set_fail_at_byte_offset` (not the single global `set_force_read_failure`,
+        // which fails EVERY cluster including the one under test) to fail ONLY the neighbour
+        // cluster's read, leaving the reader's own self-pinned cluster to fill normally --
+        // isolating exactly the scenario the degrade path exists for.
+
+        #[test]
+        fn window_backward_degrade_retreats_the_pointer_past_the_unconfirmed_straddling_frame() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
+            let (_handle, asset) = harness(geo24(3 * CLUSTER_SIZE as u64));
+
+            // Cluster 1's read (byte_offset == 1 << CLUSTER_MAGNITUDE == 512) fails; cluster 0's
+            // own read (byte_offset == 0) is untouched and succeeds normally.
+            set_fail_at_byte_offset(Some(CLUSTER_SIZE));
+
+            // Same straddling frame as the other backward straddle test (170 -> cluster 0, offset
+            // 510, pre-degrade frame_count == 171 > 1).
+            let mut reader = Reader::open(asset, 170, -1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(
+                !ptr.is_null(),
+                "plenty of SAFE frames remain even though the straddling one had to be dropped"
+            );
+            assert_eq!(
+                frame_count, 170,
+                "171 (byte_offset/stride + 1) minus the one dropped, unconfirmed straddling frame"
+            );
+            assert!(
+                reader.ok(),
+                "frames remain servable -- this is a degrade, not a failure"
+            );
+
+            // THE bug this test catches: `ptr` must have retreated past the straddling frame
+            // (byte_offset 510..513, which needs cluster 1's stitched slack) to the next-safest
+            // one (byte_offset 507..510, entirely inside cluster 0's own plain payload) -- NOT
+            // still point at byte_offset 510, which would hand the caller unconfirmed bytes.
+            // SAFETY: `ptr` is cluster 0's pinned payload; 507..510 is entirely within its plain
+            // (non-slack) `[0, 512)` payload span, always safe to read regardless of stitching.
+            let got = unsafe { [*ptr, *ptr.add(1), *ptr.add(2)] };
+            assert_eq!(
+                got,
+                [251u8, 252u8, 253u8],
+                "ptr must land on bytes 507..510 (cluster 0's own ramp) -- if this instead reads \
+                 [254, 255, <anything>] (bytes 510..513, the straddling frame), the degrade path \
+                 failed to retreat the pointer and is still exposing the unconfirmed frame"
+            );
+        }
+
+        #[test]
+        fn window_forward_degrade_to_zero_is_a_failure_not_eof() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
+            // A tiny (4-byte) cluster so a single straddling frame can be the ONLY servable frame
+            // (see this module's own derivation: for CLUSTER_SIZE == 512 a straddle only ever
+            // happens near the cluster's OWN tail, which can never coincide with "the only whole
+            // frame from byte_offset" for any realistic byte_depth/num_channels -- a small
+            // cluster is needed to make both true at once). `fill_logic::begin`'s sector math
+            // (`cluster_size >> 9`) degenerates to 0 sectors here -- harmless: this test never
+            // inspects byte content, only `frame_count`/`reader_ok()`.
+            const TINY_CLUSTER: u32 = 4;
+            const TINY_MAGNITUDE: u32 = 2; // 2^2 == 4
+            let ctx = FillContext {
+                efatfs_handle: 0,
+                audio_data_start_pos_bytes: 0,
+                audio_data_length_bytes: 3 * TINY_CLUSTER as u64, // 3 full 4-byte clusters
+                first_cluster_index_with_no_audio_data: -1,
+                cluster_size: TINY_CLUSTER,
+                cluster_size_magnitude: TINY_MAGNITUDE,
+                raw_data_format: 0, // Native
+                byte_depth: 3,
+                num_channels: 1,
+            };
+            let (_handle, asset) = harness(ctx);
+
+            // Cluster 1's read (byte_offset == 1 << 2 == 4) fails; cluster 0's own read
+            // (byte_offset == 0) succeeds.
+            set_fail_at_byte_offset(Some(TINY_CLUSTER));
+
+            // Frame 1 -> abs byte pos 3 -> cluster 0, offset 3: bytes_available = 4-3 = 1 <
+            // stride(3) -- a straddle, AND (whole == 0) the ONLY frame this position could serve.
+            let mut reader = Reader::open(asset, 1, 1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(ptr.is_null());
+            assert_eq!(frame_count, 0);
+            assert!(
+                !reader.ok(),
+                "the straddling frame was the ONLY servable one and couldn't be confirmed -- a \
+                 failure (retry later), not true end-of-audio, which real audio here is not"
+            );
+        }
+
+        #[test]
+        fn window_backward_degrade_to_zero_is_a_failure_not_eof() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            set_force_read_failure(false);
+            set_fail_at_byte_offset(None);
+            // Same tiny-cluster shape as the forward version above, for the same reason.
+            const TINY_CLUSTER: u32 = 4;
+            const TINY_MAGNITUDE: u32 = 2; // 2^2 == 4
+            let ctx = FillContext {
+                efatfs_handle: 0,
+                audio_data_start_pos_bytes: 0,
+                audio_data_length_bytes: 3 * TINY_CLUSTER as u64, // 3 full 4-byte clusters
+                first_cluster_index_with_no_audio_data: -1,
+                cluster_size: TINY_CLUSTER,
+                cluster_size_magnitude: TINY_MAGNITUDE,
+                raw_data_format: 0, // Native
+                byte_depth: 3,
+                num_channels: 1,
+            };
+            let (_handle, asset) = harness(ctx);
+
+            // Cluster 2's read (byte_offset == 2 << 2 == 8) fails; cluster 1's own read
+            // (byte_offset == 1 << 2 == 4) succeeds.
+            set_fail_at_byte_offset(Some(2 * TINY_CLUSTER));
+
+            // Frame 2 -> abs byte pos 6 -> cluster 1, offset 2: byte_offset(2) + stride(3) = 5 >
+            // resident(4) -- a straddle, AND (byte_offset/stride + 1 == 1) the ONLY frame
+            // backward from here.
+            let mut reader = Reader::open(asset, 2, -1, ReadHint::Cached);
+            assert!(reader.ok());
+
+            let (ptr, frame_count) = reader.window();
+            assert!(ptr.is_null());
+            assert_eq!(frame_count, 0);
+            assert!(
+                !reader.ok(),
+                "the straddling frame at the cursor was the ONLY servable one and couldn't be \
+                 confirmed -- a failure (retry later), not true end-of-audio"
             );
         }
     }

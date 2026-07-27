@@ -100,6 +100,7 @@ pub(crate) mod host_streaming_stubs {
     std::thread_local! {
         static ACTIVE_MANAGER: Cell<*mut c_void> = const { Cell::new(core::ptr::null_mut()) };
         static FORCE_READ_FAILURE: Cell<bool> = const { Cell::new(false) };
+        static FAIL_AT_BYTE_OFFSET: Cell<Option<u32>> = const { Cell::new(None) };
     }
 
     /// Serializes every test that touches `deluge_sample_fill`'s per-asset fill-context table
@@ -124,9 +125,25 @@ pub(crate) mod host_streaming_stubs {
 
     /// Make the next (and every subsequent, until reset) `deluge_efatfs_read_at` call on this
     /// thread fail without writing `dst` — the forced-failure half of the self-pin/failure test
-    /// matrix (`reader::tests`'s `reader_ok` coverage).
+    /// matrix (`reader::tests`'s `reader_ok` coverage). Fails EVERY read, regardless of which
+    /// cluster — for isolating a single cluster's failure instead (the degrade-path tests, where
+    /// the CURRENT cluster must succeed and only the NEIGHBOUR must fail), see
+    /// [`set_fail_at_byte_offset`].
     pub(crate) fn set_force_read_failure(force: bool) {
         FORCE_READ_FAILURE.with(|f| f.set(force));
+    }
+
+    /// Make `deluge_efatfs_read_at` fail ONLY the call whose `byte_offset` param equals
+    /// `offset` (i.e. `Some(cluster_index << cluster_size_magnitude)` — the exact value
+    /// `fill_logic::begin`/`native_begin` compute for that cluster, see `read_source.cpp`'s own
+    /// `byte_offset = cluster_index << cluster_size_magnitude`), leaving every other cluster's
+    /// read to succeed normally. `None` clears the injection. Lets a test isolate "this reader's
+    /// own (self-pinned) cluster succeeds, but the NEIGHBOUR cluster `window()` tries to
+    /// transiently fill for a boundary stitch fails" — the exact scenario the straddle
+    /// degrade-path bugs live in, which the single global [`set_force_read_failure`] flag can't
+    /// reach (it fails every cluster, including the one under test itself).
+    pub(crate) fn set_fail_at_byte_offset(offset: Option<u32>) {
+        FAIL_AT_BYTE_OFFSET.with(|f| f.set(offset));
     }
 
     #[unsafe(no_mangle)]
@@ -184,9 +201,11 @@ pub(crate) mod host_streaming_stubs {
     /// Synthetic card read: deterministic content keyed on the ABSOLUTE file byte offset
     /// (`dst[i] = (byte_offset + i) as u8`), so a test can compute a cluster's expected
     /// post-fill bytes independently of this stub — the "synthetic sample with known converted
-    /// cluster bytes" the Task 3 brief calls for. `set_force_read_failure(true)` makes this
-    /// fail closed (returns `false`, `dst`/`out_read` untouched) instead, for the forced-failure
-    /// coverage.
+    /// cluster bytes" the Task 3 brief calls for. `set_force_read_failure(true)` makes EVERY
+    /// call fail closed (returns `false`, `dst`/`out_read` untouched); `set_fail_at_byte_offset`
+    /// fails only the ONE cluster whose `byte_offset` matches, for isolating a single neighbour's
+    /// failure. Both checks run before touching `count`/`dst`, so they apply even to a
+    /// zero-sector (`count == 0`) read.
     #[unsafe(no_mangle)]
     extern "C" fn deluge_efatfs_read_at(
         _handle: u32,
@@ -196,6 +215,9 @@ pub(crate) mod host_streaming_stubs {
         out_read: *mut u32,
     ) -> bool {
         if FORCE_READ_FAILURE.with(|f| f.get()) {
+            return false;
+        }
+        if FAIL_AT_BYTE_OFFSET.with(|f| f.get()) == Some(byte_offset) {
             return false;
         }
         // SAFETY: `dst` is the caller's just-allocated destination buffer, valid for at least

@@ -1,16 +1,16 @@
 //! deluge_sample_reader — the sample range-reader C-ABI (`include/libdeluge/sample_reader.h`, U1).
 //!
-//! A zero-copy streaming reader-handle (plus, later, a stateless copy convenience) over a sample's
-//! source residency, for non-voice consumers that read raw-PCM frame RANGES instead of reaching
+//! A zero-copy streaming reader-handle plus a stateless copy convenience over a sample's source
+//! residency, for non-voice consumers that read raw-PCM frame RANGES instead of reaching
 //! `StreamedChunk` internals the way they do today — the non-voice twin of the voice region port
 //! (`deluge_sample_source`'s `DelugeSampleSource`/`DelugeSampleRegion`). Coexists with the existing
 //! facade (`peek`/`prefetch`/`load_now`/`request`/`dequeue`); no consumer migrates in U1 (that is
 //! U2) — see the design doc this crate's Cargo.toml references.
 //!
-//! Task 1 landed the lifecycle trio (`open`/`seek`/`close`); Task 3 (this landing) fills in the
-//! read core — `window`/`advance`/`ok`, plus `open`'s own Rust-side geometry resolution. The
-//! stateless `deluge_sample_read` copy is a later task; its signature already exists in the header
-//! (the header is the contract), just not yet backed here.
+//! Task 1 landed the lifecycle trio (`open`/`seek`/`close`); Task 3 filled in the read core —
+//! `window`/`advance`/`ok`, plus `open`'s own Rust-side geometry resolution. Task 4 (this landing)
+//! adds the stateless `deluge_sample_read` copy, composed entirely from that same handle (`open` ->
+//! `window`/`advance` -> drop) — no second frame-mapping/fill implementation.
 #![no_std]
 
 extern crate alloc;

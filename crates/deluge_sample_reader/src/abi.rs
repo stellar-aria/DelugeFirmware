@@ -1,10 +1,9 @@
 //! The `deluge_sample_reader_*`/`deluge_sample_read` C ABI
 //! (`include/libdeluge/sample_reader.h`). Task 1 (SR-U1) implemented the lifecycle trio —
-//! `open`/`seek`/`close` — by heap-boxing a [`crate::reader::Reader`]; Task 3 adds `window`/
-//! `advance`/`ok`, the read core. The stateless `deluge_sample_read` copy is a later task (its
-//! signature already exists in the header — the header is the contract — just not yet backed
-//! here; calling it today would be a link error, which is the correct failure mode for "not
-//! implemented yet").
+//! `open`/`seek`/`close` — by heap-boxing a [`crate::reader::Reader`]; Task 3 added `window`/
+//! `advance`/`ok`, the read core. Task 4 adds `deluge_sample_read`, the stateless copy-out
+//! convenience — a thin shim over [`crate::reader::Reader::read`], which composes `open` ->
+//! `window`/`advance` -> drop itself, so there is still only ONE residency path.
 //!
 //! Unlike `deluge_sample_source`'s `DelugeSampleSource` (a fixed, allocation-free static pool,
 //! because that port's `open()`/`close()` can fire on the audio render ISR at note-start/-end),

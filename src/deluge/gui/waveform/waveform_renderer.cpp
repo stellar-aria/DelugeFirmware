@@ -24,11 +24,11 @@
 #include "io/debug/log.h"
 #include "model/sample/overview_cache_entry.h"
 #include "model/sample/sample.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "model/sample/sample_recorder.h"
 #include "model/voice/voice_sample.h"
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
-#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <algorithm>
@@ -318,6 +318,11 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 
 	bool hadAnyTroubleLoading = false;
 
+	// One reader for the whole scan (SCAN hint: this is a one-shot whole-sample pass, so it must not evict
+	// the voice's own warm cluster set). Re-seeked per column below; cheap to open even if every column
+	// this pass turns out to be a cache hit (open takes no lease and does no I/O).
+	deluge::sample::SampleFrameReader reader{deluge::sample::source_id_for(*sample), 0, 1, DELUGE_READ_SCAN};
+
 	for (int32_t col = xStart; col < xEnd; col++) {
 
 		if (data->colStatus[col] == COL_STATUS_INVESTIGATED) {
@@ -449,81 +454,48 @@ bool WaveformRenderer::findPeaksPerCol(Sample* sample, int64_t xScrollSamples, u
 
 		// Otherwise, do our normal investigation
 		else {
-			char const* errorCode;
-			StreamedChunk* residentChunk = deluge::audio::stream::peek(*sample, clusterIndexToDo);
-			if (residentChunk) {
-				if (residentChunk->loaded) {
-					errorCode = "E343";
-				}
-				else {
-					errorCode = "E344";
-				}
-			}
-			else {
-				errorCode = "E341"; // Qui got this, around V3.1.3! And Steven G, 3.1.5. And Brawny, V4.0.1-RC! And then
-				                    // Malte P.
-			}
+			int32_t frameSize = sample->numChannels * sample->byteDepth;
 
-			StreamedChunk* cluster = deluge::audio::stream::load_now(*sample, clusterIndexToDo);
-			if (!cluster) {
-cantReadData:
+			// startByteWithinCluster is always frame-grid-aligned (either colStartByte/colEndByte's own
+			// masked byte offset, or firstFrameStartWithinCluster's result), so it maps onto exactly one
+			// frame index -- the frame this column's (or whole-cluster investigation's) read begins at.
+			int64_t startByteAbs = clusterStartByte(clusterIndexToDo, Cluster::size_magnitude) + startByteWithinCluster;
+			uint64_t startFrame =
+			    static_cast<uint64_t>(startByteAbs - static_cast<int64_t>(sample->audioDataStartPosBytes)) / frameSize;
+
+			reader.seek(startFrame);
+			DelugeFrameWindow window = reader.window();
+			if (!reader.ok()) {
 				D_PRINTLN("cant read");
 				data->colStatus[col] = 0;
 				hadAnyTroubleLoading = true;
 				continue;
 			}
 
-			if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
-				// Branko V got this. Trying to catch E340 below, which Ron R got while recording
-				FREEZE_WITH_ERROR(errorCode);
-			}
+			// How many whole frames of the intended [startByteWithinCluster, endByteWithinCluster) span the
+			// reader actually made resident. Capped to window.frame_count rather than trusting it outright:
+			// unlike a straight streaming read, this scan deliberately never widens a column's or a whole
+			// cluster's span to include a frame straddling into the next cluster (matching the historical
+			// behaviour here, which always rounded such a span down rather than reading across the boundary).
+			uint32_t wantedBytes = endByteWithinCluster > startByteWithinCluster
+			                           ? static_cast<uint32_t>(endByteWithinCluster - startByteWithinCluster)
+			                           : 0;
+			uint32_t numFramesToRead = std::min(wantedBytes / static_cast<uint32_t>(frameSize), window.frame_count);
+			uint32_t numBytesToRead = numFramesToRead * frameSize;
 
-			uint32_t numBytesToRead = endByteWithinCluster - startByteWithinCluster;
-
-			// Make the end-byte earlier, so we won't read past the end of the Cluster boundary
-			int32_t overshoot = numBytesToRead % (sample->numChannels * sample->byteDepth);
-			endByteWithinCluster -= overshoot;
-
-			// However, if that's reduced us to 0 bytes to read, we know we're gonna have to load in the next Cluster to
-			// get its sample that's on the boundary
-			StreamedChunk* nextCluster = nullptr;
-			if (endByteWithinCluster <= startByteWithinCluster && clusterIndexToDo < endClusters - 1) {
-				endByteWithinCluster += overshoot;
-				// NOTE: this deliberately indexes clusterIndexToDo + 1 (the *next* cluster), not
-				// clusterIndexToDo. The old two-argument getCluster(sample, index, ...) call let the
-				// looked-up entry and the index argument drift out of sync; get_cluster() takes a single
-				// index for both, so fetching the next cluster means indexing by clusterIndexToDo + 1.
-				nextCluster = deluge::audio::stream::load_now(*sample, clusterIndexToDo + 1);
-
-				if (deluge::cluster::lease_count(cluster->resource_slot) == 0) {
-					FREEZE_WITH_ERROR("E342"); // Trying to catch E340 below, which Ron R got while recording
-				}
-
-				if (nextCluster == nullptr) {
-					deluge::cluster::remove_reason(*cluster, "po8w");
-					goto cantReadData;
-				}
-			}
-
-			numBytesToRead = endByteWithinCluster - startByteWithinCluster;
-
-			// If, after all boundary handling, there are still no whole frames to read (e.g. audio ends very
-			// early in the final cluster, so the next-cluster fallback above doesn't apply), this column has no
+			// If there are no whole frames to read here (e.g. audio ends very early in the final cluster, or
+			// this column's span collapsed to less than one frame near a cluster boundary), this column has no
 			// valid data. Mark it as having nothing to draw rather than scanning an empty window and caching an
 			// inverted sentinel (min > max), which would render as a spurious bright column (#4460).
-			if (endByteWithinCluster <= startByteWithinCluster) {
+			if (numBytesToRead == 0) {
 				data->colStatus[col] = COL_STATUS_INVESTIGATED_BUT_BEYOND_WAVEFORM;
-				deluge::cluster::remove_reason(*cluster, "4460");
-				if (nextCluster != nullptr) {
-					deluge::cluster::remove_reason(*nextCluster, "4460");
-				}
 				continue;
 			}
 
 			// NOTE: from here on, we read *both* channels (if there are two), counting each one as a "sample"
 			WaveformPeak peak =
-			    scanClusterPeak(reinterpret_cast<const char*>(cluster->payload().data()), startByteWithinCluster,
-			                    endByteWithinCluster, sample->byteDepth, sample->numChannels);
+			    scanClusterPeak(reinterpret_cast<const char*>(window.frames), 0, static_cast<int32_t>(numBytesToRead),
+			                    sample->byteDepth, sample->numChannels);
 			int32_t minThisCol = peak.min;
 			int32_t maxThisCol = peak.max;
 
@@ -566,10 +538,6 @@ cantReadData:
 			data->maxPerCol[col] = maxThisCol;
 			data->minPerCol[col] = minThisCol;
 
-			deluge::cluster::remove_reason(*cluster, "E340"); // Ron R got this, when error was "iiuh"
-			if (nextCluster != nullptr) {
-				deluge::cluster::remove_reason(*nextCluster, "9700");
-			}
 			AudioEngine::routineWithClusterLoading();
 		}
 	}
@@ -652,14 +620,28 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 		return true;
 	}
 
-	StreamedChunk* cluster = deluge::audio::stream::load_now(*sample, clusterIndex);
-	if (cluster == nullptr) {
+	uint64_t startFrame = static_cast<uint64_t>(
+	    (clusterStartByteAbs + startByteWithinCluster - static_cast<int64_t>(sample->audioDataStartPosBytes))
+	    / frameSize);
+
+	// SCAN hint: this background pre-scan must not evict the voice's own warm cluster set.
+	deluge::sample::SampleFrameReader reader{deluge::sample::source_id_for(*sample), startFrame, 1, DELUGE_READ_SCAN};
+	DelugeFrameWindow window = reader.window();
+	if (!reader.ok()) {
 		return false; // Card busy / couldn't read - caller will retry later
 	}
 
-	WaveformPeak peak =
-	    scanClusterPeak(reinterpret_cast<const char*>(cluster->payload().data()), startByteWithinCluster,
-	                    endByteWithinCluster, sample->byteDepth, sample->numChannels);
+	// endByteWithinCluster/startByteWithinCluster are already frame-trimmed above, so this is exactly the
+	// span we want -- capped to what the reader actually made resident.
+	uint32_t wantedFrames = static_cast<uint32_t>(endByteWithinCluster - startByteWithinCluster) / frameSize;
+	uint32_t numFramesToRead = std::min(wantedFrames, window.frame_count);
+	uint32_t numBytesToRead = numFramesToRead * frameSize;
+	if (numBytesToRead == 0) {
+		return true; // Nothing came back resident this call; leave un-investigated, same as above.
+	}
+
+	WaveformPeak peak = scanClusterPeak(reinterpret_cast<const char*>(window.frames), 0,
+	                                    static_cast<int32_t>(numBytesToRead), sample->byteDepth, sample->numChannels);
 
 	// Fold in anything previously captured for this cluster (same as findPeaksPerCol's whole-cluster path).
 	peak.min = std::min(peak.min, static_cast<int32_t>(sampleCluster->min) << 24);
@@ -674,7 +656,6 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 	sample->maxValueFound = std::max(sample->maxValueFound, peak.max);
 	sample->minValueFound = std::min(sample->minValueFound, peak.min);
 
-	deluge::cluster::remove_reason(*cluster, "4460");
 	AudioEngine::routineWithClusterLoading();
 
 	return true;

@@ -61,6 +61,10 @@ unsafe extern "C" {
         count: u32,
         out_read: *mut u32,
     ) -> bool;
+    /// Wake the async loader (`include/libdeluge/streaming_fill.h:188`) after enqueueing a chunk
+    /// via `Resource::loader_enqueue` — see [`enqueue_unfilled`]'s own doc for the recipe this
+    /// mirrors (`sample_residency.cpp`'s `CLUSTER_ENQUEUE` block).
+    fn deluge_streaming_signal_fill();
 }
 
 /// Run the synchronous cluster fill on `chunk_backing` — the SAME recipe `reader::fill_now`
@@ -348,20 +352,41 @@ fn walk_and_lease(
     (covered, leases, num_covered)
 }
 
+/// Schedule `chunk` onto the async loader if it isn't already ready — the exact two-call recipe
+/// `sample_residency.cpp`'s `CLUSTER_ENQUEUE` block runs after its own `deluge_resource_request`
+/// (`Resource::request`'s C++ twin): `deluge_resource_loader_enqueue(mgr, cluster->resource_slot,
+/// priority_rating)` (here, `Resource::loader_enqueue`) then `deluge_streaming_signal_fill()` to
+/// wake the loader task. `priority_rating` for this passive-lookahead path is `0xFFFF_FFFF` — the
+/// C++ recipe's own lowest-urgency prefetch priority. A no-op if `chunk` is already ready (mirrors
+/// the C++ `if (!cluster->loaded)` guard): a hit doesn't need scheduling, and neither does a chunk
+/// some other caller already filled between `request` and this call.
+///
+/// Shared by both [`load_cluster`] paths that keep a fresh (miss) reservation without running a
+/// synchronous fill: [`LoadMode::Enqueue`] always, and [`LoadMode::NowOrEnqueue`]'s fill-failure
+/// fallback.
+fn enqueue_unfilled(resource: &Resource, chunk: deluge_resource::facade::Chunk) {
+    if resource.is_ready(chunk) {
+        return;
+    }
+    resource.loader_enqueue(resource.slot_of(chunk), 0xFFFF_FFFF);
+    // SAFETY: a bare wake call, no arguments -- see the extern's own doc.
+    unsafe { deluge_streaming_signal_fill() };
+}
+
 /// The per-cluster load recipe: a cache hit (`acquire_leased`) is already resident+ready and
 /// returns immediately, for every `load_mode` alike — never re-filled. A miss `request`s a fresh
 /// reservation (reserve + construct, no I/O); what happens to that reservation next depends on
 /// `load_mode`:
-/// - [`LoadMode::Enqueue`]: hand back the reservation as-is (reserved, unfilled, enqueued for the
-///   async loader) — never blocks.
+/// - [`LoadMode::Enqueue`]: schedule the reservation onto the async loader
+///   ([`enqueue_unfilled`]) and hand it back reserved, unfilled — never blocks.
 /// - [`LoadMode::Now`]: run the synchronous fill (`fill_now`) then `Resource::mark_ready` — the
 ///   exact recipe `reader::Reader::acquire_and_fill` uses for its own miss branch. If the fill
 ///   fails, the reservation is dropped (`None`) rather than kept unfilled, releasing it — matches
 ///   `acquire_and_fill`'s own "`lease` drops here, releasing the failed reservation."
 /// - [`LoadMode::NowOrEnqueue`]: attempt the same synchronous fill; on failure, KEEP the
-///   reservation enqueued instead of dropping it (`Some`, unfilled) — mirrors
-///   `CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE`'s fall back to the async path under memory pressure
-///   rather than giving up the reservation outright.
+///   reservation and schedule it onto the async loader ([`enqueue_unfilled`]) instead of dropping
+///   it (`Some`, unfilled) — mirrors `CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE`'s fall back to the
+///   async path under memory pressure rather than giving up the reservation outright.
 fn load_cluster(
     resource: &Resource,
     asset: u32,
@@ -374,14 +399,18 @@ fn load_cluster(
     }
     let lease = resource.request(asset, cluster_index, cluster_size_bytes as usize)?;
     match load_mode {
-        LoadMode::Enqueue => Some(lease),
+        LoadMode::Enqueue => {
+            enqueue_unfilled(resource, lease.chunk());
+            Some(lease)
+        }
         LoadMode::Now | LoadMode::NowOrEnqueue => {
             let backing = lease.chunk().as_ptr() as *mut c_void;
             if fill_now(backing) {
                 resource.mark_ready(lease.chunk());
                 Some(lease)
             } else if load_mode == LoadMode::NowOrEnqueue {
-                Some(lease) // Keep it enqueued, unfilled -- do not drop the reservation.
+                enqueue_unfilled(resource, lease.chunk()); // Keep it enqueued, unfilled -- do not drop the reservation.
+                Some(lease)
             } else {
                 None // `lease` drops here, releasing the failed reservation.
             }
@@ -787,5 +816,43 @@ mod tests {
         let now = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Now);
         assert!(h.is_ready_at(3), "load-now fills synchronously");
         drop(now);
+    }
+
+    /// The bug this test would have caught: `LoadMode::Enqueue` must actually SCHEDULE its
+    /// covered, freshly-reserved (miss) clusters onto the real loader queue
+    /// (`Resource::loader_next`), not just take a lease and leave them stranded. Before the fix,
+    /// `load_cluster`'s `Enqueue` arm handed back `resource.request(...)`'s lease without ever
+    /// calling `Resource::loader_enqueue` — `loader_next()` would return `None` here. Exercised
+    /// through the real `deluge_resource` loader queue (`h.resource()`), not a mock.
+    #[test]
+    fn open_enqueue_schedules_covered_clusters_on_the_loader() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let h = TestHarness::with_audio_data_clusters(2..6, 4);
+        h.evict_all(); // ensure nothing resident -- every covered cluster is a fresh miss
+
+        let res = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+        assert_eq!(res.covered_indices(), &[3, 4]);
+
+        let resource = h.resource();
+        let mut scheduled: Vec<(u32, u32)> = Vec::new();
+        while let Some(chunk) = resource.loader_next() {
+            scheduled.push(
+                resource
+                    .chunk_ident(chunk)
+                    .expect("popped chunk is resident"),
+            );
+        }
+        scheduled.sort_unstable();
+        assert_eq!(
+            scheduled,
+            std::vec![(h.asset, 3), (h.asset, 4)],
+            "both covered (miss) clusters must have been enqueued on the real loader queue"
+        );
+        assert!(
+            resource.loader_next().is_none(),
+            "the loader queue must be empty once every scheduled chunk has been popped"
+        );
+
+        drop(res);
     }
 }

@@ -167,6 +167,13 @@ pub(crate) mod host_streaming_stubs {
         // `Reader::acquire_and_fill` calls independently; nothing here needs this bit.
     }
 
+    /// No-op stand-in for the real async-fill wake signal (`streaming_fill.h`'s
+    /// `deluge_streaming_signal_fill`) — this test binary has no async loader task to wake;
+    /// `reservation.rs`'s enqueue paths call this unconditionally after `loader_enqueue`, so it
+    /// must exist for the host test binary to link.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_signal_fill() {}
+
     #[unsafe(no_mangle)]
     extern "C" fn deluge_streaming_chunk_convert_state(
         chunk_backing: *mut c_void,

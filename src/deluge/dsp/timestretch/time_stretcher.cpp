@@ -19,11 +19,13 @@
 #include "definitions_cxx.hpp"
 #include "deluge/model/sample/sample_low_level_reader.h"
 #include "io/debug/log.h"
+#include "libdeluge/sample_reader.h"
 #include "memory/memory_allocator_interface.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_holder.h"
 #include "model/sample/sample_playback_guide.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
@@ -648,6 +650,8 @@ skipPercStuff:
 
 		int32_t readByte[TimeStretch::Crossfade::kNumMovingAverages + 1];
 
+		const uint32_t sourceId = deluge::sample::source_id_for(*sample);
+
 		int32_t samplePos = (uint32_t)(newHeadBytePos - sample->audioDataStartPosBytes) / (uint8_t)bytesPerSample;
 
 		int32_t samplePosMidCrossfade = samplePos + (crossfadeLengthSamplesSource >> 1) * playDirection;
@@ -723,10 +727,12 @@ startSearch:
 					goto searchNextDirection;
 				}
 
-				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				StreamedChunk* cluster = deluge::audio::stream::peek(*sample, whichCluster);
-				if (!cluster || !cluster->loaded) {
-					goto skipSearch;
+				const uint64_t frame =
+				    (uint32_t)(readByte[i] - sample->audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+				const DelugeFrameWindow window =
+				    deluge_sample_peek(sourceId, frame, static_cast<int8_t>(searchDirection));
+				if (window.frames == nullptr) {
+					goto skipSearch; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
 				}
 
 				int32_t bytePosWithinCluster = readByte[i] & (Cluster::size - 1);
@@ -742,8 +748,11 @@ startSearch:
 					numSamplesThisRead = (uint32_t)bytesWeMayRead / (uint8_t)bytesPerSample;
 				}
 
-				currentPos[i] = reinterpret_cast<char const*>(
-				    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
+				// `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4` aligns for the
+				// `int32`-over-`byteDepth` read below, and the `bytesLeftThisCluster` clamp keeps a
+				// boundary-straddling frame reading this cluster's own physical slack — byte-identical to
+				// `frame_read_origin(bytePosWithinCluster, byteDepth)`.
+				currentPos[i] = reinterpret_cast<char const*>(window.frames) + byteDepth - 4;
 			}
 
 			// Alright, read those samples for our currently worked out little bit until we reach a cluster boundary or

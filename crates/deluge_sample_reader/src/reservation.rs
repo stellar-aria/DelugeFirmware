@@ -10,9 +10,9 @@
 //! Task 1 implemented `open`/`close`/`covered_indices` and the coverage + lease accounting behind
 //! them. This landing (Task 2) adds [`Reservation::reanchor`] — sliding the window as playback
 //! advances, guarded against per-render-tick lease churn when the marker drifts within its current
-//! head cluster. Synchronous load-now materialization for [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`]
-//! is Task 3 — until then both route through the SAME reserve-and-enqueue recipe [`LoadMode::Enqueue`]
-//! uses (see [`Reservation::open`]'s own doc), never blocking.
+//! head cluster. This landing (Task 3) adds synchronous load-now materialization for
+//! [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`] — see [`load_cluster`]'s own doc for the per-mode
+//! recipe.
 
 use alloc::boxed::Box;
 use core::ffi::c_void;
@@ -36,9 +36,11 @@ const DEPTH: usize = 2;
 pub enum LoadMode {
     /// Reserve the covered clusters and enqueue them for the async loader; never blocks.
     Enqueue = 0,
-    /// Materialize the covered clusters synchronously before returning (Task 3).
+    /// Materialize the covered clusters synchronously before returning. A cluster whose
+    /// synchronous fill fails has its reservation released (see [`load_cluster`]'s own doc).
     Now = 1,
-    /// Prefer a synchronous load, falling back to enqueueing under memory pressure (Task 3).
+    /// Prefer a synchronous load, falling back to enqueueing (keeping the reservation, unfilled)
+    /// under memory pressure — mirrors `CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE`.
     NowOrEnqueue = 2,
 }
 
@@ -49,6 +51,45 @@ unsafe extern "C" {
     /// definition, which may only exist once); duplicated here rather than exposed from `reader.rs`
     /// so this task's file list stays exactly what the brief specifies (`reader.rs` untouched).
     fn deluge_streaming_resource_manager() -> *mut c_void;
+    /// The synchronous card read (`include/libdeluge/streaming_fill.h`) — see [`fill_now`]. The
+    /// SAME extern declaration `reader::fill_now` makes of its own copy; duplicated here for the
+    /// same "keep `reader.rs` untouched" reason as `deluge_streaming_resource_manager` above.
+    fn deluge_efatfs_read_at(
+        handle: u32,
+        byte_offset: u32,
+        dst: *mut c_void,
+        count: u32,
+        out_read: *mut u32,
+    ) -> bool;
+}
+
+/// Run the synchronous cluster fill on `chunk_backing` — the SAME recipe `reader::fill_now`
+/// implements (resolve via `native_begin`, read exactly that span in one call, then run the
+/// post-read convert/stitch/publish tail via `native_finish`); duplicated here rather than exposed
+/// from `reader.rs` so this task's file list stays exactly what the brief specifies (`reader.rs`
+/// untouched) — see that function's own doc for the full rationale. Returns `native_finish`'s own
+/// result: `false` on a geometry-resolution failure, a failed/short read, or a failed
+/// convert/stitch/publish; `true` once the chunk is converted, stitched, and published ready.
+fn fill_now(chunk_backing: *mut c_void) -> bool {
+    let d = deluge_sample_fill::native_begin(chunk_backing);
+    if !d.ok {
+        return false;
+    }
+    let count = d.num_sectors * 512;
+    let mut out_read: u32 = 0;
+    // SAFETY: `d.dest` is this chunk's just-allocated payload buffer (resolved by `native_begin`
+    // from the same registered geometry that sized this chunk's backing), valid for at least
+    // `count` bytes; `out_read` is a valid local out-param.
+    let read_ok = unsafe {
+        deluge_efatfs_read_at(
+            d.handle,
+            d.byte_offset,
+            d.dest as *mut c_void,
+            count,
+            &mut out_read,
+        )
+    };
+    deluge_sample_fill::native_finish(chunk_backing, read_ok)
 }
 
 /// A passive lookahead reservation over one sample's source residency — the Rust-side state behind
@@ -112,20 +153,17 @@ impl Reservation {
     /// that field is negative (the sentinel a still-recording/not-yet-finalized sample's context
     /// uses — see `reader.rs`'s own `lifecycle_fill_context` for the same sentinel value, `-1`).
     ///
-    /// # Load recipe per covered cluster (this task: `Enqueue` only, fully; the rest routed through it)
-    /// For each covered index: `Resource::acquire_leased` (a cache hit returns immediately) else
-    /// `Resource::request` (reserve + construct, no I/O — mirrors `reader::Reader::acquire_and_fill`'s
-    /// own miss branch, minus the synchronous fill/`mark_ready` tail that makes it BLOCK). A load
-    /// failure (OOM, nothing evictable, a construct-less asset) leaves that slot's own lease `None`
-    /// but does NOT remove its index from `covered_indices()` — the covered RANGE is a purely
-    /// geometric fact, independent of whether a particular lease attempt happened to succeed.
+    /// # Load recipe per covered cluster
+    /// See [`load_cluster`]'s own doc for the full per-`load_mode` recipe (cache hit vs. reserve
+    /// vs. reserve-and-materialize). A load failure (OOM, nothing evictable, a construct-less
+    /// asset, or — for `LoadMode::Now` — a failed synchronous fill) leaves that slot's own lease
+    /// `None` but does NOT remove its index from `covered_indices()` — the covered RANGE is a
+    /// purely geometric fact, independent of whether a particular lease attempt happened to
+    /// succeed.
     ///
-    /// `LoadMode::Now`/`LoadMode::NowOrEnqueue` are NOT yet materialized synchronously — that is
-    /// Task 3's own landing (a real `fill_now`, mirroring `reader::Reader::acquire_and_fill`'s full
-    /// recipe). Until then both route through the exact same reserve-and-enqueue call as
-    /// `LoadMode::Enqueue`, so `open()` never blocks under any `load_mode` this task ships with —
-    /// honest (the coverage/lease-accounting contract this task's tests exercise holds for all three
-    /// today), not a silently-dropped distinction.
+    /// `LoadMode::Now`/`LoadMode::NowOrEnqueue` BLOCK this call (and [`Reservation::reanchor`]) on
+    /// the synchronous fill of every covered cluster that isn't already resident+ready —
+    /// `LoadMode::Enqueue` never blocks.
     pub fn open(asset: u32, marker_frame: u64, direction: i8, load_mode: LoadMode) -> Reservation {
         // SAFETY: returns the one process-wide resource-manager singleton; a stable pointer, no
         // aliasing/ownership concern — same call, same contract as `reader::Reader::open`'s own use
@@ -310,10 +348,20 @@ fn walk_and_lease(
     (covered, leases, num_covered)
 }
 
-/// The per-cluster load recipe every `load_mode` uses this task (see [`Reservation::open`]'s own
-/// doc for why `Now`/`NowOrEnqueue` aren't yet distinct): a cache hit (`acquire_leased`) returns
-/// immediately; a miss `request`s a fresh reservation (reserve + construct, no I/O) and hands back
-/// whatever `Lease` that produced, `None` on a load failure.
+/// The per-cluster load recipe: a cache hit (`acquire_leased`) is already resident+ready and
+/// returns immediately, for every `load_mode` alike — never re-filled. A miss `request`s a fresh
+/// reservation (reserve + construct, no I/O); what happens to that reservation next depends on
+/// `load_mode`:
+/// - [`LoadMode::Enqueue`]: hand back the reservation as-is (reserved, unfilled, enqueued for the
+///   async loader) — never blocks.
+/// - [`LoadMode::Now`]: run the synchronous fill (`fill_now`) then `Resource::mark_ready` — the
+///   exact recipe `reader::Reader::acquire_and_fill` uses for its own miss branch. If the fill
+///   fails, the reservation is dropped (`None`) rather than kept unfilled, releasing it — matches
+///   `acquire_and_fill`'s own "`lease` drops here, releasing the failed reservation."
+/// - [`LoadMode::NowOrEnqueue`]: attempt the same synchronous fill; on failure, KEEP the
+///   reservation enqueued instead of dropping it (`Some`, unfilled) — mirrors
+///   `CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE`'s fall back to the async path under memory pressure
+///   rather than giving up the reservation outright.
 fn load_cluster(
     resource: &Resource,
     asset: u32,
@@ -322,14 +370,21 @@ fn load_cluster(
     load_mode: LoadMode,
 ) -> Option<Lease> {
     if let Some(lease) = resource.acquire_leased(asset, cluster_index) {
-        return Some(lease);
+        return Some(lease); // Already resident+ready -- no fill needed under any load_mode.
     }
+    let lease = resource.request(asset, cluster_index, cluster_size_bytes as usize)?;
     match load_mode {
-        LoadMode::Enqueue => resource.request(asset, cluster_index, cluster_size_bytes as usize),
-        // TODO(Task 3): materialize -- run the synchronous fill (mirroring
-        // `reader::Reader::acquire_and_fill`'s full recipe) instead of just reserving + enqueueing.
+        LoadMode::Enqueue => Some(lease),
         LoadMode::Now | LoadMode::NowOrEnqueue => {
-            resource.request(asset, cluster_index, cluster_size_bytes as usize)
+            let backing = lease.chunk().as_ptr() as *mut c_void;
+            if fill_now(backing) {
+                resource.mark_ready(lease.chunk());
+                Some(lease)
+            } else if load_mode == LoadMode::NowOrEnqueue {
+                Some(lease) // Keep it enqueued, unfilled -- do not drop the reservation.
+            } else {
+                None // `lease` drops here, releasing the failed reservation.
+            }
         }
     }
 }
@@ -409,8 +464,11 @@ pub unsafe extern "C" fn deluge_sample_reserve_close(res: *mut DelugeSampleReser
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host_streaming_stubs::{set_active_manager, TEST_LOCK};
-    use deluge_resource::manager::BACKING_HEAP;
+    use crate::host_streaming_stubs::{
+        set_active_manager, set_fail_at_byte_offset, set_force_read_failure, PAYLOAD_OFFSET,
+        TEST_LOCK,
+    };
+    use deluge_resource::manager::BACKING_SLAB;
     use deluge_resource::value::COST_IO;
     use deluge_sample_fill::{deluge_streaming_set_fill_context, FillContext};
     extern crate std;
@@ -419,6 +477,18 @@ mod tests {
 
     const CLUSTER_SIZE_BYTES: u32 = 32768;
     const CLUSTER_SIZE_MAGNITUDE: u32 = 15; // 2^15 == 32768
+
+    /// Real per-chunk backing needs `PAYLOAD_OFFSET` (front guard) plus `CLUSTER_SIZE_BYTES`
+    /// (payload) plus 7 more bytes of trailing slack `native_finish` always touches — the SAME
+    /// sizing `reader.rs`'s own `window_tests::BACKING_SIZE` uses, for the identical reason: this
+    /// module's `LoadMode::Now` test is this harness's first REAL `fill_now` call (every other
+    /// test only ever reserves via `LoadMode::Enqueue`, which never runs a real fill) — a bare
+    /// `CLUSTER_SIZE_BYTES`-sized heap allocation would let that fill overrun its backing.
+    const BACKING_SIZE: usize = 32800; // PAYLOAD_OFFSET(16) + CLUSTER_SIZE_BYTES + 7, rounded to 16
+    const _: () = assert!(
+        BACKING_SIZE >= PAYLOAD_OFFSET + CLUSTER_SIZE_BYTES as usize + 7,
+        "BACKING_SIZE must fit the front guard + payload + trailing slack"
+    );
 
     /// `Resource::request` (the miss branch of `load_cluster`) requires SOME construct callback
     /// attached to the asset (a construct-less asset refuses `request` — see
@@ -453,16 +523,26 @@ mod tests {
 
     impl TestHarness {
         fn with_audio_data_clusters(clusters: Range<u32>, frame_stride: u32) -> Self {
-            let words = (1024 * 1024usize).div_ceil(16);
+            let words = (2 * 1024 * 1024usize).div_ceil(16);
             let mut buf: Vec<u128> = std::vec![0u128; words];
             let ptr = buf.as_mut_ptr() as *mut u8;
             // SAFETY: `buf` is leaked below so the arena stays alive for the whole test binary's
             // life, matching the sibling crates' own boot-singleton test-harness contract.
             let h = unsafe { deluge_alloc::deluge_heap_create(ptr, words * 16) };
             std::mem::forget(TestHeap { _buf: buf });
+            // SAFETY: `h` is the live heap handle just created above; `BACKING_SIZE`-byte slots
+            // (real per-chunk backing, not just the raw cluster payload — see that const's own
+            // doc) mirror production's own uniform streaming-cluster slab
+            // (`chunk_residency.cpp`'s `deluge_streaming_define_asset`), the same convention
+            // `reader.rs`'s own `window_tests` harness uses.
+            let slab =
+                unsafe { deluge_alloc::slab::deluge_slab_create_unmanaged(h, BACKING_SIZE, 16) };
+            assert!(!slab.is_null());
             // SAFETY: `h` is the live heap handle just created above.
             let handle = unsafe { deluge_resource::deluge_resource_create(h, 4, 16) };
             assert!(!handle.is_null());
+            // SAFETY: `handle`/`slab` are both live, over the same heap.
+            unsafe { deluge_resource::deluge_resource_set_slab(handle, slab) };
             // SAFETY: `handle` is live; `noop_construct` has the required C-ABI signature.
             let asset = unsafe {
                 deluge_resource::deluge_resource_define_asset(
@@ -472,7 +552,7 @@ mod tests {
                     None,
                     core::ptr::null_mut(),
                     COST_IO,
-                    BACKING_HEAP,
+                    BACKING_SLAB,
                 )
             };
             unsafe {
@@ -532,20 +612,54 @@ mod tests {
         /// `Stats::requests`, read via the crate's public `deluge_resource_stats` FFI (no
         /// manager-internal access needed).
         ///
-        /// This works as a lease-churn detector specifically BECAUSE `noop_construct` never calls
-        /// `mark_ready`: every chunk this harness's asset ever loads stays permanently un-ready, so
-        /// `load_cluster`'s first attempt (`Resource::acquire_leased`, which only hits a `ready`
-        /// chunk) NEVER hits — it always falls through to `Resource::request`, which bumps
-        /// `Stats::requests` unconditionally, on both its own cache-hit and fresh-alloc paths (see
-        /// `Manager::request`). So this delta is a faithful count of "how many times a covered
-        /// cluster's load recipe ran" over an interval, independent of residency/lease-count state
-        /// that (unlike this counter) returns to its original value across a spurious
-        /// release-then-reacquire cycle and so cannot, on its own, prove one never happened.
+        /// This works as a lease-churn detector specifically BECAUSE, under `LoadMode::Enqueue`
+        /// (every caller of this helper), `noop_construct`/the recipe itself never calls
+        /// `mark_ready`: every chunk stays permanently un-ready, so `load_cluster`'s first attempt
+        /// (`Resource::acquire_leased`, which only hits a `ready` chunk) NEVER hits — it always
+        /// falls through to `Resource::request`, which bumps `Stats::requests` unconditionally, on
+        /// both its own cache-hit and fresh-alloc paths (see `Manager::request`). So this delta is
+        /// a faithful count of "how many times a covered cluster's load recipe ran" over an
+        /// interval, independent of residency/lease-count state that (unlike this counter) returns
+        /// to its original value across a spurious release-then-reacquire cycle and so cannot, on
+        /// its own, prove one never happened. (`LoadMode::Now`/`NowOrEnqueue`, which DO call
+        /// `mark_ready` on a successful fill, would break this invariant — no caller of this helper
+        /// uses either.)
         fn acquire_generation(&self) -> u64 {
             let mut stats = deluge_resource::Stats::default();
             // SAFETY: `self.handle` is live for as long as `self`.
             unsafe { deluge_resource::deluge_resource_stats(self.handle, &mut stats) };
             stats.requests
+        }
+
+        /// Is cluster `index` of this harness's asset currently resident AND ready
+        /// (`Resource::peek` + `Resource::is_ready`, both lease-free) — the load-mode test's own
+        /// readiness query: `false` for a never-touched index, an `Enqueue`d-but-unfilled
+        /// reservation (`request` leaves `ready = false` until something calls `mark_ready`), or a
+        /// no-longer-resident one; `true` only once a real fill has published it.
+        fn is_ready_at(&self, index: u32) -> bool {
+            let resource = self.resource();
+            resource
+                .peek(self.asset, index)
+                .is_some_and(|chunk| resource.is_ready(chunk))
+        }
+
+        /// Force-evict every currently resident chunk of this harness's asset — test-setup
+        /// hygiene for a test that needs to start from "nothing resident", made explicit rather
+        /// than relying on this being a freshly-constructed manager (`deluge_resource_evict_chunk`
+        /// no-ops on a non-resident/still-leased pointer, so this is safe to call with nothing
+        /// leased, which is every caller's own precondition). Sweeps a fixed range wide enough to
+        /// cover every cluster index this module's tests ever touch.
+        fn evict_all(&self) {
+            let resource = self.resource();
+            for index in 0..32 {
+                if let Some(chunk) = resource.peek(self.asset, index) {
+                    // SAFETY: `self.handle` is live for as long as `self`; `chunk.as_ptr()` is a
+                    // pointer `peek` just reported resident under this same handle.
+                    unsafe {
+                        deluge_resource::deluge_resource_evict_chunk(self.handle, chunk.as_ptr())
+                    };
+                }
+            }
         }
     }
 
@@ -647,5 +761,31 @@ mod tests {
         assert_eq!(res.covered_indices(), &[4, 5]);
         assert_eq!(h.total_leases_over(&[3]), 0, "old head released");
         assert_eq!(h.total_leases_over(&[4, 5]), 2, "new window pinned");
+    }
+
+    /// `LoadMode::Now` runs a real synchronous fill (see [`load_cluster`]'s own doc) where
+    /// `LoadMode::Enqueue` only reserves — the load-mode distinction this task lands. Real
+    /// end-to-end proof, not vacuous: `is_ready_at` reads the manager's own readiness flag,
+    /// flipped only by `Resource::mark_ready` after a genuine `fill_now` call runs the real
+    /// `deluge_sample_fill::{native_begin, native_finish}` pair against this crate's own
+    /// `deluge_efatfs_read_at` host stub — see `BACKING_SIZE`'s own doc for why this harness's
+    /// asset is slab-backed with real per-chunk sizing (rather than the bare-`CLUSTER_SIZE_BYTES`
+    /// heap sizing every other, never-filling test here could get away with): a real fill through
+    /// an undersized backing would be an out-of-bounds write, not just a wrong assertion.
+    #[test]
+    fn load_now_materializes_where_enqueue_does_not() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_force_read_failure(false);
+        set_fail_at_byte_offset(None);
+        let h = TestHarness::with_audio_data_clusters(2..6, 4);
+        h.evict_all(); // ensure nothing resident
+
+        let enq = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+        assert!(!h.is_ready_at(3), "enqueue does not fill");
+        drop(enq);
+
+        let now = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Now);
+        assert!(h.is_ready_at(3), "load-now fills synchronously");
+        drop(now);
     }
 }

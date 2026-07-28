@@ -86,7 +86,7 @@ if (UNIX AND NOT APPLE)
     add_subdirectory(spec_resource)
 
     # A SEPARATE umbrella build, with the `sim` feature on, exclusively for
-    # spec_sample_reader (U2 Task 1): `deluge_sample_reader`'s `deluge_sample_reader_*` /
+    # spec_sample_reader: `deluge_sample_reader`'s `deluge_sample_reader_*` /
     # `deluge_sample_read` C-ABI symbols are only emitted (`#[unsafe(no_mangle)]`) under
     # `target_os = "none"` or the `host_app`/`sim` feature gates (see that crate's abi.rs) --
     # plain `deluge_rust_rs` above builds with none of those, so it never exports them. Uses

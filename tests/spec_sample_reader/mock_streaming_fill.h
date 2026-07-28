@@ -1,6 +1,6 @@
 #pragma once
 
-// U2 Task 1: this header pulls in the two C-ABI declarations (`libdeluge/streaming_fill.h`'s
+// This header pulls in the two C-ABI declarations (`libdeluge/streaming_fill.h`'s
 // accessor trio + `storage/audio/stream/chunk_residency.h`'s `deluge_streaming_define_asset`) that
 // `mock_streaming_fill.cpp` DEFINES as trivial link-time stand-ins -- real bodies normally supplied
 // by the app's `chunk_residency.cpp`/`async_fill.cpp`, which this host test does NOT link. This

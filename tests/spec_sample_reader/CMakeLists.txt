@@ -1,6 +1,6 @@
 # tests/spec_sample_reader/CMakeLists.txt
 #
-# deluge::sample::SampleFrameReader (U2 Task 1) specs. Links the sim-feature build of the Rust
+# deluge::sample::SampleFrameReader specs. Links the sim-feature build of the Rust
 # umbrella (deluge_rust_rs_sim, defined by the parent tests/CMakeLists.txt) so the bridge's
 # deluge_sample_reader_*/deluge_sample_read calls resolve against the REAL C-ABI, plus trivial
 # link-time stand-ins (mock_streaming_fill.cpp) for the app-provided accessors that ABI reaches

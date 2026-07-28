@@ -1,7 +1,7 @@
 // tests/spec_sample_reader/sample_reader_bridge_spec.cpp
 //
-// SampleFrameReader RAII/move-semantics smoke over the REAL, linked deluge_sample_reader_* C-ABI
-// (U2 Task 1). Wiring a fully manager-backed, byte-producing reader asset here would mean
+// SampleFrameReader RAII/move-semantics smoke over the REAL, linked deluge_sample_reader_* C-ABI.
+// Wiring a fully manager-backed, byte-producing reader asset here would mean
 // replicating chunk_residency.cpp's/async_fill.cpp's real Sample/StreamedChunk machinery inside a
 // host test -- disproportionate to this task (the reader crate's OWN test suite already proves
 // window()/advance()/lease correctness exhaustively; see crates/deluge_sample_reader/src/reader.rs's

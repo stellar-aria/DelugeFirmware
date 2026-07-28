@@ -24,6 +24,7 @@
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_perc_cache_zone.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
@@ -1424,6 +1425,12 @@ float Sample::determinePitch(bool doingSingleCycle, float minFreqHz, float maxFr
 		beginningOffsetForPitchDetection = audioDataStartPosBytes;
 	}
 
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
+
+	// One sample-period across all channels, matching the reader's own frame geometry (see
+	// SampleFrameReader) - the frame count a window reports is always a whole number of these.
+	const uint32_t frameSizeBytes = static_cast<uint32_t>(numChannels) * byteDepth;
+
 startAgain:
 
 #if PITCH_DETECT_DEBUG_LEVEL
@@ -1433,18 +1440,18 @@ startAgain:
 
 	// Load the sample into memory
 	int32_t currentOffset = beginningOffsetForPitchDetection;
-	uint32_t currentClusterIndex = currentOffset >> Cluster::size_magnitude;
 	int32_t writeIndex = 0;
 
-	StreamedChunk* cluster = deluge::audio::stream::load_now(*this, currentClusterIndex);
-	if (!cluster) {
+	uint32_t audioByteOffset = static_cast<uint32_t>(currentOffset) - audioDataStartPosBytes;
+	deluge::sample::SampleFrameReader reader{sourceId, audioByteOffset / frameSizeBytes, 1, DELUGE_READ_SCAN};
+	DelugeFrameWindow window = reader.window();
+	uint32_t bufPos = audioByteOffset % frameSizeBytes;
+	if (!reader.ok() || window.frame_count == 0) {
 		D_PRINTLN("failed to load first");
 getOut:
 		delugeDealloc(fftInput);
 		return 0;
 	}
-
-	StreamedChunk* nextCluster = nullptr;
 
 	int32_t biggestValueFound = 0;
 
@@ -1459,16 +1466,6 @@ getOut:
 
 	while (true) {
 continueWhileLoop:
-		// If there's no "next" Cluster, load it now
-		if (!nextCluster && currentClusterIndex + 1 < getFirstClusterIndexWithNoAudioData()) {
-			nextCluster = deluge::audio::stream::load_now(*this, currentClusterIndex + 1);
-			if (!nextCluster) {
-				deluge::cluster::remove_reason(*cluster, "imcwn4o");
-				D_PRINTLN("failed to load next");
-				goto getOut;
-			}
-		}
-
 		int32_t thisValue = 0;
 
 		// We may want to average several samples into just one - crudely downsampling, but the aliasing shouldn't hurt
@@ -1480,27 +1477,33 @@ continueWhileLoop:
 			}
 			count++;
 
-			int32_t individualSampleValue = *(int32_t*)cluster->frame_read_origin(currentOffset & (Cluster::size - 1),
-			                                                                      static_cast<uint8_t>(byteDepth))
-			                                & bitMask;
+			// Pull the next window once this one's exhausted - the reader stitches cluster boundaries
+			// internally, so this is the only "load more" the loop ever needs.
+			if (bufPos >= window.frame_count * frameSizeBytes) {
+				reader.advance(window.frame_count);
+				window = reader.window();
+				bufPos = 0;
+				if (!reader.ok() || window.frame_count == 0) {
+					D_PRINTLN("failed to load next");
+					goto getOut;
+				}
+			}
+
+			// Left-justify this byteDepth-byte little-endian sample into the top of a 32-bit word (the
+			// same placement frame_read_origin's overlapping 4-byte read used to produce), leaving the
+			// low bits zero rather than reading them out of bounds.
+			int32_t individualSampleValue = 0;
+			std::memcpy(reinterpret_cast<std::byte*>(&individualSampleValue) + (4 - byteDepth),
+			            static_cast<const std::byte*>(window.frames) + bufPos, byteDepth);
+			individualSampleValue &= bitMask;
 			thisValue += (individualSampleValue >> lengthDoublingsNow);
 
 			currentOffset += byteDepth;
+			bufPos += byteDepth;
 
 			// If reached end of file
 			if (currentOffset >= audioDataLengthBytes + audioDataStartPosBytes) {
 				goto doneReading;
-			}
-
-			uint32_t newClusterIndex = currentOffset >> Cluster::size_magnitude;
-
-			// If passed Cluster end...
-			if (newClusterIndex != currentClusterIndex) {
-				currentClusterIndex = newClusterIndex;
-
-				deluge::cluster::remove_reason(*cluster, "hset");
-				cluster = nextCluster;
-				nextCluster = nullptr; // It'll soon get filled
 			}
 
 			// Rudimentary audio start-detection. We need this, because detecting the tone of percussive sounds relies
@@ -1551,11 +1554,6 @@ continueWhileLoop:
 	}
 
 doneReading:
-	deluge::cluster::remove_reason(*cluster, "kncd");
-	if (nextCluster != nullptr) {
-		deluge::cluster::remove_reason(*nextCluster, "ljpp");
-	}
-
 	// If we didn't find any sound...
 	if (!beginningOffsetForPitchDetectionFound) {
 

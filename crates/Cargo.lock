@@ -81,6 +81,7 @@ dependencies = [
  "deluge_alloc",
  "deluge_resource",
  "deluge_sample_fill",
+ "deluge_sample_reader",
  "deluge_sample_source",
 ]
 

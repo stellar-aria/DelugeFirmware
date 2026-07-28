@@ -54,3 +54,12 @@ critical-section = { version = "1", features = ["std"] }
 # later, separate rung — see the U1 Task 1 report) — a future sim-link task adds it the same way
 # `deluge_sample_source` did, not invented ahead of need here.
 host_app = []
+# SIM (U2 Task 0): the C-host sim's sibling of `host_app` above. The sim links this crate through the
+# `deluge_rust` umbrella (its `sim` feature forwards here), so it needs a distinct selector that drives
+# the same `abi.rs` cfg_attr gate (widened to `any(target_os = "none", feature = "host_app", feature =
+# "sim")`). Dependency-free, exactly like `host_app`: the reader's backing (`deluge_sample_fill`,
+# `deluge_sample_convert` shim, `critical-section/std`) is supplied by the umbrella's own `sim` feature
+# via cargo feature unification — this crate reaches convert only THROUGH `deluge_sample_fill`, adding
+# no second compile. There is NO weak C++ fallback for these symbols, so (unlike the cursor/fill) no
+# lever/deletion is needed — the first consumer's undefined reference pulls the archive member.
+sim = []

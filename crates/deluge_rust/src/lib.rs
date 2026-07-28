@@ -39,6 +39,14 @@ extern crate critical_section;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_fill;
 
+// SIM (U2 Task 0): force-link the sample range-reader into libdeluge_rust.a, same reasoning as the
+// fill/cursor above — nothing in this crate's Rust code references its items, so without an explicit
+// `extern crate` rustc/lld would drop its objects from the staticlib, and the migrated C++ consumers'
+// `deluge_sample_reader_*` references would go unresolved at the sim link. No weak fallback to override
+// here (unlike the fill) — retention alone suffices.
+#[cfg(feature = "sim")]
+extern crate deluge_sample_reader;
+
 // Bare-metal panic handler (device only); the host build uses std's. This is the
 // one panic handler for the entire dependency graph.
 #[cfg(target_os = "none")]

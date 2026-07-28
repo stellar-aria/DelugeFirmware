@@ -32,7 +32,10 @@ pub struct DelugeSampleReader {
 /// Never returns null in this task: heap allocation only aborts (no `#[panic_handler]` unwind path
 /// on this dependency graph — see the crate's lib.rs doc), so there is no OOM-null case to report,
 /// unlike `deluge_sample_source_open`'s fixed pool, which can legitimately exhaust.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub extern "C" fn deluge_sample_reader_open(
     source_id: u32,
     start_frame: u64,
@@ -51,7 +54,10 @@ pub extern "C" fn deluge_sample_reader_open(
 /// # Safety
 /// `reader`, if non-null, must be a live pointer previously returned by
 /// `deluge_sample_reader_open` and not yet passed to `deluge_sample_reader_close`.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_reader_seek(reader: *mut DelugeSampleReader, frame: u64) {
     if reader.is_null() {
         return;
@@ -67,7 +73,10 @@ pub unsafe extern "C" fn deluge_sample_reader_seek(reader: *mut DelugeSampleRead
 /// # Safety
 /// `reader`, if non-null, must be a live pointer previously returned by
 /// `deluge_sample_reader_open`, not yet closed, and must not be used again after this call.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_reader_close(reader: *mut DelugeSampleReader) {
     if reader.is_null() {
         return;
@@ -97,7 +106,10 @@ pub struct DelugeFrameWindow {
 /// # Safety
 /// `reader`, if non-null, must be a live pointer previously returned by
 /// `deluge_sample_reader_open` and not yet passed to `deluge_sample_reader_close`.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_reader_window(
     reader: *mut DelugeSampleReader,
 ) -> DelugeFrameWindow {
@@ -122,7 +134,10 @@ pub unsafe extern "C" fn deluge_sample_reader_window(
 /// # Safety
 /// `reader`, if non-null, must be a live pointer previously returned by
 /// `deluge_sample_reader_open` and not yet passed to `deluge_sample_reader_close`.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_reader_advance(
     reader: *mut DelugeSampleReader,
     frames: u32,
@@ -142,7 +157,10 @@ pub unsafe extern "C" fn deluge_sample_reader_advance(
 /// # Safety
 /// `reader`, if non-null, must be a live pointer previously returned by
 /// `deluge_sample_reader_open` and not yet passed to `deluge_sample_reader_close`.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_reader_ok(reader: *const DelugeSampleReader) -> bool {
     if reader.is_null() {
         return false;
@@ -158,7 +176,10 @@ pub unsafe extern "C" fn deluge_sample_reader_ok(reader: *const DelugeSampleRead
 ///
 /// # Safety
 /// `dest`, if `dest_bytes > 0`, must be valid for at least `dest_bytes` writable bytes.
-#[cfg_attr(any(target_os = "none", feature = "host_app"), unsafe(no_mangle))]
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
 pub unsafe extern "C" fn deluge_sample_read(
     source_id: u32,
     start_frame: u64,

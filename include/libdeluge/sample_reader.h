@@ -162,6 +162,21 @@ typedef enum DelugeLoadMode : uint8_t {
 DelugeSampleReservation* deluge_sample_reserve_open(uint32_t source_id, uint64_t marker_frame, int8_t direction,
                                                     DelugeLoadMode load_mode);
 
+/// Re-anchor `res` to the cluster containing `marker_frame`, walking in `direction` exactly as
+/// `deluge_sample_reserve_open` does.
+///
+/// Guarded: if `marker_frame` maps to the SAME cluster `res` is already anchored on, this is a
+/// no-op — no lease is released or acquired, avoiding per-render-tick lease churn while a marker
+/// drifts within its current cluster. Otherwise every lease `res` currently holds is released
+/// FIRST, then the covered window is rebuilt from the new head exactly as `open` builds it
+/// (release-old-then-acquire-new, matching the C++ recipe this ports — load order matters for
+/// eviction-recency fidelity).
+/// @param marker_frame a sample-frame index (frame 0 == the sample's first audio-data frame).
+/// @param direction +1 forward, -1 reverse.
+/// @param load_mode how the covered clusters are (re)loaded — see `DelugeLoadMode`.
+void deluge_sample_reserve_move(DelugeSampleReservation* res, uint64_t marker_frame, int8_t direction,
+                                DelugeLoadMode load_mode);
+
 /// Release `res` and every lease it still holds.
 void deluge_sample_reserve_close(DelugeSampleReservation* res);
 

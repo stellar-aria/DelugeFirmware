@@ -7,11 +7,12 @@
 //! lookahead pins already give the timestretch/loop-point paths, generalized behind this crate's
 //! own C-ABI handle.
 //!
-//! This landing (Task 1) implements `open`/`close`/`covered_indices` and the coverage + lease
-//! accounting behind them. `move()` (sliding the window as playback advances) is Task 2;
-//! synchronous load-now materialization for [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`] is Task 3
-//! — until then both route through the SAME reserve-and-enqueue recipe [`LoadMode::Enqueue`] uses
-//! (see [`Reservation::open`]'s own doc), never blocking.
+//! Task 1 implemented `open`/`close`/`covered_indices` and the coverage + lease accounting behind
+//! them. This landing (Task 2) adds [`Reservation::reanchor`] — sliding the window as playback
+//! advances, guarded against per-render-tick lease churn when the marker drifts within its current
+//! head cluster. Synchronous load-now materialization for [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`]
+//! is Task 3 — until then both route through the SAME reserve-and-enqueue recipe [`LoadMode::Enqueue`]
+//! uses (see [`Reservation::open`]'s own doc), never blocking.
 
 use alloc::boxed::Box;
 use core::ffi::c_void;
@@ -55,19 +56,18 @@ unsafe extern "C" {
 pub struct Reservation {
     /// The resource-manager Asset id this reservation covers (the header's `source_id`; see
     /// `reader::Reader::open`'s own doc for why this is the SAME id the voice port's residency
-    /// uses).
-    #[allow(dead_code)] // read by `move()`, Task 2.
+    /// uses). Read by [`Reservation::reanchor`] to re-resolve geometry against the new marker.
     asset: u32,
     /// The resolved process-wide resource-manager handle, or null if none was available at `open()`
     /// time (mirrors `reader::Reader::open`'s own `manager` field) — kept even on an otherwise inert
-    /// (no-geometry) open, so a later `move()` can still resolve geometry itself once it exists.
-    #[allow(dead_code)] // read by `move()`, Task 2.
+    /// (no-geometry) open, so [`Reservation::reanchor`] can reuse it directly rather than re-querying
+    /// the singleton, and can still resolve geometry itself once it exists.
     manager: *mut c_void,
-    /// The cluster index `marker_frame` mapped to at `open()` time, or `None` if this reservation
-    /// is inert (null manager / no registered geometry / malformed geometry) — distinct from
-    /// `covered_indices()` being empty, which can also happen for a live reservation whose head
-    /// cluster itself sits outside the sample's real audio-data range.
-    #[allow(dead_code)] // read by `move()`, Task 2.
+    /// The cluster index `marker_frame` mapped to at `open()` (or the most recent `reanchor()`)
+    /// time, or `None` if this reservation is inert (null manager / no registered geometry /
+    /// malformed geometry) — distinct from `covered_indices()` being empty, which can also happen
+    /// for a live reservation whose head cluster itself sits outside the sample's real audio-data
+    /// range. [`Reservation::reanchor`]'s own guard reads this to decide whether a move is a no-op.
     head_index: Option<u32>,
     /// The cluster indices this reservation covers, in WALK order (marker-then-outward, per
     /// `direction`) — up to [`DEPTH`] of them, clamped to the sample's real audio-data cluster
@@ -81,9 +81,8 @@ pub struct Reservation {
     /// shrink `covered_indices()`; it only leaves that slot's own pin absent. Dropping `Reservation`
     /// drops every `Some` here, releasing each held lease exactly once (ordinary `Drop`, no custom
     /// `impl Drop` needed — mirrors `reader::Reader::held_lease`'s own reliance on structural drop).
-    /// Never read back this task (only written, then dropped) — `move()` (Task 2) is the first
-    /// reader, sliding leases in and out as the window shifts.
-    #[allow(dead_code)]
+    /// [`Reservation::reanchor`] slides this array's contents in and out as the window shifts,
+    /// releasing every held lease (structural drop, via reassignment) before acquiring any new one.
     leases: [Option<Lease>; DEPTH],
 }
 
@@ -128,75 +127,187 @@ impl Reservation {
     /// honest (the coverage/lease-accounting contract this task's tests exercise holds for all three
     /// today), not a silently-dropped distinction.
     pub fn open(asset: u32, marker_frame: u64, direction: i8, load_mode: LoadMode) -> Reservation {
-        let inert = |manager: *mut c_void| Reservation {
-            asset,
-            manager,
-            head_index: None,
-            covered: [0; DEPTH],
-            num_covered: 0,
-            leases: core::array::from_fn(|_| None),
-        };
-
         // SAFETY: returns the one process-wide resource-manager singleton; a stable pointer, no
         // aliasing/ownership concern — same call, same contract as `reader::Reader::open`'s own use
         // of this extern.
         let manager = unsafe { deluge_streaming_resource_manager() };
-        if manager.is_null() {
-            return inert(manager);
-        }
-        let Some(ctx) = deluge_sample_fill::fill_context_for(asset) else {
-            return inert(manager); // No registered geometry -- nothing to map frames against.
-        };
-        let frame_stride = ctx.byte_depth as u64 * ctx.num_channels as u64;
-        if frame_stride == 0 || ctx.cluster_size_magnitude >= 64 {
-            return inert(manager); // Malformed geometry -- mirrors `reader::locate`'s own guard.
-        }
-
-        let start_byte = (ctx.audio_data_start_pos_bytes as u64)
-            .saturating_add(marker_frame.saturating_mul(frame_stride));
-        let head = start_byte >> ctx.cluster_size_magnitude;
-        let first_with_data = (ctx.audio_data_start_pos_bytes as u64) >> ctx.cluster_size_magnitude;
-        let first_no_data: i64 = if ctx.first_cluster_index_with_no_audio_data < 0 {
-            i64::MAX // No known upper bound (e.g. still recording) -- never clamps.
-        } else {
-            ctx.first_cluster_index_with_no_audio_data as i64
+        let Some(geometry) = resolve_geometry(manager, asset, marker_frame) else {
+            return Reservation {
+                asset,
+                manager,
+                head_index: None,
+                covered: [0; DEPTH],
+                num_covered: 0,
+                leases: core::array::from_fn(|_| None),
+            };
         };
 
-        // SAFETY: `manager` is non-null (checked above) and, per the boot-singleton contract
-        // `deluge_streaming_resource_manager` documents, live for the process's remaining life.
-        let resource = unsafe { Resource::from_handle(manager as *mut DelugeResource) };
-
-        let mut covered = [0u32; DEPTH];
-        let mut leases: [Option<Lease>; DEPTH] = core::array::from_fn(|_| None);
-        let mut num_covered = 0usize;
-        let mut idx = head as i64;
-        for slot in 0..DEPTH {
-            if idx < first_with_data as i64 || idx >= first_no_data {
-                break;
-            }
-            let cluster_index = idx as u32;
-            covered[slot] = cluster_index;
-            num_covered = slot + 1;
-            leases[slot] =
-                load_cluster(&resource, asset, cluster_index, ctx.cluster_size, load_mode);
-            idx += direction as i64;
-        }
-
+        let (covered, leases, num_covered) =
+            walk_and_lease(manager, asset, &geometry, direction, load_mode);
         Reservation {
             asset,
             manager,
-            head_index: Some(head as u32),
+            head_index: Some(geometry.head),
             covered,
             num_covered,
             leases,
         }
     }
 
-    /// The cluster indices this reservation covers, in walk order (test-visible; also `move()`'s
-    /// own future bookkeeping surface).
+    /// Re-anchor this reservation to the cluster containing `marker_frame`, walking in `direction`
+    /// exactly as [`Reservation::open`] does — the header's `deluge_sample_reserve_move`.
+    ///
+    /// # The guard: same head cluster is a no-op
+    /// Resolves the new head cluster the SAME way `open` resolves its own (see that method's own
+    /// doc for the full geometry-resolution recipe). If the newly resolved head cluster is the SAME
+    /// one this reservation is already anchored on (`Some(new_head) == self.head_index`), this
+    /// returns immediately WITHOUT touching a single lease — no release, no acquire. This is the
+    /// guard that keeps a marker drifting within its current head cluster (the common case, once per
+    /// render tick) from repeatedly releasing and re-acquiring the SAME leases.
+    ///
+    /// # Otherwise: release-old-then-acquire-new
+    /// Every lease this reservation currently holds is released FIRST (reassigning `leases` drops
+    /// the old array's contents structurally), THEN the covered window is rebuilt from the new head
+    /// via the exact same walk-and-lease recipe `open` uses. This order — not
+    /// acquire-new-before-release-old — matches the C++ path this ports: releasing old pins before
+    /// taking new ones preserves eviction-recency fidelity (a stale-but-still-held pin must not keep
+    /// an LRU-eligible slot artificially warm past the point this reservation actually needs it).
+    ///
+    /// A resolution failure (manager still unavailable, geometry now missing/malformed) rebuilds
+    /// into the same inert shape `open` itself returns for those cases — old leases released, no new
+    /// ones taken.
+    pub fn reanchor(&mut self, marker_frame: u64, direction: i8, load_mode: LoadMode) {
+        // Reuse the manager resolved at `open()` time when we have one (the common case — see the
+        // `manager` field's own doc); otherwise retry the singleton lookup, since geometry may have
+        // become resolvable since (e.g. streaming boot completing after this reservation opened).
+        let manager = if self.manager.is_null() {
+            // SAFETY: same call, same contract as `open`'s own use of this extern.
+            unsafe { deluge_streaming_resource_manager() }
+        } else {
+            self.manager
+        };
+
+        let geometry = resolve_geometry(manager, self.asset, marker_frame);
+        let new_head = geometry.as_ref().map(|g| g.head);
+        if new_head.is_some() && new_head == self.head_index {
+            return; // Guard: still anchored on the same cluster -- no lease churn.
+        }
+
+        // Release every lease this reservation currently holds BEFORE acquiring any new one (see
+        // this method's own doc for why the order matters).
+        self.leases = core::array::from_fn(|_| None);
+        self.manager = manager;
+
+        match geometry {
+            None => {
+                self.head_index = None;
+                self.covered = [0; DEPTH];
+                self.num_covered = 0;
+            }
+            Some(geometry) => {
+                let (covered, leases, num_covered) =
+                    walk_and_lease(manager, self.asset, &geometry, direction, load_mode);
+                self.head_index = Some(geometry.head);
+                self.covered = covered;
+                self.num_covered = num_covered;
+                self.leases = leases;
+            }
+        }
+    }
+
+    /// The cluster indices this reservation covers, in walk order (test-visible; also
+    /// [`Reservation::reanchor`]'s own bookkeeping surface).
     pub fn covered_indices(&self) -> &[u32] {
         &self.covered[..self.num_covered]
     }
+}
+
+/// The resolved geometry needed to walk a reservation's covered window from its head cluster — the
+/// shared first half of [`Reservation::open`]'s and [`Reservation::reanchor`]'s work (see either's
+/// own doc for the full resolution recipe).
+struct WalkGeometry {
+    /// The cluster index the marker frame mapped to.
+    head: u32,
+    /// The cluster containing `audio_data_start_pos_bytes` itself — the walk's forward-clamp floor.
+    first_with_data: u32,
+    /// The registered `first_cluster_index_with_no_audio_data`, or `i64::MAX` (no bound) if that
+    /// field is negative — the walk's clamp ceiling.
+    first_no_data: i64,
+    /// The registered `FillContext`'s own cluster size in bytes, threaded through to
+    /// [`load_cluster`] unchanged.
+    cluster_size: u32,
+}
+
+/// Resolves `asset`'s registered geometry against `marker_frame`, mirroring [`Reservation::open`]'s
+/// own resolution recipe exactly (see that method's doc for the full rationale). Returns `None` for
+/// every case `open` itself treats as inert: a null `manager`, no registered `FillContext`, or a
+/// malformed one (zero frame stride / an out-of-range cluster-size shift).
+fn resolve_geometry(manager: *mut c_void, asset: u32, marker_frame: u64) -> Option<WalkGeometry> {
+    if manager.is_null() {
+        return None;
+    }
+    let ctx = deluge_sample_fill::fill_context_for(asset)?; // No registered geometry.
+    let frame_stride = ctx.byte_depth as u64 * ctx.num_channels as u64;
+    if frame_stride == 0 || ctx.cluster_size_magnitude >= 64 {
+        return None; // Malformed geometry -- mirrors `reader::locate`'s own guard.
+    }
+
+    let start_byte = (ctx.audio_data_start_pos_bytes as u64)
+        .saturating_add(marker_frame.saturating_mul(frame_stride));
+    let head = (start_byte >> ctx.cluster_size_magnitude) as u32;
+    let first_with_data =
+        ((ctx.audio_data_start_pos_bytes as u64) >> ctx.cluster_size_magnitude) as u32;
+    let first_no_data: i64 = if ctx.first_cluster_index_with_no_audio_data < 0 {
+        i64::MAX // No known upper bound (e.g. still recording) -- never clamps.
+    } else {
+        ctx.first_cluster_index_with_no_audio_data as i64
+    };
+
+    Some(WalkGeometry {
+        head,
+        first_with_data,
+        first_no_data,
+        cluster_size: ctx.cluster_size,
+    })
+}
+
+/// Walks up to [`DEPTH`] cluster indices from `geometry.head` in `direction`, clamped to
+/// `[geometry.first_with_data, geometry.first_no_data)`, taking one lease per covered cluster via
+/// [`load_cluster`] — the shared second half of [`Reservation::open`]'s and
+/// [`Reservation::reanchor`]'s work (see either's own doc for the full walk/clamp rationale).
+fn walk_and_lease(
+    manager: *mut c_void,
+    asset: u32,
+    geometry: &WalkGeometry,
+    direction: i8,
+    load_mode: LoadMode,
+) -> ([u32; DEPTH], [Option<Lease>; DEPTH], usize) {
+    // SAFETY: `manager` is non-null (a live `WalkGeometry` only resolves from a non-null one — see
+    // `resolve_geometry`) and, per the boot-singleton contract `deluge_streaming_resource_manager`
+    // documents, live for the process's remaining life.
+    let resource = unsafe { Resource::from_handle(manager as *mut DelugeResource) };
+
+    let mut covered = [0u32; DEPTH];
+    let mut leases: [Option<Lease>; DEPTH] = core::array::from_fn(|_| None);
+    let mut num_covered = 0usize;
+    let mut idx = geometry.head as i64;
+    for slot in 0..DEPTH {
+        if idx < geometry.first_with_data as i64 || idx >= geometry.first_no_data {
+            break;
+        }
+        let cluster_index = idx as u32;
+        covered[slot] = cluster_index;
+        num_covered = slot + 1;
+        leases[slot] = load_cluster(
+            &resource,
+            asset,
+            cluster_index,
+            geometry.cluster_size,
+            load_mode,
+        );
+        idx += direction as i64;
+    }
+    (covered, leases, num_covered)
 }
 
 /// The per-cluster load recipe every `load_mode` uses this task (see [`Reservation::open`]'s own
@@ -249,6 +360,29 @@ pub extern "C" fn deluge_sample_reserve_open(
 ) -> *mut DelugeSampleReservation {
     let reservation = Reservation::open(source_id, marker_frame, direction, load_mode);
     Box::into_raw(Box::new(reservation)) as *mut DelugeSampleReservation
+}
+
+/// Re-anchor `res` to the cluster containing `marker_frame`. See the header doc
+/// (`deluge_sample_reserve_move`) and [`Reservation::reanchor`] for the full contract.
+///
+/// # Safety
+/// `res` must be a live pointer previously returned by `deluge_sample_reserve_open` and not yet
+/// passed to `deluge_sample_reserve_close`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub unsafe extern "C" fn deluge_sample_reserve_move(
+    res: *mut DelugeSampleReservation,
+    marker_frame: u64,
+    direction: i8,
+    load_mode: LoadMode,
+) {
+    // SAFETY: `res` is a live, not-yet-closed pointer per this fn's own contract — the same cast
+    // validity `deluge_sample_reserve_close` relies on (same address, `Reservation`'s layout
+    // underneath).
+    let reservation = unsafe { &mut *(res as *mut Reservation) };
+    reservation.reanchor(marker_frame, direction, load_mode);
 }
 
 /// Release `res` and every lease it still holds. No-op on a null `res`.
@@ -392,6 +526,27 @@ mod tests {
                 .map(|chunk| resource.lease_count_by_slot(resource.slot_of(chunk)))
                 .sum()
         }
+
+        /// A monotonic counter that bumps on every `load_cluster` call this reservation's
+        /// `LoadMode::Enqueue` recipe actually runs (hit or miss alike) — `deluge_resource`'s own
+        /// `Stats::requests`, read via the crate's public `deluge_resource_stats` FFI (no
+        /// manager-internal access needed).
+        ///
+        /// This works as a lease-churn detector specifically BECAUSE `noop_construct` never calls
+        /// `mark_ready`: every chunk this harness's asset ever loads stays permanently un-ready, so
+        /// `load_cluster`'s first attempt (`Resource::acquire_leased`, which only hits a `ready`
+        /// chunk) NEVER hits — it always falls through to `Resource::request`, which bumps
+        /// `Stats::requests` unconditionally, on both its own cache-hit and fresh-alloc paths (see
+        /// `Manager::request`). So this delta is a faithful count of "how many times a covered
+        /// cluster's load recipe ran" over an interval, independent of residency/lease-count state
+        /// that (unlike this counter) returns to its original value across a spurious
+        /// release-then-reacquire cycle and so cannot, on its own, prove one never happened.
+        fn acquire_generation(&self) -> u64 {
+            let mut stats = deluge_resource::Stats::default();
+            // SAFETY: `self.handle` is live for as long as `self`.
+            unsafe { deluge_resource::deluge_resource_stats(self.handle, &mut stats) };
+            stats.requests
+        }
     }
 
     #[test]
@@ -456,5 +611,41 @@ mod tests {
         let never_registered_asset = h.asset + 1000;
         let res = Reservation::open(never_registered_asset, 0, 1, LoadMode::Enqueue);
         assert!(res.covered_indices().is_empty());
+    }
+
+    /// The guard: a marker that drifts but stays inside the SAME head cluster must not release or
+    /// re-acquire a single lease — see `acquire_generation`'s own doc for why its delta (rather than
+    /// a lease-count snapshot, which returns to its original value across a spurious
+    /// release-then-reacquire cycle) is what actually proves this.
+    #[test]
+    fn move_within_the_same_head_unit_is_a_no_op() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let h = TestHarness::with_audio_data_clusters(2..6, 4);
+        let mut res = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+        assert_eq!(res.covered_indices(), &[3, 4]);
+
+        let before = h.acquire_generation();
+        res.reanchor(h.frame_in_cluster(3) + 10, 1, LoadMode::Enqueue); // still cluster 3
+        assert_eq!(res.covered_indices(), &[3, 4]);
+        assert_eq!(
+            h.acquire_generation(),
+            before,
+            "no lease churn when head unit unchanged"
+        );
+    }
+
+    /// Crossing a cluster boundary releases the old head's lease and pins the new window —
+    /// release-old-then-acquire-new, exercised end to end via real lease-count observation.
+    #[test]
+    fn move_across_a_unit_boundary_rebuilds_the_window() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let h = TestHarness::with_audio_data_clusters(2..6, 4);
+        let mut res = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+        assert_eq!(res.covered_indices(), &[3, 4]);
+
+        res.reanchor(h.frame_in_cluster(4), 1, LoadMode::Enqueue);
+        assert_eq!(res.covered_indices(), &[4, 5]);
+        assert_eq!(h.total_leases_over(&[3]), 0, "old head released");
+        assert_eq!(h.total_leases_over(&[4, 5]), 2, "new window pinned");
     }
 }

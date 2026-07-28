@@ -432,6 +432,8 @@ Error Sample::fillPercCache(TimeStretcher* timeStretcher, int32_t startPosSample
 	int32_t bytesPerSample = numChannels * byteDepth;
 	int32_t posIncrement = bytesPerSample * playDirection;
 
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
+
 	int32_t i;
 	if (!reversed) {
 		i = searchPercCacheZones(percCacheZones[reversed], startPosSamples + 1, LESS);
@@ -674,10 +676,12 @@ doLoading:
 			percCacheNow = percCacheMemory[reversed];
 		}
 
-		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff.
-		StreamedChunk* cluster = deluge::audio::stream::peek(*this, sourceClusterIndex);
-		if (!cluster || !cluster->loaded) {
-			goto getOut;
+		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff. The passive
+		// peek is genuinely zero-lease, matching that original intent exactly.
+		const uint64_t frame = (uint32_t)(sourceBytePos - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+		const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
+		if (window.frames == nullptr) {
+			goto getOut; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
 		}
 
 		int32_t bytePosWithinCluster = sourceBytePos & (Cluster::size - 1);
@@ -696,9 +700,11 @@ doLoading:
 		    numSamplesThisClusterReadWrite * playDirection; // Do this now, in case the next Cluster fails
 		sourceBytePos += numSamplesThisClusterReadWrite * posIncrement;
 
-		// Alright, load those samples
-		char* currentPos =
-		    reinterpret_cast<char*>(cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
+		// Alright, load those samples. `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4`
+		// aligns for the `int32`-over-`byteDepth` read below, and the `bytesLeftThisSourceCluster` clamp keeps a
+		// boundary-straddling frame reading this cluster's own physical slack — byte-identical to
+		// `frame_read_origin(bytePosWithinCluster, byteDepth)`.
+		char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepth - 4;
 
 		do {
 			int32_t numSamplesThisPercPixelSegment = numSamplesThisClusterReadWrite;

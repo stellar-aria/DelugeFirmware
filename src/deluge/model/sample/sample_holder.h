@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "definitions_cxx.hpp"
+#include "libdeluge/sample_reader.h"
 #include "model/sample/sample_playback_guide.h"
 #include "storage/audio/audio_file_holder.h"
 #include "util/c_string.h"
@@ -29,7 +30,6 @@ extern "C" {
 }
 
 class Sample;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 
 class SampleHolder : public AudioFileHolder {
 public:
@@ -38,11 +38,8 @@ public:
 	SampleHolder(SampleHolder&& other) noexcept
 	    : AudioFileHolder(std::move(other)), startPos(other.startPos), endPos(other.endPos),
 	      waveformViewScroll(other.waveformViewScroll), waveformViewZoom(other.waveformViewZoom),
-	      neutralPhaseIncrement(other.neutralPhaseIncrement) {
-		for (size_t i = 0; i < kNumClustersLoadedAhead; i++) {
-			clustersForStart[i] = std::exchange(other.clustersForStart[i], nullptr);
-		}
-	}
+	      neutralPhaseIncrement(other.neutralPhaseIncrement),
+	      clustersForStart_(std::exchange(other.clustersForStart_, nullptr)) {}
 	SampleHolder& operator=(SampleHolder&& other) noexcept {
 		AudioFileHolder::operator=(std::move(other));
 		startPos = other.startPos;
@@ -50,9 +47,7 @@ public:
 		waveformViewScroll = other.waveformViewScroll;
 		waveformViewZoom = other.waveformViewZoom;
 		neutralPhaseIncrement = other.neutralPhaseIncrement;
-		for (size_t i = 0; i < kNumClustersLoadedAhead; i++) {
-			clustersForStart[i] = std::exchange(other.clustersForStart[i], nullptr);
-		}
+		clustersForStart_ = std::exchange(other.clustersForStart_, nullptr);
 		return *this;
 	}
 	~SampleHolder() override;
@@ -75,10 +70,10 @@ public:
 
 	int32_t neutralPhaseIncrement{};
 
-	StreamedChunk* clustersForStart[kNumClustersLoadedAhead]{};
+	DelugeSampleReservation* clustersForStart_ = nullptr;
 
 protected:
-	void claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
-	                                  int32_t clusterLoadInstruction);
+	void claimClusterReasonsForMarker(DelugeSampleReservation*& reservation, uint32_t startPlaybackAtByte,
+	                                  int32_t playDirection, int32_t clusterLoadInstruction);
 	virtual void sampleBeenSet(bool reversed, bool manuallySelected) {}
 };

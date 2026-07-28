@@ -20,21 +20,29 @@
 #include "hid/display/display.h"
 #include "io/debug/log.h"
 #include "model/sample/sample.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
 #include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 
+static DelugeLoadMode loadModeFor(int32_t clusterLoadInstruction) {
+	switch (clusterLoadInstruction) {
+	case CLUSTER_LOAD_IMMEDIATELY:
+		return DELUGE_LOAD_NOW;
+	case CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE:
+		return DELUGE_LOAD_NOW_OR_ENQUEUE;
+	default:
+		return DELUGE_LOAD_ENQUEUE; // CLUSTER_ENQUEUE
+	}
+}
+
 SampleHolder::SampleHolder() {
 	startPos = 0;
 	endPos = 9999999;
 	waveformViewZoom = 0;
 	audioFileType = AudioFileType::SAMPLE;
-
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		clustersForStart[l] = nullptr;
-	}
 }
 
 SampleHolder::~SampleHolder() {
@@ -65,12 +73,10 @@ void SampleHolder::beenClonedFrom(SampleHolder const* other, bool reversed) {
 }
 
 void SampleHolder::unassignAllClusterReasons(bool beingDestructed) {
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clustersForStart[l] != nullptr) {
-			deluge::cluster::remove_reason(*clustersForStart[l], "E123");
-			if (!beingDestructed) {
-				clustersForStart[l] = nullptr;
-			}
+	if (clustersForStart_ != nullptr) {
+		deluge_sample_reserve_close(clustersForStart_);
+		if (!beingDestructed) {
+			clustersForStart_ = nullptr;
 		}
 	}
 }
@@ -184,61 +190,20 @@ void SampleHolder::claimClusterReasons(bool reversed, int32_t clusterLoadInstruc
 
 	int32_t startPlaybackAtByte = ((Sample*)audioFile)->audioDataStartPosBytes + startPlaybackAtSample * bytesPerSample;
 
-	claimClusterReasonsForMarker(clustersForStart, startPlaybackAtByte, playDirection, clusterLoadInstruction);
+	claimClusterReasonsForMarker(clustersForStart_, startPlaybackAtByte, playDirection, clusterLoadInstruction);
 }
 
-void SampleHolder::claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte,
+void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reservation, uint32_t startPlaybackAtByte,
                                                 int32_t playDirection, int32_t clusterLoadInstruction) {
 
-	int32_t clusterIndex = startPlaybackAtByte >> Cluster::size_magnitude;
-
-	uint32_t posWithinCluster = startPlaybackAtByte & (Cluster::size - 1);
-
-	// Set up new temp list
-	StreamedChunk* newClusters[kNumClustersLoadedAhead];
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		newClusters[l] = nullptr;
+	uint32_t sourceId = deluge::sample::source_id_for(*(Sample*)audioFile);
+	int32_t bytesPerSample = audioFile->numChannels * ((Sample*)audioFile)->byteDepth;
+	uint64_t markerFrame = (startPlaybackAtByte - ((Sample*)audioFile)->audioDataStartPosBytes) / bytesPerSample;
+	DelugeLoadMode mode = loadModeFor(clusterLoadInstruction);
+	if (reservation == nullptr) {
+		reservation = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, mode);
 	}
-
-	// Populate new list
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-
-		/*
-		// If final one, only load it if posWithinCluster is at least a quarter of the way in
-		if (l == NUM_SAMPLE_CLUSTERS_LOADED_AHEAD - 1) {
-		    if (playDirection == 1) {
-		        if (posWithinCluster < (sampleManager.clusterSize >> 2)) break;
-		    }
-		    else {
-		        if (posWithinCluster > sampleManager.clusterSize - (sampleManager.clusterSize >> 2)) break;
-		    }
-		}
-		*/
-
-		// Boundary-crossing lease: one stream() hop per lookahead slot here, not per-sample -- this
-		// runs only when (re)claiming the head/loop-start lookahead window, never in the per-sample
-		// hot loop.
-		newClusters[l] = deluge::audio::stream::request(*(Sample*)audioFile, clusterIndex, clusterLoadInstruction);
-
-		if (!newClusters[l]) {
-			D_PRINTLN("NULL!!");
-		}
-		else if (clusterLoadInstruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE && !newClusters[l]->loaded) {
-			D_PRINTLN("not loaded!!");
-		}
-
-		clusterIndex += playDirection;
-		if (clusterIndex < ((Sample*)audioFile)->getFirstClusterIndexWithAudioData()
-		    || clusterIndex >= ((Sample*)audioFile)->getFirstClusterIndexWithNoAudioData()) {
-			break;
-		}
-	}
-
-	// Replace old list
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clusters[l] != nullptr) {
-			deluge::cluster::remove_reason(*clusters[l], "E146");
-		}
-		clusters[l] = newClusters[l];
+	else {
+		deluge_sample_reserve_move(reservation, markerFrame, playDirection, mode);
 	}
 }

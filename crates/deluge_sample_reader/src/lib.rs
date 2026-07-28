@@ -17,6 +17,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod reader;
+pub mod reservation;
 
 // `deluge_resource::sync` calls out to three C-ABI critical-section primitives that, in the real
 // firmware/host-sim link, the BSP (`src/bsp/rust/src/services.rs`) provides. `deluge_resource`'s

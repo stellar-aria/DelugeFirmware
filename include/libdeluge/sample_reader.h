@@ -130,6 +130,41 @@ void deluge_sample_reader_close(DelugeSampleReader* reader);
 /// frame) — the caller walks DOWN from `frames` in that case, not up from some earlier start.
 DelugeFrameWindow deluge_sample_peek(uint32_t source_id, uint64_t start_frame, int8_t direction);
 
+/// A per-reservation passive lookahead handle. Opaque; owned by the backend. The active twin of
+/// `deluge_sample_peek`: where a peek is a single, transient, non-pinning glance, a reservation
+/// pins a small forward- or backward-facing WINDOW of cluster residency (holding one real lease per
+/// covered cluster) for as long as it stays open — the same shape `kNumClustersLoadedAhead`'s
+/// existing lookahead pins already give the timestretch/loop-point paths, generalized behind this
+/// handle. `deluge_sample_reserve_move` (a later task) slides the window; `deluge_sample_reserve_close`
+/// releases every lease it still holds.
+typedef struct DelugeSampleReservation DelugeSampleReservation;
+
+/// How a reservation's covered clusters are loaded when opened (or, in a later task, moved).
+///
+/// Fixed underlying type (`: uint8_t`, C23 + C++11): this enum crosses the FFI BY VALUE
+/// (`deluge_sample_reserve_open`'s parameter), so its width must be pinned explicitly rather than
+/// left to the C++ build's default `int` enum width — mirrors `DelugeReadHint` above (see that
+/// enum's doc for the fuller rationale).
+typedef enum DelugeLoadMode : uint8_t {
+	/// Reserve the covered clusters and enqueue them for the async loader; never blocks.
+	DELUGE_LOAD_ENQUEUE = 0,
+	/// Materialize the covered clusters synchronously before returning.
+	DELUGE_LOAD_NOW = 1,
+	/// Prefer a synchronous load, falling back to enqueueing under memory pressure.
+	DELUGE_LOAD_NOW_OR_ENQUEUE = 2,
+} DelugeLoadMode;
+
+/// Open a passive lookahead reservation over `source_id`'s sample residency, pinning up to a fixed
+/// small depth of clusters starting at the cluster containing `marker_frame`, walking in `direction`.
+/// @param marker_frame a sample-frame index (frame 0 == the sample's first audio-data frame).
+/// @param direction +1 forward, -1 reverse.
+/// @param load_mode how the covered clusters are loaded — see `DelugeLoadMode`.
+DelugeSampleReservation* deluge_sample_reserve_open(uint32_t source_id, uint64_t marker_frame, int8_t direction,
+                                                    DelugeLoadMode load_mode);
+
+/// Release `res` and every lease it still holds.
+void deluge_sample_reserve_close(DelugeSampleReservation* res);
+
 /// Convenience for cold one-shots: copy `[start_frame, start_frame + num_frames)` native-format
 /// frames of `source_id`'s sample into `dest`. Blocking. Internally an open → window/copy loop →
 /// close (one path, not a second implementation) — equivalent to driving the handle API by hand with

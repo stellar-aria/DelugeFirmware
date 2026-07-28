@@ -822,6 +822,17 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// The byte source streams the clusters; its destructor releases the held cluster's reason.
 		ClusterByteSource source{*sampleFile, effectiveFilePointer.objsize};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts);
+
+		// loadFile() parses the WAV header, which is what finally populates the Sample's geometry
+		// (byteDepth/numChannels/audioDataStartPosBytes/audioDataLengthBytes). Both earlier
+		// registrations of the streaming fill-context -- open_read_stream() above and the header-parse
+		// getCluster's define_asset() -- ran while that geometry was still zero, so the context was
+		// snapshotted with a zero frame stride. Refresh it now that the geometry is final; otherwise
+		// every fill-context consumer (the sample range-reader and its passive peek) resolves a
+		// zero-stride geometry and returns nothing for this sample.
+		if (*error == Error::NONE) {
+			sampleFile->stream().register_fill_context();
+		}
 	}
 	else {
 		audioFile = new (audioFileMemory) WaveTable;

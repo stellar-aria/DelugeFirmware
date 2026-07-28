@@ -17,6 +17,11 @@
 //!      directive so `deluge-bsp-rust`'s final device link picks it up. Deliberately does NOT recompile
 //!      `convert.cpp`/`stitch.cpp`/`audio_format_helpers.cpp` for the device — see [`build_device`]'s doc
 //!      for why (duplicate-definition avoidance against the app's own already-linked objects).
+//!   3. HOST + the `app_convert` Cargo feature (the C-host sim, standing in for the app link): the SAME
+//!      shim-only, duplicate-avoidance idea as DEVICE, but via `cc::Build` + SIMDe like HOST #1 (the sim
+//!      is still an x86 host build). Compiles ONLY `cpp/shim.cpp`, skips the ARM verify, and leaves
+//!      `convert_word`/`stitch_boundaries`/helpers undefined for `deluge_app`'s own already-compiled
+//!      objects to resolve at the sim's final link. OFF by default — see the feature's doc in Cargo.toml.
 //!
 //! Dep ownership (SR2d gotcha #4): argon + SIMDe are header-only and pinned by tag. This crate OWNS them
 //! — `fetch_pinned` git-fetches each at the SAME SHA the CMake FetchContent uses into a gitignored
@@ -86,6 +91,20 @@ fn main() {
     );
     let argon_inc = argon_dir.join("include");
 
+    // Fetched here (rather than further down, HOST-only) because the shim-only `app_convert` branch
+    // below ALSO needs it: shim.cpp includes convert.h -> argon.hpp, and on a non-ARM host argon falls
+    // back to SIMDe's portable NEON shim, same as the full HOST build further down. Only the DEVICE path
+    // (real target, real <arm_neon.h>) never needs it.
+    let simde_dir = third_party.join("simde");
+    fetch_pinned(
+        "simde",
+        SIMDE_URL,
+        SIMDE_SHA,
+        &simde_dir,
+        Path::new("simde/arm/neon.h"),
+    );
+    let simde_root = simde_dir;
+
     // SR2d-4 Task 5: this crate now has a real consumer (`deluge-bsp-rust`'s native fill task), which
     // links it on the ACTUAL armv7a-none-eabihf device target, not just the x86 host test binary. Same
     // `CARGO_CFG_TARGET_OS` check `deluge-bsp-rust`'s own build.rs uses to distinguish device from host.
@@ -103,16 +122,37 @@ fn main() {
         return;
     }
 
-    // --- HOST-only from here down: SIMDe is only ever needed for the x86 cc::Build below. -------------
-    let simde_dir = third_party.join("simde");
-    fetch_pinned(
-        "simde",
-        SIMDE_URL,
-        SIMDE_SHA,
-        &simde_dir,
-        Path::new("simde/arm/neon.h"),
-    );
-    let simde_root = simde_dir;
+    // C-host sim ("host, standing in for the app link"): the sim's deluge_app already compiles
+    // convert.cpp/stitch.cpp/audio_format_helpers.cpp (shared deluge_SOURCES glob), so recompiling them
+    // here would double-define convert_word/stitch_boundaries. Compile ONLY cpp/shim.cpp — the SAME
+    // duplicate-avoidance the device path does above — and skip the ARM verify (not relevant to the
+    // sim). shim.cpp's references to the app's convert/stitch symbols stay undefined in this archive and
+    // resolve against deluge_app at the final sim link.
+    let app_convert = std::env::var("CARGO_FEATURE_APP_CONVERT").is_ok();
+    if app_convert {
+        let mut build = cc::Build::new();
+        build
+            .cpp(true)
+            .std("c++26")
+            .file(&shim_cpp)
+            .include(&src) // definitions_cxx.hpp
+            .include(&src_deluge) // storage/..., util/...
+            .include(&include) // libdeluge/types.h
+            .include(&argon_inc) // argon headers used by shim.cpp's included app headers
+            // argon's bare <arm/neon.h> falls back to SIMDe on a non-ARM host, via the same compat shim
+            // + SIMDe root the full HOST cc::Build uses below (added after `cargo build --features
+            // app_convert` failed on `fatal error: arm/neon.h: No such file or directory`).
+            .include(&sim_compat) // <arm_neon.h> -> SIMDe shim
+            .include(&simde_root) // compat shim's <simde/arm/neon.h>
+            .include(simde_root.join("simde")) // argon's bare <arm/neon.h>
+            .define("DELUGE_HOST", None)
+            .define("SIMDE_NO_NATIVE", None) // portable-C NEON fallback = bit-accurate to device NEON
+            .flag_if_supported("-Wno-unused-parameter");
+        build.compile("deluge_sample_convert_cc");
+        return;
+    }
+
+    // --- HOST-only from here down: SIMDe is fetched above (shared with the app_convert branch). -------
 
     // ============================================================================================
     // 1. x86 host build via cc::Build + SIMDe (the runnable, linked-in path).

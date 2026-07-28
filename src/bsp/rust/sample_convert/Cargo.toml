@@ -29,3 +29,11 @@ path = "src/lib.rs"
 
 [build-dependencies]
 cc = "1"
+
+[features]
+# Host "shim-only" mode for the C-host sim: compile ONLY cpp/shim.cpp and let the final consumer's
+# already-compiled convert.cpp/stitch.cpp/audio_format_helpers.cpp (deluge_app's, in the shared
+# deluge_SOURCES glob) provide convert_word/stitch_boundaries/helpers. Mirrors the device path's
+# duplicate-definition avoidance. OFF by default: a standalone `cargo test`/`region_*_differential`
+# build has no deluge_app, so it needs the full HOST compile to define those symbols itself.
+app_convert = []

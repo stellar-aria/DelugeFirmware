@@ -69,8 +69,10 @@ typedef enum DelugeReadHint : uint8_t {
 /// produce this window).
 typedef struct DelugeFrameWindow {
 	const void* frames;   ///< pinned, already-converted native-format frames at the cursor (zero-copy)
-	uint32_t frame_count; ///< valid frames in this window; 0 == end-of-audio (or a hard read failure — see
-	                      ///< deluge_sample_reader_ok)
+	uint32_t frame_count; ///< valid frames in this window; for deluge_sample_reader_window, 0 == end-of-audio
+	                      ///< (or a hard read failure — see deluge_sample_reader_ok). For deluge_sample_peek,
+	                      ///< residency is signalled by `frames` (null == not resident); a non-null `frames`
+	                      ///< with 0 here is a valid resident position on the cluster's last partial frame.
 } DelugeFrameWindow;
 
 /// Open a reader over `source_id`'s sample residency (the resource-manager Asset id the facade

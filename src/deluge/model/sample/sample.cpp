@@ -21,6 +21,7 @@
 #include "dsp/fft/fft_config_manager.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "io/debug/log.h"
+#include "libdeluge/sample_reader.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_perc_cache_zone.h"
@@ -836,6 +837,8 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 	int32_t numChannelsNow = numChannels;
 	int32_t bytesPerSample = byteDepthNow * numChannelsNow;
 
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
+
 	// This can happen. Not 100% sure if it should, but we'll return false just below in this case anyway, so I think
 	// it's ok
 	if (ALPHA_OR_BETA_VERSION && startBytePos < (int32_t)audioDataStartPosBytes) {
@@ -897,9 +900,10 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				FREEZE_WITH_ERROR("EEEE");
 			}
 
-			StreamedChunk* cluster = deluge::audio::stream::peek(*this, whichCluster);
-			if (!cluster || !cluster->loaded) {
-				return false;
+			const uint64_t frame = (uint32_t)(readByte - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+			const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
+			if (window.frames == nullptr) {
+				return false; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
 			}
 
 			int32_t bytePosWithinCluster = readByte & (Cluster::size - 1);
@@ -913,9 +917,11 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				numSamplesThisRead = (uint32_t)bytesLeftThisCluster / (uint8_t)bytesPerSample;
 			}
 
-			// Alright, read those samples
-			char* currentPos = reinterpret_cast<char*>(
-			    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepthNow)));
+			// Alright, read those samples. `window.frames` points AT this frame's own bytes; the
+			// `+ byteDepthNow - 4` aligns for the `int32`-over-`byteDepth` read below (its high 16
+			// bits are the sample), and the `bytesLeftThisCluster` clamp keeps a boundary-straddling
+			// frame reading this cluster's own physical slack — byte-identical to `frame_read_origin`.
+			char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepthNow - 4;
 			char* endPos = currentPos + numSamplesThisRead * bytesPerSample * playDirection;
 
 			do {

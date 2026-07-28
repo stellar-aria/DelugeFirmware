@@ -104,6 +104,24 @@ bool deluge_sample_reader_ok(const DelugeSampleReader* reader);
 /// Release the reader and any pin it still holds.
 void deluge_sample_reader_close(DelugeSampleReader* reader);
 
+/// Stateless, passive resident-peek: the resident, already-converted frames at `start_frame` of
+/// `source_id`'s residency, as a zero-copy run to the CONTAINING CLUSTER's own boundary in
+/// `direction` — `{NULL, 0}` iff that cluster is not resident, OR resident but not yet ready (a
+/// `deluge_sample_reader_open`+`window()` would block to fill it; this never does). Takes NO
+/// lease, bumps NO recency, triggers NO load on a miss, and prefetches NO neighbouring cluster —
+/// safe to call from the audio render thread.
+///
+/// Within-cluster only: unlike `deluge_sample_reader_window`, this does NOT serve a
+/// boundary-straddling frame via the stitched trailing slack (that serve is proven safe only for
+/// a sequential reader's own access pattern; a peek is random-access and takes no pin at all) — a
+/// frame whose bytes cross into the next cluster is simply excluded from the run.
+///
+/// `frames` always points AT `start_frame` itself, in both directions. For `direction == +1`
+/// `frame_count` extends toward HIGHER addresses (forward, up to the cluster's own last resident
+/// frame); for `-1` it extends toward LOWER addresses (backward, down to the cluster's own first
+/// frame) — the caller walks DOWN from `frames` in that case, not up from some earlier start.
+DelugeFrameWindow deluge_sample_peek(uint32_t source_id, uint64_t start_frame, int8_t direction);
+
 /// Convenience for cold one-shots: copy `[start_frame, start_frame + num_frames)` native-format
 /// frames of `source_id`'s sample into `dest`. Blocking. Internally an open → window/copy loop →
 /// close (one path, not a second implementation) — equivalent to driving the handle API by hand with

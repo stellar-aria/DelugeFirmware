@@ -63,6 +63,7 @@ function(create_specs_driver driver_name spec_dir)
     ${CMAKE_CURRENT_LIST_DIR}/../../include      # libdeluge/sample_reader.h, streaming_fill.h, system.h
     ${CMAKE_CURRENT_LIST_DIR}/../../src          # definitions_cxx.hpp
     ${CMAKE_CURRENT_LIST_DIR}/../../src/deluge    # model/sample/sample_reader_bridge.h, storage/audio/stream/chunk_residency.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../crates/deluge_resource/include # deluge_resource.h (sample_peek_spec.cpp's own manager setup)
   )
   if(NOT SAMPLE_READER_SPEC_NEON_NATIVE)
     target_include_directories(${driver_name} PRIVATE

@@ -25,8 +25,16 @@ bool deluge_in_interrupt() {
 }
 }
 
+namespace {
+DelugeResource* g_active_manager = nullptr;
+}
+
+void set_active_manager(DelugeResource* handle) {
+	g_active_manager = handle;
+}
+
 DelugeResource* deluge_streaming_resource_manager() {
-	return nullptr;
+	return g_active_manager;
 }
 
 uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {

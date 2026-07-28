@@ -72,6 +72,20 @@ fn resident_bytes_for(index: u32, geo: &Geometry) -> u32 {
     }
 }
 
+/// Map a registered per-asset [`deluge_sample_fill::FillContext`] onto this crate's own
+/// `Geometry` mirror, field-for-field — shared by [`Reader::open`] and [`peek`] so the two
+/// entry points resolve geometry identically rather than each re-deriving the mapping.
+fn geometry_from_context(ctx: deluge_sample_fill::FillContext) -> Geometry {
+    Geometry {
+        audio_data_start_bytes: ctx.audio_data_start_pos_bytes,
+        audio_data_length_bytes: ctx.audio_data_length_bytes,
+        cluster_size_bytes: ctx.cluster_size,
+        byte_depth: ctx.byte_depth,
+        num_channels: ctx.num_channels,
+        raw_data_format: ctx.raw_data_format,
+    }
+}
+
 /// One resolved frame position: which cluster it falls in, its byte offset within that cluster,
 /// and how many bytes of that cluster are valid audio data (`resident_bytes_for`). Mirrors
 /// `sample.cpp`'s own frame->cluster mapping (`getPlayByteLowLevel`/the perc-cache scan, both
@@ -198,17 +212,7 @@ impl Reader {
         // aliasing/ownership concern (mirrors deluge_sample_fill::native's own call).
         let manager = unsafe { deluge_streaming_resource_manager() };
         let (geometry, ok) = match deluge_sample_fill::fill_context_for(asset) {
-            Some(ctx) => (
-                Geometry {
-                    audio_data_start_bytes: ctx.audio_data_start_pos_bytes,
-                    audio_data_length_bytes: ctx.audio_data_length_bytes,
-                    cluster_size_bytes: ctx.cluster_size,
-                    byte_depth: ctx.byte_depth,
-                    num_channels: ctx.num_channels,
-                    raw_data_format: ctx.raw_data_format,
-                },
-                true,
-            ),
+            Some(ctx) => (geometry_from_context(ctx), true),
             None => (Geometry::default(), false),
         };
         Reader {
@@ -613,6 +617,88 @@ impl Reader {
         }
         written_frames
     }
+}
+
+/// Stateless, passive resident-peek (`deluge_sample_peek`, header doc): the resident,
+/// already-converted frames at `start_frame` of `source_id`'s residency, as a zero-copy run to
+/// the CONTAINING CLUSTER's own boundary in `direction` -- `{null, 0}` iff that cluster is not
+/// resident, or resident but not yet ready.
+///
+/// Reuses the SAME geometry resolution and frame->cluster mapping [`Reader::open`]/[`locate`]
+/// use, and the SAME `deluge_streaming_chunk_payload` accessor [`Reader::window`] uses -- no
+/// separate geometry or payload logic. Unlike `window`/`advance` this has no cursor to hold: no
+/// lease is ever taken, no recency is ever bumped (`Resource::peek`'s own contract), no load is
+/// ever triggered on a miss, and no neighbouring cluster is ever touched -- render-thread-safe.
+///
+/// # Within-cluster only (checkpoint-review I1)
+/// This deliberately does NOT reuse [`Reader::window`]'s cross-cluster stitched-slack straddle
+/// serve. That serve is proven safe only for a SEQUENTIAL reader's own access pattern (see
+/// `window`'s doc): it self-pins the current cluster and then transiently resident-fills the
+/// NEXT one purely to trigger its `native_finish`'s boundary stitch. A peek call is random-access
+/// and takes no pin at all, so it has no business ever touching a second cluster; the run this
+/// function returns always stays within the single cluster `start_frame` maps into.
+///
+/// # The backward-window pointer convention (checkpoint-review I2)
+/// `frames` always points AT `start_frame` itself, in both directions. For `direction == +1`
+/// `frame_count` extends FORWARD from there (toward higher addresses, up to the cluster's own
+/// last resident frame); for `-1` it extends BACKWARD (toward lower addresses, down to the
+/// cluster's own first frame) -- the caller walks down from `frames` in that case, exactly like
+/// `window`'s own backward run.
+pub fn peek(source_id: u32, start_frame: u64, direction: i8) -> (*const u8, u32) {
+    // SAFETY: the one process-wide resource-manager singleton -- same call, same contract as
+    // `Reader::open`'s own use of this extern.
+    let manager = unsafe { deluge_streaming_resource_manager() };
+    if manager.is_null() {
+        return (core::ptr::null(), 0);
+    }
+    let Some(ctx) = deluge_sample_fill::fill_context_for(source_id) else {
+        return (core::ptr::null(), 0); // No registered geometry -- nothing to map frames against.
+    };
+    let geometry = geometry_from_context(ctx);
+    let Some((cluster_index, byte_offset, resident)) = locate(start_frame, &geometry) else {
+        return (core::ptr::null(), 0); // Malformed geometry (zero stride or zero cluster size).
+    };
+    if byte_offset >= resident {
+        return (core::ptr::null(), 0); // Past the end of this cluster's real audio data.
+    }
+    // `locate`'s own `None` case above already rules out a zero stride, so this can't be 0.
+    let frame_stride = geometry.byte_depth as u32 * geometry.num_channels as u32;
+
+    // SAFETY: `manager` is non-null (checked above) and, per the boot-singleton contract
+    // `deluge_streaming_resource_manager` documents, live for the process's remaining life.
+    let resource = unsafe { Resource::from_handle(manager as *mut DelugeResource) };
+    let Some(chunk) = resource.peek(source_id, cluster_index) else {
+        return (core::ptr::null(), 0); // Not resident -- a true miss, not this fn's job to fill.
+    };
+    if !resource.is_ready(chunk) {
+        return (core::ptr::null(), 0); // Resident but not yet loaded -- the ready gate.
+    }
+
+    // No straddle rounding here (see this fn's own "within-cluster only" doc): a forward run
+    // takes only WHOLE frames up to `resident`; a backward run takes every whole frame from
+    // `start_frame` back to the cluster's own first frame (byte_offset / frame_stride whole
+    // frames below it, plus the one at `byte_offset` itself).
+    let frame_count = if direction >= 0 {
+        (resident - byte_offset) / frame_stride
+    } else {
+        byte_offset / frame_stride + 1
+    };
+    if frame_count == 0 {
+        return (core::ptr::null(), 0); // No whole frame remains in this direction.
+    }
+
+    // SAFETY: `chunk` was just confirmed resident (and ready) by `resource.peek`/`is_ready`
+    // above; `deluge_streaming_chunk_payload` returns that chunk's payload base, valid for as
+    // long as it stays resident -- guaranteed for the remainder of this call (a peek never
+    // triggers eviction: it takes no lease, but it also never blocks or yields).
+    let payload_base = unsafe { deluge_streaming_chunk_payload(chunk.as_ptr() as *mut c_void) };
+    // SAFETY: within-cluster only, by construction: the forward run's last byte is at
+    // `byte_offset + frame_count * frame_stride <= resident <= cluster_size_bytes`, and the
+    // backward run never reads past `byte_offset` itself (`resident <= cluster_size_bytes`) --
+    // every byte this fn can ever expose stays inside the plain, unpadded cluster payload; the
+    // trailing-slack straddle span `window()` sometimes reads is never touched here.
+    let frames = unsafe { payload_base.add(byte_offset as usize) };
+    (frames as *const u8, frame_count)
 }
 
 #[cfg(test)]
@@ -1507,6 +1593,128 @@ mod tests {
                     dest[written_bytes], 0xAA,
                     "the one leftover byte (100..101, less than one whole frame) must be untouched"
                 );
+            }
+        }
+
+        // ── The passive peek: no lease, no fill, within-cluster only ────────────────────────────
+        //
+        // Reuses `harness`/`geo`/`CLUSTER_SIZE`/`expected_cluster_bytes` (`use super::*`), the
+        // SAME synthetic ramp fixture `window_tests`'s own cases assert against.
+        mod peek_tests {
+            use super::*;
+
+            const STRIDE: u32 = 2; // byte_depth 2 * num_channels 1, this module's `geo()` shape
+
+            #[test]
+            fn peek_forward_from_a_clusters_first_frame_runs_to_its_last_frame_matching_the_ramp() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+                // Make cluster 0 resident+ready via the normal fill path (`window()`, already
+                // proven byte-exact against the ramp elsewhere in this module) -- and keep
+                // `reader` alive so its self-pinned lease holds the chunk resident for `peek` to
+                // observe; `peek` itself must take no pin of its own.
+                let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
+                let (_, filled) = reader.window();
+                assert_eq!(filled, CLUSTER_SIZE / 2);
+
+                let (frames, frame_count) = peek(asset, 0, 1);
+                assert!(
+                    !frames.is_null(),
+                    "a resident+ready cluster must not peek null"
+                );
+                assert_eq!(
+                    frame_count,
+                    CLUSTER_SIZE / 2,
+                    "a +1 peek from the cluster's own first frame must run all the way to its \
+                     last resident frame"
+                );
+                // SAFETY: `reader`'s own held lease (still alive, `reader` not yet dropped) pins
+                // this same chunk resident for the duration of this read-back.
+                let got: Vec<u8> = (0..CLUSTER_SIZE as usize)
+                    .map(|i| unsafe { *frames.add(i) })
+                    .collect();
+                assert_eq!(
+                    got,
+                    expected_cluster_bytes(0),
+                    "peek's bytes must match the synthetic fill, exactly like window()'s own"
+                );
+            }
+
+            #[test]
+            fn peek_backward_at_a_mid_cluster_frame_runs_back_to_the_clusters_first_frame() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+                let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
+                reader.window(); // fill+ready cluster 0; kept alive (not dropped) below.
+
+                // Frame 100 -> byte_offset 200 (stride 2), well inside cluster 0 (resident 512).
+                let start_frame = 100u64;
+                let byte_offset = 200u32;
+                let (frames, frame_count) = peek(asset, start_frame, -1);
+                assert!(!frames.is_null());
+                assert_eq!(
+                    frame_count,
+                    byte_offset / STRIDE + 1,
+                    "a -1 peek must run back to (and include) the cluster's own first frame"
+                );
+
+                // `frames` points AT start_frame's own byte_offset (checkpoint-review I2) -- NOT
+                // at the run's start. Walking backward `k` frames (`STRIDE` bytes each) must
+                // land on the synthetic ramp's byte at `byte_offset - k*STRIDE`.
+                for k in 0..frame_count {
+                    // SAFETY: `frames - k*STRIDE` stays within cluster 0's plain payload
+                    // (`byte_offset - k*STRIDE >= 0` for every `k < frame_count`, by construction
+                    // of `frame_count` above), which `reader`'s still-held lease keeps resident.
+                    let byte = unsafe { *frames.sub(k as usize * STRIDE as usize) };
+                    let expected = (byte_offset - k * STRIDE) as u8;
+                    assert_eq!(
+                        byte, expected,
+                        "reverse-run byte at k={k} must match the ramp"
+                    );
+                }
+            }
+
+            #[test]
+            fn peek_on_a_non_resident_cluster_returns_null() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+                // Geometry is registered, but nothing has ever requested/filled any cluster.
+                let (frames, frame_count) = peek(asset, 0, 1);
+                assert!(frames.is_null(), "a never-resident cluster must peek null");
+                assert_eq!(frame_count, 0);
+            }
+
+            #[test]
+            fn peek_on_a_resident_but_not_ready_cluster_returns_null() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                let (handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+                // SAFETY: `handle` is live for the test's duration.
+                let resource = unsafe { Resource::from_handle(handle) };
+
+                // `request` reserves + constructs (no I/O) -- resident, but `ready` stays false
+                // until a `mark_ready` this test deliberately never makes. Held for the test's
+                // whole run (not dropped) so the chunk stays resident throughout.
+                let _reservation = resource
+                    .request(asset, 0, CLUSTER_SIZE as usize)
+                    .expect("request");
+
+                let (frames, frame_count) = peek(asset, 0, 1);
+                assert!(
+                    frames.is_null(),
+                    "resident-but-not-ready must peek null (the Step 2 ready gate)"
+                );
+                assert_eq!(frame_count, 0);
             }
         }
     }

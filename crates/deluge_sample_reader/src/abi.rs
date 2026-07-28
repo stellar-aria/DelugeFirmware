@@ -199,6 +199,28 @@ pub unsafe extern "C" fn deluge_sample_read(
     }
 }
 
+/// Stateless, passive resident-peek: the resident, already-converted frames at `start_frame` of
+/// `source_id`'s residency, as a zero-copy run to the containing cluster's own boundary in
+/// `direction`. See the header doc (`deluge_sample_peek`) and [`crate::reader::peek`] for the
+/// full contract -- this is a thin type-cast shim over it, matching every other wrapper in this
+/// module. Takes no pointer argument, so (unlike most of this module) there is no pointer
+/// contract to forward -- a plain, non-`unsafe` `extern "C" fn`, like `deluge_sample_reader_open`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub extern "C" fn deluge_sample_peek(
+    source_id: u32,
+    start_frame: u64,
+    direction: i8,
+) -> DelugeFrameWindow {
+    let (frames, frame_count) = crate::reader::peek(source_id, start_frame, direction);
+    DelugeFrameWindow {
+        frames: frames as *const c_void,
+        frame_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

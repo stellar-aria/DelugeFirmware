@@ -18,6 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "libdeluge/sample_reader.h"
 #include "model/sample/sample_low_level_reader.h"
 #include <cstdint>
 
@@ -30,7 +31,6 @@ class VoiceSample;
 class Voice;
 class VoiceSamplePlaybackGuide;
 class VoiceUnisonPartSource;
-struct StreamedChunk; ///< File-backed streamed sample-audio chunk (see storage/cluster/cluster.h).
 struct ComputedChunk; ///< Computed/cached chunk — perc-cache + sample-cache scratch (see storage/cluster/cluster.h).
 class Sample;
 class SampleCache;
@@ -99,10 +99,10 @@ public:
 	uint64_t bufferSamplesWritten; // Hopefully we can do away with the need for this
 #endif
 
-	/// @note Misnamed (not perc cache) — despite living in the perc-lookahead machinery, this holds
-	///       source-audio SAMPLE chunks fed via Sample::stream().get_cluster() (see
-	///       updateClustersForPercLookahead).
-	StreamedChunk* clustersForPercLookahead[kNumClustersLoadedAhead]{};
+	/// @note Perc lookahead — pins the small forward/backward window of upcoming source-audio
+	///       clusters the time-stretcher's older-head search needs resident (see
+	///       updateClustersForPercLookahead), through the reservation handle (sample_reader.h).
+	DelugeSampleReservation* percLookahead_ = nullptr;
 
 	ComputedChunk* percCacheClustersNearby[2]{}; ///< Reason-holder for the two most recently needed/accessed
 	                                             ///< perc-cache chunks.

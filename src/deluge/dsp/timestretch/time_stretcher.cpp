@@ -29,7 +29,6 @@
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "util/functions.h"
 #include <cmath>
@@ -45,10 +44,6 @@ bool TimeStretcher::init(Sample* sample, VoiceSample* voiceSample, SamplePlaybac
 	AudioEngine::logAction("TimeStretcher::init");
 
 	// D_PRINTLN("TimeStretcher::init");
-
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		clustersForPercLookahead[l] = nullptr;
-	}
 
 	for (int32_t l = 0; l < 2; l++) {
 		percCacheClustersNearby[l] = nullptr;
@@ -179,11 +174,9 @@ void TimeStretcher::beenUnassigned() {
 }
 
 void TimeStretcher::unassignAllReasonsForPercLookahead() {
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clustersForPercLookahead[l]) {
-			deluge::cluster::remove_reason(*clustersForPercLookahead[l], "E130");
-			clustersForPercLookahead[l] = nullptr;
-		}
+	if (percLookahead_ != nullptr) {
+		deluge_sample_reserve_close(percLookahead_);
+		percLookahead_ = nullptr;
 	}
 }
 
@@ -1140,23 +1133,15 @@ void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 // going to need in the next little while, to reserve it and hopefully make sure it's loaded and in memory when we need
 // it.
 void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection) {
-	int32_t clusterIndex = sourceBytePos >> Cluster::size_magnitude;
+	uint32_t sourceId = deluge::sample::source_id_for(*sample);
+	int32_t bytesPerSample = sample->numChannels * sample->byteDepth;
+	uint64_t markerFrame = (sourceBytePos - sample->audioDataStartPosBytes) / bytesPerSample;
 
-	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->cluster_index != clusterIndex) {
-		unassignAllReasonsForPercLookahead();
-
-		int32_t nextClusterIndex = clusterIndex;
-		for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-			if (nextClusterIndex < sample->getFirstClusterIndexWithAudioData()
-			    || nextClusterIndex >= sample->getFirstClusterIndexWithNoAudioData()) {
-				break; // If no more Clusters
-			}
-			clustersForPercLookahead[l] = deluge::audio::stream::prefetch(*sample, nextClusterIndex);
-			if (!clustersForPercLookahead[l]) {
-				break;
-			}
-			nextClusterIndex += playDirection;
-		}
+	if (percLookahead_ == nullptr) {
+		percLookahead_ = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
+	}
+	else {
+		deluge_sample_reserve_move(percLookahead_, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
 	}
 }
 

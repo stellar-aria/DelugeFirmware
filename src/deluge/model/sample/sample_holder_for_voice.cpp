@@ -34,31 +34,22 @@ SampleHolderForVoice::SampleHolderForVoice() {
 	// For backwards compatibility
 	startMSec = 0;
 	endMSec = 0;
-
-	for (auto& l : clustersForLoopStart) {
-		l = nullptr;
-	}
 }
 
 SampleHolderForVoice::~SampleHolderForVoice() {
 	// We have to unassign reasons here, even though our parent destructor will call unassignAllReasons() - our
 	// overriding of that virtual function won't happen as we've already been destructed!
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clustersForLoopStart[l]) {
-			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E247");
-		}
+	if (clustersForLoopStart_ != nullptr) {
+		deluge_sample_reserve_close(clustersForLoopStart_);
 	}
 }
 
 void SampleHolderForVoice::unassignAllClusterReasons(bool beingDestructed) {
 	SampleHolder::unassignAllClusterReasons(beingDestructed);
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clustersForLoopStart[l]) {
-			// Happened to me while auto-pilot testing, I think
-			deluge::cluster::remove_reason(*clustersForLoopStart[l], "E320");
-			if (!beingDestructed) {
-				clustersForLoopStart[l] = nullptr;
-			}
+	if (clustersForLoopStart_ != nullptr) {
+		deluge_sample_reserve_close(clustersForLoopStart_);
+		if (!beingDestructed) {
+			clustersForLoopStart_ = nullptr;
 		}
 	}
 }
@@ -89,7 +80,7 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 	if (loopStartPlaybackAtSample) {
 		int32_t loopStartPlaybackAtByte =
 		    ((Sample*)audioFile)->audioDataStartPosBytes + loopStartPlaybackAtSample * bytesPerSample;
-		claimClusterReasonsForMarker(clustersForLoopStart, loopStartPlaybackAtByte, playDirection,
+		claimClusterReasonsForMarker(clustersForLoopStart_, loopStartPlaybackAtByte, playDirection,
 		                             clusterLoadInstruction);
 	}
 
@@ -97,16 +88,15 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 		// claim the next few reasons for the sample instead since we can keep it all cached
 		int32_t nextClusterStartByte = (((Sample*)audioFile)->audioDataStartPosBytes + Cluster::size_magnitude) << 1;
 
-		claimClusterReasonsForMarker(clustersForLoopStart, nextClusterStartByte, playDirection, clusterLoadInstruction);
+		claimClusterReasonsForMarker(clustersForLoopStart_, nextClusterStartByte, playDirection,
+		                             clusterLoadInstruction);
 	}
 
 	// Or if no loop start point now, clear out any reasons we had before
 	else {
-		for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-			if (clustersForLoopStart[l]) {
-				deluge::cluster::remove_reason(*clustersForLoopStart[l], "E246");
-				clustersForLoopStart[l] = nullptr;
-			}
+		if (clustersForLoopStart_ != nullptr) {
+			deluge_sample_reserve_close(clustersForLoopStart_);
+			clustersForLoopStart_ = nullptr;
 		}
 	}
 }

@@ -27,6 +27,14 @@ deluge_resource = { path = "../deluge_resource" }
 # `__attribute__((weak))` fallback -- mirrors `deluge-bsp-rust`'s own direct dependency on
 # device (src/bsp/rust/Cargo.toml).
 deluge_sample_source = { path = "../deluge_sample_source", optional = true }
+# SIM (C2b): the Rust cluster fill, pulled into the sim's libdeluge_rust.a so its strong
+# deluge_streaming_begin_fill/_finish_fill/_set_fill_context override async_fill.cpp's (deleted) weak
+# C++ wrappers. native_fill = the manager-reaching fill; sim_convert = build convert shim-only (deluge_app
+# provides the convert objects). Optional + only pulled via the `sim` feature below.
+deluge_sample_fill = { path = "../deluge_sample_fill", optional = true }
+# SIM (C2b): std-backed critical-section impl for deluge_sample_fill's FILL_CONTEXTS mutex. Sim-only —
+# device links deluge_rust WITHOUT `sim` and gets the real impl from deluge-bsp-rust.
+critical-section = { version = "1", optional = true }
 
 [features]
 # Forward the allocator's AddressSanitizer poisoning (host-sim ASan build only).
@@ -40,4 +48,12 @@ asan = ["deluge_alloc/asan"]
 # code. `sim/CMakeLists.txt` passes `--features deluge_rust/sim` unconditionally for the sim
 # build; off by default, so a plain `cargo build -p deluge_rust` is unaffected, and neither is
 # device/host_app (they link `deluge_sample_source` directly, not through this umbrella).
-sim = ["dep:deluge_sample_source", "deluge_sample_source/sim"]
+sim = [
+    "dep:deluge_sample_source",
+    "deluge_sample_source/sim",
+    "dep:deluge_sample_fill",
+    "deluge_sample_fill/native_fill",
+    "deluge_sample_fill/sim_convert",
+    "dep:critical-section",
+    "critical-section/std",
+]

@@ -28,6 +28,17 @@ pub use deluge_resource::*;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_source;
 
+// SIM (C2b): force-link the Rust cluster fill + the std critical-section impl into libdeluge_rust.a,
+// same reasoning as `deluge_sample_source` above — nothing in this crate's Rust code references their
+// items, so without an explicit `extern crate` rustc/lld would not retain their objects in the
+// staticlib, and the sim's C++ would keep resolving async_fill.cpp's weak fill wrappers. Retaining the
+// fill member lets Task 3's deletion pull the strong override from the archive; retaining
+// critical_section keeps its `_critical_section_1_0_acquire` impl present for FILL_CONTEXTS's mutex.
+#[cfg(feature = "sim")]
+extern crate critical_section;
+#[cfg(feature = "sim")]
+extern crate deluge_sample_fill;
+
 // Bare-metal panic handler (device only); the host build uses std's. This is the
 // one panic handler for the entire dependency graph.
 #[cfg(target_os = "none")]

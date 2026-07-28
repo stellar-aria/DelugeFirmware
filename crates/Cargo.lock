@@ -77,8 +77,10 @@ dependencies = [
 name = "deluge_rust"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "deluge_alloc",
  "deluge_resource",
+ "deluge_sample_fill",
  "deluge_sample_source",
 ]
 

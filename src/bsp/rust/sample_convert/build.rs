@@ -91,20 +91,6 @@ fn main() {
     );
     let argon_inc = argon_dir.join("include");
 
-    // Fetched here (rather than further down, HOST-only) because the shim-only `app_convert` branch
-    // below ALSO needs it: shim.cpp includes convert.h -> argon.hpp, and on a non-ARM host argon falls
-    // back to SIMDe's portable NEON shim, same as the full HOST build further down. Only the DEVICE path
-    // (real target, real <arm_neon.h>) never needs it.
-    let simde_dir = third_party.join("simde");
-    fetch_pinned(
-        "simde",
-        SIMDE_URL,
-        SIMDE_SHA,
-        &simde_dir,
-        Path::new("simde/arm/neon.h"),
-    );
-    let simde_root = simde_dir;
-
     // SR2d-4 Task 5: this crate now has a real consumer (`deluge-bsp-rust`'s native fill task), which
     // links it on the ACTUAL armv7a-none-eabihf device target, not just the x86 host test binary. Same
     // `CARGO_CFG_TARGET_OS` check `deluge-bsp-rust`'s own build.rs uses to distinguish device from host.
@@ -121,6 +107,20 @@ fn main() {
         );
         return;
     }
+
+    // Fetched here (rather than up top with argon) because the DEVICE path above returns before this
+    // point and never needs it (real target, real <arm_neon.h>). Both branches below — the shim-only
+    // `app_convert` branch and the full HOST build further down — DO need it: shim.cpp includes
+    // convert.h -> argon.hpp, and on a non-ARM host argon falls back to SIMDe's portable NEON shim.
+    let simde_dir = third_party.join("simde");
+    fetch_pinned(
+        "simde",
+        SIMDE_URL,
+        SIMDE_SHA,
+        &simde_dir,
+        Path::new("simde/arm/neon.h"),
+    );
+    let simde_root = simde_dir;
 
     // C-host sim ("host, standing in for the app link"): the sim's deluge_app already compiles
     // convert.cpp/stitch.cpp/audio_format_helpers.cpp (shared deluge_SOURCES glob), so recompiling them

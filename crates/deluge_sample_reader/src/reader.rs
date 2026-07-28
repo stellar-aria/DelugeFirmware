@@ -621,8 +621,18 @@ impl Reader {
 
 /// Stateless, passive resident-peek (`deluge_sample_peek`, header doc): the resident,
 /// already-converted frames at `start_frame` of `source_id`'s residency, as a zero-copy run to
-/// the CONTAINING CLUSTER's own boundary in `direction` -- `{null, 0}` iff that cluster is not
-/// resident, or resident but not yet ready.
+/// the CONTAINING CLUSTER's own boundary in `direction`.
+///
+/// # Residency is the null pointer, not the count
+/// The residency signal is the returned `frames` pointer, NOT `frame_count` -- this makes the
+/// peek the exact equivalent of the C++ facade `peek` it replaces. `frames == null` iff there is
+/// no valid resident position here: null manager, no registered geometry, malformed geometry,
+/// `start_frame` past this cluster's real audio, not resident, or resident-but-not-yet-ready. A
+/// NON-null `frames` is always a valid pointer into the resident cluster payload; `frame_count`
+/// may then legitimately be `0`, meaning "resident and ready, but the cursor sits on the last
+/// PARTIAL frame -- fewer than one whole frame fits in `direction`." The caller reads that frame
+/// from the pointer with its own byte-math (as `Sample::getAveragesForCrossfade` does), so a `0`
+/// count must NOT be mistaken for "not resident."
 ///
 /// Reuses the SAME geometry resolution and frame->cluster mapping [`Reader::open`]/[`locate`]
 /// use, and the SAME `deluge_streaming_chunk_payload` accessor [`Reader::window`] uses -- no
@@ -683,9 +693,11 @@ pub fn peek(source_id: u32, start_frame: u64, direction: i8) -> (*const u8, u32)
     } else {
         byte_offset / frame_stride + 1
     };
-    if frame_count == 0 {
-        return (core::ptr::null(), 0); // No whole frame remains in this direction.
-    }
+    // No early return on `frame_count == 0`: residency is signalled by the non-null `frames`
+    // pointer, NOT the count (see this fn's doc). A resident, ready cluster whose cursor sits on
+    // its last PARTIAL frame (`resident - byte_offset < frame_stride`, forward) has zero WHOLE
+    // frames ahead yet is a perfectly valid resident position -- the caller reads that partial
+    // frame from `frames` with its own byte bounds, exactly as the facade `peek` it replaces does.
 
     // SAFETY: `chunk` was just confirmed resident (and ready) by `resource.peek`/`is_ready`
     // above; `deluge_streaming_chunk_payload` returns that chunk's payload base, valid for as
@@ -1678,6 +1690,50 @@ mod tests {
                         "reverse-run byte at k={k} must match the ramp"
                     );
                 }
+            }
+
+            #[test]
+            fn peek_on_the_last_partial_frame_is_resident_non_null_with_a_zero_count() {
+                let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                set_force_read_failure(false);
+                set_fail_at_byte_offset(None);
+                // 511 bytes, 24-bit mono (stride 3): cluster 0 is genuinely short (resident 511),
+                // and 511 is NOT a whole multiple of stride 3 -- its last frame is partial, exactly
+                // the boundary-straddling shape 24-bit samples hit constantly (and 16-bit never do).
+                let (_handle, asset) = harness(geo24(511));
+
+                // Fill+ready cluster 0 via the normal path (open at frame 0, not the partial tail),
+                // keeping `reader` alive so its self-pin holds the chunk resident for the peek.
+                let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
+                let (ptr, filled) = reader.window();
+                assert!(!ptr.is_null(), "cluster 0 must fill from frame 0");
+                assert_eq!(filled, 170, "511 bytes / stride 3 == 170 whole frames");
+
+                // Frame 170 -> byte_offset 510, resident 511: only 1 byte remains forward, less
+                // than one whole frame (stride 3). Residency is the NULL POINTER, not the count --
+                // this is a valid resident position, so `frames` must be non-null with a 0 count.
+                let (frames, frame_count) = peek(asset, 170, 1);
+                assert!(
+                    !frames.is_null(),
+                    "the last partial frame is resident: residency is the pointer, not the count"
+                );
+                assert_eq!(
+                    frame_count, 0,
+                    "no WHOLE frame fits forward from the last partial frame -- 0, not EOF"
+                );
+
+                // `frames` points AT byte_offset 510 (the cursor's own frame); the consumer reads
+                // the partial frame from here with its own byte-math. Byte 510 is cluster 0's own
+                // ramp value (510 mod 256 == 254), byte 511 == 255 -- the same bytes `window()`'s
+                // own 24-bit straddle test asserts at this position.
+                // SAFETY: `reader`'s still-held lease pins cluster 0 resident; bytes 510/511 are in
+                // its plain payload (resident 511), so both reads stay in bounds.
+                let got = unsafe { [*frames, *frames.add(1)] };
+                assert_eq!(
+                    got,
+                    [254u8, 255u8],
+                    "frames must point at the cursor's own ramp bytes, ready to read byte-wise"
+                );
             }
 
             #[test]

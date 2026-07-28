@@ -106,10 +106,16 @@ void deluge_sample_reader_close(DelugeSampleReader* reader);
 
 /// Stateless, passive resident-peek: the resident, already-converted frames at `start_frame` of
 /// `source_id`'s residency, as a zero-copy run to the CONTAINING CLUSTER's own boundary in
-/// `direction` — `{NULL, 0}` iff that cluster is not resident, OR resident but not yet ready (a
-/// `deluge_sample_reader_open`+`window()` would block to fill it; this never does). Takes NO
-/// lease, bumps NO recency, triggers NO load on a miss, and prefetches NO neighbouring cluster —
-/// safe to call from the audio render thread.
+/// `direction`. Takes NO lease, bumps NO recency, triggers NO load on a miss, and prefetches NO
+/// neighbouring cluster — safe to call from the audio render thread.
+///
+/// Residency is signalled by the `frames` pointer, NOT `frame_count` (this makes it the exact
+/// equivalent of the C++ facade `peek` it replaces): `frames == NULL` iff there is no valid
+/// resident position here — not resident, OR resident but not yet ready (a
+/// `deluge_sample_reader_open`+`window()` would block to fill it; this never does). A non-NULL
+/// `frames` with `frame_count == 0` means "resident and ready, but the cursor is on the last
+/// PARTIAL frame" — read that frame via the pointer with your own byte bounds; do NOT treat a 0
+/// count as not-resident.
 ///
 /// Within-cluster only: unlike `deluge_sample_reader_window`, this does NOT serve a
 /// boundary-straddling frame via the stitched trailing slack (that serve is proven safe only for

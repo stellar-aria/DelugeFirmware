@@ -18,13 +18,10 @@
 #include "model/sample/sample_holder.h"
 #include "gui/ui/browser/sample_browser.h"
 #include "hid/display/display.h"
-#include "io/debug/log.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_reader_bridge.h"
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
-#include "storage/audio/stream/sample_residency.h"
-#include "storage/cluster/cluster.h"
 #include "util/functions.h"
 
 static DelugeLoadMode loadModeFor(int32_t clusterLoadInstruction) {

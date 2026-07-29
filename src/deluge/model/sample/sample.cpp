@@ -1785,23 +1785,6 @@ doneReading:
 	return freq;
 }
 
-void Sample::convertDataOnAnyClustersIfNecessary() {
-	if (rawDataFormat != RawDataFormat::NATIVE) {
-		for (int32_t c = getFirstClusterIndexWithAudioData(); c < getFirstClusterIndexWithNoAudioData(); c++) {
-			StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
-			if (cluster != nullptr) {
-
-				// Add reason in case it would get stolen
-				deluge::cluster::add_lease(cluster);
-
-				cluster->convert_data_if_necessary();
-
-				deluge::cluster::remove_reason(*cluster, "E231");
-			}
-		}
-	}
-}
-
 int32_t Sample::getMaxPeakFromZero() {
 	// Comes out one >> of the value we actually want
 	int32_t halfValue = std::abs(getFoundValueCentrePoint() >> 1) + (maxValueFound >> 2) - (minValueFound >> 2);
@@ -1822,11 +1805,6 @@ int32_t Sample::getValueSpan() {
 void Sample::finalizeAfterLoad(uint32_t fileSize) {
 
 	audioDataLengthBytes = std::min<uint64_t>(audioDataLengthBytes, fileSize - audioDataStartPosBytes);
-
-	// If floating point file, Clusers can only be float-processed (as they're loaded) once we've found the data
-	// start-pos, which we just did, and since we've already loaded that first cluster which contains data, we'd better
-	// float-process it now!
-	convertDataOnAnyClustersIfNecessary();
 
 	uint32_t bytesPerSample = byteDepth * numChannels;
 

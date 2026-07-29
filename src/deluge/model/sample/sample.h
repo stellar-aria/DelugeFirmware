@@ -85,7 +85,6 @@ public:
 	                                int32_t* latestPixellatedPos);
 	bool getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int32_t crossfadeLengthSamples,
 	                             int32_t playDirection, int32_t lengthToAverageEach);
-	void convertDataOnAnyClustersIfNecessary();
 	int32_t getMaxPeakFromZero();
 	int32_t getFoundValueCentrePoint();
 	int32_t getValueSpan();

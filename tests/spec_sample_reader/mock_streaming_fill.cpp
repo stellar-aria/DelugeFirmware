@@ -44,6 +44,22 @@ uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {
 void deluge_streaming_chunk_set_loaded(void* /*chunk_backing*/) {
 }
 
+bool deluge_streaming_chunk_loaded(void* /*chunk_backing*/) {
+	return false;
+}
+
+// No async streaming-fill task in this spec: `Reader::acquire_and_fill` gates on
+// deluge_streaming_async_active() (false here) and takes its synchronous fill route, never calling
+// deluge_streaming_fill_chunk_blocking. Both are declared as externs by the reader crate, so they
+// must exist for the link even though this spec's one scenario never reaches either.
+bool deluge_streaming_async_active() {
+	return false;
+}
+
+bool deluge_streaming_fill_chunk_blocking(void* /*chunk_backing*/) {
+	return false;
+}
+
 DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* /*chunk_backing*/) {
 	return {};
 }

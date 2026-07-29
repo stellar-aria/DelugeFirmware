@@ -89,6 +89,20 @@ extern "C" fn deluge_efatfs_read_at(
     false
 }
 
+/// No async streaming-fill task in this differential harness, so `Reader::acquire_and_fill` takes
+/// its synchronous `fill_now` route (through `deluge_efatfs_read_at` above) — the same path this
+/// harness has always exercised. `deluge_streaming_fill_chunk_blocking` below is the async-BSP
+/// alternative, never reached here (this returns false); both must exist for the binary to link.
+#[unsafe(no_mangle)]
+extern "C" fn deluge_streaming_async_active() -> bool {
+    false
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn deluge_streaming_fill_chunk_blocking(_chunk_backing: *mut c_void) -> bool {
+    false
+}
+
 /// `cpp/harness_shim.cpp`'s own entry points — real `StreamedChunk` construction/introspection plus
 /// the differential's own oracle reads. See that file's module doc for what each does.
 mod shim {

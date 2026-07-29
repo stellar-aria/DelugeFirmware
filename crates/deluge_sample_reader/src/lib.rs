@@ -190,6 +190,22 @@ pub(crate) mod host_streaming_stubs {
     #[unsafe(no_mangle)]
     extern "C" fn deluge_streaming_signal_fill() {}
 
+    /// The host test binary has no async streaming-fill task, so it takes the synchronous `fill_now`
+    /// route through `deluge_efatfs_read_at` above (the one these tests exercise) — exactly the
+    /// C-host `deluge_render` path. `Reader::acquire_and_fill` gates on this.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_async_active() -> bool {
+        false
+    }
+
+    /// Never reached in the host test binary (`deluge_streaming_async_active` returns false, so
+    /// `acquire_and_fill` takes the `fill_now` branch), but declared as an `extern` there, so it
+    /// must exist for the binary to link. Returns false.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_fill_chunk_blocking(_chunk_backing: *mut c_void) -> bool {
+        false
+    }
+
     #[unsafe(no_mangle)]
     extern "C" fn deluge_streaming_chunk_convert_state(
         chunk_backing: *mut c_void,

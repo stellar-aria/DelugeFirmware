@@ -138,6 +138,15 @@ uint8_t* deluge_streaming_chunk_payload(void* chunk_backing);
 ///                       deluge_resource_loader_next.
 void deluge_streaming_chunk_set_loaded(void* chunk_backing);
 
+/// @brief Read the chunk's loaded/ready flag (the read half of deluge_streaming_chunk_set_loaded).
+///
+/// Returns `StreamedChunk::loaded` — the flag the async drain's `native_finish` tail flips true
+/// once the chunk is read + converted + stitched. Polled by deluge_streaming_fill_chunk_blocking's
+/// on-fiber yield-wait to tell when the drain has landed a chunk it is blocking on.
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer.
+/// @return true if the chunk's payload is loaded/ready.
+bool deluge_streaming_chunk_loaded(void* chunk_backing);
+
 /// @brief The chunk's pre-conversion convert-state, mirrored from `StreamedChunk`'s own fields.
 ///
 /// `first_three_bytes` is the PRE-conversion first 3 bytes of the chunk's raw data (read by a
@@ -191,6 +200,29 @@ bool deluge_streaming_async_active(void);
 /// Embassy BSP with the feature off it signals a `Signal` nobody awaits; on every other BSP it
 /// hits the weak no-op fallback in `async_fill.cpp`.
 void deluge_streaming_signal_fill(void);
+
+/// @brief Fill a reserved chunk through the async drain, blocking on the worker fiber.
+///
+/// The async-BSP replacement for the range reader's synchronous `fill_now` (deluge_sample_reader's
+/// `reader.rs`), reached only when deluge_streaming_async_active() is true. Enqueues @p chunk_backing
+/// on the loader queue at the most-urgent priority and wakes `streaming_fill_task`, then:
+/// - ON the worker fiber: yields (the executor drains the fill task while suspended) until the
+///   chunk's `loaded` flag flips, returning readiness. Byte-equivalent to the synchronous fill —
+///   same `native_finish` convert/stitch/publish tail — just awaited instead of run inline, and
+///   without the off-fiber `block_on` that deadlocks a single-threaded executor against a
+///   fiber-suspended load holding the embedded-fatfs mutex.
+/// - OFF the worker fiber: returns false immediately (degrade-to-eventual). An off-fiber caller has
+///   no stack to suspend; the chunk stays enqueued. The sole off-fiber caller today is the
+///   display-only background waveform overview pre-scan, whose consumer already retries a not-ready
+///   read on the next tick.
+///
+/// The real implementation lives in `streaming_loader.rs` (always compiled on the Rust/Embassy BSP);
+/// every other BSP/config links the `__attribute__((weak))` fallback in `async_fill.cpp` (returns
+/// false, never reached on the hot path since those BSPs report deluge_streaming_async_active()
+/// false and take the synchronous `fill_now` branch).
+/// @param chunk_backing Opaque `StreamedChunk` backing pointer for a reserved, still-leased chunk.
+/// @return true once the chunk is resident+ready; false on the off-fiber degrade or a failed fill.
+bool deluge_streaming_fill_chunk_blocking(void* chunk_backing);
 
 /// @brief Open a sample file for streaming reads through embedded-fatfs, writing its handle out.
 ///

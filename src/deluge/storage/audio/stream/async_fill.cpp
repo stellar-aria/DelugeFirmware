@@ -109,6 +109,14 @@ void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
 	reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;
 }
 
+// Read half of deluge_streaming_chunk_set_loaded -- the readiness flag the on-fiber yield-wait in
+// deluge_streaming_fill_chunk_blocking (streaming_loader.rs) polls. Real body only, no weak
+// fallback, same as its siblings above: this TU is part of the shared deluge_SOURCES glob and so
+// always compiles and links into every BSP.
+bool deluge_streaming_chunk_loaded(void* chunk_backing) {
+	return reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded;
+}
+
 void deluge_streaming_chunk_set_unloadable(void* chunk_backing) {
 	reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable = true;
 }
@@ -155,6 +163,16 @@ __attribute__((weak)) bool deluge_streaming_async_active(void) {
 
 __attribute__((weak)) void deluge_streaming_signal_fill(void) {
 	// No async task to wake on this BSP/config.
+}
+
+// Weak fallback for the reader range-fill's async-BSP blocking-fill routine. The Rust Embassy BSP
+// provides the real definition (streaming_loader.rs) whenever it links that crate; every other
+// BSP/config resolves this instead. Unreachable on the hot path there: those BSPs report
+// deluge_streaming_async_active() false, so the reader takes its synchronous `fill_now` branch and
+// never calls this. Returns false so any stray call degrades to a not-ready read rather than
+// silently claiming success.
+__attribute__((weak)) bool deluge_streaming_fill_chunk_blocking(void* /*chunk_backing*/) {
+	return false;
 }
 
 // Weak fallbacks for the embedded-fatfs streaming READ symbols. The Rust Embassy BSP provides the

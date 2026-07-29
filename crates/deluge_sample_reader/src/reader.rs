@@ -167,6 +167,20 @@ unsafe extern "C" {
         count: u32,
         out_read: *mut u32,
     ) -> bool;
+    /// Whether the Rust async streaming-fill task owns the loader queue on this build/BSP
+    /// (`include/libdeluge/streaming_fill.h`). Gates [`Reader::acquire_and_fill`]'s fill route: false
+    /// (the C-host `deluge_render` sim — resolves the `async_fill.cpp` weak `false`) keeps the
+    /// synchronous [`fill_now`] byte-for-byte; true (the Rust/Embassy BSP) routes through the async
+    /// drain via [`deluge_streaming_fill_chunk_blocking`] below.
+    fn deluge_streaming_async_active() -> bool;
+    /// Fill a reserved chunk through the async drain, blocking on the worker fiber
+    /// (`include/libdeluge/streaming_fill.h`) — the async-BSP replacement for [`fill_now`]. On the
+    /// worker fiber it yields until the drain lands the chunk (byte-equivalent to `fill_now`, same
+    /// `native_finish` tail); off-fiber it enqueues and returns `false` (degrade-to-eventual — the
+    /// off-fiber overview pre-scan is display-only and its consumer retries). Real body in
+    /// `streaming_loader.rs`; weak `false` fallback in `async_fill.cpp` for non-async BSPs (never
+    /// reached — they report `deluge_streaming_async_active() == false`).
+    fn deluge_streaming_fill_chunk_blocking(chunk_backing: *mut c_void) -> bool;
 }
 
 /// A reader's frame-cursor state over one sample's source residency
@@ -309,8 +323,26 @@ impl Reader {
             self.geometry.cluster_size_bytes as usize,
         )?;
         let backing = lease.chunk().as_ptr() as *mut c_void;
-        if !fill_now(backing) {
-            return None; // `lease` drops here, releasing the failed reservation.
+        // Fill route, gated on whether an async streaming-fill drain owns the loader queue:
+        // - false (the C-host `deluge_render` sim): the synchronous [`fill_now`] exactly as before —
+        //   a passthrough read with no async task, byte-for-byte the golden path.
+        // - true (the Rust/Embassy BSP): route through the async drain
+        //   ([`deluge_streaming_fill_chunk_blocking`]). On the worker fiber it yields until the drain
+        //   lands the chunk (byte-equivalent — same `native_finish` convert/stitch/publish tail),
+        //   instead of the synchronous off-fiber `block_on` that deadlocks a single-threaded executor
+        //   against a fiber-suspended load holding the embedded-fatfs mutex. Off the fiber (the
+        //   display-only background waveform overview pre-scan, this reader's sole off-fiber caller)
+        //   it degrades to not-ready and the scan's consumer retries — never affecting audio/stem
+        //   output (overview data is display-only).
+        // SAFETY: `deluge_streaming_async_active`/`_fill_chunk_blocking` are the streaming-fill C-ABI;
+        // `backing` is the just-`request`ed, still-leased chunk (its lease is held here).
+        let filled = if unsafe { deluge_streaming_async_active() } {
+            unsafe { deluge_streaming_fill_chunk_blocking(backing) }
+        } else {
+            fill_now(backing)
+        };
+        if !filled {
+            return None; // `lease` drops here, releasing the unfilled reservation.
         }
         resource.mark_ready(lease.chunk());
         Some(lease)

@@ -129,9 +129,10 @@ Error Sample::initialize(int32_t newNumClusters) {
 	return Error::NONE;
 }
 
-// The SAMPLE-cluster resource-manager Source callbacks (materialize / construct / evict) and the
+// The SAMPLE-cluster resource-manager Source's construct callback (materialize and evict are both
+// null -- eviction needs no callback; a StreamedChunk is a trivially-destructible slab POD) and the
 // asset-definition entry deluge_streaming_define_asset() live in
-// storage/audio/stream/chunk_residency.cpp; the residency table itself lives on
+// storage/audio/stream/chunk_residency.cpp; the Asset id cache lives on
 // deluge::audio::stream::SampleStream -- storage/audio/stream/sample_stream.{h,cpp}.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========

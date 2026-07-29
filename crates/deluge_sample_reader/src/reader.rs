@@ -1061,8 +1061,8 @@ mod tests {
         /// `DELUGE_RESOURCE_BACKING_SLAB` streaming-cluster assets — `chunk_residency.cpp`'s
         /// `deluge_streaming_define_asset` — rather than `BACKING_HEAP`: a slab's per-slot size is
         /// fixed at slab-creation time and the `size` argument `Reader::acquire_and_fill` passes to
-        /// `request` is ignored, exactly like the real `kSlabBackedSizeIgnored` convention
-        /// `sample_residency.cpp` documents), register `ctx` as the asset's fill-context, and route
+        /// `request` is ignored, exactly like the real `kSlabBackedSizeIgnored` convention documents
+        /// (`storage/cluster/cluster.h`)), register `ctx` as the asset's fill-context, and route
         /// the stub's active manager — see `test_manager_and_asset` (the parent module) for why
         /// every caller must hold [`TEST_LOCK`] for its whole run.
         fn harness(ctx: FillContext) -> (*mut DelugeResource, u32) {

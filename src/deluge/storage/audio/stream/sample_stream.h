@@ -35,27 +35,26 @@ namespace deluge::audio::stream {
 ///
 /// Every `Sample` owns exactly one `SampleStream` (as a member). It is the sole owner of that sample's
 /// streaming state:
-///   - residency itself, which lives entirely in the resource manager and is reached via the
-///     `deluge::audio::stream` facade's prefetch()/load_now()/request() (leasing dispatch) or its
-///     peek() free function (non-leasing peek) → the manager peek/acquire (SR3e retired the former
+///   - residency itself, which lives entirely in the resource manager (SR3e retired the former
 ///     app-side residency-table mirror; there is nothing left on `SampleStream` for a caller to index
-///     directly);
+///     directly). Non-voice consumers reach it through the reader C-ABI (`SampleFrameReader` /
+///     `deluge_sample_read` / `deluge_sample_peek` / `deluge_sample_reserve_*` /
+///     `deluge_sample_invalidate`); the voice reaches it through the region port;
 ///   - the open **efatfs read handle** used to pull cluster bytes off the card (R1's streaming read
 ///     path; see `efatfs_handle_`);
 ///   - the sample's **resource-manager Asset** id cache (`resource_asset_id_`); the Asset's
-///     *definition* + the materialize / construct callbacks the manager invokes now live in
-///     `chunk_residency.cpp` (`deluge_streaming_define_asset()`), not here (eviction needs no callback —
-///     the manager frees the trivially-destructible slab chunk itself);
+///     *definition* + the `construct` callback the manager invokes now live in `chunk_residency.cpp`
+///     (`deluge_streaming_define_asset()`), not here (eviction needs no callback — the manager frees
+///     the trivially-destructible slab chunk itself);
 ///   - **read-source selection** — the single place a cluster read is issued from (make_read_source()).
 ///
-/// Callers obtain a cluster through the `deluge::audio::stream` facade's prefetch()/load_now()/request()
-/// (which take a manager lease) or peek at a resident one through its peek() free function (no lease);
-/// none branches on how a cluster's bytes are read.
+/// Callers reach a cluster's bytes through the reader C-ABI or the region port (each dispatching to the
+/// resource manager for residency); none branches on how a cluster's bytes are read.
 ///
 /// @note **Real-time contract.** The audio render thread never calls into `SampleStream` per sample —
 ///       it reads already-resident chunk bytes by pointer from its own lookahead array. It only touches
-///       this class at cluster-boundary crossings, to enqueue the next cluster, and the facade's
-///       prefetch() (CLUSTER_ENQUEUE) never blocks on I/O.
+///       this class at cluster-boundary crossings, to enqueue the next cluster via the resource manager,
+///       which never blocks on I/O.
 ///
 /// @warning Non-copyable and non-movable: it holds a back-reference to its owning `Sample` and owns the
 ///          read stream and Asset. This transitively makes `Sample` non-movable.
@@ -129,9 +128,10 @@ public:
 	/// @brief Reconstruct @p cluster's data: read its sectors from the read source, convert if the
 	///        sample's raw format isn't native, and stitch in the neighbouring clusters' boundary bytes.
 	///
-	/// The pure per-cluster reconstruction primitive underneath the residency dispatch and the
-	/// resource-manager materialize callback (cluster_materialize()) — no orchestration (leasing, the
-	/// loading queue) here.
+	/// The pure per-cluster reconstruction primitive underneath the residency dispatch — called by the
+	/// async loader's (sim) fill drain (`loader.cpp`), using `deluge_streaming_begin_fill()`/
+	/// `deluge_streaming_finish_fill()` internally to do the read/convert/stitch — no orchestration
+	/// (leasing, the loading queue) here.
 	/// @warning Must be called on the cluster's OWN sample's stream, i.e. on `cluster.sample->stream()`
 	///          (`this == &cluster.sample->stream()`) — make_read_source() is called on `*this` below,
 	///          and the finish-fill step it hands off to peeks `cluster.sample`'s resident neighbour

@@ -63,7 +63,7 @@ unsafe extern "C" {
     ) -> bool;
     /// Wake the async loader (`include/libdeluge/streaming_fill.h:188`) after enqueueing a chunk
     /// via `Resource::loader_enqueue` — see [`enqueue_unfilled`]'s own doc for the recipe this
-    /// mirrors (`sample_residency.cpp`'s `CLUSTER_ENQUEUE` block).
+    /// mirrors (the `CLUSTER_ENQUEUE` block formerly in `sample_residency.cpp`, since deleted).
     fn deluge_streaming_signal_fill();
 }
 
@@ -352,11 +352,12 @@ fn walk_and_lease(
     (covered, leases, num_covered)
 }
 
-/// Schedule `chunk` onto the async loader if it isn't already ready — the exact two-call recipe
-/// `sample_residency.cpp`'s `CLUSTER_ENQUEUE` block runs after its own `deluge_resource_request`
-/// (`Resource::request`'s C++ twin): `deluge_resource_loader_enqueue(mgr, cluster->resource_slot,
-/// priority_rating)` (here, `Resource::loader_enqueue`) then `deluge_streaming_signal_fill()` to
-/// wake the loader task. `priority_rating` for this passive-lookahead path is `0xFFFF_FFFF` — the
+/// Schedule `chunk` onto the async loader if it isn't already ready — the exact two-call recipe the
+/// `CLUSTER_ENQUEUE` block formerly in `sample_residency.cpp` (since deleted) ran after its own
+/// `deluge_resource_request` (`Resource::request`'s C++ twin): `deluge_resource_loader_enqueue(mgr,
+/// cluster->resource_slot, priority_rating)` (here, `Resource::loader_enqueue`) then
+/// `deluge_streaming_signal_fill()` to wake the loader task. `priority_rating` for this
+/// passive-lookahead path is `0xFFFF_FFFF` — the
 /// C++ recipe's own lowest-urgency prefetch priority. A no-op if `chunk` is already ready (mirrors
 /// the C++ `if (!cluster->loaded)` guard): a hit doesn't need scheduling, and neither does a chunk
 /// some other caller already filled between `request` and this call.

@@ -589,8 +589,9 @@ tryGettingFFTConfig:
 				source += byteDepth;
 			}
 
-			int32_t bytesJustWritten = initialBandWritePos - bandDestinationStartedAt;
-			int32_t samplesJustCopied = bytesJustWritten >> 1;
+			// initialBandWritePos and bandDestinationStartedAt are both int16_t*, so their
+			// native subtraction already yields a sample (element) count.
+			int32_t samplesJustCopied = initialBandWritePos - bandDestinationStartedAt;
 			int32_t sourceBytesJustRead = samplesJustCopied * byteDepth;
 			sourceBytesLeftToCopyThisCycle -= sourceBytesJustRead;
 			byteIndexWithinCluster += sourceBytesJustRead;

@@ -2,10 +2,12 @@
 //! `deluge_app` on this repo's Rust/Embassy host substrate (the same
 //! `raw::Executor` + `PeekableMockDriver` + no-thread pender shape
 //! `../lens1_vt_sim/` pioneered for the streaming-underrun harness), mounts a
-//! fixture SD-card image, and — **this rung's scope only** — exits cleanly.
-//! Later rungs replace [`run_stem_export_scenario`]'s stub body with a real
-//! `StemExport` drive and wire up deterministic stem-audio capture; this file
-//! only takes the harness as far as boot + mount + a clean `exit(0)`.
+//! fixture SD-card image, dispatches a real offline `StemExport` run onto the
+//! storage-owner worker fiber, copies the produced stem WAV(s) out of the
+//! image, and exits cleanly. No cluster fills drain yet under `async_active`
+//! (`loader::pump` no-ops — see [`run_stem_export_scenario`]'s doc), so a
+//! sample-backed fixture's stem content is still silence; that's a later
+//! rung's job (see the plan).
 //!
 //! # Why a sibling package, not a `lens1_vt_sim` `[[bin]]`
 //!
@@ -72,12 +74,14 @@
 //! sys`/Cargo features), not a fork: a change to any of these files is picked
 //! up by every package that path-includes it. Deliberately does NOT
 //! `#[path]`-include `scenario.rs` (unlike `../lens1_vt_sim/`): nothing this
-//! rung boots reaches into it, and this package's own future scenario
+//! package boots reaches into it, and this package's own scenario
 //! ([`run_stem_export_scenario`]) is a `StemExport` drive, not the
 //! streaming-underrun harness's play/record scenario that file wraps.
 #![feature(impl_trait_in_assoc_type)]
 
+use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::CString;
 
 use embassy_executor::raw;
 use embassy_time::{Duration, Instant, Timer};
@@ -170,11 +174,36 @@ unsafe extern "C" {
     fn deluge_app_init(board: *const sys::DelugeBoard);
 }
 
+// Host-only C-ABI bridge (src/deluge/harness/streaming_scenario.{h,cpp},
+// `DELUGE_HOST`-guarded — compiled into the linked host_app `deluge_app` object
+// closure, never into the ARM device firmware). Manually declared (not through
+// the bindgen `sys` module, same pattern `scenario.rs` uses for the identical
+// bridge): these are harness-only entry points the app exposes to the platform,
+// not part of the libdeluge C-ABI the app CONSUMES.
+//
+// The song-load quartet (`begin_song_load`/`song_listing_in_progress`/
+// `commit_song_load`/`song_load_in_progress`) pre-dates this task (added for
+// the streaming-underrun harness, `scenario.rs`'s own copy of these same
+// declarations) — this scenario needs its own since it does NOT `#[path]`-
+// include `scenario.rs` (see the module doc). Without loading a real song
+// first, `currentSong` is still the blank boot-time song `deluge_boot()`
+// leaves in place, and StemExport has nothing to export.
+unsafe extern "C" {
+    fn deluge_scenario_start_song_load(full_path: *const c_char);
+    fn deluge_scenario_song_load_begin_done() -> bool;
+    fn deluge_scenario_song_load_begin_ok() -> bool;
+    fn deluge_scenario_song_listing_in_progress() -> bool;
+    fn deluge_scenario_commit_song_load() -> bool;
+    fn deluge_scenario_song_load_in_progress() -> bool;
+    fn deluge_scenario_start_stem_export(mode: i32);
+    fn deluge_scenario_stem_export_done() -> bool;
+    fn deluge_scenario_copy_stems_out(out_dir: *const c_char);
+}
+
 /// Set once [`boot_task`] has run the efatfs mount, `deluge_app_init` (which
 /// itself runs the C FatFS mount synchronously), and is about to enter its
-/// worker-fiber pump loop. This rung's [`run_stem_export_scenario`] waits on
-/// this flag and then declares the run done — the entirety of Task 1's scope
-/// (boot + mount + clean exit, no scenario logic yet).
+/// worker-fiber pump loop. [`run_stem_export_scenario`] waits on this flag
+/// before dispatching the stem export.
 static BOOT_MOUNTED: AtomicBool = AtomicBool::new(false);
 
 /// Boot task: mirrors `deluge-bsp-rust`'s `host_app_task` exactly (PIC-ready
@@ -227,16 +256,64 @@ async fn boot_task() {
     }
 }
 
+/// In-image `SONGS/*.XML` path for `fixture` — the same `SONG_XML` values
+/// `scripts/golden_mixdown.sh`'s per-fixture `case` uses (the packed image
+/// flattens each fixture's song to `SONGS/<name>.XML`, dropping the
+/// `problem_songs/...` subdirectory the local backup corpus nests it under —
+/// see `sd_image::pack_golden_fixture`). `GOLDEN_STEM_SONG` overrides for a
+/// fixture not in this table.
+fn fixture_song_path(fixture: &str) -> String {
+    if let Ok(path) = std::env::var("GOLDEN_STEM_SONG") {
+        return path;
+    }
+    match fixture {
+        "cordae" => "SONGS/Cordae.XML",
+        "highsiderr" => "SONGS/06 Ilove Techno Song_Final_2.XML",
+        "icoustic" => "SONGS/Grunnmur 58 Nobass 14 Comm-Test.XML",
+        other => panic!(
+            "golden_vt_render: no known SONGS/*.XML path for fixture '{other}' — set GOLDEN_STEM_SONG"
+        ),
+    }
+    .to_string()
+}
+
+/// `StemExportType` to export — matches the C++ enum's values
+/// (`definitions_cxx.hpp`: CLIP=0, TRACK=1, DRUM=2, MIXDOWN=3), carried as the
+/// `int32_t` `deluge_scenario_start_stem_export` takes. `GOLDEN_STEM_MODE`
+/// mirrors `deluge_render`'s own `--mode` flag (`host_render_main.cpp`'s
+/// `parse_mode`); defaults to TRACK, same as that tool.
+fn stem_export_mode() -> i32 {
+    match std::env::var("GOLDEN_STEM_MODE")
+        .unwrap_or_default()
+        .to_uppercase()
+        .as_str()
+    {
+        "CLIP" => 0,
+        "DRUM" => 2,
+        "MIXDOWN" => 3,
+        _ => 1, // TRACK
+    }
+}
+
 /// This rung's scenario: waits for [`boot_task`] to finish booting + mounting,
-/// then declares the run done. `fixture` is already packed and pointed at by
-/// `DELUGE_SD_IMAGE` before this task is even spawned (see the module doc's
-/// "SD-image packing" section) — it's threaded through here only so the log
-/// line identifies which fixture this run booted against, and so later rungs
-/// (which replace this body with a real `StemExport` drive) have it in scope
-/// without a signature change.
+/// dispatches a real offline `StemExport` run onto the storage-owner worker
+/// fiber (`deluge_scenario_start_stem_export`), polls the driver to quiescence
+/// until it completes (`deluge_scenario_stem_export_done`), copies the produced
+/// stem WAV(s) out of the mounted image (`deluge_scenario_copy_stems_out` —
+/// mirrors `host_render_main.cpp`'s `copy_stems_out`), then declares the run
+/// done. `fixture` is already packed and pointed at by `DELUGE_SD_IMAGE` before
+/// this task is even spawned (see the module doc's "SD-image packing" section)
+/// — it's threaded through here only so the log lines identify which fixture
+/// this run is against.
 ///
-/// Deliberately does NOT call any `StemExport` C-ABI yet — that's a later
-/// rung's job (see the module doc).
+/// This rung drains NO cluster fills: `async_active` is on for this package
+/// (see `Cargo.toml`'s `default` features), so `loader::pump` no-ops inside
+/// `StemExport::renderWait`'s offline loop and the real async fill drain is a
+/// later rung's job (see the module doc / the plan). A fixture whose render
+/// needs no streamed sample clusters (synth-only) renders correct content
+/// here; a sample-backed fixture renders silence for its sample content —
+/// this task only proves the plumbing (real WAV files, right count/structure,
+/// clean exit), not sample-content correctness.
 #[embassy_executor::task]
 async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBool) {
     log::info!("golden_vt_render: run_stem_export_scenario: fixture={fixture}, awaiting boot+mount");
@@ -253,7 +330,119 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
         }
         Timer::after_millis(5).await;
     }
-    log::info!("golden_vt_render: boot+mount confirmed for fixture={fixture}; exiting cleanly");
+
+    // Load the fixture's real song first — StemExport exports whatever
+    // `currentSong` currently is, and boot leaves it as the blank template
+    // song otherwise. Same two-phase dispatch/poll shape `scenario.rs`'s
+    // `run()` uses for the identical C-ABI (see `streaming_scenario.h`'s "Why
+    // two-phase song load" doc): `begin_song_load` only DISPATCHES the async
+    // directory listing.
+    let song_path = fixture_song_path(fixture);
+    log::info!("golden_vt_render: boot+mount confirmed for fixture={fixture}; loading {song_path}");
+    let song_path_c =
+        CString::new(song_path.clone()).expect("fixture_song_path never contains a NUL byte");
+    // Dispatched onto the worker fiber (deluge_scenario_start_song_load), NOT
+    // called inline — see that C-ABI entry's doc: called directly from this
+    // off-fiber Rust task, deluge_scenario_begin_song_load()'s own
+    // openUI(&loadSongUI) chain does a real storage read that can livelock the
+    // process under sim_latency.
+    // SAFETY: DELUGE_HOST harness C-ABI; boot (confirmed above) has already run
+    // `deluge_app_init`, so `currentSong` exists. `song_path_c` outlives the call.
+    unsafe { deluge_scenario_start_song_load(song_path_c.as_ptr()) };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // SAFETY: as above.
+        if unsafe { deluge_scenario_song_load_begin_done() } {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!("golden_vt_render: song-load dispatch did not run within the 30s wait budget — wedged");
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+    // SAFETY: as above.
+    if !unsafe { deluge_scenario_song_load_begin_ok() } {
+        log::error!("golden_vt_render: deluge_scenario_begin_song_load('{song_path}') returned false");
+        hard_exit(2);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // SAFETY: as above.
+        if !unsafe { deluge_scenario_song_listing_in_progress() } {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!("golden_vt_render: song listing did not complete within the 30s wait budget — wedged");
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+
+    // SAFETY: as above.
+    let committed = unsafe { deluge_scenario_commit_song_load() };
+    if !committed {
+        log::error!("golden_vt_render: deluge_scenario_commit_song_load() returned false (owner queue rejected it)");
+        hard_exit(2);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        // SAFETY: as above.
+        if !unsafe { deluge_scenario_song_load_in_progress() } {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!("golden_vt_render: song load did not complete within the 60s wait budget — wedged");
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+    log::info!("golden_vt_render: song load complete for fixture={fixture}");
+
+    let mode = stem_export_mode();
+    log::info!("golden_vt_render: dispatching stem export mode={mode}");
+    // SAFETY: DELUGE_HOST harness C-ABI; the song load above has completed, so
+    // `currentSong` is the fixture's real song. Fire-and-forget: this only
+    // enqueues the export onto the storage-owner worker fiber (see the C++ doc
+    // comment) — it does not itself run the export.
+    unsafe { deluge_scenario_start_stem_export(mode) };
+
+    // The export runs as ONE synchronous worker-fiber op once dispatched (no
+    // yield points inside it yet — see the module doc's fill-drain note), so
+    // this wait budget only needs to cover real wall-clock render time, not a
+    // wedge in the usual "stuck forever" sense; keep it generous regardless.
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        // SAFETY: as above.
+        if unsafe { deluge_scenario_stem_export_done() } {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!(
+                "golden_vt_render: stem export did not complete within the 300s wait budget — wedged"
+            );
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+    log::info!("golden_vt_render: stem export complete for fixture={fixture}; copying stems out");
+
+    let out_dir = std::env::var("GOLDEN_STEM_OUT").unwrap_or_else(|_| "golden_stems".to_string());
+    match CString::new(out_dir.clone()) {
+        Ok(c_out_dir) => {
+            // SAFETY: as above; `c_out_dir` outlives the call.
+            unsafe { deluge_scenario_copy_stems_out(c_out_dir.as_ptr()) };
+        }
+        Err(_) => {
+            log::error!("golden_vt_render: GOLDEN_STEM_OUT ({out_dir:?}) contains a NUL byte");
+            hard_exit(2);
+        }
+    }
+
+    log::info!("golden_vt_render: stems copied to {out_dir}; exiting cleanly");
     done.store(true, Ordering::Release);
 }
 
@@ -302,6 +491,13 @@ fn main() {
         // SAFETY: single-threaded at this point (before any task/executor exists).
         unsafe { std::env::set_var("DELUGE_SD_IMAGE", &img) };
     }
+    // Same flag `host_render_main.cpp`'s `main()` sets before its own
+    // `deluge_main()` — `audio_host.rs`'s `deluge_audio_drive` reads it to trim
+    // redundant per-block diagnostic bookkeeping during the offline export (see
+    // its `render_mode()` doc comment). `host_app`/`lens1_vt_sim` never set this,
+    // so this is inert everywhere but this binary.
+    // SAFETY: single-threaded at this point (before any task/executor exists).
+    unsafe { std::env::set_var("DELUGE_RENDER", "1") };
 
     // See this file's module doc: sidesteps the boot-time off-fiber block_on
     // livelock. Set once, before anything spawns.

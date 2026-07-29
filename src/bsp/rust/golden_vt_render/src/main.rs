@@ -500,7 +500,12 @@ fn main() {
     unsafe { std::env::set_var("DELUGE_RENDER", "1") };
 
     // See this file's module doc: sidesteps the boot-time off-fiber block_on
-    // livelock. Set once, before anything spawns.
+    // livelock. Set once, before anything spawns. Only needed (and only
+    // exists) under `sim_latency` — this package's default feature set
+    // dropped it (see Cargo.toml's `default`/`sim_latency` doc): without
+    // `sim_latency`, `sd.rs`'s plain (non-modeled) block-device path is used
+    // directly and the livelock this sidesteps cannot occur.
+    #[cfg(feature = "sim_latency")]
     sd::sim_latency::set_off_fiber_instant(true);
     // Zero-jitter starvation guard (see `fiber.rs`'s `HIGH_PRIORITY_FAIRNESS_BOUND`
     // doc comment): without this, `loader::request_pump`'s HIGH-priority
@@ -525,6 +530,10 @@ fn main() {
     spawner.spawn(control::pad_render().unwrap());
     spawner.spawn(control::encoder_wake_pump().unwrap());
     spawner.spawn(display::oled_render().unwrap());
+    // Only spawned under `sim_latency` (see Cargo.toml's `default` doc and
+    // the `set_off_fiber_instant` call above): with the feature off there is
+    // no modeled-latency queue for this task to pump.
+    #[cfg(feature = "sim_latency")]
     spawner.spawn(sd::sim_latency::pump().unwrap());
     spawner.spawn(boot_task().unwrap());
     // The async cluster-fill task, on the SAME executor `boot_task`'s

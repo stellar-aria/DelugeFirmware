@@ -117,8 +117,19 @@ embedded-io-async = "0.7.0"
 heapless = { version = "0.8", default-features = false }
 
 [features]
-# `host_app` + `sim_latency` always on for this package (it exists ONLY to
-# run the real C++ app on this host-BSP substrate), same as `lens1_vt_sim`.
+# `host_app` always on for this package (it exists ONLY to run the real C++
+# app on this host-BSP substrate), same as `lens1_vt_sim`. `sim_latency` is
+# deliberately NOT in this package's default set — unlike `lens1_vt_sim`
+# (which legitimately models SD latency for its underrun-margin work), this
+# package wants bit-exact GOLDEN output, not latency realism. A
+# characterization spike measured `sim_latency`'s off-fiber `block_on`
+# busy-spin against the `SD_BUS` mutex starving the render to ~0.01x
+# realtime (cordae's full 8-stem TRACK export: ~3.7hr -> ~37s / ~58x
+# realtime with it dropped, clean valid WAVs). `sd.rs`'s
+# `sim_latency::off_fiber_instant` escape hatch existed only to dodge a
+# `sim_latency`-specific boot livelock (see this crate's `main.rs` module
+# doc's "The boot livelock" section) and is itself entirely
+# `#[cfg(feature = "sim_latency")]`, so it drops for free with this feature.
 # `async_streaming_loader` + `efatfs_streaming` are ALSO on by default here
 # (unlike `lens1_vt_sim`, where both are opt-in — see that Cargo.toml's
 # `efatfs_streaming` comment for the reproducible hang it found under its own
@@ -129,7 +140,6 @@ heapless = { version = "0.8", default-features = false }
 # purpose of standing this package up at all.
 default = [
     "host_app",
-    "sim_latency",
     "async_streaming_loader",
     "efatfs_streaming",
 ]

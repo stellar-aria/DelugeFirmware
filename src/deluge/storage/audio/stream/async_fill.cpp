@@ -23,7 +23,6 @@
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
-#include "storage/audio/stream/sample_residency.h"
 #include "storage/audio/stream/sample_stream.h"
 #include "storage/audio/stream/stitch.h"
 #include "storage/cluster/cluster.h"

@@ -29,7 +29,6 @@
 #include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
-#include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
 #include <cmath>

@@ -232,14 +232,9 @@ void Sample::markAsUnloadable() {
 	// The on-disk audio may have changed, so the cached waveform overview can no longer be trusted.
 	resetOverviewScan();
 
-	// If any Clusters in the load-queue, remove them from there
-	for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
-		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
-		if (cluster != nullptr) {
-			cluster->unloadable = true;
-			deluge::audio::stream::dequeue(*cluster);
-		}
-	}
+	// Cancel any pending loads and flag resident clusters, so a mid-flight fill won't complete with
+	// stale bytes (the residency lives in the Rust manager now).
+	deluge_sample_invalidate(deluge::sample::source_id_for(*this));
 }
 
 void Sample::resetOverviewScan() {
@@ -1882,48 +1877,4 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 	// No longer project-relevant → drop the soft-references (assets stay resident but now evict before
 	// current-song data under pressure).
 	applyProjectReference(false);
-
-#if ALPHA_OR_BETA_VERSION
-	// Count up the individual reasons, as a bug check
-	int32_t numClusterReasons = 0;
-	for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
-
-		StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
-		if (cluster) {
-
-			if (cluster->cluster_index != c) {
-				// Leo got! Aug 2020. Suspect some sort of memory corruption... And then Michael got, Feb 2021
-				FREEZE_WITH_ERROR(errorCode);
-			}
-
-			numClusterReasons += static_cast<int32_t>(deluge::cluster::lease_count(cluster->resource_slot));
-		}
-	}
-
-	if (numClusterReasons) {
-		D_PRINTLN("reason dump---");
-		for (int32_t c = 0; c < static_cast<int32_t>(num_clusters()); c++) {
-
-			StreamedChunk* cluster = deluge::audio::stream::peek(*this, c);
-			if (cluster) {
-				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
-
-				if (!cluster->loaded) {
-					D_PRINTLN(" (unloaded)");
-				}
-				else {
-					D_PRINTLN("");
-				}
-			}
-			else {
-				D_PRINTLN("*");
-			}
-		}
-		D_PRINTLN("/reason dump---");
-
-		// LegsMechanical got, V4.0.0-beta2.
-		// https://forums.synthstrom.com/discussion/4106/v4-0-beta2-e078-crash-when-recording-audio-clip
-		FREEZE_WITH_ERROR("E078");
-	}
-#endif
 }

@@ -237,6 +237,7 @@ pub extern "C" fn deluge_sample_invalidate(source_id: u32) {
 mod tests {
     use super::*;
     use crate::host_streaming_stubs::{set_active_manager, TEST_LOCK};
+    use crate::reader::UNKNOWN_LENGTH_SENTINEL;
     use deluge_resource::facade::Resource;
     use deluge_resource::value::COST_IO;
     use deluge_resource::DelugeResource;
@@ -470,5 +471,45 @@ mod tests {
         // Each `cargo test` test runs on its own thread and `ACTIVE_MANAGER` is a `thread_local`
         // (see `set_active_manager`'s own doc), so there is nothing shared left to restore here --
         // unlike `POOL`/`ACTIVE_MANAGER` in crates that serialize tests over real statics.
+    }
+
+    /// Mirrors `resident_bytes_for_full_clusters_short_last_and_sentinel`'s own sentinel/zero
+    /// coverage (`reader.rs`'s tests), but for `invalidate`: `audio_data_length_bytes ==
+    /// UNKNOWN_LENGTH_SENTINEL` (still recording) has no finite geometric cluster-count bound, and
+    /// `== 0` is the same "length not known yet" shape -- both must make `invalidate` return
+    /// promptly as a no-op (bounded, not a ~4.3-billion-iteration scan) rather than flag or dequeue
+    /// anything, even when a cluster IS resident.
+    #[test]
+    fn invalidate_is_a_bounded_no_op_when_length_is_unknown_or_zero() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for length in [UNKNOWN_LENGTH_SENTINEL, 0] {
+            let ctx = FillContext {
+                audio_data_length_bytes: length,
+                ..two_cluster_fill_context()
+            };
+            let (handle, asset) = manager_and_asset_with_context(ctx);
+            crate::host_streaming_stubs::take_unloadable_calls(); // drain any prior recording
+
+            // SAFETY: `handle` is live for the test's duration.
+            let resource = unsafe { Resource::from_handle(handle) };
+            let l0 = resource.request(asset, 0, CHUNK_SIZE).unwrap();
+            resource.mark_ready(l0.chunk());
+            let slot = resource.slot_of(l0.chunk());
+
+            deluge_sample_invalidate(asset);
+
+            let flagged = crate::host_streaming_stubs::take_unloadable_calls();
+            assert!(
+                flagged.is_empty(),
+                "length {length:#x} must invalidate nothing -- no finite bound available"
+            );
+            assert_eq!(
+                resource.lease_count_by_slot(slot),
+                1,
+                "the resident cluster's lease must be untouched by a bounded no-op"
+            );
+
+            drop(l0);
+        }
     }
 }

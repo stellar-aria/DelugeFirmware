@@ -44,8 +44,11 @@ pub struct Geometry {
 /// `deluge_sample_source::geometry::UNKNOWN_LENGTH_SENTINEL` and `deluge_sample_fill::fill_logic`'s
 /// own copy — kept as its own literal here too rather than importing either crate, matching this
 /// workspace's established "each side re-mirrors the one constant it needs" convention (see this
-/// module's own `Geometry` doc).
-const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
+/// module's own `Geometry` doc). `pub(crate)`, not private: `abi::tests`'s own `invalidate` sentinel
+/// test needs the exact same value `invalidate` itself guards on, rather than a second copy of the
+/// literal drifting from this one — intra-crate sharing, not the cross-crate case the doc above
+/// deliberately avoids.
+pub(crate) const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
 
 /// Valid payload bytes for cluster `index` of `geo`'s audio-data byte-stream — mirrored verbatim
 /// from `deluge_sample_source::geometry::resident_bytes_for` (itself reimplemented natively from
@@ -736,11 +739,21 @@ pub fn invalidate(source_id: u32) {
     if ctx.cluster_size == 0 || ctx.cluster_size_magnitude >= 64 {
         return; // Malformed geometry -- mirrors resolve_geometry's own guard.
     }
+    // C++ `Sample::num_clusters()` (sample.cpp:221-222) branches on `isLengthKnown()`:
+    // `geometricClusterCount()` for a known length, `liveRecorderClusterCount()` (tracked by the
+    // recorder itself, not this fill context) while still recording. `audio_data_length_bytes ==
+    // UNKNOWN_LENGTH_SENTINEL` is exactly that "still recording" case (same sentinel `resident_bytes_for`
+    // and `advance` already guard on above); `== 0` is the same "no known length yet" shape. Neither
+    // has a finite geometric bound available here, and the live recorder-side count is out of this
+    // rung's scope -- so both bail out as a no-op rather than feeding an astronomical `total_bytes`
+    // into the geometric formula below (which `.min(u32::MAX)` would otherwise clamp to ~4.3 billion,
+    // turning the peek-loop below into an effective hang).
+    if ctx.audio_data_length_bytes == 0 || ctx.audio_data_length_bytes == UNKNOWN_LENGTH_SENTINEL {
+        return;
+    }
     // The sample's whole cluster span [0, num_clusters): faithful to markAsUnloadable's own
-    // `0..num_clusters()`. For a known-length sample num_clusters() == geometricClusterCount() ==
-    // ceil((start + length) / cluster_size); a still-recording sample's live count isn't in the
-    // fill context, so this geometric bound is a best-effort over-approximation there (a
-    // non-resident index simply yields a null `peek`, exactly like the C++ loop). Iterating from 0
+    // `0..num_clusters()`. For this (now-confirmed known-length) sample, num_clusters() ==
+    // geometricClusterCount() == ceil((start + length) / cluster_size) exactly. Iterating from 0
     // (not first_with_data) is deliberate: a pre-audio header cluster can be resident under this
     // asset from the load-time parse, and markAsUnloadable invalidates it too.
     let total_bytes = ctx.audio_data_start_pos_bytes as u64 + ctx.audio_data_length_bytes;

@@ -221,6 +221,18 @@ pub extern "C" fn deluge_sample_peek(
     }
 }
 
+/// Invalidate every currently-resident cluster of `source_id`'s sample: flag each unloadable and
+/// cancel any queued load. See the header doc (`deluge_sample_invalidate`) and [`crate::reader::invalidate`]
+/// for the full contract. Stateless, keyed by `source_id` like `deluge_sample_peek` — a plain,
+/// non-`unsafe` `extern "C" fn`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub extern "C" fn deluge_sample_invalidate(source_id: u32) {
+    crate::reader::invalidate(source_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,13 +282,25 @@ mod tests {
         }
     }
 
+    /// A `FillContext` sized for exactly two resident clusters (`audio_data_length_bytes ==
+    /// 2 * CHUNK_SIZE`) — for `invalidate`'s own test, which (unlike every other test in this
+    /// module) needs `deluge_sample_invalidate`'s cluster-span math (`ceil((start + length) /
+    /// cluster_size)`) to resolve to a real, non-zero span rather than `abi_fill_context`'s
+    /// unbounded `0`.
+    fn two_cluster_fill_context() -> FillContext {
+        FillContext {
+            audio_data_length_bytes: (CHUNK_SIZE * 2) as u64,
+            ..abi_fill_context()
+        }
+    }
+
     /// Build a manager over a fresh test heap (leaking its backing arena) with one requestable
     /// asset attached — the same harness shape `reader.rs`'s own tests use, duplicated here (each
     /// test module keeps its own small copy, matching the sibling crates' convention) since this
     /// module tests the raw C-ABI surface specifically, not `Reader`'s internal state. Also
-    /// registers the asset's fill-context and routes the `deluge_streaming_resource_manager` stub
-    /// — every caller must hold [`TEST_LOCK`] for its whole run (see that static's own doc).
-    fn test_manager_and_asset() -> (*mut DelugeResource, u32) {
+    /// registers `ctx` as the asset's fill-context and routes the `deluge_streaming_resource_manager`
+    /// stub — every caller must hold [`TEST_LOCK`] for its whole run (see that static's own doc).
+    fn manager_and_asset_with_context(ctx: FillContext) -> (*mut DelugeResource, u32) {
         let words = (256 * 1024usize).div_ceil(16);
         let mut buf: Vec<u128> = std::vec![0u128; words];
         let ptr = buf.as_mut_ptr() as *mut u8;
@@ -304,9 +328,16 @@ mod tests {
         unsafe {
             deluge_resource::deluge_resource_set_construct(handle, asset, Some(noop_construct))
         };
-        deluge_streaming_set_fill_context(core::ptr::null_mut(), asset, abi_fill_context());
+        deluge_streaming_set_fill_context(core::ptr::null_mut(), asset, ctx);
         set_active_manager(handle as *mut c_void);
         (handle, asset)
+    }
+
+    /// The harness every test in this module but `invalidate`'s own used before this fn existed —
+    /// now a thin wrapper over [`manager_and_asset_with_context`] with the shared single-cluster
+    /// [`abi_fill_context`].
+    fn test_manager_and_asset() -> (*mut DelugeResource, u32) {
+        manager_and_asset_with_context(abi_fill_context())
     }
 
     #[test]
@@ -394,5 +425,50 @@ mod tests {
             assert_eq!(w.frame_count, 0);
             deluge_sample_reader_close(core::ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn invalidate_flags_and_dequeues_every_resident_cluster() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Two-cluster sample. Build the manager, register its fill-context, make it the active
+        // manager -- the shared harness, sized for two clusters (see `two_cluster_fill_context`).
+        let (handle, asset) = manager_and_asset_with_context(two_cluster_fill_context());
+        crate::host_streaming_stubs::take_unloadable_calls(); // drain any prior recording
+
+        // SAFETY: `handle` is live for the test's duration.
+        let resource = unsafe { Resource::from_handle(handle) };
+        // Make cluster 0 resident+ready and cluster 1 reserved+queued (unfilled).
+        let l0 = resource.request(asset, 0, CHUNK_SIZE).unwrap();
+        resource.mark_ready(l0.chunk());
+        let l1 = resource.request(asset, 1, CHUNK_SIZE).unwrap();
+        resource.loader_enqueue(resource.slot_of(l1.chunk()), 0xFFFF_FFFF);
+        let s1 = resource.slot_of(l1.chunk());
+        assert!(
+            resource.loader_next().is_some(),
+            "precondition: queue is non-empty"
+        ); // non-vacuity
+        resource.loader_enqueue(s1, 0xFFFF_FFFF); // re-enqueue what loader_next just popped
+
+        deluge_sample_invalidate(asset);
+
+        // Both clusters were flagged unloadable (the C++ setter stub recorded their backings).
+        let flagged = crate::host_streaming_stubs::take_unloadable_calls();
+        assert_eq!(
+            flagged.len(),
+            2,
+            "both resident clusters flagged unloadable"
+        );
+        assert!(flagged.contains(&(l0.chunk().as_ptr() as *mut c_void)));
+        assert!(flagged.contains(&(l1.chunk().as_ptr() as *mut c_void)));
+        // The queue was drained (loader_remove ran for the queued cluster).
+        assert!(
+            resource.loader_next().is_none(),
+            "invalidate dequeued the queued cluster"
+        );
+
+        drop((l0, l1));
+        // Each `cargo test` test runs on its own thread and `ACTIVE_MANAGER` is a `thread_local`
+        // (see `set_active_manager`'s own doc), so there is nothing shared left to restore here --
+        // unlike `POOL`/`ACTIVE_MANAGER` in crates that serialize tests over real statics.
     }
 }

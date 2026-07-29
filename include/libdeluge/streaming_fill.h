@@ -113,6 +113,11 @@ uint32_t deluge_sample_stream_asset_id(void* stream_backing);
 /// @return true if the chunk is currently marked unloadable.
 bool deluge_streaming_chunk_unloadable(void* chunk_backing);
 
+/// Mark a queued/resident chunk unloadable (the write half of `deluge_streaming_chunk_unloadable`),
+/// so the async loader skips it rather than completing a fill with stale bytes. Called by
+/// `deluge_sample_invalidate` when a sample's backing file has gone away.
+void deluge_streaming_chunk_set_unloadable(void* chunk_backing);
+
 /// @brief The chunk's payload buffer base — where its cluster data lives once read.
 ///
 /// The ONLY other `StreamedChunk` field-touch the native Rust fill task needs, alongside

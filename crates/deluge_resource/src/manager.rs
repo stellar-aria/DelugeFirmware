@@ -403,7 +403,7 @@ impl Manager {
     }
 
     /// Remove the chunk at `slot` from the load queue (the C++ `erase`). No-op if not queued.
-    fn loader_remove(&self, slot: u32) {
+    pub(crate) fn loader_remove(&self, slot: u32) {
         let i = slot as usize;
         if i >= self.chunks.len() {
             return;

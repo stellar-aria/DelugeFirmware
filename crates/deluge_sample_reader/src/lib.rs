@@ -102,6 +102,8 @@ pub(crate) mod host_streaming_stubs {
         static ACTIVE_MANAGER: Cell<*mut c_void> = const { Cell::new(core::ptr::null_mut()) };
         static FORCE_READ_FAILURE: Cell<bool> = const { Cell::new(false) };
         static FAIL_AT_BYTE_OFFSET: Cell<Option<u32>> = const { Cell::new(None) };
+        static UNLOADABLE_CALLS: core::cell::RefCell<std::vec::Vec<*mut core::ffi::c_void>> =
+            const { core::cell::RefCell::new(std::vec::Vec::new()) };
     }
 
     /// Serializes every test that touches `deluge_sample_fill`'s per-asset fill-context table
@@ -165,6 +167,20 @@ pub(crate) mod host_streaming_stubs {
         // No `loaded` flag on this test binary's synthetic chunks (no real `StreamedChunk`) —
         // residency readiness is tracked by the manager's own `mark_ready`, which
         // `Reader::acquire_and_fill` calls independently; nothing here needs this bit.
+    }
+
+    /// Host stub for the C++ POD setter (`async_fill.cpp`): the real body reinterprets the backing as
+    /// a `StreamedChunk` and sets its `unloadable` byte, which has no meaning over this crate's synthetic
+    /// slab backing — so the host build records the call instead, letting `invalidate`'s test assert
+    /// which chunks got flagged.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_streaming_chunk_set_unloadable(chunk_backing: *mut core::ffi::c_void) {
+        UNLOADABLE_CALLS.with(|c| c.borrow_mut().push(chunk_backing));
+    }
+
+    /// Drain and return the backings passed to `deluge_streaming_chunk_set_unloadable` since the last drain.
+    pub(crate) fn take_unloadable_calls() -> std::vec::Vec<*mut core::ffi::c_void> {
+        UNLOADABLE_CALLS.with(|c| core::mem::take(&mut *c.borrow_mut()))
     }
 
     /// No-op stand-in for the real async-fill wake signal (`streaming_fill.h`'s

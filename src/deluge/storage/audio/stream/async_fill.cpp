@@ -110,6 +110,10 @@ void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
 	reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;
 }
 
+void deluge_streaming_chunk_set_unloadable(void* chunk_backing) {
+	reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable = true;
+}
+
 // StreamedChunk convert-state get/set accessors (SR2d-4 Task 1): thin accessors over the same
 // three fields the legacy sync-fiber finish_fill() above reads/writes directly
 // (first_three_bytes_pre_data_conversion, extra_bytes_at_start_converted,

@@ -130,6 +130,13 @@ void deluge_sample_reader_close(DelugeSampleReader* reader);
 /// frame) — the caller walks DOWN from `frames` in that case, not up from some earlier start.
 DelugeFrameWindow deluge_sample_peek(uint32_t source_id, uint64_t start_frame, int8_t direction);
 
+/// Invalidate every currently-resident cluster of `source_id`'s sample: cancel any queued/in-flight
+/// loads and mark each resident cluster unloadable, so a mid-flight async fill will not complete with
+/// stale bytes. Used when the sample's backing file has gone missing/unreadable (card reinsert). The
+/// caller retains the Sample-level `unloadable` bool and overview-scan reset; this handles only the
+/// per-cluster residency. Idempotent; a no-op on a sample with no resident clusters.
+void deluge_sample_invalidate(uint32_t source_id);
+
 /// A per-reservation passive lookahead handle. Opaque; owned by the backend. The active twin of
 /// `deluge_sample_peek`: where a peek is a single, transient, non-pinning glance, a reservation
 /// pins a small forward- or backward-facing WINDOW of cluster residency (holding one real lease per

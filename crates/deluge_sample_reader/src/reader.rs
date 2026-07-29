@@ -149,6 +149,10 @@ unsafe extern "C" {
     /// Resolved once at `open()` time and cached — the same boot-singleton contract
     /// `deluge_sample_source::manager_residency::ManagerResidency::new` requires of its own handle.
     fn deluge_streaming_resource_manager() -> *mut c_void;
+    /// Flag a resident chunk unloadable so an in-flight async fill skips it (the C++ POD setter in
+    /// `async_fill.cpp`, mirror of `deluge_streaming_chunk_unloadable`). The flag stays a
+    /// `StreamedChunk` field (design A); this setter and its getter are both deleted at U4.
+    fn deluge_streaming_chunk_set_unloadable(chunk_backing: *mut c_void);
     /// A resident chunk's payload base (`backing + kChunkPayloadOffset`), the single source of
     /// truth for the payload offset (SR2d-4 lesson: never assume payload == backing).
     fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
@@ -711,6 +715,48 @@ pub fn peek(source_id: u32, start_frame: u64, direction: i8) -> (*const u8, u32)
     // trailing-slack straddle span `window()` sometimes reads is never touched here.
     let frames = unsafe { payload_base.add(byte_offset as usize) };
     (frames as *const u8, frame_count)
+}
+
+/// Invalidate every currently-resident cluster of `source_id`'s sample — the Rust backing of the
+/// header's `deluge_sample_invalidate`. For each resident cluster: flag it unloadable (so a mid-flight
+/// async fill won't complete with stale bytes) and remove it from the load queue (cancel a pending
+/// load). Faithful to C++ `Sample::markAsUnloadable`'s `for c in 0..num_clusters()` peek-loop, with
+/// the cluster span resolved Rust-side from the fill context (geometry is Rust-owned; no count is
+/// threaded from C++). A sample with no registered fill-context, or none of whose clusters are
+/// resident, invalidates nothing (a no-op) — matching a peek-loop that finds every `peek` null.
+pub fn invalidate(source_id: u32) {
+    // SAFETY: the process-wide boot-singleton, same contract `open`/`peek` rely on.
+    let manager = unsafe { deluge_streaming_resource_manager() };
+    if manager.is_null() {
+        return;
+    }
+    let Some(ctx) = deluge_sample_fill::fill_context_for(source_id) else {
+        return; // No registered geometry -> nothing resident through this port.
+    };
+    if ctx.cluster_size == 0 || ctx.cluster_size_magnitude >= 64 {
+        return; // Malformed geometry -- mirrors resolve_geometry's own guard.
+    }
+    // The sample's whole cluster span [0, num_clusters): faithful to markAsUnloadable's own
+    // `0..num_clusters()`. For a known-length sample num_clusters() == geometricClusterCount() ==
+    // ceil((start + length) / cluster_size); a still-recording sample's live count isn't in the
+    // fill context, so this geometric bound is a best-effort over-approximation there (a
+    // non-resident index simply yields a null `peek`, exactly like the C++ loop). Iterating from 0
+    // (not first_with_data) is deliberate: a pre-audio header cluster can be resident under this
+    // asset from the load-time parse, and markAsUnloadable invalidates it too.
+    let total_bytes = ctx.audio_data_start_pos_bytes as u64 + ctx.audio_data_length_bytes;
+    let num_clusters = total_bytes
+        .div_ceil(ctx.cluster_size as u64)
+        .min(u32::MAX as u64) as u32;
+    // SAFETY: non-null manager, boot-singleton lifetime (see walk_and_lease's own use of this).
+    let resource = unsafe { Resource::from_handle(manager as *mut DelugeResource) };
+    for index in 0..num_clusters {
+        if let Some(chunk) = resource.peek(source_id, index) {
+            // SAFETY: `chunk` is a live resident backing from `peek`; the setter only writes the
+            // POD's `unloadable` byte.
+            unsafe { deluge_streaming_chunk_set_unloadable(chunk.as_ptr() as *mut c_void) };
+            resource.loader_remove(resource.slot_of(chunk));
+        }
+    }
 }
 
 #[cfg(test)]

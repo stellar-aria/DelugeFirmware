@@ -121,6 +121,12 @@ impl<'m> Resource<'m> {
         self.mgr.loader_enqueue(slot, priority);
     }
 
+    /// Remove the chunk at `slot` from the load queue (the `dequeue` primitive — cancels a pending
+    /// load). No-op if `slot` isn't queued.
+    pub fn loader_remove(&self, slot: u32) {
+        self.mgr.loader_remove(slot);
+    }
+
     /// Pop the most-urgent queued + still-leased chunk (clearing its queued flag), or
     /// `None` if the load queue is empty. The returned `Chunk` is a NON-OWNING borrow
     /// of an already-leased chunk (`loader_next` never leases — see `Manager::loader_next`,

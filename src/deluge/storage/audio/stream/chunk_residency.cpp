@@ -41,7 +41,7 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 	uint32_t clusterCost =
 	    (sample->rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	uint32_t asset_id = (mgr != nullptr) ? deluge_resource_define_asset(mgr, sample, deluge_streaming_chunk_materialize,
+	uint32_t asset_id = (mgr != nullptr) ? deluge_resource_define_asset(mgr, sample, nullptr /*materialize: never*/,
 	                                                                    /*on_evict=*/nullptr, nullptr, clusterCost,
 	                                                                    DELUGE_RESOURCE_BACKING_SLAB)
 	                                     : DELUGE_RESOURCE_NO_ASSET;
@@ -65,21 +65,6 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 	// open_read_stream() as a defensive re-registration, in case that ordering ever changes.
 	stream.register_fill_context();
 	return stream.resource_asset_id();
-}
-
-bool deluge_streaming_chunk_materialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-
-	bool ok = sample->stream().read_cluster_data(*cluster, 0); // uses payload() — payload_ set above
-	if (!ok) {
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-	return ok;
 }
 
 void deluge_streaming_chunk_construct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {

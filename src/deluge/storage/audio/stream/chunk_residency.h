@@ -26,10 +26,9 @@ class Sample;
 /// Resource-manager Source callbacks for SAMPLE (streamed) chunks, plus the asset-*definition* core,
 /// relocated out of `SampleStream` into their own translation unit. `owner` is always the `Sample*`
 /// registered by `deluge_streaming_define_asset()`; each callback reaches that sample's `SampleStream`
-/// via `sample->stream()` -- residency itself is manager-owned, so these callbacks only construct or
-/// reconstruct a chunk's bytes, and, for materialize, read the cluster's data
-/// (`read_cluster_data()`). See sample_stream.h's "Cluster residency" section for the broader
-/// contract these implement.
+/// via `sample->stream()` -- residency itself is manager-owned, so this callback only constructs a
+/// chunk's bytes (`loaded` stays false; the background loader reads it via `read_cluster_data()`).
+/// See sample_stream.h's "Cluster residency" section for the broader contract this implements.
 
 extern "C" {
 
@@ -41,15 +40,9 @@ extern "C" {
 /// @return The Asset id.
 uint32_t deluge_streaming_define_asset(Sample* sample);
 
-/// @brief Prefetch counterpart to deluge_streaming_chunk_materialize(): construct the `StreamedChunk`
-///        into @p dest (the manager backing) but do not read it (`loaded` stays false), so the audio
-///        thread never blocks — the background loader fills it later.
+/// @brief Construct the `StreamedChunk` into @p dest (the manager backing) but do not read it
+///        (`loaded` stays false), so the audio thread never blocks — the background loader fills it
+///        later.
 void deluge_streaming_chunk_construct(void* ctx, void* owner, uint32_t index, void* dest);
-
-/// @brief Reconstruct cluster @p index synchronously: placement-new a `StreamedChunk` into @p dest
-///        (the manager backing) and read its data. On read failure the chunk is destructed and the
-///        slot freed.
-/// @return `true` if the cluster was materialized.
-bool deluge_streaming_chunk_materialize(void* ctx, void* owner, uint32_t index, void* dest, size_t len);
 
 } // extern "C"

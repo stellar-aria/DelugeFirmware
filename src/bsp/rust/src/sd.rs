@@ -207,7 +207,32 @@ pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result
     stats::note_read(crate::fiber::on_fiber());
     #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
     {
-        sim_latency::modeled_read(lba, count, buf).await
+        // Mirrors `deluge_block_read`'s identical off-fiber branch (see its doc
+        // comment and `sim_latency::off_fiber_instant`'s): an off-fiber caller
+        // reaching this function is NOT necessarily suspend-safe — unlike
+        // `deluge_block_read`, whose only callers are C FatFS's own diskio
+        // shims, this one is also `HostSdBlockDevice::read`'s backing, reached
+        // (via `efatfs_host_shim::deluge_efatfs_file_open`'s off-fiber branch)
+        // through a NON-yielding `embassy_futures::block_on` when the C++ app
+        // opens an efatfs task-context file before the worker fiber exists
+        // (e.g. during `deluge_app_init`'s early boot). Awaiting
+        // `modeled_read`'s `Timer` there would livelock exactly like the
+        // original boot-time C-FatFS mount did before `off_fiber_instant` was
+        // introduced — nothing can poll `sim_latency::pump` while that
+        // `block_on` never returns (confirmed empirically: 100% CPU virtual-
+        // clock-frozen spin in `embassy_futures::block_on::<task_file_open>`
+        // when standing up the `golden_vt_render` harness with
+        // `efatfs_streaming` + `async_streaming_loader` + `sim_latency` all
+        // on). Skip modeling and go straight to the real (synchronous,
+        // always-ready-on-host) read whenever off-fiber AND the flag is set —
+        // the same conservative "off-fiber transfers don't get modeled
+        // latency" tradeoff `deluge_block_read` already makes, just extended
+        // to this newer call path.
+        if !crate::fiber::on_fiber() && sim_latency::off_fiber_instant() {
+            sd::read_sectors(lba, count, buf).await
+        } else {
+            sim_latency::modeled_read(lba, count, buf).await
+        }
     }
     #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
     {
@@ -217,14 +242,19 @@ pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result
 
 /// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
 /// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]),
-/// same R3 on-fiber write instrumentation (see the read sibling's doc comment).
+/// same R3 on-fiber write instrumentation and off-fiber-instant escape hatch
+/// (see the read sibling's doc comment for both).
 pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
     #[cfg(not(target_os = "none"))]
     stats::note_write(crate::fiber::on_fiber());
     #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
     {
-        sim_latency::modeled_write(lba, count, buf).await
+        if !crate::fiber::on_fiber() && sim_latency::off_fiber_instant() {
+            sd::write_sectors(lba, count, buf).await
+        } else {
+            sim_latency::modeled_write(lba, count, buf).await
+        }
     }
     #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
     {

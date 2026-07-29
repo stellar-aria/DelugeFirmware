@@ -224,6 +224,26 @@ void deluge_streaming_signal_fill(void);
 /// @return true once the chunk is resident+ready; false on the off-fiber degrade or a failed fill.
 bool deluge_streaming_fill_chunk_blocking(void* chunk_backing);
 
+/// @brief Drain the WHOLE loader queue through the async fill task, blocking on the worker fiber.
+///
+/// The offline stem-export drain (`StemExport::renderWait`'s async-BSP branch), reached only when
+/// deluge_streaming_async_active() is true. Unlike deluge_streaming_fill_chunk_blocking, which blocks
+/// on ONE named chunk, this wakes `streaming_fill_task` and yield-waits until the loader queue is
+/// empty — matching the C-host between-routines `loader::pump()` that drains everything the preceding
+/// `AudioEngine::routine()` enqueued. renderWait's offline loop has no other yield point, so this is
+/// what lets the single Embassy executor actually run the fill task between audio routines.
+/// - ON the worker fiber (renderWait's context): yields until the queue drains, bounded by a cycle
+///   cap so a persistently-failing read degrades to a not-fully-drained result instead of wedging.
+/// - OFF the worker fiber: returns false immediately (no stack to suspend; renderWait is always
+///   on-fiber, so this is only a safety net).
+///
+/// The real implementation lives in `streaming_loader.rs` (always compiled on the Rust/Embassy BSP);
+/// every other BSP/config links the `__attribute__((weak))` fallback in `async_fill.cpp` (returns
+/// false, never reached on the hot path since those BSPs report deluge_streaming_async_active() false
+/// and take the synchronous `loader::pump()` branch).
+/// @return true once the queue is fully drained; false on the off-fiber degrade or a hit cycle cap.
+bool deluge_streaming_drain_queue_blocking(void);
+
 /// @brief Open a sample file for streaming reads through embedded-fatfs, writing its handle out.
 ///
 /// The sync→async bridge for the streaming READ path: C++ calls this synchronously at sample-load,

@@ -460,6 +460,19 @@ impl Manager {
         })
     }
 
+    /// Any queued + leased chunk at all, regardless of priority — the non-destructive
+    /// "is the loader queue non-empty" predicate the offline async drain
+    /// (`deluge_streaming_drain_queue_blocking`) polls until it goes false. Neither pops nor mutates
+    /// queue state (unlike `loader_next`), and does not filter on priority (unlike
+    /// `loader_has_lowest`): it answers exactly "would `loader_next` return non-null", i.e. is there
+    /// any drain work left.
+    fn loader_has_any(&self) -> bool {
+        (0..self.chunks.len()).any(|i| {
+            let s = m_get(&self.chunks[i]);
+            s.queued && !s.backing.is_null() && s.leases > 0
+        })
+    }
+
     /// Is `index` the highest-index resident chunk of `asset`? (No resident chunk of the
     /// asset has a greater index.) Used to gate tail-first eviction.
     fn is_highest_resident(&self, asset: u32, index: u32) -> bool {
@@ -1432,6 +1445,14 @@ pub unsafe extern "C" fn deluge_resource_loader_next(handle: *mut DelugeResource
 #[no_mangle]
 pub unsafe extern "C" fn deluge_resource_loader_has_lowest(handle: *mut DelugeResource) -> bool {
     !handle.is_null() && mgr(handle).loader_has_lowest()
+}
+
+/// Whether any queued + leased chunk remains at all (any priority) — the non-destructive
+/// loader-queue-non-empty predicate the offline async drain blocks on. Answers "would
+/// `deluge_resource_loader_next` return non-null" without popping or mutating anything.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_loader_has_any(handle: *mut DelugeResource) -> bool {
+    !handle.is_null() && mgr(handle).loader_has_any()
 }
 
 /// Copy the manager's cumulative instrumentation counters into `*out` (see `Stats` /

@@ -175,6 +175,15 @@ __attribute__((weak)) bool deluge_streaming_fill_chunk_blocking(void* /*chunk_ba
 	return false;
 }
 
+// Weak fallback for the offline stem-export drain-all-queued routine. The Rust Embassy BSP provides
+// the real definition (streaming_loader.rs) whenever it links that crate; every other BSP/config
+// resolves this instead. Unreachable on the hot path there: StemExport::renderWait only calls this
+// under deluge_streaming_async_active(), false on those BSPs, so they take the synchronous
+// loader::pump() branch and never reach here. Returns false (nothing drained) for a stray call.
+__attribute__((weak)) bool deluge_streaming_drain_queue_blocking(void) {
+	return false;
+}
+
 // Weak fallbacks for the embedded-fatfs streaming READ symbols. The Rust Embassy BSP provides the
 // real definitions (efatfs_fs.rs / streaming_loader.rs) whenever it links this crate with the
 // `efatfs_streaming` feature; every other BSP/config resolves these instead: "no efatfs backing" —

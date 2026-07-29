@@ -186,6 +186,10 @@ void deluge_resource_loader_remove(DelugeResource* mgr, uint32_t slot);
 void* deluge_resource_loader_next(DelugeResource* mgr);
 /// Whether any queued + leased chunk sits at the lowest priority (0xFFFFFFFF) — the load-song yield gate.
 bool deluge_resource_loader_has_lowest(DelugeResource* mgr);
+/// Whether any queued + leased chunk remains at all (any priority) — the non-destructive
+/// loader-queue-non-empty predicate the offline async drain blocks on. Answers "would
+/// deluge_resource_loader_next return non-null" without popping or mutating anything.
+bool deluge_resource_loader_has_any(DelugeResource* mgr);
 
 /// Number of cost classes `evictions_by_cost` buckets by (must match the Rust COST_BUCKETS).
 #define DELUGE_RESOURCE_COST_BUCKETS 8

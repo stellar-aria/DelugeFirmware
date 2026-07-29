@@ -122,6 +122,9 @@ unsafe extern "C" {
     fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
     /// The chunk's `loaded` flag (`streaming_fill.h`) — flipped true by the drain's `native_finish`.
     fn deluge_streaming_chunk_loaded(chunk_backing: *mut c_void) -> bool;
+    /// Non-destructive "loader queue non-empty" predicate (`deluge_resource.h`): true while any
+    /// queued+leased chunk remains — the condition the drain-all-queued wait below polls to empty.
+    fn deluge_resource_loader_has_any(mgr: *mut c_void) -> bool;
 }
 
 /// Poll-until-`loaded` future the on-fiber wait in [`deluge_streaming_fill_chunk_blocking`] drives
@@ -186,6 +189,70 @@ pub extern "C" fn deluge_streaming_fill_chunk_blocking(chunk_backing: *mut c_voi
     } else {
         // Off the worker fiber (the display-only overview pre-scan): no stack to suspend. The chunk
         // is enqueued; return not-ready so the consumer retries on its next tick.
+        false
+    }
+}
+
+/// Poll-until-queue-empty future the offline drain in [`deluge_streaming_drain_queue_blocking`]
+/// drives through `block_on_fiber`. Each `Pending` suspends the fiber (via `block_on_fiber`'s own
+/// `yield_now`), letting the executor run [`streaming_fill_task`] to drain the queue; the fiber is
+/// re-polled by `worker_poll` and re-checks. Same shape as [`WaitChunkLoaded`], but the readiness
+/// predicate is "the loader queue is empty" (`deluge_resource_loader_has_any` false) rather than one
+/// named chunk's `loaded` flag. `remaining` bounds the spin so a cluster whose read keeps failing
+/// (and re-queuing itself) reports drained-with-cap rather than wedging the fiber.
+struct WaitQueueDrained {
+    mgr: *mut c_void,
+    remaining: u32,
+}
+
+impl core::future::Future for WaitQueueDrained {
+    type Output = bool;
+
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<bool> {
+        // SAFETY: `mgr` is the process-wide resource-manager singleton captured at construction; the
+        // predicate only reads per-slot queue state, popping/mutating nothing.
+        if !unsafe { deluge_resource_loader_has_any(self.mgr) } {
+            return core::task::Poll::Ready(true); // Queue drained — nothing left to load.
+        }
+        if self.remaining == 0 {
+            return core::task::Poll::Ready(false); // Gave up: a read kept failing and re-queuing.
+        }
+        self.remaining -= 1;
+        // Wake the drain: the executor runs `streaming_fill_task` while this fiber is suspended.
+        FILL_WAKE.signal(());
+        core::task::Poll::Pending
+    }
+}
+
+/// Drain the WHOLE loader queue through the async fill task, blocking on the worker fiber — the
+/// offline stem-export drain (`StemExport::renderWait`'s async-BSP branch). See `streaming_fill.h`'s
+/// `deluge_streaming_drain_queue_blocking` doc for the C-side contract; in brief: unlike
+/// [`deluge_streaming_fill_chunk_blocking`] (which blocks on ONE named chunk), this wakes
+/// `streaming_fill_task` and yield-waits until the loader queue is empty
+/// (`deluge_resource_loader_has_any` false) — matching the C-host between-routines `loader::pump()`
+/// that drains everything the preceding `AudioEngine::routine()` enqueued. On-fiber it yields until
+/// drained, bounded by [`BLOCKING_FILL_MAX_CYCLES`]; off-fiber it returns false immediately (no stack
+/// to suspend — renderWait is always on-fiber, so this is only a safety net).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_streaming_drain_queue_blocking() -> bool {
+    // SAFETY: `deluge_streaming_resource_manager` returns the boot-singleton manager.
+    let mgr = unsafe { deluge_streaming_resource_manager() };
+    if mgr.is_null() {
+        return false;
+    }
+    FILL_WAKE.signal(());
+
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(WaitQueueDrained {
+            mgr,
+            remaining: BLOCKING_FILL_MAX_CYCLES,
+        })
+    } else {
+        // Off the worker fiber: no stack to suspend. renderWait always runs on-fiber; this branch is
+        // a safety net only.
         false
     }
 }

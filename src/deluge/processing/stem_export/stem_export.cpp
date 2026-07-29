@@ -29,6 +29,7 @@
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
 #include "libdeluge/file_io.h"
+#include "libdeluge/streaming_fill.h" // deluge_streaming_async_active / deluge_streaming_drain_queue_blocking
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/non_audio_instrument.h"
@@ -213,12 +214,20 @@ void StemExport::renderWait(RunCondition until) {
 	if (renderOffline) {
 		while (!until()) {
 			AudioEngine::routine();
-			// Pump the cluster loader HERE, between audio routines, where audioRoutineLocked is
-			// false — loader::pump() bails immediately while it's set, and the offline
-			// AudioEngine::routine() holds it for its whole body, so the in-routine pump (and any
-			// async prefetch) would otherwise never load anything (the headless-render streaming
-			// starvation). On-device the scheduler runs this between audio routines for the same reason.
-			deluge::audio::stream::loader::pump(128, false);
+			// Drain the cluster loader HERE, between audio routines, where audioRoutineLocked is
+			// false — the offline AudioEngine::routine() holds it for its whole body, so the
+			// in-routine pump (and any async prefetch) would otherwise never load anything (the
+			// headless-render streaming starvation). On-device the scheduler runs this between audio
+			// routines for the same reason.
+			if (deluge_streaming_async_active()) {
+				// Embassy/device: renderWait's offline loop has no other yield point, so pump()
+				// no-ops (the async task owns the queue). Yield the worker fiber and drain the whole
+				// loader queue via streaming_fill_task — the byte-equivalent of the C-host pump below.
+				deluge_streaming_drain_queue_blocking();
+			}
+			else {
+				deluge::audio::stream::loader::pump(128, false); // C-host: byte-for-byte unchanged.
+			}
 			AudioEngine::slowRoutine();
 			audioRecorder.slowRoutine();
 		}

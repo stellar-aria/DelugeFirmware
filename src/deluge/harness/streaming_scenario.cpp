@@ -150,8 +150,17 @@ uint32_t deluge_scenario_debug_load_state() {
 }
 
 void deluge_scenario_start_stem_export(int32_t mode) {
+	StemExportType stemMode = static_cast<StemExportType>(mode);
 	stemExport.renderOffline = true;
 	stemExport.exportToSilence = true;
+	stemExport.exportMixdown = (stemMode == StemExportType::MIXDOWN);
+	// A MIXDOWN is the full master output, so it must include the song-level FX — see
+	// host_render_main.cpp's deluge_render_driver() (the field-for-field reference this
+	// mirrors) for the mechanical reason: the offline render path only feeds a recorder
+	// whose channel is OFFLINE_OUTPUT, which is selected only when includeSongFX is set.
+	if (stemMode == StemExportType::MIXDOWN) {
+		stemExport.includeSongFX = true;
+	}
 	g_stem_export_dispatch_finished = false;
 	// Dispatch the whole export onto the storage-owner worker fiber, exactly as
 	// host_render_main.cpp's deluge_render_driver does — StemExport::startStemExportProcess

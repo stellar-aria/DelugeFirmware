@@ -23,7 +23,7 @@
 #include <string>
 
 class AudioByteSource;
-class DeserializerByteSource;
+class FileByteSource;
 
 // An AudioFile (Sample / WaveTable) is a resource-manager *adopted* object: the owner allocates +
 // builds it, the manager owns only its eviction (value-scored). `addReason`/`removeReason` route to
@@ -38,8 +38,7 @@ public:
 	// the fields; WaveTable: hand them to WaveTable::setup). `wtSource` is the deserializer-backed source for
 	// setup's zero-copy data read — only the WAVETABLE path uses it, and it is the same object as `source`
 	// (the concrete handle the band loop needs the cluster accessors from).
-	Error loadFile(AudioByteSource& source, bool makeWaveTableWorkAtAllCosts,
-	               DeserializerByteSource* wtSource = nullptr);
+	Error loadFile(AudioByteSource& source, bool makeWaveTableWorkAtAllCosts, FileByteSource* wtSource = nullptr);
 	virtual void finalizeAfterLoad(uint32_t fileSize) {}
 
 	void addReason();

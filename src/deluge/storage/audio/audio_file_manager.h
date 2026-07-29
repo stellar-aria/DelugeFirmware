@@ -167,7 +167,7 @@ private:
 	// can't be a wavetable (stereo, or not wavetable-looking unless insisted) or alloc/setup fails.
 	AudioFile* convertSampleToWaveTable(Sample& foundSample, bool makeWaveTableWorkAtAllCosts, Error* error);
 	// Construct an AudioFile from a resolved file: alloc + adopt the object, build it (Sample: FAT-walk the
-	// cluster table + stream-parse via ClusterByteSource; WaveTable: parse + setup via DeserializerByteSource),
+	// cluster table + raw header parse via FileByteSource; WaveTable: parse + setup via FileByteSource),
 	// insert into `audioFiles` and finalize. Returns the loaded object (held by no reason — the caller leases
 	// it), or nullptr with `*error` set. The file-resolution that produced `effectiveFilePointer` /
 	// `usingAlternateLocation` is the caller's job.

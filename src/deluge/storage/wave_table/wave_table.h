@@ -25,7 +25,7 @@
 #include <utility>
 
 class Sample;
-class DeserializerByteSource;
+class FileByteSource;
 
 class WaveTableBand {
 public:
@@ -79,7 +79,7 @@ public:
 	Error setupFromSample(Sample& sample);
 	// Build this WaveTable by reading audio data from a file, via the deserializer-backed byte source. The
 	// header fields come from the parser (parseWaveTableHeader).
-	Error setupFromFile(DeserializerByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
+	Error setupFromFile(FileByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
 	                    uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat);
 	void deleteAllBandsAndData();
 	void bandDataBeingStolen(WaveTableBandData* bandData);
@@ -102,7 +102,7 @@ private:
 	// the Sample). The two public entry points keep this nullable split off the API.
 	Error setup(Sample* sample, int32_t rawFileCycleSize, uint32_t audioDataStartPosBytes,
 	            uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat,
-	            DeserializerByteSource* byteSource);
+	            FileByteSource* byteSource);
 
 	void doRenderingLoop(int32_t* __restrict__ thisSample, int32_t const* bufferEnd, int32_t firstCycleNumber,
 	                     WaveTableBand* __restrict__ bandHere, uint32_t phase, uint32_t phaseIncrement,

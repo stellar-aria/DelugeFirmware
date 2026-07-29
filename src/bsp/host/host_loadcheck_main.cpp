@@ -17,7 +17,7 @@
 
 /// deluge_loadcheck — headless "load these audio files and print their parsed descriptors" utility.
 ///
-/// Drives the real file-loading path (AudioFileManager::getAudioFileFromFilename → ClusterByteSource →
+/// Drives the real file-loading path (AudioFileManager::getAudioFileFromFilename → FileByteSource →
 /// parseAudioFileHeader → buildSample) against a FAT disk image, so it exercises the construction path
 /// end-to-end (FAT cluster walk + on-demand cluster streaming + header parse). It is the Tier-2 regression
 /// net for the file-loading redesign: load known WAV/AIFF files off a card image and dump every descriptor

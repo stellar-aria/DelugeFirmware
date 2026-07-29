@@ -38,8 +38,7 @@
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/cluster_byte_source.h"
-#include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/file_byte_source.h"
 #include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/owner.h" // deluge::storage::Coalescer
@@ -819,8 +818,10 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 			return nullptr;
 		}
 
-		// The byte source streams the clusters; its destructor releases the held cluster's reason.
-		ClusterByteSource source{*sampleFile, effectiveFilePointer.objsize};
+		// The byte source reads the header raw off the sample's efatfs handle (through the file-io boundary),
+		// block by block, taking no manager lease and touching no StreamedChunk.
+		FileByteSource source{std::make_unique<ReadSourceBlockReader>(sampleFile->stream().make_read_source()),
+		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts);
 
 		// loadFile() parses the WAV header, which is what finally populates the Sample's geometry
@@ -856,7 +857,8 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 		// One deserializer-backed source serves both the header parse (via the AudioByteSource surface) and
 		// WaveTable::setup's zero-copy band read (via its cluster accessors) — hence passed both ways.
-		DeserializerByteSource source{static_cast<uint32_t>(effectiveFilePointer.objsize)};
+		FileByteSource source{std::make_unique<DeserializerBlockReader>(),
+		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts, &source);
 	}
 

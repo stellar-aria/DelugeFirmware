@@ -26,7 +26,7 @@
 #include "model/sample/sample.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/render_wave.h"
-#include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/file_byte_source.h"
 #include "storage/audio/stream/sample_residency.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
@@ -163,14 +163,14 @@ Error WaveTable::setupFromSample(Sample& sample) {
 	return setup(&sample, 0, 0, 0, 0, RawDataFormat::NATIVE, nullptr);
 }
 
-Error WaveTable::setupFromFile(DeserializerByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
+Error WaveTable::setupFromFile(FileByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
                                uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat) {
 	return setup(nullptr, cycleSize, audioDataStartPosBytes, audioDataLengthBytes, byteDepth, rawDataFormat, &source);
 }
 
 Error WaveTable::setup(Sample* sample, int32_t rawFileCycleSize, uint32_t audioDataStartPosBytes,
                        uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat,
-                       DeserializerByteSource* byteSource) {
+                       FileByteSource* byteSource) {
 	AudioEngine::logAction("WaveTable::setup");
 
 	uint32_t originalSampleLengthInSamples;

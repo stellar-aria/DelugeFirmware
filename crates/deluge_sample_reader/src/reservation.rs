@@ -296,7 +296,7 @@ fn resolve_geometry(manager: *mut c_void, asset: u32, marker_frame: u64) -> Opti
 
     let start_byte = (ctx.audio_data_start_pos_bytes as u64)
         .saturating_add(marker_frame.saturating_mul(frame_stride));
-    let head = (start_byte >> ctx.cluster_size_magnitude) as u32;
+    let head = (start_byte >> ctx.cluster_size_magnitude).min(u32::MAX as u64) as u32;
     let first_with_data =
         ((ctx.audio_data_start_pos_bytes as u64) >> ctx.cluster_size_magnitude) as u32;
     let first_no_data: i64 = if ctx.first_cluster_index_with_no_audio_data < 0 {

@@ -177,10 +177,12 @@ pub struct Reader {
     direction: i8,
     hint: ReadHint,
     current_frame: u64,
-    /// `false` if `asset` had no registered fill-context at `open()` time (geometry stayed
-    /// zeroed — a reader over an unregistered asset can't map frames), OR if a later `window()`
-    /// hit a malformed-geometry / acquire-or-fill failure. Distinct from EOF (`frame_count == 0`
-    /// with `ok` still `true`) — see `deluge_sample_reader_ok`'s header doc.
+    /// Whether the MOST RECENT `window()` succeeded: `false` if the last `window()` hit a
+    /// malformed-geometry or acquire-or-fill failure (a transient card error / OOM is retried on the
+    /// next `window()` — the flag is no longer sticky). Distinct from EOF (`frame_count == 0` with
+    /// `ok` still `true`) — see `deluge_sample_reader_ok`'s header doc. A reader opened over an asset
+    /// with no registered fill-context has zeroed geometry, so every `window()` re-fails and `ok`
+    /// stays effectively `false`.
     ok: bool,
     /// The process-wide resource-manager handle, resolved once at `open()` (see the
     /// `deluge_streaming_resource_manager` extern above).
@@ -400,9 +402,11 @@ impl Reader {
     /// An acquire/fill failure for THIS cluster sets `ok = false` and returns `{null, 0}` — distinct
     /// from the EOF case above (which leaves `ok` alone).
     pub fn window(&mut self) -> (*const u8, u32) {
-        if !self.ok {
-            return (core::ptr::null(), 0);
-        }
+        // Each window() is judged fresh: a prior transient failure (card error / OOM) must not latch
+        // the reader dead. Every existing failure path below re-sets `ok = false` for THIS attempt,
+        // so ok() still means "did the most recent window() succeed"; a permanent fault (malformed
+        // geometry) simply re-fails its own cheap check next call.
+        self.ok = true;
         let Some((cluster_index, byte_offset, resident)) =
             locate(self.current_frame, &self.geometry)
         else {
@@ -1254,6 +1258,31 @@ mod tests {
             );
 
             set_force_read_failure(false); // restore for other tests sharing this thread
+            set_fail_at_byte_offset(None);
+        }
+
+        #[test]
+        fn window_recovers_after_a_transient_read_failure() {
+            let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let (_handle, asset) = harness(geo(3 * CLUSTER_SIZE as u64));
+
+            set_force_read_failure(true);
+            let mut reader = Reader::open(asset, 0, 1, ReadHint::Cached);
+            let (ptr, _) = reader.window();
+            assert!(ptr.is_null());
+            assert!(!reader.ok(), "a transient read failure clears ok()");
+
+            // The card recovers: the NEXT window() must retry, not stay latched dead.
+            set_force_read_failure(false);
+            let (ptr2, frame_count2) = reader.window();
+            assert!(
+                !ptr2.is_null(),
+                "reader recovers on the next window after the failure clears"
+            );
+            assert!(frame_count2 > 0);
+            assert!(reader.ok(), "ok() reflects the now-successful window");
+
+            set_force_read_failure(false);
             set_fail_at_byte_offset(None);
         }
 

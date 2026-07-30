@@ -20,9 +20,7 @@
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_cache.h"
-#include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/convert.h"
 #include "util/misc.h"
 
 #include "deluge_resource.h" // resource manager: manager-owned clusters lease instead of queueing
@@ -31,9 +29,9 @@
 #include <cstring>
 #include <type_traits>
 
-// Both chunk types must stay standard-layout + non-polymorphic: they're placement-new'd into raw slab
-// slots (as pure metadata headers) and their payload lives, via payload_, elsewhere in the same slot.
-static_assert(std::is_standard_layout_v<StreamedChunk> && !std::is_polymorphic_v<StreamedChunk>);
+// ComputedChunk must stay standard-layout + non-polymorphic: it's placement-new'd into a raw slab
+// slot (as a pure metadata header) and its payload lives, via payload_, elsewhere in the same slot.
+// (The streamed chunk's equivalent guarantee is the Rust struct's own Drop-free POD contract, U4d.)
 static_assert(std::is_standard_layout_v<ComputedChunk> && !std::is_polymorphic_v<ComputedChunk>);
 
 // The slot-geometry guard proof (see cluster.h). The payload sits at kChunkPayloadOffset from the slot
@@ -42,9 +40,7 @@ static_assert(std::is_standard_layout_v<ComputedChunk> && !std::is_polymorphic_v
 // front guard, the next slot above the trailing guard), AND >= the application edge-slack reach
 // (kFrontSlackBytes/kTrailingSlackBytes). These use sizeof, so they hold on both the ARM32 firmware and
 // the x86-64 sim despite differing header sizes (kChunkPayloadOffset auto-fits via std::max(sizeof)).
-static_assert(kChunkPayloadOffset - sizeof(StreamedChunk) >= CACHE_LINE_SIZE);  // front guard >= a cache line (DMA)
-static_assert(kChunkPayloadOffset - sizeof(StreamedChunk) >= kFrontSlackBytes); // ... and covers the app front reach
-static_assert(kChunkPayloadOffset - sizeof(ComputedChunk) >= CACHE_LINE_SIZE);
+static_assert(kChunkPayloadOffset - sizeof(ComputedChunk) >= CACHE_LINE_SIZE); // front guard >= a cache line (DMA)
 static_assert(kChunkPayloadOffset - sizeof(ComputedChunk) >= kFrontSlackBytes);
 static_assert(kChunkTrailingGuard >= CACHE_LINE_SIZE && kChunkTrailingGuard >= kTrailingSlackBytes); // trailing guard
 
@@ -59,41 +55,10 @@ void Cluster::set_size(size_t size) {
 	Cluster::size_magnitude = 32 - __builtin_clz(size) - 1;
 }
 
-// Safety nets (see the header): release through the slab so the table entry is cleared.
+// Safety net (see the header): release through the slab so the table entry is cleared.
 // freeSdram() falls back to a plain heap free for any non-slab pointer.
-void StreamedChunk::operator delete(void* ptr) {
-	GeneralMemoryAllocator::get().freeSdram(ptr);
-}
-
 void ComputedChunk::operator delete(void* ptr) {
 	GeneralMemoryAllocator::get().freeSdram(ptr);
-}
-
-/**
- * @brief This function goes through the contents of the cluster,
- *        and converts them to the Deluge's native PCM 24-bit format if needed
- */
-void StreamedChunk::convert_data_if_necessary() {
-	deluge::audio::stream::convert_cluster_data(
-	    payload(), cluster_index, sample->rawDataFormat,
-	    {.audio_data_start_pos_bytes = sample->audioDataStartPosBytes,
-	     .audio_data_length_bytes = sample->audioDataLengthBytes,
-	     .first_cluster_index_with_no_audio_data = sample->getFirstClusterIndexWithNoAudioData()},
-	    Cluster::size, Cluster::size_magnitude,
-	    std::span<std::byte, 3>(reinterpret_cast<std::byte*>(first_three_bytes_pre_data_conversion), 3),
-	    // Cooperative yield during long conversions. Both of convert_cluster_data's yield sites route
-	    // here, so the "from convert-data" log marker fires on every raw-data-format path, not just
-	    // the 24-bit one.
-	    [] {
-		    AudioEngine::logAction("from convert-data");
-		    AudioEngine::runRoutine();
-	    });
-}
-
-// The resource-manager Asset that owns this chunk's residency (the sample's asset), or NO_ASSET if
-// it has no sample. Used to route a reason to a manager lease.
-uint32_t StreamedChunk::resource_lease_asset_id() const {
-	return (sample != nullptr) ? sample->stream().resource_asset_id() : DELUGE_RESOURCE_NO_ASSET;
 }
 
 // The resource-manager Asset that owns this chunk's residency for the *leased* (reason-tracked) perc
@@ -151,10 +116,6 @@ static void remove_reason_impl(void* chunk, uint32_t resource_slot, [[maybe_unus
 		FREEZE_WITH_ERROR(error_code); // removing a reason that was never there
 	}
 	release_lease(chunk); // unlease (backing ptr == the chunk's own address)
-}
-
-void remove_reason(StreamedChunk& chunk, char const* error_code) {
-	remove_reason_impl(&chunk, chunk.resource_slot, error_code);
 }
 
 void remove_reason(ComputedChunk& chunk, char const* error_code) {

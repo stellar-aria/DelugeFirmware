@@ -30,7 +30,6 @@
 class VoiceSamplePlaybackGuide;
 class Voice;
 class Sample;
-struct StreamedChunk;      // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 struct DelugeSampleSource; // per-reader residency cursor over the region port (libdeluge/sample_source.h)
 class TimeStretcher;
 class SamplePlaybackGuide;

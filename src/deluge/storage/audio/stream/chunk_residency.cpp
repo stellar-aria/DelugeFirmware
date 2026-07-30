@@ -19,8 +19,6 @@
 
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
-#include "storage/cluster/cluster.h"
-#include <new>
 
 #include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
 
@@ -67,17 +65,11 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 	return stream.resource_asset_id();
 }
 
-void deluge_streaming_chunk_construct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-	// cluster->loaded stays false — the loader reads it. The chunk is the manager backing at `dest`;
-	// residency is the manager's, so nothing is mirrored into SampleStream.
-}
+// The chunk-construct callback (`deluge_streaming_chunk_construct`, registered above) and every
+// chunk field accessor now live in Rust (`deluge_sample_fill::chunk`, U4d) — the streamed chunk's
+// storage was relocated there, so this TU only *registers* the Rust construct symbol; it no longer
+// defines it or touches the chunk's byte layout.
 
-// No evict callback (SR3d): a StreamedChunk is a trivially-destructible POD living in the manager's
-// slab, and the manager frees the slab + auto-de-queues the loader entry on eviction — there is
-// nothing an evict callback would need to do, so the asset registers a null on_evict.
+// No evict callback (SR3d): the streamed chunk is a trivially-destructible POD living in the
+// manager's slab, and the manager frees the slab + auto-de-queues the loader entry on eviction —
+// there is nothing an evict callback would need to do, so the asset registers a null on_evict.

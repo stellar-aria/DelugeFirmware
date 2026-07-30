@@ -26,7 +26,6 @@
 #include <string_view>
 
 class Sample;
-struct StreamedChunk;
 
 namespace deluge::audio::stream {
 
@@ -103,7 +102,7 @@ public:
 	/// @brief Release the Asset, freeing every resident cluster's backing first.
 	///
 	/// Releasing frees the manager's slab slot for each resident Chunk directly — there is no evict
-	/// callback (a `StreamedChunk` is a trivially-destructible POD in the slab). Idempotent (a no-op if
+	/// callback (the streamed chunk is a trivially-destructible POD in the slab). Idempotent (a no-op if
 	/// the Asset was never defined or is already released).
 	/// @warning Release before the `Sample`/`SampleStream` is destroyed so the manager frees this
 	///          asset's resident backings rather than orphaning them; `~Sample` calls it explicitly,

@@ -40,9 +40,12 @@ extern "C" {
 /// @return The Asset id.
 uint32_t deluge_streaming_define_asset(Sample* sample);
 
-/// @brief Construct the `StreamedChunk` into @p dest (the manager backing) but do not read it
+/// @brief Construct the streamed chunk into @p dest (the manager backing) but do not read it
 ///        (`loaded` stays false), so the audio thread never blocks — the background loader fills it
 ///        later.
+///
+/// Defined in Rust (`deluge_sample_fill::chunk`, U4d) — the chunk's storage lives there; this decl
+/// only lets `deluge_streaming_define_asset()` register the symbol as the asset's construct callback.
 void deluge_streaming_chunk_construct(void* ctx, void* owner, uint32_t index, void* dest);
 
 } // extern "C"

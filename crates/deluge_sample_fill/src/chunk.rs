@@ -11,6 +11,10 @@
 //! neither is carried here. `cluster_index` IS live: `deluge_sample_fill::fill_logic::begin`/
 //! `finish` document and use it directly in offset math.
 
+use core::ffi::c_void;
+
+use crate::DelugeChunkConvertState;
+
 /// Cache line, matching the C++ `CACHE_LINE_SIZE` (definitions.h). The front guard between the
 /// struct header and the payload must be >= this; guarded C++-side by the slab reconcile.
 const CACHE_LINE: usize = 32;
@@ -72,6 +76,123 @@ pub extern "C" fn deluge_streamed_chunk_payload_offset() -> u32 {
     RUST_CHUNK_PAYLOAD_OFFSET as u32
 }
 
+// ── Chunk construct + field-accessor C-ABI (U4d) ────────────────────────────
+// The streamed chunk's storage now lives entirely in Rust: the resource manager placement-constructs
+// it through `deluge_streaming_chunk_construct` (registered from `chunk_residency.cpp`) and the native
+// fill task + C++ region cursor reach its fields only through the accessors below. Each is an
+// `#[unsafe(no_mangle)]` C-ABI export (plain, not cfg-gated: this crate declares no `host_app`/`sim`
+// selector features — see `deluge_streamed_chunk_payload_offset` above and
+// `deluge_streaming_set_fill_context` in `lib.rs` — so it is pulled in wherever it is linked at all).
+
+/// C-ABI construct callback the resource manager invokes for a streamed SAMPLE chunk (registered from
+/// `chunk_residency.cpp` via `deluge_resource_set_construct`). Matches the manager's
+/// `DelugeResourceConstructFn` signature `(ctx, owner, index, dest)`. `ctx`/`owner` are unused: the
+/// relocated chunk carries neither a context nor its owning `Sample*` — both were write-only in the
+/// former C++ POD and dropped in the U4d field audit (see this module's header).
+///
+/// # Safety
+/// `dest` is a manager-owned writable slab slot of at least `RUST_CHUNK_PAYLOAD_OFFSET + Cluster::size
+/// + trailing guard` bytes (the manager's construct contract).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_construct(
+    _ctx: *mut c_void,
+    _owner: *mut c_void,
+    index: u32,
+    dest: *mut c_void,
+) {
+    // SAFETY: `dest` is a manager-owned writable slab slot (construct contract above).
+    unsafe { construct(dest as *mut u8, index) };
+}
+
+/// Reborrow an opaque chunk backing pointer as `&mut StreamedChunk`.
+///
+/// # Safety
+/// `backing` must point at a live `StreamedChunk` this crate's [`construct`] placement-wrote into a
+/// leased manager slab slot. Every accessor below is only ever called on such a pointer, handed back
+/// by the manager (`deluge_resource_loader_next`); no two accessors alias it concurrently (all run on
+/// the single fill task / cursor).
+#[inline]
+unsafe fn chunk<'a>(backing: *mut c_void) -> &'a mut StreamedChunk {
+    // SAFETY: caller contract — `backing` is a live, uniquely-borrowed constructed StreamedChunk.
+    unsafe { &mut *(backing as *mut StreamedChunk) }
+}
+
+/// Base of the chunk's audio payload (the DMA/read destination and frame-read origin).
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_payload(backing: *mut c_void) -> *mut u8 {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    unsafe { chunk(backing).payload }
+}
+
+/// Mark the chunk's payload loaded/ready (the flag the C++ region cursor polls).
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_loaded(backing: *mut c_void) {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    unsafe { chunk(backing).loaded = true };
+}
+
+/// Read the chunk's loaded/ready flag.
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_loaded(backing: *mut c_void) -> bool {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    unsafe { chunk(backing).loaded }
+}
+
+/// Read the chunk's unloadable flag.
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_unloadable(backing: *mut c_void) -> bool {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    unsafe { chunk(backing).unloadable }
+}
+
+/// Mark the chunk unloadable.
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_unloadable(backing: *mut c_void) {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    unsafe { chunk(backing).unloadable = true };
+}
+
+/// Read the chunk's pre-conversion convert-state (first-three-bytes + boundary-stitch guards).
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_convert_state(
+    backing: *mut c_void,
+) -> DelugeChunkConvertState {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    let c = unsafe { chunk(backing) };
+    DelugeChunkConvertState {
+        first_three_bytes: c.first_three_bytes,
+        start_converted: c.extra_bytes_start_converted,
+        end_converted: c.extra_bytes_end_converted,
+    }
+}
+
+/// Write the chunk's convert-state (the inverse of [`deluge_streaming_chunk_convert_state`]).
+/// # Safety
+/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_convert_state(
+    backing: *mut c_void,
+    state: DelugeChunkConvertState,
+) {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
+    let c = unsafe { chunk(backing) };
+    c.first_three_bytes = state.first_three_bytes;
+    c.extra_bytes_start_converted = state.start_converted;
+    c.extra_bytes_end_converted = state.end_converted;
+}
+
 #[cfg(test)]
 mod tests {
     // A plain `cargo test` on this `#![no_std]` crate links no allocator; `std` is available on
@@ -108,5 +229,81 @@ mod tests {
         assert!(!c.loaded);
         assert!(!c.unloadable);
         assert_eq!(c.payload, unsafe { dest.add(RUST_CHUNK_PAYLOAD_OFFSET) });
+    }
+
+    // Construct a chunk into a fresh backing buffer and hand back the opaque backing pointer the
+    // C-ABI accessors take.
+    fn constructed(buf: &mut std::vec::Vec<u8>, index: u32) -> *mut c_void {
+        let dest = buf.as_mut_ptr();
+        // SAFETY: `buf` owns RUST_CHUNK_PAYLOAD_OFFSET+64 writable bytes (allocated by the caller).
+        unsafe { construct(dest, index) };
+        dest as *mut c_void
+    }
+
+    #[test]
+    fn construct_c_abi_matches_direct_construct() {
+        let mut buf = vec![0u8; RUST_CHUNK_PAYLOAD_OFFSET + 64];
+        let dest = buf.as_mut_ptr();
+        // SAFETY: `buf` owns the slot bytes; ctx/owner are unused by the callback.
+        unsafe {
+            deluge_streaming_chunk_construct(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                11,
+                dest as *mut c_void,
+            );
+        }
+        // SAFETY: the callback placement-wrote a StreamedChunk at dest.
+        let c = unsafe { &*(dest as *const StreamedChunk) };
+        assert_eq!(c.cluster_index, 11);
+        assert_eq!(c.payload, unsafe { dest.add(RUST_CHUNK_PAYLOAD_OFFSET) });
+        // SAFETY: dest is a live constructed chunk.
+        assert_eq!(
+            unsafe { deluge_streaming_chunk_payload(dest as *mut c_void) },
+            unsafe { dest.add(RUST_CHUNK_PAYLOAD_OFFSET) }
+        );
+    }
+
+    #[test]
+    fn loaded_flag_round_trips() {
+        let mut buf = vec![0u8; RUST_CHUNK_PAYLOAD_OFFSET + 64];
+        let backing = constructed(&mut buf, 0);
+        // SAFETY: backing is a live constructed chunk for the duration of this test.
+        unsafe {
+            assert!(!deluge_streaming_chunk_loaded(backing));
+            deluge_streaming_chunk_set_loaded(backing);
+            assert!(deluge_streaming_chunk_loaded(backing));
+        }
+    }
+
+    #[test]
+    fn unloadable_flag_round_trips() {
+        let mut buf = vec![0u8; RUST_CHUNK_PAYLOAD_OFFSET + 64];
+        let backing = constructed(&mut buf, 0);
+        // SAFETY: backing is a live constructed chunk for the duration of this test.
+        unsafe {
+            assert!(!deluge_streaming_chunk_unloadable(backing));
+            deluge_streaming_chunk_set_unloadable(backing);
+            assert!(deluge_streaming_chunk_unloadable(backing));
+        }
+    }
+
+    #[test]
+    fn convert_state_round_trips() {
+        let mut buf = vec![0u8; RUST_CHUNK_PAYLOAD_OFFSET + 64];
+        let backing = constructed(&mut buf, 0);
+        let written = DelugeChunkConvertState {
+            first_three_bytes: [0xDE, 0xAD, 0xBE],
+            start_converted: true,
+            end_converted: false,
+        };
+        // SAFETY: backing is a live constructed chunk for the duration of this test.
+        let read = unsafe {
+            deluge_streaming_chunk_set_convert_state(backing, written);
+            deluge_streaming_chunk_convert_state(backing)
+        };
+        assert_eq!(read.first_three_bytes, written.first_three_bytes);
+        assert_eq!(read.start_converted, written.start_converted);
+        assert_eq!(read.end_converted, written.end_converted);
     }
 }

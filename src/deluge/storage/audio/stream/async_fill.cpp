@@ -68,14 +68,9 @@ static_assert(offsetof(DelugeStreamingFillContext, byte_depth) == 29);
 static_assert(offsetof(DelugeStreamingFillContext, num_channels) == 30);
 static_assert(sizeof(DelugeStreamingFillContext) == 32);
 
-// FFI layout guard for DelugeChunkConvertState (SR2d-4 Task 1), mirroring ConvertState's own
-// `core::mem::offset_of!` guard in streaming_loader.rs. No pointer members, and every member
-// (`uint8_t[3]` then two `bool`s) is 1-byte-aligned, so this layout is identical on the 32-bit
-// device and the 64-bit host_app build: no padding anywhere, laid out back-to-back.
-static_assert(offsetof(DelugeChunkConvertState, first_three_bytes) == 0);
-static_assert(offsetof(DelugeChunkConvertState, start_converted) == 3);
-static_assert(offsetof(DelugeChunkConvertState, end_converted) == 4);
-static_assert(sizeof(DelugeChunkConvertState) == 5);
+// The DelugeChunkConvertState FFI layout guard now lives Rust-side only (the crate that owns the
+// convert-state accessors, `deluge_sample_fill`, guards its own mirror in `lib.rs`): U4d relocated
+// those accessor bodies to Rust, so this TU no longer touches the struct.
 
 extern "C" {
 
@@ -92,63 +87,11 @@ __attribute__((weak)) uint32_t deluge_sample_stream_asset_id(void* /*stream_back
 	return DELUGE_RESOURCE_NO_ASSET;
 }
 
-bool deluge_streaming_chunk_unloadable(void* chunk_backing) {
-	return reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable;
-}
-
-// The two StreamedChunk field-touch accessors the native Rust fill task needs (SR2d-4 Task 2):
-// payload pointer (read/DMA destination) and the loaded flag the C++ region cursor polls for
-// readiness. Same shape as deluge_streaming_chunk_unloadable just above -- real bodies only, no
-// weak fallback, because this TU (async_fill.cpp) is part of the shared deluge_SOURCES glob and so
-// always compiles and links into every BSP, not just the Rust/Embassy one.
-uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {
-	return reinterpret_cast<uint8_t*>(reinterpret_cast<StreamedChunk*>(chunk_backing)->payload().data());
-}
-
-void deluge_streaming_chunk_set_loaded(void* chunk_backing) {
-	reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;
-}
-
-// Read half of deluge_streaming_chunk_set_loaded -- the readiness flag the on-fiber yield-wait in
-// deluge_streaming_fill_chunk_blocking (streaming_loader.rs) polls. Real body only, no weak
-// fallback, same as its siblings above: this TU is part of the shared deluge_SOURCES glob and so
-// always compiles and links into every BSP.
-bool deluge_streaming_chunk_loaded(void* chunk_backing) {
-	return reinterpret_cast<StreamedChunk*>(chunk_backing)->loaded;
-}
-
-void deluge_streaming_chunk_set_unloadable(void* chunk_backing) {
-	reinterpret_cast<StreamedChunk*>(chunk_backing)->unloadable = true;
-}
-
-// StreamedChunk convert-state get/set accessors (SR2d-4 Task 1): thin accessors over the same
-// three fields the legacy sync-fiber finish_fill() above reads/writes directly
-// (first_three_bytes_pre_data_conversion, extra_bytes_at_start_converted,
-// extra_bytes_at_end_converted -- cluster.h:102-106). The native Rust fill's begin/finish
-// (streaming_loader.rs's native_begin/native_finish) read/write convert-state directly through
-// these (SR2d-4 Task 2) -- the single store for this state, replacing an earlier per-chunk sidecar
-// table (since deleted). Same shape as deluge_streaming_chunk_payload/_set_loaded just above --
-// real bodies only, no weak fallback, because this TU is part of the shared deluge_SOURCES glob
-// and so always compiles and links into every BSP.
-DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing) {
-	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
-	DelugeChunkConvertState state{};
-	for (size_t i = 0; i < 3; ++i) {
-		state.first_three_bytes[i] = static_cast<uint8_t>(cluster->first_three_bytes_pre_data_conversion[i]);
-	}
-	state.start_converted = cluster->extra_bytes_at_start_converted;
-	state.end_converted = cluster->extra_bytes_at_end_converted;
-	return state;
-}
-
-void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state) {
-	auto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);
-	for (size_t i = 0; i < 3; ++i) {
-		cluster->first_three_bytes_pre_data_conversion[i] = static_cast<char>(state.first_three_bytes[i]);
-	}
-	cluster->extra_bytes_at_start_converted = state.start_converted;
-	cluster->extra_bytes_at_end_converted = state.end_converted;
-}
+// The streamed chunk's seven field accessors (`deluge_streaming_chunk_{unloadable,set_unloadable,
+// payload,set_loaded,loaded,convert_state,set_convert_state}`) now live in Rust
+// (`deluge_sample_fill::chunk`, U4d) alongside the chunk's storage — this TU no longer defines them
+// or reads the chunk's byte layout. `deluge_streaming_resource_manager` (above) and the weak
+// fallbacks (below) stay here; only the chunk-field bodies moved.
 
 // Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP
 // provides the real definitions (streaming_loader.rs) whenever it links this crate —

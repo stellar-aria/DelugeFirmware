@@ -73,12 +73,15 @@ pub extern "C" fn deluge_sample_stream_set_asset_id(handle: u32, id: u32) {
     registry::set_asset_id(handle, id);
 }
 
-/// Read up to `len` bytes at `byte_offset` of `handle`'s open file into `buf`, returning the bytes
-/// actually read (0 on an invalid/out-of-range/freed handle). See [`registry::read_at`] for the
-/// full contract.
+/// Read up to `len` bytes at `byte_offset` of `handle`'s open file into `buf`. On success writes the
+/// bytes actually read to `*out_read` (0 is a legitimate read at/after EOF) and returns `true`;
+/// returns `false` on a failed read (an invalid/out-of-range/freed handle, or the underlying efatfs
+/// read reporting failure), leaving `*out_read` untouched. Mirrors `deluge_efatfs_read_at`'s
+/// success/byte-count split. See [`registry::read_at`] for the full contract.
 ///
 /// # Safety
-/// `buf`, if `len > 0`, must be valid for at least `len` writable bytes.
+/// `buf`, if `len > 0`, must be valid for at least `len` writable bytes; `out_read` must be a valid
+/// writable `u32`.
 #[cfg_attr(
     any(target_os = "none", feature = "host_app", feature = "sim"),
     unsafe(no_mangle)
@@ -88,9 +91,19 @@ pub unsafe extern "C" fn deluge_sample_stream_read_at(
     byte_offset: u32,
     buf: *mut u8,
     len: u32,
-) -> u32 {
+    out_read: *mut u32,
+) -> bool {
     // SAFETY: forwarded from this fn's own contract.
-    unsafe { registry::read_at(handle, byte_offset, buf, len) }
+    match unsafe { registry::read_at(handle, byte_offset, buf, len) } {
+        Some(n) => {
+            if !out_read.is_null() {
+                // SAFETY: `out_read` non-null and writable per this fn's own contract.
+                unsafe { *out_read = n };
+            }
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -137,9 +150,13 @@ mod tests {
 
         mock_backing::set_read_result(4);
         let mut buf = [0u8; 4];
-        // SAFETY: `buf` is a valid 4-byte local buffer.
-        let n = unsafe { deluge_sample_stream_read_at(h, 0, buf.as_mut_ptr(), buf.len() as u32) };
-        assert_eq!(n, 4);
+        let mut got: u32 = 0;
+        // SAFETY: `buf` is a valid 4-byte local buffer; `got` is a valid out-param.
+        let ok = unsafe {
+            deluge_sample_stream_read_at(h, 0, buf.as_mut_ptr(), buf.len() as u32, &mut got)
+        };
+        assert!(ok);
+        assert_eq!(got, 4);
 
         deluge_sample_stream_close(h);
         assert_eq!(mock_backing::closed_handles(), std::vec![11]);

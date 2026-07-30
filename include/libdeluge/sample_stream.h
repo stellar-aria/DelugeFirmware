@@ -103,14 +103,18 @@ void deluge_sample_stream_set_asset_id(uint32_t handle, uint32_t id);
 
 /// @brief Read @p len bytes at absolute @p byte_offset of @p handle's open file into @p buf.
 ///
-/// A slot with no real efatfs handle yet (still recording) reports a clean failed read (0)
-/// without touching the underlying file layer.
+/// Mirrors deluge_efatfs_read_at's success/byte-count split so a legitimate zero-byte read at/after
+/// EOF stays distinct from a failure.
 /// @param handle      A handle previously returned by deluge_sample_stream_open.
 /// @param byte_offset Absolute byte offset within the file to read from.
 /// @param buf         Destination buffer; up to @p len bytes are written.
 /// @param len         Number of bytes to read.
-/// @return Bytes actually read; 0 on an invalid handle, a still-recording slot, or a failed read.
-uint32_t deluge_sample_stream_read_at(uint32_t handle, uint32_t byte_offset, uint8_t* buf, uint32_t len);
+/// @param out_read    On success, receives the bytes actually read (0 is a valid read at/after EOF).
+/// @return true on success (@p out_read written); false on a failed read (invalid/out-of-range/
+///         already-closed @p handle, or the underlying efatfs read failing), leaving @p out_read
+///         untouched.
+bool deluge_sample_stream_read_at(uint32_t handle, uint32_t byte_offset, uint8_t* buf, uint32_t len,
+                                  uint32_t* out_read);
 
 #ifdef __cplusplus
 }

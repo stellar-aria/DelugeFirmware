@@ -193,25 +193,23 @@ pub fn set_asset_id(handle: u32, id: u32) {
     try_register_fill_context(index);
 }
 
-/// Read up to `len` bytes at `byte_offset` of `handle`'s open file into `buf`, returning the bytes
-/// actually read. A slot with no real efatfs handle yet (`efatfs_handle == 0` -- still recording)
-/// reports a clean failed read (`0`) without ever calling `deluge_efatfs_read_at`, exactly like
-/// today's behaviour. An invalid/out-of-range/freed `handle` also returns `0`.
+/// Read up to `len` bytes at `byte_offset` of `handle`'s open file into `buf`. Returns `Some(n)`
+/// with the bytes actually read -- `Some(0)` is a legitimate read at/after EOF, NOT a failure -- or
+/// `None` if the read failed: an invalid/out-of-range/freed `handle`, or `deluge_efatfs_read_at`
+/// itself reporting failure. Mirroring `deluge_efatfs_read_at`'s own success/byte-count split keeps
+/// the C++ `SampleStreamReadSource` a faithful forward of `EfatfsReadSource` (EOF -> `Ok(0)`,
+/// failure -> `Err`) rather than collapsing the two into a bare `0`.
 ///
 /// # Safety
 /// `buf`, if `len > 0`, must be valid for at least `len` writable bytes.
-pub unsafe fn read_at(handle: u32, byte_offset: u32, buf: *mut u8, len: u32) -> u32 {
-    let Some(index) = slot_index(handle) else {
-        return 0;
-    };
+pub unsafe fn read_at(handle: u32, byte_offset: u32, buf: *mut u8, len: u32) -> Option<u32> {
+    let index = slot_index(handle)?;
+    // `None` => freed slot.
     let efatfs_handle = REGISTRY.lock(|table| {
         table.borrow()[index]
             .as_ref()
             .map(|slot| slot.efatfs_handle)
-    });
-    let Some(efatfs_handle) = efatfs_handle else {
-        return 0; // Freed slot.
-    };
+    })?;
     // NB: no `efatfs_handle == 0` "still recording" short-circuit here. A registry slot is created
     // only AFTER a successful `deluge_efatfs_open` (see `open`), so its handle is always a real,
     // readable one -- and `0` is a valid handle the OS hands out for the very first open. A
@@ -231,11 +229,7 @@ pub unsafe fn read_at(handle: u32, byte_offset: u32, buf: *mut u8, len: u32) -> 
             &mut out_read,
         )
     };
-    if ok {
-        out_read
-    } else {
-        0
-    }
+    ok.then_some(out_read)
 }
 
 /// Register `index`'s slot's fill-context with the resource manager, once BOTH a real asset id
@@ -407,7 +401,11 @@ mod tests {
         let mut buf = [0u8; 16];
         // SAFETY: `buf` is a valid 16-byte local buffer.
         let n = unsafe { read_at(h, 1234, buf.as_mut_ptr(), buf.len() as u32) };
-        assert_eq!(n, 10, "a handle-0 slot must actually read, not fail clean");
+        assert_eq!(
+            n,
+            Some(10),
+            "a handle-0 slot must actually read, not fail clean"
+        );
         assert_eq!(
             mock_backing::last_read_call(),
             Some((0, 1234, 16)),
@@ -431,7 +429,7 @@ mod tests {
         let mut buf = [0u8; 16];
         // SAFETY: `buf` is a valid 16-byte local buffer.
         let n = unsafe { read_at(h, 1234, buf.as_mut_ptr(), buf.len() as u32) };
-        assert_eq!(n, 10);
+        assert_eq!(n, Some(10));
         assert_eq!(mock_backing::last_read_call(), Some((55, 1234, 16)));
 
         close(h);
@@ -489,7 +487,10 @@ mod tests {
         let mut buf = [0u8; 4];
         // SAFETY: `buf` is a valid 4-byte local buffer.
         let n = unsafe { read_at(0, 0, buf.as_mut_ptr(), buf.len() as u32) };
-        assert_eq!(n, 0);
+        assert_eq!(
+            n, None,
+            "an invalid handle is a failed read, not a 0-byte success"
+        );
 
         let out_of_range = (CAP as u32) + 1000;
         close(out_of_range);

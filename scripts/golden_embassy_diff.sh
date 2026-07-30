@@ -11,10 +11,16 @@
 # to prove the Rust/Embassy BSP still produces bit-exact golden output.
 #
 # Usage:
-#   scripts/golden_embassy_diff.sh <fixture>      # cordae | highsiderr | icoustic
+#   scripts/golden_embassy_diff.sh <fixture> [check|update]   # cordae | highsiderr | icoustic
+#     check  (default) — render and byte-compare against the stored golden baseline
+#     update           — render and RECORD the output as the new golden baseline
+#                        (<fixture>_MIXDOWN.golden.wav + .sha256 in DELUGE_GOLDEN_DIR).
+#                        This is the async re-baseline tool: golden_mixdown.sh's own
+#                        `update` renders the SYNC C-host deluge_render, so it is NOT
+#                        how the async Embassy baseline gets captured.
 #
-# Exit: 0 = PASS (byte-identical to the stored golden), 1 = mismatch or a render
-# crash/wedge, 2 = setup error (no baseline yet, no corpus, etc.)
+# Exit: 0 = PASS (byte-identical to the stored golden) / update wrote the baseline,
+# 1 = mismatch or a render crash/wedge, 2 = setup error (no baseline yet, no corpus, etc.)
 #
 # Env overrides (same conventions as golden_mixdown.sh / sd_image.rs):
 #   DELUGE_GOLDEN_DIR         where the reconstructed project + golden baseline live
@@ -41,18 +47,30 @@ FIXTURE="${1:-}"
 case "$FIXTURE" in
 cordae | highsiderr | icoustic) ;;
 *)
-	echo "usage: $0 <cordae|highsiderr|icoustic>"
+	echo "usage: $0 <cordae|highsiderr|icoustic> [check|update]"
 	exit 2
 	;;
 esac
 
-GOLDEN_SHA_FILE="$GOLDEN_DIR/${FIXTURE}_MIXDOWN.golden.wav.sha256"
-[ -f "$GOLDEN_SHA_FILE" ] || {
-	echo "ERROR: no MIXDOWN golden baseline for '$FIXTURE' yet — run:"
-	echo "  FIXTURE=$FIXTURE MODE=MIXDOWN scripts/golden_mixdown.sh update"
+VERB="${2:-check}"
+case "$VERB" in
+check | update) ;;
+*)
+	echo "usage: $0 <cordae|highsiderr|icoustic> [check|update]"
 	exit 2
-}
-GOLDEN_SHA="$(cut -c1-64 "$GOLDEN_SHA_FILE")"
+	;;
+esac
+
+GOLDEN_WAV_FILE="$GOLDEN_DIR/${FIXTURE}_MIXDOWN.golden.wav"
+GOLDEN_SHA_FILE="$GOLDEN_WAV_FILE.sha256"
+if [ "$VERB" = check ]; then
+	[ -f "$GOLDEN_SHA_FILE" ] || {
+		echo "ERROR: no MIXDOWN golden baseline for '$FIXTURE' yet — run:"
+		echo "  $0 $FIXTURE update"
+		exit 2
+	}
+	GOLDEN_SHA="$(cut -c1-64 "$GOLDEN_SHA_FILE")"
+fi
 
 if [ "${NO_BUILD:-0}" != 1 ]; then
 	[ -d "$BUILD_DIR" ] || {
@@ -97,6 +115,18 @@ if [ -z "$wav" ]; then
 fi
 
 render_sha="$(sha256sum "$wav" | awk '{print $1}')"
+
+if [ "$VERB" = update ]; then
+	mkdir -p "$GOLDEN_DIR"
+	cp "$wav" "$GOLDEN_WAV_FILE"
+	printf '%s\n' "$render_sha" >"$GOLDEN_SHA_FILE"
+	echo "UPDATED — $FIXTURE MIXDOWN async golden recorded (${render_sha:0:16}…)"
+	echo "  wav:    $GOLDEN_WAV_FILE"
+	echo "  sha256: $GOLDEN_SHA_FILE"
+	rm -f "$OUT_DIR.log"
+	exit 0
+fi
+
 if [ "$render_sha" = "$GOLDEN_SHA" ]; then
 	echo "PASS — $FIXTURE MIXDOWN matches golden (${GOLDEN_SHA:0:16}…)"
 	rm -f "$OUT_DIR.log"

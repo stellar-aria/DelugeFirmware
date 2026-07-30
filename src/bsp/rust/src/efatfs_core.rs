@@ -509,6 +509,18 @@ where
     OCC: OemCpConverter,
 {
     let root = fs.root_dir();
+    // Ensure the parent directory path exists (mkdir -p) FIRST — before the exclusive existence
+    // check below, which itself errors (not `Ok(false)`) on a path whose parent is missing.
+    // embedded-fatfs' create_file requires the parent, returning NotFound otherwise, but the efatfs
+    // C-ABI reports only success/failure as a bool — losing the NOT_FOUND distinction portable
+    // callers (e.g. SampleRecorder writing into a fresh SAMPLES/RESAMPLE folder) rely on to create
+    // the parent and retry. Creating it here makes write-create "just work" for a nested path, on
+    // device and host alike; mkdir no-ops an already-existing parent.
+    if let Some(slash) = path.rfind('/') {
+        if slash > 0 {
+            mkdir(fs, &path[..slash]).await?;
+        }
+    }
     if exclusive && root.exists(path).await.ok()? {
         return None;
     }
@@ -528,15 +540,34 @@ where
     fs.root_dir().remove(path).await.ok()
 }
 
-/// Create the directory at `path`; `path`'s parent must already exist.
-/// `None` on any FS error.
+/// Create the directory at `path`, creating any missing parent directories too
+/// (`mkdir -p` semantics). `None` on any FS error.
+///
+/// `embedded-fatfs`' `create_dir` requires the immediate parent to already exist
+/// (it returns `NotFound` otherwise) but is idempotent on an already-existing
+/// directory, so we build the path one ancestor prefix at a time. This matches the
+/// portable folder-creation contract callers rely on: the FatFS/C-host `mkdir` path
+/// returns `NOT_FOUND` for a missing parent so incremental callers (e.g.
+/// `SampleRecorder`, creating a nested `SAMPLES/RESAMPLE` recording folder on a
+/// fresh card) can create it — but the efatfs C-ABI reports only success/failure
+/// as a bool, losing that distinction. Making mkdir recursive here restores the
+/// expected behaviour uniformly for every efatfs caller, device and host alike.
 pub async fn mkdir<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, path: &str) -> Option<()>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
     OCC: OemCpConverter,
 {
-    fs.root_dir().create_dir(path).await.ok()?;
+    let root = fs.root_dir();
+    // Create each ancestor prefix (the substring up to each interior '/') before the
+    // full path. Skips empty components (a leading or doubled '/'); create_dir no-ops
+    // an existing dir, so re-creating shared ancestors is harmless.
+    for (idx, ch) in path.char_indices() {
+        if ch == '/' && idx > 0 && !path[..idx].ends_with('/') {
+            root.create_dir(&path[..idx]).await.ok()?;
+        }
+    }
+    root.create_dir(path).await.ok()?;
     Some(())
 }
 

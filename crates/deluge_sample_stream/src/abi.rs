@@ -74,8 +74,8 @@ pub extern "C" fn deluge_sample_stream_set_asset_id(handle: u32, id: u32) {
 }
 
 /// Read up to `len` bytes at `byte_offset` of `handle`'s open file into `buf`, returning the bytes
-/// actually read. See [`registry::read_at`] for the full contract, including the still-recording
-/// (`efatfs_handle == 0`) clean-failed-read case.
+/// actually read (0 on an invalid/out-of-range/freed handle). See [`registry::read_at`] for the
+/// full contract.
 ///
 /// # Safety
 /// `buf`, if `len > 0`, must be valid for at least `len` writable bytes.

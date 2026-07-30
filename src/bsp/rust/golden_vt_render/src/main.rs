@@ -199,6 +199,9 @@ unsafe extern "C" {
     fn deluge_scenario_start_stem_export(mode: i32);
     fn deluge_scenario_stem_export_done() -> bool;
     fn deluge_scenario_copy_stems_out(out_dir: *const c_char);
+    fn deluge_scenario_start_recorder_roundtrip();
+    fn deluge_scenario_recorder_roundtrip_done() -> bool;
+    fn deluge_scenario_recorder_roundtrip_failures() -> i32;
 }
 
 /// Set once [`boot_task`] has run the efatfs mount, `deluge_app_init` (which
@@ -447,6 +450,59 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
     done.store(true, Ordering::Release);
 }
 
+/// The `GOLDEN_SCENARIO=recorder_roundtrip` alternative to [`run_stem_export_scenario`]:
+/// runs the SampleRecorder byte-exact round-trip oracle (the ex-`deluge_recorder_roundtrip`
+/// binary, now the `deluge_scenario_run_recorder_roundtrip` harness scenario) on THIS Embassy
+/// substrate. Waits for boot+mount, dispatches the oracle onto the storage-owner worker fiber
+/// (`deluge_scenario_start_recorder_roundtrip` — where its file I/O and the finalized probe's
+/// async fill drain can block/resume), polls to quiescence until it finishes, then exits with
+/// its result. Unlike the stem-export scenario, no song load and no fixture image: `main`
+/// formats an EMPTY FAT image (the recorder only ever writes new files) and leaves
+/// `DELUGE_SD_ROOT` unset so the finalized probe reads efatfs on the same image it wrote.
+#[embassy_executor::task]
+async fn run_recorder_roundtrip_scenario(done: &'static AtomicBool) {
+    log::info!("golden_vt_render: run_recorder_roundtrip_scenario: awaiting boot+mount");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if BOOT_MOUNTED.load(Ordering::Acquire) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!("golden_vt_render: boot+mount did not complete within the 30s wait budget — wedged");
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+
+    log::info!("golden_vt_render: boot+mount confirmed; dispatching recorder round-trip onto the worker fiber");
+    // SAFETY: DELUGE_HOST harness C-ABI; boot (confirmed above) has run `deluge_app_init`.
+    unsafe { deluge_scenario_start_recorder_roundtrip() };
+
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        // SAFETY: as above.
+        if unsafe { deluge_scenario_recorder_roundtrip_done() } {
+            break;
+        }
+        if Instant::now() >= deadline {
+            log::error!(
+                "golden_vt_render: recorder round-trip did not complete within the 300s wait budget — wedged"
+            );
+            hard_exit(2);
+        }
+        Timer::after_millis(5).await;
+    }
+
+    // SAFETY: as above.
+    let failures = unsafe { deluge_scenario_recorder_roundtrip_failures() };
+    if failures != 0 {
+        log::error!("golden_vt_render: recorder round-trip FAILED ({failures} case(s) — see the log above)");
+        hard_exit(1);
+    }
+    log::info!("golden_vt_render: recorder round-trip PASSED (0 failures); exiting cleanly");
+    done.store(true, Ordering::Release);
+}
+
 /// Our own pender: no thread, no parking — just a flag the driver loop polls
 /// itself between `raw::Executor::poll()` calls.
 static PENDED: AtomicBool = AtomicBool::new(false);
@@ -475,7 +531,14 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(60_000);
 
-    log::info!("golden_vt_render: fixture={fixture} budget_ms={budget_ms}");
+    // GOLDEN_SCENARIO selects what this binary runs on the Embassy substrate: the default
+    // stem-export golden render, or the SampleRecorder byte-exact round-trip oracle (the
+    // ex-`deluge_recorder_roundtrip`, converged onto Embassy so the C++ sync fill drain can be
+    // retired). The recorder scenario ignores GOLDEN_FIXTURE — it formats an empty image and
+    // records into it rather than loading a corpus song.
+    let recorder_mode = std::env::var("GOLDEN_SCENARIO").as_deref() == Ok("recorder_roundtrip");
+
+    log::info!("golden_vt_render: fixture={fixture} budget_ms={budget_ms} recorder_mode={recorder_mode}");
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same
     // tooling `../lens1_vt_sim/`'s scenario driver uses. Must run before
@@ -488,7 +551,14 @@ fn main() {
         .expect("CARGO_MANIFEST_DIR (src/bsp/rust/golden_vt_render) has a repo root 4 levels up")
         .to_path_buf();
     if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
-        let img = sd_image::pack_golden_fixture(&repo_root, &fixture);
+        // Recorder mode records into a fresh EMPTY image (it only ever writes new files); the
+        // stem-export golden packs the fixture's corpus song + samples.
+        let img = if recorder_mode {
+            sd_image::format_empty_image()
+        }
+        else {
+            sd_image::pack_golden_fixture(&repo_root, &fixture)
+        };
         // SAFETY: single-threaded at this point (before any task/executor exists).
         unsafe { std::env::set_var("DELUGE_SD_IMAGE", &img) };
     }
@@ -546,9 +616,14 @@ fn main() {
     #[cfg(feature = "async_streaming_loader")]
     spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
 
-    let fixture_static: &'static str = Box::leak(fixture.into_boxed_str());
     static DONE: AtomicBool = AtomicBool::new(false);
-    spawner.spawn(run_stem_export_scenario(fixture_static, &DONE).unwrap());
+    if recorder_mode {
+        spawner.spawn(run_recorder_roundtrip_scenario(&DONE).unwrap());
+    }
+    else {
+        let fixture_static: &'static str = Box::leak(fixture.into_boxed_str());
+        spawner.spawn(run_stem_export_scenario(fixture_static, &DONE).unwrap());
+    }
 
     // --- Discrete-event driver loop -----------------------------------------
     // Same shape as `../lens1_vt_sim/src/main.rs`'s driver loop: poll to

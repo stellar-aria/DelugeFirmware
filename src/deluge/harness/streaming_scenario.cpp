@@ -19,6 +19,8 @@
 
 #ifdef DELUGE_HOST
 
+#include "harness/recorder_roundtrip_scenario.h" // deluge_scenario_run_recorder_roundtrip
+
 #include "definitions_cxx.hpp"
 #include "fatfs/ff.h"
 #include "gui/ui/audio_recorder.h"
@@ -53,6 +55,13 @@ bool g_stem_export_dispatch_finished = false;
 bool g_song_load_begin_finished = false;
 bool g_song_load_begin_result = false;
 std::string g_song_load_begin_path;
+
+/// Same start/finished-latch shape as g_stem_export_dispatch_finished, for the
+/// recorder-roundtrip scenario dispatched onto the storage-owner worker fiber.
+/// `g_recorder_roundtrip_failures` is -1 until the dispatched closure sets it to the
+/// oracle's returned failure count.
+bool g_recorder_roundtrip_dispatch_finished = false;
+int32_t g_recorder_roundtrip_failures = -1;
 
 } // namespace
 
@@ -178,6 +187,29 @@ void deluge_scenario_start_stem_export(int32_t mode) {
 
 bool deluge_scenario_stem_export_done() {
 	return g_stem_export_dispatch_finished;
+}
+
+void deluge_scenario_start_recorder_roundtrip() {
+	g_recorder_roundtrip_dispatch_finished = false;
+	g_recorder_roundtrip_failures = -1;
+	// Dispatch the whole oracle onto the storage-owner worker fiber (same shape as
+	// deluge_scenario_start_stem_export above): its file I/O — recorder writes, deluge::io::File
+	// reads, open_read_stream — and the finalized probe's deluge_streaming_drain_queue_blocking()
+	// yield-and-drain must run ON the fiber to block/resume against the async fill task.
+	deluge::storage::Owner::run(
+	    [](void*) {
+		    g_recorder_roundtrip_failures = deluge_scenario_run_recorder_roundtrip();
+		    g_recorder_roundtrip_dispatch_finished = true;
+	    },
+	    nullptr);
+}
+
+bool deluge_scenario_recorder_roundtrip_done() {
+	return g_recorder_roundtrip_dispatch_finished;
+}
+
+int32_t deluge_scenario_recorder_roundtrip_failures() {
+	return g_recorder_roundtrip_failures;
 }
 
 void deluge_scenario_copy_stems_out(const char* out_dir) {

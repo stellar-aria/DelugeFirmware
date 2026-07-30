@@ -1,0 +1,112 @@
+/*
+ * Copyright © 2014-2026 Synthstrom Audible Limited
+ *
+ * This file is part of The Synthstrom Audible Deluge Firmware.
+ *
+ * The Synthstrom Audible Deluge Firmware is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program.
+ * If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/// libdeluge/sample_stream.h — the streaming-file slot registry C-ABI (U4c).
+///
+/// A fixed-capacity table of open efatfs streaming handles (`deluge_sample_stream` Rust crate),
+/// each pairing an efatfs read handle with the resource-manager asset id + geometry a caller
+/// supplies once known, registering the asset's `DelugeStreamingFillContext`
+/// (`streaming_fill.h`) with the resource manager itself the moment both are present. Handles are
+/// opaque `uint32_t`s (`0` = invalid/fail), NOT a pointer — the registry owns a fixed slot table
+/// rather than heap-boxing per-stream state.
+///
+/// This is the U4c rung's relocation target: a later task flips `SampleStream`'s own held efatfs
+/// handle + geometry (`sample_stream.cpp`'s `register_fill_context`) onto this registry, so the
+/// C++ side stops holding that state itself.
+#ifndef LIBDELUGE_SAMPLE_STREAM_H
+#define LIBDELUGE_SAMPLE_STREAM_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// The geometry a stream slot needs to register its asset's fill-context — `streaming_fill.h`'s
+/// `DelugeStreamingFillContext` minus `efatfs_handle` (the registry supplies that field itself,
+/// from the slot's own efatfs handle).
+typedef struct DelugeSampleStreamGeometry {
+	uint32_t audio_data_start_pos_bytes; ///< Offset from the start of the file to the first audio byte.
+	uint64_t audio_data_length_bytes;    ///< Audio payload length in bytes; 0x8FFFFFFFFFFFFFFF = still recording.
+	int32_t first_cluster_index_with_no_audio_data; ///< First cluster index past the end of the audio data.
+	uint32_t cluster_size;                          ///< Cluster::size — bytes per (non-final) cluster.
+	uint32_t cluster_size_magnitude;                ///< Cluster::size_magnitude — log2(cluster_size).
+	uint8_t raw_data_format;                        ///< Sample::rawDataFormat (RawDataFormat's uint8_t representation).
+	uint8_t byte_depth;   ///< Sample::byteDepth — bytes per channel-sample (e.g. 2 for 16-bit).
+	uint8_t num_channels; ///< Sample::numChannels — channel count (1 = mono, 2 = stereo).
+} DelugeSampleStreamGeometry;
+
+/// @brief Open @p path for streaming reads and register a fresh slot for it.
+///
+/// @param path           NUL-terminated absolute file path.
+/// @param out_table_full Always written: true iff the failure was specifically this registry's
+///                        own slot table being full (as opposed to the underlying
+///                        deluge_efatfs_open failing for its own reasons, e.g. its own handle
+///                        table full or the file not existing) — lets a caller map this
+///                        registry's own exhaustion to a dedicated error rather than a misleading
+///                        "file not found". On the registry's-own-table-full case, the
+///                        underlying efatfs handle that was just opened is closed, never leaked.
+/// @return A non-zero slot handle on success; 0 on failure.
+uint32_t deluge_sample_stream_open(const char* path, bool* out_table_full);
+
+/// @brief Release @p handle's slot: close its efatfs handle (if any) and release its
+///        resource-manager asset (if one was ever assigned).
+///
+/// Idempotent — a no-op on 0 or an already-closed handle.
+/// @param handle A handle previously returned by deluge_sample_stream_open, or 0.
+void deluge_sample_stream_close(uint32_t handle);
+
+/// @brief Store @p geo on @p handle's slot, registering its streaming fill-context with the
+///        resource manager once both a geometry and a real asset id are present.
+///
+/// No-op on an invalid/out-of-range/already-closed @p handle.
+/// @param handle A handle previously returned by deluge_sample_stream_open.
+/// @param geo    The geometry to store.
+void deluge_sample_stream_set_geometry(uint32_t handle, DelugeSampleStreamGeometry geo);
+
+/// @brief @p handle's currently assigned resource-manager asset id.
+///
+/// @param handle A handle previously returned by deluge_sample_stream_open.
+/// @return The asset id, or DELUGE_RESOURCE_NO_ASSET (0xFFFFFFFF) on an invalid handle or one
+///         with no asset id assigned yet.
+uint32_t deluge_sample_stream_asset_id(uint32_t handle);
+
+/// @brief Assign @p id as @p handle's resource-manager asset, registering its streaming
+///        fill-context once both an asset id and a geometry are present.
+///
+/// No-op on an invalid/out-of-range/already-closed @p handle.
+/// @param handle A handle previously returned by deluge_sample_stream_open.
+/// @param id     The resource-manager asset id to assign.
+void deluge_sample_stream_set_asset_id(uint32_t handle, uint32_t id);
+
+/// @brief Read @p len bytes at absolute @p byte_offset of @p handle's open file into @p buf.
+///
+/// A slot with no real efatfs handle yet (still recording) reports a clean failed read (0)
+/// without touching the underlying file layer.
+/// @param handle      A handle previously returned by deluge_sample_stream_open.
+/// @param byte_offset Absolute byte offset within the file to read from.
+/// @param buf         Destination buffer; up to @p len bytes are written.
+/// @param len         Number of bytes to read.
+/// @return Bytes actually read; 0 on an invalid handle, a still-recording slot, or a failed read.
+uint32_t deluge_sample_stream_read_at(uint32_t handle, uint32_t byte_offset, uint8_t* buf, uint32_t len);
+
+#ifdef __cplusplus
+}
+#endif
+#endif // LIBDELUGE_SAMPLE_STREAM_H

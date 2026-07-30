@@ -6,6 +6,7 @@
 #include <span>
 
 extern "C" {
+#include "libdeluge/sample_stream.h"
 #include "libdeluge/streaming_fill.h"
 #include "libdeluge/types.h" // DelugeStatus
 }
@@ -15,12 +16,14 @@ namespace deluge::audio::stream {
 /// @brief The audio-stream module's read seam (design spec §6/§7).
 ///
 /// A ReadSource pulls one FAT-cluster-sized block of a sample's on-card bytes into a caller buffer.
-/// EfatfsReadSource (streaming read via the embedded-fatfs handle, the R1 read path) is the sole
-/// implementation. SR3b deleted the other one, RecordingReadSource (recorder read-back of a mid-write
-/// file via the recorder's own open efatfs write context, R3) -- a dead end on the real device (the
-/// async Rust loader reads via a raw efatfs handle and never routed through this abstraction anyway),
-/// exercised only by the C-host sim / diagnostic harnesses. The reconstruction core reads through
-/// this and stays pure.
+/// SampleStreamReadSource (via the `deluge_sample_stream` registry handle) is what
+/// SampleStream::make_read_source() actually returns since U4c. EfatfsReadSource (direct embedded-
+/// fatfs handle reads) remains for callers that hold a raw efatfs handle outside the registry. SR3b
+/// deleted the other one, RecordingReadSource (recorder read-back of a mid-write file via the
+/// recorder's own open efatfs write context, R3) -- a dead end on the real device (the async Rust
+/// loader reads via a raw efatfs handle and never routed through this abstraction anyway), exercised
+/// only by the C-host sim / diagnostic harnesses. The reconstruction core reads through this and
+/// stays pure.
 class ReadSource {
 public:
 	virtual ~ReadSource() = default;
@@ -45,6 +48,22 @@ public:
 
 private:
 	uint32_t handle_;
+	uint8_t cluster_size_magnitude_;
+};
+
+/// @brief Streaming read path via the `deluge_sample_stream` registry (U4c): reads via a stream
+///        registry handle at a cluster-aligned byte offset (deluge_sample_stream_read_at). Selected
+///        by SampleStream::make_read_source(), the facade's forwarding read source.
+class SampleStreamReadSource final : public ReadSource {
+public:
+	SampleStreamReadSource(uint32_t stream_handle, uint8_t cluster_size_magnitude)
+	    : stream_handle_{stream_handle}, cluster_size_magnitude_{cluster_size_magnitude} {}
+
+	/// @copydoc ReadSource::read
+	std::expected<uint32_t, DelugeStatus> read(uint32_t cluster_index, std::span<std::byte> dst) override;
+
+private:
+	uint32_t stream_handle_;
 	uint8_t cluster_size_magnitude_;
 };
 

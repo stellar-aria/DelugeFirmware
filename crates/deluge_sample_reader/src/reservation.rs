@@ -495,8 +495,7 @@ pub unsafe extern "C" fn deluge_sample_reserve_close(res: *mut DelugeSampleReser
 mod tests {
     use super::*;
     use crate::host_streaming_stubs::{
-        set_active_manager, set_fail_at_byte_offset, set_force_read_failure, PAYLOAD_OFFSET,
-        TEST_LOCK,
+        set_active_manager, set_fail_at_byte_offset, set_force_read_failure, TEST_LOCK,
     };
     use deluge_resource::manager::BACKING_SLAB;
     use deluge_resource::value::COST_IO;
@@ -508,29 +507,46 @@ mod tests {
     const CLUSTER_SIZE_BYTES: u32 = 32768;
     const CLUSTER_SIZE_MAGNITUDE: u32 = 15; // 2^15 == 32768
 
-    /// Real per-chunk backing needs `PAYLOAD_OFFSET` (front guard) plus `CLUSTER_SIZE_BYTES`
-    /// (payload) plus 7 more bytes of trailing slack `native_finish` always touches — the SAME
-    /// sizing `reader.rs`'s own `window_tests::BACKING_SIZE` uses, for the identical reason: this
-    /// module's `LoadMode::Now` test is this harness's first REAL `fill_now` call (every other
-    /// test only ever reserves via `LoadMode::Enqueue`, which never runs a real fill) — a bare
-    /// `CLUSTER_SIZE_BYTES`-sized heap allocation would let that fill overrun its backing.
-    const BACKING_SIZE: usize = 32800; // PAYLOAD_OFFSET(16) + CLUSTER_SIZE_BYTES + 7, rounded to 16
-    const _: () = assert!(
-        BACKING_SIZE >= PAYLOAD_OFFSET + CLUSTER_SIZE_BYTES as usize + 7,
-        "BACKING_SIZE must fit the front guard + payload + trailing slack"
-    );
+    /// Real per-chunk backing needs `RUST_CHUNK_PAYLOAD_OFFSET` (front guard) plus
+    /// `CLUSTER_SIZE_BYTES` (payload) plus 7 more bytes of trailing slack `native_finish` always
+    /// touches — the SAME sizing `reader.rs`'s own `window_tests::BACKING_SIZE` uses, for the
+    /// identical reason: this module's `LoadMode::Now` test is this harness's first REAL
+    /// `fill_now` call (every other test only ever reserves via `LoadMode::Enqueue`, which never
+    /// runs a real fill) — a bare `CLUSTER_SIZE_BYTES`-sized heap allocation would let that fill
+    /// overrun its backing. Derived from the real offset (not a hand-rounded literal) so this
+    /// harness never silently drifts out of sync with `StreamedChunk`'s own layout.
+    const BACKING_SIZE: usize =
+        (deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET + CLUSTER_SIZE_BYTES as usize + 7)
+            .next_multiple_of(16);
 
-    /// `Resource::request` (the miss branch of `load_cluster`) requires SOME construct callback
-    /// attached to the asset (a construct-less asset refuses `request` — see
-    /// `deluge_resource`'s own `request_constructs_without_loading_then_leases` test), and these
-    /// tests never read chunk bytes back, only lease bookkeeping — a no-op suffices, mirroring
-    /// `abi.rs`'s own `noop_construct`.
-    unsafe extern "C" fn noop_construct(
-        _ctx: *mut c_void,
-        _owner: *mut c_void,
-        _index: u32,
-        _dest: *mut u8,
+    /// Placement-construct a real `StreamedChunk` at `dest` — `Resource::request` (the miss
+    /// branch of `load_cluster`) requires SOME construct callback attached to the asset (a
+    /// construct-less asset refuses `request` — see `deluge_resource`'s own
+    /// `request_constructs_without_loading_then_leases` test), and this module's `LoadMode::Now`
+    /// test runs a REAL `fill_now` against the resulting chunk (`native_begin`/`native_finish`
+    /// reach it through `deluge_sample_fill::chunk`'s real, in-crate accessors), which requires a
+    /// genuinely constructed backing to reborrow soundly — mirrors `reader.rs`'s own
+    /// `window_tests::real_chunk_construct` (see `lib.rs`'s `host_streaming_stubs` module doc for
+    /// why this crate no longer stubs the C-ABI construct/accessors themselves).
+    ///
+    /// # Safety
+    /// `dest` must be a writable slab slot of at least `RUST_CHUNK_PAYLOAD_OFFSET +
+    /// CLUSTER_SIZE_BYTES + 7` bytes — this module's own `BACKING_SIZE` slab satisfies that.
+    unsafe extern "C" fn real_chunk_construct(
+        ctx: *mut c_void,
+        owner: *mut c_void,
+        index: u32,
+        dest: *mut u8,
     ) {
+        // SAFETY: forwarding the caller's contract (above) to the real construct.
+        unsafe {
+            deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+                ctx,
+                owner,
+                index,
+                dest as *mut c_void,
+            );
+        }
     }
 
     /// Backing arena for the leaked test heap, kept alive for the process's remaining life —
@@ -573,7 +589,7 @@ mod tests {
             assert!(!handle.is_null());
             // SAFETY: `handle`/`slab` are both live, over the same heap.
             unsafe { deluge_resource::deluge_resource_set_slab(handle, slab) };
-            // SAFETY: `handle` is live; `noop_construct` has the required C-ABI signature.
+            // SAFETY: `handle` is live; `real_chunk_construct` has the required C-ABI signature.
             let asset = unsafe {
                 deluge_resource::deluge_resource_define_asset(
                     handle,
@@ -586,7 +602,11 @@ mod tests {
                 )
             };
             unsafe {
-                deluge_resource::deluge_resource_set_construct(handle, asset, Some(noop_construct));
+                deluge_resource::deluge_resource_set_construct(
+                    handle,
+                    asset,
+                    Some(real_chunk_construct),
+                );
             }
             let ctx = FillContext {
                 efatfs_handle: 0,
@@ -643,7 +663,7 @@ mod tests {
         /// manager-internal access needed).
         ///
         /// This works as a lease-churn detector specifically BECAUSE, under `LoadMode::Enqueue`
-        /// (every caller of this helper), `noop_construct`/the recipe itself never calls
+        /// (every caller of this helper), `real_chunk_construct`/the recipe itself never calls
         /// `mark_ready`: every chunk stays permanently un-ready, so `load_cluster`'s first attempt
         /// (`Resource::acquire_leased`, which only hits a `ready` chunk) NEVER hits — it always
         /// falls through to `Resource::request`, which bumps `Stats::requests` unconditionally, on

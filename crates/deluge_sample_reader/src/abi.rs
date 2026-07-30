@@ -252,17 +252,35 @@ mod tests {
         _buf: Vec<u128>,
     }
 
-    /// A no-op construct: `Resource::request` (used to mint the leases these tests attach to a
-    /// reader) requires SOME construct callback attached to the asset (see
-    /// `deluge_resource`'s own `request_constructs_without_loading_then_leases` test — a
-    /// construct-less asset refuses `request`), and this module never reads the bytes back, only
-    /// the lease bookkeeping.
-    unsafe extern "C" fn noop_construct(
-        _ctx: *mut c_void,
-        _owner: *mut c_void,
-        _index: u32,
-        _dest: *mut u8,
+    /// Placement-construct a real `StreamedChunk` at `dest`: `Resource::request` (used to mint
+    /// the leases these tests attach to a reader) requires SOME construct callback attached to
+    /// the asset (see `deluge_resource`'s own `request_constructs_without_loading_then_leases`
+    /// test — a construct-less asset refuses `request`), and `invalidate`'s own tests read the
+    /// resulting chunk's `unloadable` flag back through the real
+    /// `deluge_sample_fill::chunk::unloadable` accessor (U4d) — which requires a genuinely
+    /// constructed backing to reborrow soundly (mirrors `reader::tests::window_tests`'s own
+    /// `real_chunk_construct`; see `lib.rs`'s `host_streaming_stubs` module doc for why this
+    /// crate no longer stubs the C-ABI construct/accessors themselves).
+    ///
+    /// # Safety
+    /// `dest` must be a writable slot of at least `deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET`
+    /// bytes — every asset this module's harness defines requests `CHUNK_SIZE` (4096) bytes per
+    /// chunk, ample headroom for the small `StreamedChunk` header.
+    unsafe extern "C" fn real_chunk_construct(
+        ctx: *mut c_void,
+        owner: *mut c_void,
+        index: u32,
+        dest: *mut u8,
     ) {
+        // SAFETY: forwarding the caller's contract (above) to the real construct.
+        unsafe {
+            deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+                ctx,
+                owner,
+                index,
+                dest as *mut c_void,
+            );
+        }
     }
 
     /// A `FillContext` compatible with `CHUNK_SIZE` (4096 = 2^12) — just enough for
@@ -311,7 +329,7 @@ mod tests {
         // SAFETY: `h` is the live heap handle just created above.
         let handle = unsafe { deluge_resource::deluge_resource_create(h, 4, 16) };
         assert!(!handle.is_null());
-        // SAFETY: `handle` is live; `noop_construct` has the required C-ABI signature. No
+        // SAFETY: `handle` is live; `real_chunk_construct` has the required C-ABI signature. No
         // materialize needed -- this module never `acquire`s through the asset, only
         // `Resource::request`s directly in the test bodies below.
         let asset = unsafe {
@@ -327,7 +345,11 @@ mod tests {
         };
         // SAFETY: `handle`/`asset` are live/valid per the call above.
         unsafe {
-            deluge_resource::deluge_resource_set_construct(handle, asset, Some(noop_construct))
+            deluge_resource::deluge_resource_set_construct(
+                handle,
+                asset,
+                Some(real_chunk_construct),
+            )
         };
         deluge_streaming_set_fill_context(core::ptr::null_mut(), asset, ctx);
         set_active_manager(handle as *mut c_void);
@@ -434,7 +456,6 @@ mod tests {
         // Two-cluster sample. Build the manager, register its fill-context, make it the active
         // manager -- the shared harness, sized for two clusters (see `two_cluster_fill_context`).
         let (handle, asset) = manager_and_asset_with_context(two_cluster_fill_context());
-        crate::host_streaming_stubs::take_unloadable_calls(); // drain any prior recording
 
         // SAFETY: `handle` is live for the test's duration.
         let resource = unsafe { Resource::from_handle(handle) };
@@ -450,17 +471,31 @@ mod tests {
         ); // non-vacuity
         resource.loader_enqueue(s1, 0xFFFF_FFFF); // re-enqueue what loader_next just popped
 
+        // SAFETY: `l0`/`l1`'s chunks were placement-constructed by `real_chunk_construct` above
+        // (this harness's registered construct callback) and stay live (leases held) here.
+        unsafe {
+            assert!(!deluge_sample_fill::chunk::unloadable(
+                l0.chunk().as_ptr() as *mut c_void
+            ));
+            assert!(!deluge_sample_fill::chunk::unloadable(
+                l1.chunk().as_ptr() as *mut c_void
+            ));
+        }
+
         deluge_sample_invalidate(asset);
 
-        // Both clusters were flagged unloadable (the C++ setter stub recorded their backings).
-        let flagged = crate::host_streaming_stubs::take_unloadable_calls();
-        assert_eq!(
-            flagged.len(),
-            2,
-            "both resident clusters flagged unloadable"
-        );
-        assert!(flagged.contains(&(l0.chunk().as_ptr() as *mut c_void)));
-        assert!(flagged.contains(&(l1.chunk().as_ptr() as *mut c_void)));
+        // Both clusters were flagged unloadable (the real `StreamedChunk` accessor, read directly).
+        // SAFETY: both chunks are still live (leases held) for the duration of this read.
+        unsafe {
+            assert!(
+                deluge_sample_fill::chunk::unloadable(l0.chunk().as_ptr() as *mut c_void),
+                "cluster 0 flagged unloadable"
+            );
+            assert!(
+                deluge_sample_fill::chunk::unloadable(l1.chunk().as_ptr() as *mut c_void),
+                "cluster 1 flagged unloadable"
+            );
+        }
         // The queue was drained (loader_remove ran for the queued cluster).
         assert!(
             resource.loader_next().is_none(),
@@ -488,7 +523,6 @@ mod tests {
                 ..two_cluster_fill_context()
             };
             let (handle, asset) = manager_and_asset_with_context(ctx);
-            crate::host_streaming_stubs::take_unloadable_calls(); // drain any prior recording
 
             // SAFETY: `handle` is live for the test's duration.
             let resource = unsafe { Resource::from_handle(handle) };
@@ -498,9 +532,12 @@ mod tests {
 
             deluge_sample_invalidate(asset);
 
-            let flagged = crate::host_streaming_stubs::take_unloadable_calls();
+            // SAFETY: `l0`'s chunk was placement-constructed by `real_chunk_construct` and stays
+            // live (lease held) for the duration of this read.
             assert!(
-                flagged.is_empty(),
+                !unsafe {
+                    deluge_sample_fill::chunk::unloadable(l0.chunk().as_ptr() as *mut c_void)
+                },
                 "length {length:#x} must invalidate nothing -- no finite bound available"
             );
             assert_eq!(

@@ -152,13 +152,6 @@ unsafe extern "C" {
     /// Resolved once at `open()` time and cached — the same boot-singleton contract
     /// `deluge_sample_source::manager_residency::ManagerResidency::new` requires of its own handle.
     fn deluge_streaming_resource_manager() -> *mut c_void;
-    /// Flag a resident chunk unloadable so an in-flight async fill skips it (the C++ POD setter in
-    /// `async_fill.cpp`, mirror of `deluge_streaming_chunk_unloadable`). The flag stays a
-    /// `StreamedChunk` field (design A); this setter and its getter are both deleted at U4.
-    fn deluge_streaming_chunk_set_unloadable(chunk_backing: *mut c_void);
-    /// A resident chunk's payload base (`backing + kChunkPayloadOffset`), the single source of
-    /// truth for the payload offset (SR2d-4 lesson: never assume payload == backing).
-    fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
     /// The synchronous card read (`include/libdeluge/streaming_fill.h`) — see [`fill_now`].
     fn deluge_efatfs_read_at(
         handle: u32,
@@ -535,9 +528,10 @@ impl Reader {
         }
 
         // SAFETY: `held_lease` (just confirmed `Some` above) pins a resident chunk for as long as
-        // this reader holds it; `deluge_streaming_chunk_payload` returns that chunk's payload base.
+        // this reader holds it; `deluge_sample_fill::chunk::payload` returns that chunk's payload
+        // base.
         let payload_base = unsafe {
-            deluge_streaming_chunk_payload(
+            deluge_sample_fill::chunk::payload(
                 self.held_lease.as_ref().unwrap().chunk().as_ptr() as *mut c_void
             )
         };
@@ -678,7 +672,7 @@ impl Reader {
 /// count must NOT be mistaken for "not resident."
 ///
 /// Reuses the SAME geometry resolution and frame->cluster mapping [`Reader::open`]/[`locate`]
-/// use, and the SAME `deluge_streaming_chunk_payload` accessor [`Reader::window`] uses -- no
+/// use, and the SAME `deluge_sample_fill::chunk::payload` accessor [`Reader::window`] uses -- no
 /// separate geometry or payload logic. Unlike `window`/`advance` this has no cursor to hold: no
 /// lease is ever taken, no recency is ever bumped (`Resource::peek`'s own contract), no load is
 /// ever triggered on a miss, and no neighbouring cluster is ever touched -- render-thread-safe.
@@ -743,10 +737,10 @@ pub fn peek(source_id: u32, start_frame: u64, direction: i8) -> (*const u8, u32)
     // frame from `frames` with its own byte bounds, exactly as the facade `peek` it replaces does.
 
     // SAFETY: `chunk` was just confirmed resident (and ready) by `resource.peek`/`is_ready`
-    // above; `deluge_streaming_chunk_payload` returns that chunk's payload base, valid for as
+    // above; `deluge_sample_fill::chunk::payload` returns that chunk's payload base, valid for as
     // long as it stays resident -- guaranteed for the remainder of this call (a peek never
     // triggers eviction: it takes no lease, but it also never blocks or yields).
-    let payload_base = unsafe { deluge_streaming_chunk_payload(chunk.as_ptr() as *mut c_void) };
+    let payload_base = unsafe { deluge_sample_fill::chunk::payload(chunk.as_ptr() as *mut c_void) };
     // SAFETY: within-cluster only, by construction: the forward run's last byte is at
     // `byte_offset + frame_count * frame_stride <= resident <= cluster_size_bytes`, and the
     // backward run never reads past `byte_offset` itself (`resident <= cluster_size_bytes`) --
@@ -802,7 +796,7 @@ pub fn invalidate(source_id: u32) {
         if let Some(chunk) = resource.peek(source_id, index) {
             // SAFETY: `chunk` is a live resident backing from `peek`; the setter only writes the
             // POD's `unloadable` byte.
-            unsafe { deluge_streaming_chunk_set_unloadable(chunk.as_ptr() as *mut c_void) };
+            unsafe { deluge_sample_fill::chunk::set_unloadable(chunk.as_ptr() as *mut c_void) };
             resource.loader_remove(resource.slot_of(chunk));
         }
     }
@@ -1030,14 +1024,19 @@ mod tests {
     // payload (see the module doc's derivation) — the fill stub's deterministic ramp
     // (`byte_offset + i`, `lib.rs`'s `host_streaming_stubs::deluge_efatfs_read_at`) survives to
     // `window()` untouched, so a test can assert on it directly. Real `deluge_resource` manager,
-    // real `deluge_sample_fill::{native_begin, native_finish}`, real (if synthetic) chunks — not
-    // seeded payload == backing (`PAYLOAD_OFFSET` is a real nonzero front guard) — per the SR2d-4
-    // lesson this task's brief calls out.
+    // real `deluge_sample_fill::{native_begin, native_finish}`, real chunks — every backing this
+    // module's `harness` mints is a genuine `StreamedChunk`, placement-constructed by the same
+    // `deluge_sample_fill::chunk::deluge_streaming_chunk_construct` callback production registers
+    // (`chunk_residency.cpp`), not a seeded `payload == backing` stand-in (`RUST_CHUNK_PAYLOAD_OFFSET`
+    // is a real nonzero front guard) — per the SR2d-4 lesson this task's brief calls out. This is
+    // also load-bearing for soundness, not just fidelity: `native_finish` (`native.rs`) reaches a
+    // chunk's fields via `crate::chunk::payload`/`convert_state`/`set_convert_state`/`set_loaded`
+    // directly (in-crate calls, not the C-ABI wrappers this crate's own `host_streaming_stubs` used
+    // to shadow) — those reborrow the backing as `&`/`&mut StreamedChunk`, which is only valid over
+    // a backing this module actually constructed as one.
     mod window_tests {
         use super::*;
-        use crate::host_streaming_stubs::{
-            set_fail_at_byte_offset, set_force_read_failure, PAYLOAD_OFFSET,
-        };
+        use crate::host_streaming_stubs::{set_fail_at_byte_offset, set_force_read_failure};
 
         // 512, not a smaller power of two: `fill_logic::begin`'s sector math is
         // `cluster_size >> 9` (512-byte sectors, mirroring the real `deluge_efatfs_read_at`
@@ -1046,29 +1045,42 @@ mod tests {
         // FAT cluster, KBs); 512 is the smallest size that keeps this synthetic sample honest.
         const CLUSTER_SIZE: u32 = 512;
         const CLUSTER_MAGNITUDE: u32 = 9; // 2^9 == 512
-        /// Real per-chunk backing needs `PAYLOAD_OFFSET` (front guard) plus `CLUSTER_SIZE`
-        /// (payload) plus 7 more bytes of trailing slack that `native_finish` always touches (see
-        /// its own `payload_len` doc), totalling 535 bytes; rounded up to 544 (a 16-byte multiple)
-        /// for the slab, mirroring the real `kChunkPayloadOffset`-sized slab slots production
+        /// Real per-chunk backing needs `RUST_CHUNK_PAYLOAD_OFFSET` (front guard) plus
+        /// `CLUSTER_SIZE` (payload) plus 7 more bytes of trailing slack that `native_finish`
+        /// always touches (see its own `payload_len` doc), rounded up to a 16-byte multiple for
+        /// the slab, mirroring the real `kChunkPayloadOffset`-sized slab slots production
         /// configures for `BACKING_SLAB` assets (`deluge_alloc::slab`'s own 16-byte-aligned-slot
         /// contract — see `deluge_resource::lib`'s `slab_backed_asset_acquires_evicts_reloads`
-        /// test).
-        const BACKING_SIZE: usize = 544;
+        /// test). Derived from the real offset (not a hand-rounded literal) so this harness never
+        /// silently drifts out of sync with `StreamedChunk`'s own layout.
+        const BACKING_SIZE: usize =
+            (deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET + CLUSTER_SIZE as usize + 7)
+                .next_multiple_of(16);
 
-        const _: () = assert!(
-            BACKING_SIZE >= PAYLOAD_OFFSET + CLUSTER_SIZE as usize + 7,
-            "BACKING_SIZE must fit the front guard + payload + trailing slack"
-        );
-
-        unsafe extern "C" fn noop_construct(
-            _ctx: *mut c_void,
-            _owner: *mut c_void,
-            _index: u32,
-            _dest: *mut u8,
+        /// Placement-construct a real `StreamedChunk` at `dest` — the exact callback production
+        /// registers for streamed-chunk assets (`chunk_residency.cpp`), reached through a thin
+        /// `ConstructFn`-shaped forwarder (`deluge_resource::manager::ConstructFn` takes `dest: *mut
+        /// u8`; the real construct's C-ABI signature takes `dest: *mut c_void` — the two function
+        /// pointer types don't unify, so this wrapper is the cast, not a behavioural stand-in).
+        ///
+        /// # Safety
+        /// `dest` must be a writable slab slot of at least `RUST_CHUNK_PAYLOAD_OFFSET +
+        /// CLUSTER_SIZE + 7` bytes — this module's own `BACKING_SIZE` slab satisfies that.
+        unsafe extern "C" fn real_chunk_construct(
+            ctx: *mut c_void,
+            owner: *mut c_void,
+            index: u32,
+            dest: *mut u8,
         ) {
-            // Nothing to initialize: the payload is populated by `fill_now`'s synthetic read, not
-            // by `construct` (which only runs to satisfy `Resource::request`'s "requestable asset
-            // needs a construct callback" precondition — see `manager_residency.rs`'s own tests).
+            // SAFETY: forwarding the caller's contract (above) to the real construct.
+            unsafe {
+                deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+                    ctx,
+                    owner,
+                    index,
+                    dest as *mut c_void,
+                );
+            }
         }
 
         struct TestHeap {
@@ -1114,7 +1126,7 @@ mod tests {
             assert!(!handle.is_null());
             // SAFETY: `handle`/`slab` are both live, over the same heap.
             unsafe { deluge_resource::deluge_resource_set_slab(handle, slab) };
-            // SAFETY: `handle` is live; `noop_construct` has the required C-ABI signature.
+            // SAFETY: `handle` is live; `real_chunk_construct` has the required C-ABI signature.
             let asset = unsafe {
                 deluge_resource::deluge_resource_define_asset(
                     handle,
@@ -1127,7 +1139,11 @@ mod tests {
                 )
             };
             unsafe {
-                deluge_resource::deluge_resource_set_construct(handle, asset, Some(noop_construct));
+                deluge_resource::deluge_resource_set_construct(
+                    handle,
+                    asset,
+                    Some(real_chunk_construct),
+                );
             }
             deluge_streaming_set_fill_context(core::ptr::null_mut(), asset, ctx);
             set_active_manager(handle as *mut c_void);

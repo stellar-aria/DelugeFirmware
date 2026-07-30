@@ -75,35 +75,34 @@ mod host_critical_section_stubs {
     }
 }
 
-// `reader.rs`'s `fill_now`/`window()` (Task 3) reach the app-provided `StreamedChunk`
-// accessors + the synchronous card read through `unsafe extern "C"` declarations — real C++
-// symbols in production (`async_fill.cpp`/`efatfs_fs.rs`), which this crate's own `cargo test`
-// binary does not link. Mirrors `host_critical_section_stubs` above: ONE crate-level
-// `#[cfg(test)]` module providing every stub `#[unsafe(no_mangle)]` definition this crate's test
-// binary needs (never duplicated per-test-module — a `#[no_mangle]` symbol may only be defined
-// once in a linked binary), used by both `reader::tests` and `abi::tests`.
+// `reader.rs`'s `fill_now`/`window()` (Task 3) reach the synchronous card read through an
+// `unsafe extern "C"` declaration — a real C++ symbol in production (`efatfs_fs.rs`), which this
+// crate's own `cargo test` binary does not link. Mirrors `host_critical_section_stubs` above: ONE
+// crate-level `#[cfg(test)]` module providing every stub `#[unsafe(no_mangle)]` definition this
+// crate's test binary needs (never duplicated per-test-module — a `#[no_mangle]` symbol may only
+// be defined once in a linked binary), used by both `reader::tests` and `abi::tests`.
 //
-// Deliberately NOT payload == backing (the SR2d-4 lesson `manager_residency.rs`'s own
-// `host_streaming_stubs` flags: an identity stub can't catch an offset bug) — `PAYLOAD_OFFSET`
-// is a nonzero front guard, matching the shape (if not the exact mechanism) of the real
-// `kChunkPayloadOffset` this crate's own chunks don't have without a real `StreamedChunk`.
+// Does NOT stub the `deluge_streaming_chunk_*` accessors any more (U4d): those are now real Rust
+// exports of `deluge_sample_fill::chunk`, unconditionally compiled into every binary that links
+// that crate (this crate always does — see its own `Cargo.toml`), so a same-named mock definition
+// here would collide with them at link time (a `#[no_mangle]` symbol may only be defined once).
+// `reader.rs`'s own tests instead construct genuine `StreamedChunk` backings (via
+// `deluge_sample_fill::chunk::deluge_streaming_chunk_construct`, registered as the asset's own
+// construct callback — see `reader::tests::window_tests::real_chunk_construct`) and read them
+// back through the real accessors, which is both simpler than shadowing them AND sound — a mock
+// keyed on a hand-picked `PAYLOAD_OFFSET` couldn't ever match `StreamedChunk`'s own (Rust-chosen,
+// not `repr(C)`) layout, and reborrowing a never-constructed backing as `&StreamedChunk` is UB
+// regardless of whether the mock happens to agree with it.
 #[cfg(test)]
 pub(crate) mod host_streaming_stubs {
     extern crate std;
     use core::cell::Cell;
     use core::ffi::c_void;
 
-    /// Nonzero front guard between a chunk's backing (`request`'s returned pointer) and its
-    /// payload — see the module doc. Large enough to hold the 5-byte `DelugeChunkConvertState`
-    /// this module's own convert-state accessors store at the chunk's backing base.
-    pub(crate) const PAYLOAD_OFFSET: usize = 16;
-
     std::thread_local! {
         static ACTIVE_MANAGER: Cell<*mut c_void> = const { Cell::new(core::ptr::null_mut()) };
         static FORCE_READ_FAILURE: Cell<bool> = const { Cell::new(false) };
         static FAIL_AT_BYTE_OFFSET: Cell<Option<u32>> = const { Cell::new(None) };
-        static UNLOADABLE_CALLS: core::cell::RefCell<std::vec::Vec<*mut core::ffi::c_void>> =
-            const { core::cell::RefCell::new(std::vec::Vec::new()) };
     }
 
     /// Serializes every test that touches `deluge_sample_fill`'s per-asset fill-context table
@@ -154,34 +153,13 @@ pub(crate) mod host_streaming_stubs {
         ACTIVE_MANAGER.with(|m| m.get())
     }
 
-    #[unsafe(no_mangle)]
-    extern "C" fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8 {
-        // SAFETY: every chunk this test binary ever constructs is sized `PAYLOAD_OFFSET +
-        // cluster_size + 7` bytes (see `reader::tests`'s harness) — `chunk_backing +
-        // PAYLOAD_OFFSET` stays within that allocation.
-        unsafe { (chunk_backing as *mut u8).add(PAYLOAD_OFFSET) }
-    }
-
-    #[unsafe(no_mangle)]
-    extern "C" fn deluge_streaming_chunk_set_loaded(_chunk_backing: *mut c_void) {
-        // No `loaded` flag on this test binary's synthetic chunks (no real `StreamedChunk`) —
-        // residency readiness is tracked by the manager's own `mark_ready`, which
-        // `Reader::acquire_and_fill` calls independently; nothing here needs this bit.
-    }
-
-    /// Host stub for the C++ POD setter (`async_fill.cpp`): the real body reinterprets the backing as
-    /// a `StreamedChunk` and sets its `unloadable` byte, which has no meaning over this crate's synthetic
-    /// slab backing — so the host build records the call instead, letting `invalidate`'s test assert
-    /// which chunks got flagged.
-    #[unsafe(no_mangle)]
-    extern "C" fn deluge_streaming_chunk_set_unloadable(chunk_backing: *mut core::ffi::c_void) {
-        UNLOADABLE_CALLS.with(|c| c.borrow_mut().push(chunk_backing));
-    }
-
-    /// Drain and return the backings passed to `deluge_streaming_chunk_set_unloadable` since the last drain.
-    pub(crate) fn take_unloadable_calls() -> std::vec::Vec<*mut core::ffi::c_void> {
-        UNLOADABLE_CALLS.with(|c| core::mem::take(&mut *c.borrow_mut()))
-    }
+    // `deluge_streaming_chunk_payload`/`_set_loaded`/`_unloadable`/`_set_unloadable`/
+    // `_convert_state`/`_set_convert_state` are deliberately NOT stubbed here (U4d) — see the
+    // module doc for why: they are real, unconditionally-compiled Rust exports of
+    // `deluge_sample_fill::chunk` now, and a same-named mock here would collide with them at link
+    // time. Tests that need them go through the real accessors directly
+    // (`deluge_sample_fill::chunk::payload`/`unloadable`/etc.) over a genuinely constructed
+    // `StreamedChunk` backing.
 
     /// No-op stand-in for the real async-fill wake signal (`streaming_fill.h`'s
     /// `deluge_streaming_signal_fill`) — this test binary has no async loader task to wake;
@@ -204,38 +182,6 @@ pub(crate) mod host_streaming_stubs {
     #[unsafe(no_mangle)]
     extern "C" fn deluge_streaming_fill_chunk_blocking(_chunk_backing: *mut c_void) -> bool {
         false
-    }
-
-    #[unsafe(no_mangle)]
-    extern "C" fn deluge_streaming_chunk_convert_state(
-        chunk_backing: *mut c_void,
-    ) -> deluge_sample_fill::DelugeChunkConvertState {
-        // SAFETY: the chunk's backing base has at least 5 bytes before `PAYLOAD_OFFSET` (16),
-        // reserved by this module for exactly this state — see the module doc.
-        unsafe {
-            let p = chunk_backing as *const u8;
-            deluge_sample_fill::DelugeChunkConvertState {
-                first_three_bytes: [*p, *p.add(1), *p.add(2)],
-                start_converted: *p.add(3) != 0,
-                end_converted: *p.add(4) != 0,
-            }
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    extern "C" fn deluge_streaming_chunk_set_convert_state(
-        chunk_backing: *mut c_void,
-        state: deluge_sample_fill::DelugeChunkConvertState,
-    ) {
-        // SAFETY: see `deluge_streaming_chunk_convert_state` above.
-        unsafe {
-            let p = chunk_backing as *mut u8;
-            *p = state.first_three_bytes[0];
-            *p.add(1) = state.first_three_bytes[1];
-            *p.add(2) = state.first_three_bytes[2];
-            *p.add(3) = state.start_converted as u8;
-            *p.add(4) = state.end_converted as u8;
-        }
     }
 
     /// Synthetic card read: deterministic content keyed on the ABSOLUTE file byte offset

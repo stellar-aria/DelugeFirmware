@@ -416,31 +416,6 @@ if(RT_LIB)
     target_link_libraries(deluge_host PRIVATE ${RT_LIB})
 endif()
 
-# deluge_render: the headless "project -> stems" utility. Same app + host BSP as
-# deluge_host, but its own main()/render-driver (host_render_main.cpp) instead of
-# host_main.c, and it drives the existing offline StemExport engine against a FAT
-# disk image (the shared host_platform.c diskio backend). Requires mtools at runtime
-# (--project packing). See host_render_main.cpp for usage.
-add_executable(deluge_render
-    ${REPO_ROOT}/src/bsp/host/host_bsp.c
-    ${REPO_ROOT}/src/bsp/host/host_platform.c
-    ${REPO_ROOT}/src/bsp/host/host_audio.c
-    ${REPO_ROOT}/src/bsp/host/host_link.c
-    ${REPO_ROOT}/src/bsp/host/host_ws.c
-    ${REPO_ROOT}/src/bsp/host/host_pcm.c
-    ${REPO_ROOT}/src/bsp/host/host_midi.c
-    ${REPO_ROOT}/src/bsp/host/host_render_main.cpp
-    ${REPO_ROOT}/src/bsp/host/host_debug.cpp
-    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
-)
-# host_debug.cpp provides deluge_host_debug_poll() (called from host_audio.c) + reaches the app's reason_check;
-# src/deluge on the path for memory/reason_check.h (the boundary check only forbids app→BSP, not BSP→app).
-target_include_directories(deluge_render PRIVATE ${HOST_INCLUDE_DIRS} ${REPO_ROOT}/src/deluge)
-target_link_libraries(deluge_render PRIVATE deluge_app deluge_scheduler ${SIM_ALLOC_LINK})
-if(RT_LIB)
-    target_link_libraries(deluge_render PRIVATE ${RT_LIB})
-endif()
-
 # deluge_loadcheck: headless "load these audio files, print their parsed descriptors" utility — the Tier-2
 # regression net for the file-loading redesign. Same app + host BSP as deluge_render, with its own
 # main()/driver (host_loadcheck_main.cpp) that drives AudioFileManager::getAudioFileFromFilename (and so
@@ -465,57 +440,10 @@ if(RT_LIB)
     target_link_libraries(deluge_loadcheck PRIVATE ${RT_LIB})
 endif()
 
-# deluge_recorder_roundtrip: headless byte-exact round-trip oracle for SampleRecorder (SR3b Task 2).
-# Same app + host BSP as deluge_render/deluge_loadcheck, with its own main()/driver
-# (host_recorder_roundtrip_main.cpp) that constructs a real SampleRecorder directly, feeds it a
-# deterministic PCM ramp, pumps its fiber drain (cardRoutine()) synchronously, finalizes, and reads
-# the produced SD file back byte-exact. No mtools/project dependency (only ever writes new files, the
-# disk image is freshly mformat-ed empty) — self-contained, no golden-corpus fixture needed.
-add_executable(deluge_recorder_roundtrip
-    ${REPO_ROOT}/src/bsp/host/host_bsp.c
-    ${REPO_ROOT}/src/bsp/host/host_platform.c
-    ${REPO_ROOT}/src/bsp/host/host_audio.c
-    ${REPO_ROOT}/src/bsp/host/host_link.c
-    ${REPO_ROOT}/src/bsp/host/host_ws.c
-    ${REPO_ROOT}/src/bsp/host/host_pcm.c
-    ${REPO_ROOT}/src/bsp/host/host_midi.c
-    ${REPO_ROOT}/src/bsp/host/host_recorder_roundtrip_main.cpp
-    ${REPO_ROOT}/src/bsp/host/host_debug.cpp
-    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
-)
-target_include_directories(deluge_recorder_roundtrip PRIVATE ${HOST_INCLUDE_DIRS} ${REPO_ROOT}/src/deluge)
-target_link_libraries(deluge_recorder_roundtrip PRIVATE deluge_app deluge_scheduler ${SIM_ALLOC_LINK})
-if(RT_LIB)
-    target_link_libraries(deluge_recorder_roundtrip PRIVATE ${RT_LIB})
-endif()
-
-# ---------------------------------------------------------------------------
-# Layout-invariance guard (CTest). Render each fixture at two heap-pad layouts
-# (DELUGE_SIM_HEAP_PAD via scripts/golden_mixdown.sh padsweep) and assert the
-# outputs are bit-identical — proving no render depends on allocation addresses.
-# This is the regression net for the shared-PRNG / overread class of layout-
-# coupled bug (a passing `golden check` does NOT prove this; it's pinned to one
-# layout). The real backup songs live only on the developer's machine
-# (DELUGE_BACKUP), so each test SKIPs (exit 77) when its fixture is absent — a
-# fixtureless CI runner skips rather than fails. Slow (two full renders each);
-# build deluge_render first, then opt in with `ctest -L padsweep`.
-enable_testing()
-foreach(fixture cordae highsiderr icoustic)
-    add_test(
-        NAME padsweep_${fixture}
-        COMMAND ${CMAKE_COMMAND} -E env
-                FIXTURE=${fixture} PADS=64 NO_BUILD=1 BUILD_DIR=${CMAKE_BINARY_DIR}
-                bash ${REPO_ROOT}/scripts/golden_mixdown.sh padsweep
-    )
-    set_tests_properties(padsweep_${fixture} PROPERTIES
-        SKIP_RETURN_CODE 77
-        LABELS padsweep
-        TIMEOUT 1200
-    )
-endforeach()
-
-# SampleRecorder byte-exact round-trip oracle (SR3b Task 2). Self-contained (no fixture/corpus
-# dependency, only requires mtools for the empty-image mformat), so it runs unconditionally rather
-# than SKIP-on-missing-fixture like the padsweep tests above.
-add_test(NAME recorder_roundtrip COMMAND deluge_recorder_roundtrip)
-set_tests_properties(recorder_roundtrip PROPERTIES LABELS recorder TIMEOUT 120)
+# NOTE: the C-host `deluge_render` / `deluge_recorder_roundtrip` renderers and their CTests
+# (the padsweep layout-invariance guard + the SampleRecorder round-trip oracle) were retired
+# when the sample-streaming golden moved onto the async Embassy renderer: `deluge_render` is
+# superseded by `src/bsp/rust/golden_vt_render` (`scripts/golden_embassy_diff.sh`), and the
+# recorder round-trip oracle now runs there too (`GOLDEN_SCENARIO=recorder_roundtrip`). The
+# padsweep layout-invariance guard has no Embassy replacement yet — a tracked follow-up.
+# `deluge_loadcheck` (parse-only, no sample streaming) stays.

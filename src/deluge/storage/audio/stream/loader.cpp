@@ -37,112 +37,15 @@
 
 namespace deluge::audio::stream::loader {
 
-// Instrumentation only, compile-disabled by default (kept for future debugging). `timeLastFinish` is
-// deliberately a translation-unit-scope variable rather than a class member — nothing else needs it, and
-// it carries no lifetime dependency on any particular owning object.
-#define REPORT_AWAY_TIME 0
-
-#if REPORT_AWAY_TIME
-uint16_t timeLastFinish;
-#endif
-
-// Lowest loader-queue priority — a cluster that is still wanted but not currently loadable (e.g. the card
-// was pulled mid-read) is re-queued here so it waits behind everything else. Matches the value
-// deluge_resource_loader_has_lowest() looks for.
-constexpr uint32_t kLowestLoaderPriority = 0xFFFFFFFF;
-
-namespace {
-/// Reconstruct one popped, manager-owned cluster. Opens the user-action gate for the duration of the card
-/// read (see `deluge::sync::StorageOp`) so the handful of safe UI actions can run while it blocks. Every
-/// queued cluster is manager-owned — get_cluster() ran deluge_streaming_define_asset() and construct/materialize
-/// set `cluster->sample` before it was enqueued — so it is already constructed + leased; the read just
-/// flips `loaded` true (or fails).
-/// @return `true` to keep draining; `false` only when the read failed while the cluster is still wanted
-///         (callers still hold reasons), in which case the caller re-queues it and stops.
-bool reconstruct_one(StreamedChunk* cluster) {
-	bool ok;
-	{
-		deluge::sync::StorageOp storage_op; // permits safe UI actions for the read's duration
-		ok = cluster->sample->stream().read_cluster_data(*cluster, 0);
-	}
-	if (ok) {
-		return true;
-	}
-
-	D_PRINTLN("load Cluster fail"); // most likely the card was ejected mid-read
-	// If the cluster dropped to 0 reasons while loading, it has already been made available — nothing to do,
-	// keep draining. Otherwise callers still want it, so the caller re-queues it and stops.
-	return deluge::cluster::lease_count(cluster->resource_slot) == 0;
-}
-} // namespace
-
 void pump(int32_t max_num, bool may_process_user_actions) {
-	// When the Rust async streaming-fill task owns the loader queue (see
-	// deluge_streaming_async_active()'s doc), the fiber's own drain must step aside entirely —
-	// the loader queue is streaming-only (recorder/preview dispatch through
-	// deluge::storage::Owner::run, not this queue), so nothing else needs to keep running here.
-	// deluge_streaming_async_active() is false while the feature is disabled, so this gate is a
-	// no-op then and behaviour stays byte-identical to before this gate existed.
-	if (deluge_streaming_async_active()) {
-		return;
-	}
-
-	// Admission. Nothing below may touch the SD card except read_cluster_data(), or it would re-enter here.
-	// Refuse while the card is mid-access or the audio routine holds the lock (the latter guards the
-	// cooperative convert-yield re-entrancy; its necessity is unverified but retained).
-	if (currentlyAccessingCard || AudioEngine::audioRoutineLocked) {
-		return;
-	}
-	// Card gone / uninitialised: nothing to load, but still let queued user actions (undo/redo) breathe.
-	if (audioFileManager.cardUnavailableForStreaming()) {
-		if (may_process_user_actions) {
-			playbackHandler.slowRoutine();
-		}
-		return;
-	}
-
-#if REPORT_AWAY_TIME
-	uint16_t startTime = MTU2.TCNT_0;
-	uint16_t awayTime = startTime - timeLastFinish;
-	int32_t uSecAway = timerCountToUS(awayTime);
-	if (uSecAway > 1000) {
-		D_PRINTLN("away  %d", uSecAway);
-	}
-#endif
-
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	for (int32_t count = 0; count < max_num;) {
-		// Between reads is a safe point to process pending user actions (undo/redo).
-		if (may_process_user_actions) {
-			playbackHandler.slowRoutine();
-		}
-
-		// Pop the most-urgent queued + still-leased cluster (the manager de-queues abandoned-unleased ones
-		// itself). Empty queue → done.
-		auto* cluster = reinterpret_cast<StreamedChunk*>(deluge_resource_loader_next(mgr));
-		if (cluster == nullptr) {
-			return;
-		}
-
-		// Safety net: markAsUnloadable already de-queued this and loader_next cleared its queued flag, so
-		// skipping can't loop. An unloadable cluster doesn't count against max_num.
-		if (cluster->unloadable) {
-			continue;
-		}
-
-		if (!reconstruct_one(cluster)) {
-			// Read failed while still wanted — re-queue at lowest priority and stop, else we'd keep
-			// re-popping the same cluster until the card is back.
-			deluge_resource_loader_enqueue(mgr, cluster->resource_slot, kLowestLoaderPriority);
-			break;
-		}
-
-		count++;
-	}
-
-#if REPORT_AWAY_TIME
-	timeLastFinish = MTU2.TCNT_0;
-#endif
+	// The synchronous C++ cluster-fill drain was retired along with the C-host renderers: every
+	// remaining target loads streamed clusters through the async Embassy fill task
+	// (`streaming_loader::streaming_fill_task`), and `deluge_streaming_async_active()` is true on
+	// all of them, so this is a no-op. Kept as a stub only so the in-app callers (audio_engine,
+	// load_song_ui, browser, audio_file_manager, deluge.cpp) still link; removing those calls and
+	// this file is a follow-up cleanup.
+	(void)max_num;
+	(void)may_process_user_actions;
 }
 
 bool has_lowest_priority_queued() {

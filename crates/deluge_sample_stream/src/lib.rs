@@ -184,6 +184,11 @@ pub(crate) mod mock_backing {
         LAST_FILL_CONTEXT_CALLS.with(|c| *c.borrow())
     }
 
+    /// Every asset id passed to `deluge_resource_release_asset` so far, in call order.
+    pub(crate) fn released_assets() -> Vec<u32> {
+        RELEASED_ASSETS.with(|c| c.borrow().clone())
+    }
+
     std::thread_local! {
         static LAST_FILL_CONTEXT_CALLS: RefCell<usize> = const { RefCell::new(0) };
     }

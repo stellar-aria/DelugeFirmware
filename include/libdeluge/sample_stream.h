@@ -82,10 +82,16 @@ void deluge_sample_stream_set_geometry(uint32_t handle, DelugeSampleStreamGeomet
 
 /// @brief @p handle's currently assigned resource-manager asset id.
 ///
+/// Named `_get_` (not the plain `deluge_sample_stream_asset_id` its handle-based sibling setter's
+/// naming would suggest): `streaming_fill.h` already declares an UNRELATED
+/// `deluge_sample_stream_asset_id(void* stream_backing)` (the `SampleStream*`-keyed accessor
+/// `sample_stream.cpp` defines and `deluge_sample_source::abi` consumes) — reusing that exact name
+/// here for a different signature would be a duplicate-symbol link error the moment both crates
+/// link into the same binary.
 /// @param handle A handle previously returned by deluge_sample_stream_open.
 /// @return The asset id, or DELUGE_RESOURCE_NO_ASSET (0xFFFFFFFF) on an invalid handle or one
 ///         with no asset id assigned yet.
-uint32_t deluge_sample_stream_asset_id(uint32_t handle);
+uint32_t deluge_sample_stream_get_asset_id(uint32_t handle);
 
 /// @brief Assign @p id as @p handle's resource-manager asset, registering its streaming
 ///        fill-context once both an asset id and a geometry are present.

@@ -427,6 +427,38 @@ mod tests {
         close(h);
     }
 
+    /// `close`'s asset-release branch: a slot with a real asset id assigned releases it through
+    /// `deluge_resource_release_asset` on close; a slot with no asset id ever assigned (still
+    /// `DELUGE_RESOURCE_NO_ASSET`) must NOT call it at all.
+    #[test]
+    fn close_releases_the_assigned_asset_but_not_an_unassigned_one() {
+        mock_backing::reset();
+        mock_backing::set_open_result(21, true, false);
+
+        // Slot with an assigned asset id: close must release it.
+        let mut tf = false;
+        let with_asset = open(c"ASSIGNED.WAV".as_ptr(), &mut tf);
+        assert_ne!(with_asset, 0);
+        set_asset_id(with_asset, 77);
+        close(with_asset);
+        assert_eq!(
+            mock_backing::released_assets(),
+            std::vec![77],
+            "close must release the slot's assigned asset id"
+        );
+
+        // Slot with no asset id ever assigned: close must not call release at all.
+        let mut tf2 = false;
+        let without_asset = open(c"UNASSIGNED.WAV".as_ptr(), &mut tf2);
+        assert_ne!(without_asset, 0);
+        close(without_asset);
+        assert_eq!(
+            mock_backing::released_assets(),
+            std::vec![77],
+            "close on a slot with no asset id assigned must not call deluge_resource_release_asset"
+        );
+    }
+
     #[test]
     fn open_failure_propagates_table_full_and_returns_zero() {
         mock_backing::reset();

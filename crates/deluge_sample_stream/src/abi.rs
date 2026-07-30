@@ -48,11 +48,18 @@ pub extern "C" fn deluge_sample_stream_set_geometry(handle: u32, geo: DelugeSamp
 
 /// `handle`'s currently assigned resource-manager asset id, or `DELUGE_RESOURCE_NO_ASSET`
 /// (`0xFFFFFFFF`) on an invalid handle or one with no asset id assigned yet.
+///
+/// Named `_get_` (not the plain `deluge_sample_stream_asset_id` its sibling setter's naming would
+/// suggest): `streaming_fill.h` already declares an unrelated, already-exported
+/// `deluge_sample_stream_asset_id(void* stream_backing)` (`sample_stream.cpp`'s
+/// `SampleStream*`-keyed accessor, consumed by `deluge_sample_source::abi`) — reusing that exact
+/// symbol name here for an incompatible signature would be a duplicate-symbol link error the
+/// moment both crates link into the same binary.
 #[cfg_attr(
     any(target_os = "none", feature = "host_app", feature = "sim"),
     unsafe(no_mangle)
 )]
-pub extern "C" fn deluge_sample_stream_asset_id(handle: u32) -> u32 {
+pub extern "C" fn deluge_sample_stream_get_asset_id(handle: u32) -> u32 {
     registry::asset_id(handle)
 }
 
@@ -116,9 +123,12 @@ mod tests {
         assert_ne!(h, 0);
         assert!(!tf);
 
-        assert_eq!(deluge_sample_stream_asset_id(h), DELUGE_RESOURCE_NO_ASSET);
+        assert_eq!(
+            deluge_sample_stream_get_asset_id(h),
+            DELUGE_RESOURCE_NO_ASSET
+        );
         deluge_sample_stream_set_asset_id(h, 3);
-        assert_eq!(deluge_sample_stream_asset_id(h), 3);
+        assert_eq!(deluge_sample_stream_get_asset_id(h), 3);
         deluge_sample_stream_set_geometry(h, sample_geometry());
 
         let (asset, ctx) = mock_backing::last_fill_context().expect("registered once both are set");

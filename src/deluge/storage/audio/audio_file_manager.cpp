@@ -39,7 +39,6 @@
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/file_byte_source.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/owner.h" // deluge::storage::Coalescer
 #include "storage/storage_manager.h"
@@ -59,14 +58,9 @@ extern "C" {
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
 
-// FatFs porting symbols. Service the audio cluster-streaming queue before every FatFs
-// sector access (an app priority concern), then do the plain sector I/O via the
-// libdeluge block-device boundary. Inverts what used to be a HAL->app upcall (diskio.c
-// calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
-// calls *down* into the block device.
+// FatFs porting symbols: plain sector I/O via the libdeluge block-device boundary. (Cluster
+// streaming is drained by the async fill task now, not pumped from the diskio callbacks.)
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
-
 	DelugeStatus status =
 	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 
@@ -78,7 +72,6 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 	DelugeStatus status =
 	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 	return status == DELUGE_OK ? RES_OK : RES_ERROR;
@@ -332,7 +325,6 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 			staticDIR = *maybeDIR;
 
 			while (true) {
-				deluge::audio::stream::loader::pump();
 				/* Read a directory item */
 				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
 					return Error::SD_CARD; // error if invalid

@@ -23,10 +23,9 @@
 #include "dsp/stereo_sample.h"
 #include "io/file.hpp"
 #include "libdeluge/sample_source.h"
-#include "libdeluge/streaming_fill.h" // deluge_streaming_async_active / _drain_queue_blocking
+#include "libdeluge/streaming_fill.h" // deluge_streaming_drain_queue_blocking
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 
 #include <cstdio>
@@ -46,19 +45,12 @@ int32_t expected24(uint32_t frameIndex, uint32_t channel) {
 	return static_cast<int32_t>(v) - (1 << 23);
 }
 
-// Drive the streaming fill one step so a pending region-acquire can progress LOADING->READY. On the
-// C-host sync path this is the fiber loader drain (loader::pump); on the Embassy path loader::pump
-// no-ops and the real drain is the async fill task, so route onto the rung-1 yield-and-drain
-// primitive (deluge_streaming_drain_queue_blocking) — valid because the probes run ON the storage
-// owner worker fiber there (dispatched by the recorder-roundtrip scenario). Mirrors
-// StemExport::renderWait's async-vs-sync fork.
+// Drive the streaming fill so a pending region-acquire can progress LOADING->READY: yield the worker
+// fiber and drain the whole loader queue via the async fill task (deluge_streaming_drain_queue_blocking).
+// Valid because the probes run ON the storage-owner worker fiber (dispatched by the recorder-roundtrip
+// scenario on the Embassy renderer). Mirrors StemExport::renderWait's drain.
 void driveFillDrain() {
-	if (deluge_streaming_async_active()) {
-		deluge_streaming_drain_queue_blocking();
-	}
-	else {
-		deluge::audio::stream::loader::pump();
-	}
+	deluge_streaming_drain_queue_blocking();
 }
 
 int32_t rampSample(uint32_t frameIndex, uint32_t channel) {
@@ -208,13 +200,10 @@ uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, u
 	                                                          /*priority=*/0, &out);
 
 	// A first CLUSTER_ENQUEUE-style acquire is expected to come back LOADING (the fill is scheduled,
-	// not synchronous) -- retry a bounded number of times, driving the C++ fiber loader drain
-	// ourselves in between (deluge::audio::stream::loader::pump()) exactly as the sim's own scheduler
-	// task would. This is a NO-OP when deluge_streaming_async_active() is true (loader.cpp's pump()
-	// early-returns, per the SR3b routing spike) -- i.e. on host_app this loop will not by itself
-	// resolve the state; that's the point being probed, not a harness bug. See
-	// deluge_harness_recorder_probe_poll() for the Rust-driven retry that also lets the ASYNC fill
-	// task (the thing that actually owns the drain on host_app) run between checks.
+	// not synchronous) -- retry a bounded number of times, draining the fill via the async task
+	// (driveFillDrain -> deluge_streaming_drain_queue_blocking) in between. A still-recording Sample
+	// has no efatfs read handle, so the read fails and the acquire stays LOADING here regardless of
+	// draining -- that non-resolution is the point being probed, not a harness bug.
 	for (int i = 0; i < 32 && state == DELUGE_REGION_LOADING; i++) {
 		driveFillDrain();
 		state = deluge_sample_region_acquire_ex(g_source, /*index=*/0, /*direction=*/+1, /*priority=*/0, &out);

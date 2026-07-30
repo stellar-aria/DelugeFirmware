@@ -34,8 +34,8 @@
 #include <string>
 #include <vector>
 
-// SR3b regression-gate probes (see harness/recorder_readback_probe.h). Their fill drain routes onto
-// deluge_streaming_drain_queue_blocking() under async_active (Embassy) or loader::pump() (C-host).
+// SR3b regression-gate probes (see harness/recorder_readback_probe.h). Their fill drain runs on the
+// async fill task via deluge_streaming_drain_queue_blocking() (the probes run on the worker fiber).
 extern "C" {
 uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, uint32_t pumpDrainTicks);
 void deluge_harness_recorder_probe_end();

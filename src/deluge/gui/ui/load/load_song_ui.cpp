@@ -17,6 +17,7 @@
 
 #include "gui/ui/load/load_song_ui.h"
 #include "definitions_cxx.hpp"
+#include "deluge_resource.h" // deluge_resource_loader_has_lowest
 #include "extern.h"
 #include "gui/colour/colour.h"
 #include "gui/l10n/l10n.h"
@@ -42,7 +43,6 @@
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/owner.h" // deluge::storage::Owner::run — run the load on the worker fiber
@@ -476,8 +476,10 @@ gotErrorAfterCreatingSong:
 		preLoadedSong->loadAllSamples(true);
 	}
 
-	// Ensure all AudioFile Clusters needed for new song are loaded
-	yieldWithTimeout([]() { return !(deluge::audio::stream::loader::has_lowest_priority_queued()); }, 5);
+	// Ensure all AudioFile Clusters needed for new song are loaded: wait until the loader queue holds
+	// no lowest-priority (failed-and-requeued) items, i.e. the async fill task has settled.
+	yieldWithTimeout(
+	    []() { return !deluge_resource_loader_has_lowest(GeneralMemoryAllocator::get().resourceManager()); }, 5);
 
 	preLoadedSong->name = enteredText;
 
@@ -526,9 +528,8 @@ gotErrorAfterCreatingSong:
 swapDone:
 	// To override our popup if we did one. (Still necessary?)
 	deluge::hid::display::OLED::displayWorkingAnimation("Loading");
-	// Ok, the swap's been done, the first tick of the new song has been done, and there are potentially loads of
-	// samples wanting some data loaded. So do that immediately
-	deluge::audio::stream::loader::pump(99999);
+	// The swap's been done and the first tick of the new song has been done; any samples wanting data
+	// loaded are drained by the async fill task (no synchronous pump needed here anymore).
 
 	// Delete the old song
 	AudioEngine::logAction("deleting old song");

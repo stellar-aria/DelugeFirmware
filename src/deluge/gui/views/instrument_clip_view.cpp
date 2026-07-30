@@ -86,7 +86,6 @@
 #include "processing/sound/sound_instrument.h"
 #include "processing/stem_export/stem_export.h"
 #include "storage/audio/audio_file_holder.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/multi_range/multi_range.h"
 #include "storage/owner.h"
 #include "storage/storage_manager.h"
@@ -2187,7 +2186,6 @@ ActionResult InstrumentClipView::potentiallyRandomizeDrumSample(Kit* kit, Drum* 
 		if (!entry.has_value() || !entry->has_value()) {
 			break;
 		}
-		deluge::audio::stream::loader::request_pump();
 		if ((*entry)->is_directory || !isAudioFilename((*entry)->name)) {
 			continue;
 		}

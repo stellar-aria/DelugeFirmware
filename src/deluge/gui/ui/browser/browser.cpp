@@ -33,7 +33,6 @@
 #include "model/instrument/instrument.h"
 #include "model/song/song.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/owner.h"
 #include "storage/storage_manager.h"
@@ -320,8 +319,6 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 
 	while (true) {
 		AudioEngine::logAction("while loop");
-
-		deluge::audio::stream::loader::request_pump();
 
 		std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir.read(), error, {
 			break; // Break on error

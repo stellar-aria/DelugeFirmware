@@ -177,9 +177,9 @@ __attribute__((weak)) bool deluge_streaming_fill_chunk_blocking(void* /*chunk_ba
 
 // Weak fallback for the offline stem-export drain-all-queued routine. The Rust Embassy BSP provides
 // the real definition (streaming_loader.rs) whenever it links that crate; every other BSP/config
-// resolves this instead. Unreachable on the hot path there: StemExport::renderWait only calls this
-// under deluge_streaming_async_active(), false on those BSPs, so they take the synchronous
-// loader::pump() branch and never reach here. Returns false (nothing drained) for a stray call.
+// resolves this instead. StemExport::renderWait (the only caller) runs only on BSPs that do offline
+// export, which are exactly the ones that link the real definition — so this fallback just returns
+// false (nothing drained) for a stray call and is never reached on the hot path.
 __attribute__((weak)) bool deluge_streaming_drain_queue_blocking(void) {
 	return false;
 }

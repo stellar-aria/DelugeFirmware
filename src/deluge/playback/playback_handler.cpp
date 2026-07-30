@@ -193,12 +193,9 @@ void PlaybackHandler::slowRoutine() {
 		// Snapshot which command (UNDO vs REDO) and clear the pending flag now, synchronously,
 		// before the dispatch below. undo()/redo() can load a sample (bug B6, chain #6) and, once
 		// dispatched onto the storage worker, can outlive this call (Embassy fire-and-forget).
-		// slowRoutine() can be re-entered before that op completes — from this same repeating
-		// task's own next tick (deluge.cpp), or from *inside* the worker itself
-		// (loader::pump()'s may_process_user_actions path calls slowRoutine() between cluster
-		// loads while running as a dispatched worker op — see storage/audio/stream/loader.cpp).
-		// Clearing pendingGlobalMIDICommand here means a re-entrant call sees NONE and does
-		// nothing, instead of double-dispatching the same command.
+		// slowRoutine() can be re-entered before that op completes — e.g. from this same repeating
+		// task's own next tick (deluge.cpp). Clearing pendingGlobalMIDICommand here means a
+		// re-entrant call sees NONE and does nothing, instead of double-dispatching the same command.
 		GlobalMIDICommand command = pendingGlobalMIDICommand;
 		pendingGlobalMIDICommand = GlobalMIDICommand::NONE;
 
@@ -212,8 +209,8 @@ void PlaybackHandler::slowRoutine() {
 
 			// Run the whole undo()/redo() dispatch on the storage worker (mirrors
 			// LoadSongUI::performLoad's Owner::run idiom). run_or_inline: if slowRoutine() is
-			// itself already running on the worker (the loader::pump() re-entrancy noted above),
-			// run inline rather than re-dispatching onto the fiber it's already on.
+			// itself already running on the worker, run inline rather than re-dispatching onto the
+			// fiber it's already on.
 			deluge::storage::Owner::run_or_inline(&runUndoRedoOp,
 			                                      reinterpret_cast<void*>(static_cast<intptr_t>(command)));
 		}

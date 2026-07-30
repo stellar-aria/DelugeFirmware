@@ -65,7 +65,6 @@
 #include "processing/sound/sound_drum.h"
 #include "processing/source.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
@@ -1272,8 +1271,6 @@ removeReasonsFromSamplesAndGetOut:
 	}
 
 	while (true) {
-		deluge::audio::stream::loader::request_pump();
-
 		/* Read a directory item */
 		std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir.read(), error, {
 			break; // break on error

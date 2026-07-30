@@ -63,7 +63,6 @@
 #include "processing/sound/sound_instrument.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
 #include "storage/owner.h" // deluge::storage::Coalescer (SD-routine dispatch)
@@ -385,12 +384,10 @@ int32_t getNumVoices() {
 	                             [](auto sound) { return sound->voices().size(); });
 }
 
-void routineWithClusterLoading(bool mayProcessUserActionsBetween) {
+void routineWithClusterLoading() {
 	logAction("AudioDriver::routineWithClusterLoading");
 
 	routineBeenCalled = false;
-
-	deluge::audio::stream::loader::request_pump(128, mayProcessUserActionsBetween);
 
 	if (!routineBeenCalled) {
 		// bypassCulling = true; // yolo? Sean: not sure if this is necessary
@@ -1141,8 +1138,6 @@ void routine() {
 						}
 					}
 				}
-
-				deluge::audio::stream::loader::pump(128, false);
 			}
 		}
 	}
@@ -1577,9 +1572,9 @@ void recorder_card_routines_fill(void*) {
 } // namespace
 
 void requestRecorderCardRoutines() {
-	// Never from an ISR / the audio interrupt-executor (see loader::request_pump):
-	// deluge_storage_on_owner() is false there and we'd race the coalescer's
-	// main-executor-only state. The recorder drain is never driven from an ISR.
+	// Never from an ISR / the audio interrupt-executor: deluge_storage_on_owner() is false there
+	// and we'd race the coalescer's main-executor-only state. The recorder drain is never driven
+	// from an ISR.
 	if (deluge_in_interrupt()) {
 		return;
 	}

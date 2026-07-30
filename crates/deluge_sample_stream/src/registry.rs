@@ -23,9 +23,10 @@ use crate::{DelugeSampleStreamGeometry, DelugeStreamingFillContext, DELUGE_RESOU
 /// (`deluge_sample_source`) own fixed-pool size until that's confirmed.
 pub const CAP: usize = 256;
 
-/// One registered streaming handle: the efatfs read handle (`0` = none yet — a still-recording
-/// sample that hasn't opened its file for reading), the resource-manager asset id
-/// ([`DELUGE_RESOURCE_NO_ASSET`] until [`set_asset_id`] assigns one), and the geometry
+/// One registered streaming handle: the efatfs read handle (always a real, open handle — a slot
+/// exists only after a successful `deluge_efatfs_open`, and `0` is a valid handle the OS hands out
+/// for the first open; a still-recording sample never opens a slot at all), the resource-manager
+/// asset id ([`DELUGE_RESOURCE_NO_ASSET`] until [`set_asset_id`] assigns one), and the geometry
 /// [`set_geometry`] stores, if any.
 struct Slot {
     efatfs_handle: u32,

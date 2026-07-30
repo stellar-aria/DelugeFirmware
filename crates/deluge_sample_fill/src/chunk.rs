@@ -104,13 +104,34 @@ pub unsafe extern "C" fn deluge_streaming_chunk_construct(
     unsafe { construct(dest as *mut u8, index) };
 }
 
-/// Reborrow an opaque chunk backing pointer as `&mut StreamedChunk`.
+/// Reborrow an opaque chunk backing pointer as `&StreamedChunk`, for the read-only accessors
+/// ([`payload`], [`loaded`], [`unloadable`], [`convert_state`]).
 ///
 /// # Safety
 /// `backing` must point at a live `StreamedChunk` this crate's [`construct`] placement-wrote into a
-/// leased manager slab slot. Every accessor below is only ever called on such a pointer, handed back
-/// by the manager (`deluge_resource_loader_next`); no two accessors alias it concurrently (all run on
-/// the single fill task / cursor).
+/// leased manager slab slot, handed back by the manager (`deluge_resource_loader_next`).
+#[inline]
+unsafe fn chunk_ref<'a>(backing: *mut c_void) -> &'a StreamedChunk {
+    // SAFETY: caller contract — `backing` is a live constructed StreamedChunk.
+    unsafe { &*(backing as *const StreamedChunk) }
+}
+
+/// Reborrow an opaque chunk backing pointer as `&mut StreamedChunk`, for the accessors that mutate a
+/// field ([`set_loaded`], [`set_unloadable`], [`set_convert_state`]).
+///
+/// # Safety
+/// `backing` must point at a live `StreamedChunk` this crate's [`construct`] placement-wrote into a
+/// leased manager slab slot, handed back by the manager (`deluge_resource_loader_next`).
+///
+/// This crate does NOT synchronize the field this reborrow lets its caller write against concurrent
+/// readers: `set_loaded` is written by the fill task while `loaded` (through [`chunk_ref`]) is
+/// polled from the BSP drain — a genuine producer/consumer pair on different tasks, not "the single
+/// fill task / cursor". The access is a plain, non-atomic read/write race by that description, but
+/// it is the SAME race the prior C++ `StreamedChunk::loaded` field access already had (a bare `bool`
+/// field, set by the fill fiber and polled by the cursor with no lock or atomic) — not a hazard
+/// introduced by this relocation, just carried forward unchanged. Each write-accessor below holds
+/// its `&mut` only for the duration of its own single field write, so no two writers alias it
+/// concurrently; a concurrent reader observing a torn or stale value is the pre-existing behaviour.
 #[inline]
 unsafe fn chunk<'a>(backing: *mut c_void) -> &'a mut StreamedChunk {
     // SAFETY: caller contract — `backing` is a live, uniquely-borrowed constructed StreamedChunk.
@@ -119,58 +140,56 @@ unsafe fn chunk<'a>(backing: *mut c_void) -> &'a mut StreamedChunk {
 
 /// Base of the chunk's audio payload (the DMA/read destination and frame-read origin).
 /// # Safety
-/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_payload(backing: *mut c_void) -> *mut u8 {
-    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
-    unsafe { chunk(backing).payload }
+/// See [`chunk_ref`]: `backing` is a live constructed StreamedChunk.
+#[inline]
+pub unsafe fn payload(backing: *mut c_void) -> *mut u8 {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk_ref()'s contract).
+    unsafe { chunk_ref(backing).payload }
 }
 
 /// Mark the chunk's payload loaded/ready (the flag the C++ region cursor polls).
 /// # Safety
 /// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_set_loaded(backing: *mut c_void) {
+#[inline]
+pub unsafe fn set_loaded(backing: *mut c_void) {
     // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
     unsafe { chunk(backing).loaded = true };
 }
 
 /// Read the chunk's loaded/ready flag.
 /// # Safety
-/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_loaded(backing: *mut c_void) -> bool {
-    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
-    unsafe { chunk(backing).loaded }
+/// See [`chunk_ref`]: `backing` is a live constructed StreamedChunk.
+#[inline]
+pub unsafe fn loaded(backing: *mut c_void) -> bool {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk_ref()'s contract).
+    unsafe { chunk_ref(backing).loaded }
 }
 
 /// Read the chunk's unloadable flag.
 /// # Safety
-/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_unloadable(backing: *mut c_void) -> bool {
-    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
-    unsafe { chunk(backing).unloadable }
+/// See [`chunk_ref`]: `backing` is a live constructed StreamedChunk.
+#[inline]
+pub unsafe fn unloadable(backing: *mut c_void) -> bool {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk_ref()'s contract).
+    unsafe { chunk_ref(backing).unloadable }
 }
 
 /// Mark the chunk unloadable.
 /// # Safety
 /// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_set_unloadable(backing: *mut c_void) {
+#[inline]
+pub unsafe fn set_unloadable(backing: *mut c_void) {
     // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
     unsafe { chunk(backing).unloadable = true };
 }
 
 /// Read the chunk's pre-conversion convert-state (first-three-bytes + boundary-stitch guards).
 /// # Safety
-/// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_convert_state(
-    backing: *mut c_void,
-) -> DelugeChunkConvertState {
-    // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
-    let c = unsafe { chunk(backing) };
+/// See [`chunk_ref`]: `backing` is a live constructed StreamedChunk.
+#[inline]
+pub unsafe fn convert_state(backing: *mut c_void) -> DelugeChunkConvertState {
+    // SAFETY: `backing` is a live constructed StreamedChunk (chunk_ref()'s contract).
+    let c = unsafe { chunk_ref(backing) };
     DelugeChunkConvertState {
         first_three_bytes: c.first_three_bytes,
         start_converted: c.extra_bytes_start_converted,
@@ -178,19 +197,85 @@ pub unsafe extern "C" fn deluge_streaming_chunk_convert_state(
     }
 }
 
-/// Write the chunk's convert-state (the inverse of [`deluge_streaming_chunk_convert_state`]).
+/// Write the chunk's convert-state (the inverse of [`convert_state`]).
 /// # Safety
 /// See [`chunk`]: `backing` is a live constructed StreamedChunk.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn deluge_streaming_chunk_set_convert_state(
-    backing: *mut c_void,
-    state: DelugeChunkConvertState,
-) {
+#[inline]
+pub unsafe fn set_convert_state(backing: *mut c_void, state: DelugeChunkConvertState) {
     // SAFETY: `backing` is a live constructed StreamedChunk (chunk()'s contract).
     let c = unsafe { chunk(backing) };
     c.first_three_bytes = state.first_three_bytes;
     c.extra_bytes_start_converted = state.start_converted;
     c.extra_bytes_end_converted = state.end_converted;
+}
+
+/// C-ABI: base of the chunk's audio payload. Delegates to [`payload`] — the pub fn keeps the
+/// SAFETY contract in one place; T5-T8 still call this C-ABI symbol until they migrate off it (U4d).
+/// # Safety
+/// See [`payload`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_payload(backing: *mut c_void) -> *mut u8 {
+    // SAFETY: forwarding the caller's contract to `payload`.
+    unsafe { payload(backing) }
+}
+
+/// C-ABI: mark the chunk's payload loaded/ready. Delegates to [`set_loaded`].
+/// # Safety
+/// See [`set_loaded`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_loaded(backing: *mut c_void) {
+    // SAFETY: forwarding the caller's contract to `set_loaded`.
+    unsafe { set_loaded(backing) };
+}
+
+/// C-ABI: read the chunk's loaded/ready flag. Delegates to [`loaded`].
+/// # Safety
+/// See [`loaded`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_loaded(backing: *mut c_void) -> bool {
+    // SAFETY: forwarding the caller's contract to `loaded`.
+    unsafe { loaded(backing) }
+}
+
+/// C-ABI: read the chunk's unloadable flag. Delegates to [`unloadable`].
+/// # Safety
+/// See [`unloadable`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_unloadable(backing: *mut c_void) -> bool {
+    // SAFETY: forwarding the caller's contract to `unloadable`.
+    unsafe { unloadable(backing) }
+}
+
+/// C-ABI: mark the chunk unloadable. Delegates to [`set_unloadable`].
+/// # Safety
+/// See [`set_unloadable`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_unloadable(backing: *mut c_void) {
+    // SAFETY: forwarding the caller's contract to `set_unloadable`.
+    unsafe { set_unloadable(backing) };
+}
+
+/// C-ABI: read the chunk's pre-conversion convert-state. Delegates to [`convert_state`].
+/// # Safety
+/// See [`convert_state`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_convert_state(
+    backing: *mut c_void,
+) -> DelugeChunkConvertState {
+    // SAFETY: forwarding the caller's contract to `convert_state`.
+    unsafe { convert_state(backing) }
+}
+
+/// C-ABI: write the chunk's convert-state. Delegates to [`set_convert_state`].
+/// # Safety
+/// See [`set_convert_state`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn deluge_streaming_chunk_set_convert_state(
+    backing: *mut c_void,
+    state: DelugeChunkConvertState,
+) {
+    // SAFETY: forwarding the caller's contract to `set_convert_state`.
+    unsafe { set_convert_state(backing, state) };
 }
 
 #[cfg(test)]

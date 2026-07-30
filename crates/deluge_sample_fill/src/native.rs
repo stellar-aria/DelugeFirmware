@@ -4,29 +4,19 @@
 //! `native_finish` implementation here. (The strong `deluge_streaming_begin_fill`/`_finish_fill`
 //! C-ABI overrides that also lived here — the bridge for the C++ synchronous fill path — were
 //! removed when `SampleStream::read_cluster_data` was deleted.) Gated behind the `native_fill`
-//! feature (default-off): every `unsafe extern "C" { … }` symbol below is a manager/chunk accessor this
-//! crate itself does not define, so this module only compiles where a final link — device,
-//! `host_app`, or a test harness supplying the real symbols (`region_fill_differential`) — will
-//! actually resolve them (see this crate's `Cargo.toml` `[features]` doc).
+//! feature (default-off): every `unsafe extern "C" { … }` symbol below is a resource-manager
+//! accessor this crate itself does not define, so this module only compiles where a final link —
+//! device, `host_app`, or a test harness supplying the real symbols (`region_fill_differential`) —
+//! will actually resolve them (see this crate's `Cargo.toml` `[features]` doc). The `StreamedChunk`
+//! field accessors this module also uses (`payload`/`set_loaded`/`convert_state`/
+//! `set_convert_state`) are `pub fn`s this crate DOES define, in [`crate::chunk`] — called directly,
+//! no C-ABI hop (U4d).
 use core::ffi::c_void;
 
 use crate::{DelugeChunkConvertState, FillContext, StreamingFillDescriptor, fill_context_for};
 
 unsafe extern "C" {
     fn deluge_streaming_resource_manager() -> *mut c_void;
-    // The two StreamedChunk field-touch accessors the native fill uses (SR2d-4 Task 2): payload
-    // pointer (read/DMA destination, and the base of the `cluster_size + 7`-byte
-    // `payload_with_trailing_slack()` span `finish_convert_stitch` needs) + set-loaded.
-    fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
-    fn deluge_streaming_chunk_set_loaded(chunk_backing: *mut c_void);
-    // SR2d-4 Task 1 + Task 2: the StreamedChunk convert-state get/set accessors -- `native_finish`
-    // below reads/writes self's + each neighbour's convert-state directly through these (the
-    // single store for this state; SR2d-4 Task 2 retired the earlier per-chunk sidecar table).
-    fn deluge_streaming_chunk_convert_state(chunk_backing: *mut c_void) -> DelugeChunkConvertState;
-    fn deluge_streaming_chunk_set_convert_state(
-        chunk_backing: *mut c_void,
-        state: DelugeChunkConvertState,
-    );
     // `deluge_resource_chunk_ident`: recovers a loader-queue chunk's `(asset, index)` identity
     // (out-params; `false` on a miss) so `begin`/`finish` can look up its per-asset fill-context
     // (`fill_context_for`) -- mirrors `deluge_resource_slot_of` (declared in `deluge-bsp-rust`'s own
@@ -83,8 +73,8 @@ fn resolve(mgr: *mut c_void, chunk: *mut c_void) -> Option<(u32, u32, FillContex
     Some((asset, index, ctx))
 }
 
-/// `DelugeChunkConvertState` (the C-ABI mirror `deluge_streaming_chunk_convert_state`/
-/// `_set_convert_state` cross) -> `fill_logic::ConvertState`: the two are separate types with the
+/// `DelugeChunkConvertState` (the type [`crate::chunk::convert_state`]/[`crate::chunk::set_convert_state`]
+/// read/write) -> `fill_logic::ConvertState`: the two are separate types with the
 /// identical three-field shape (see `fill_logic::ConvertState`'s doc for why they aren't the same
 /// type) -- a trivial field-for-field copy at the one tier where both exist.
 fn to_logic_state(s: DelugeChunkConvertState) -> crate::fill_logic::ConvertState {
@@ -96,7 +86,7 @@ fn to_logic_state(s: DelugeChunkConvertState) -> crate::fill_logic::ConvertState
 }
 
 /// The inverse of [`to_logic_state`], for writing `finish_convert_stitch`'s (possibly updated)
-/// output back onto the `StreamedChunk` via `deluge_streaming_chunk_set_convert_state`.
+/// output back onto the `StreamedChunk` via [`crate::chunk::set_convert_state`].
 fn from_logic_state(s: crate::fill_logic::ConvertState) -> DelugeChunkConvertState {
     DelugeChunkConvertState {
         first_three_bytes: s.first_three_bytes,
@@ -150,7 +140,7 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
     }
     // SAFETY: `chunk_backing` is the same resident, leased `StreamedChunk*` `resolve` just
     // validated has a registered fill-context.
-    let dest = unsafe { deluge_streaming_chunk_payload(chunk_backing) };
+    let dest = unsafe { crate::chunk::payload(chunk_backing) };
     StreamingFillDescriptor {
         dest,
         num_sectors: r.num_sectors,
@@ -180,10 +170,10 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 ///   the same masking the C++ sync-fiber path's own manager calls (`deluge_resource_request`,
 ///   `deluge_resource_release`, etc. — see `sample_stream.cpp`) already go through today. Nothing
 ///   about calling them from a synchronous, non-async context is new.
-/// - [`deluge_streaming_chunk_convert_state`]/[`deluge_streaming_chunk_set_convert_state`]: plain
-///   field reads/writes on a `StreamedChunk*` (see `async_fill.cpp`'s definitions) — no locking at
-///   all, by design, exactly like the pre-existing [`deluge_streaming_chunk_payload`]/
-///   [`deluge_streaming_chunk_set_loaded`] this function already called before this task. Safe
+/// - [`crate::chunk::convert_state`]/[`crate::chunk::set_convert_state`]: plain field reads/writes
+///   on a `StreamedChunk*` (see `chunk.rs`'s definitions) — no locking at all, by design, exactly
+///   like the pre-existing [`crate::chunk::payload`]/[`crate::chunk::set_loaded`] this function
+///   already called before this task. Safe
 ///   because the chunk this function touches (`chunk_backing` itself, and each neighbour just
 ///   after its own successful `try_acquire`) is hard-leased for the duration of this call — the
 ///   SAME "leased, so exclusively mine to mutate until I release it" discipline the legacy
@@ -226,12 +216,11 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
     // SAFETY: `chunk_backing` is a resident, still-leased `StreamedChunk*`; its payload buffer is
     // `payload_with_trailing_slack()` -- `cluster_size + 7` bytes, matching `payload_len`.
     let self_payload = unsafe {
-        core::slice::from_raw_parts_mut(deluge_streaming_chunk_payload(chunk_backing), payload_len)
+        core::slice::from_raw_parts_mut(crate::chunk::payload(chunk_backing), payload_len)
     };
     // SAFETY: `chunk_backing` is a resident, still-leased `StreamedChunk*` (see this function's
     // doc, "Sync-context safety" above).
-    let mut self_state =
-        to_logic_state(unsafe { deluge_streaming_chunk_convert_state(chunk_backing) });
+    let mut self_state = to_logic_state(unsafe { crate::chunk::convert_state(chunk_backing) });
 
     // Gather each neighbour, mirroring `async_fill.cpp:116-157`'s "present AND loaded" gate
     // in one step: `try_acquire` reports resident-and-ready (the manager's `Loading` state
@@ -250,8 +239,7 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
         let p = unsafe { deluge_resource_try_acquire(mgr, asset, prev_index) };
         if !p.is_null() {
             // SAFETY: `p` was just leased+validated resident by `try_acquire` above.
-            prev_state =
-                to_logic_state(unsafe { deluge_streaming_chunk_convert_state(p as *mut c_void) });
+            prev_state = to_logic_state(unsafe { crate::chunk::convert_state(p as *mut c_void) });
             prev_lease = Some(p);
         }
     }
@@ -259,14 +247,11 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
         // SAFETY: `p` was just leased+validated resident by `try_acquire` above, but `p`
         // itself is the neighbour's BACKING pointer (`== StreamedChunk*`), not its payload --
         // same distinction as `chunk_backing` vs `self_payload` above.
-        // `deluge_streaming_chunk_payload(p)` returns the neighbour's payload base
+        // `crate::chunk::payload(p)` returns the neighbour's payload base
         // (`backing + kChunkPayloadOffset`), its `payload_with_trailing_slack()` buffer --
         // `cluster_size + 7` bytes, matching `payload_len`.
         payload: unsafe {
-            core::slice::from_raw_parts_mut(
-                deluge_streaming_chunk_payload(p as *mut c_void),
-                payload_len,
-            )
+            core::slice::from_raw_parts_mut(crate::chunk::payload(p as *mut c_void), payload_len)
         },
         unconverted_head: &prev_state.first_three_bytes,
         start_converted: &mut prev_state.start_converted,
@@ -280,18 +265,14 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
         let p = unsafe { deluge_resource_try_acquire(mgr, asset, next_index) };
         if !p.is_null() {
             // SAFETY: `p` was just leased+validated resident by `try_acquire` above.
-            next_state =
-                to_logic_state(unsafe { deluge_streaming_chunk_convert_state(p as *mut c_void) });
+            next_state = to_logic_state(unsafe { crate::chunk::convert_state(p as *mut c_void) });
             next_lease = Some(p);
         }
     }
     let next_view = next_lease.map(|p| crate::fill_logic::NeighbourView {
         // SAFETY: same as the prev branch above.
         payload: unsafe {
-            core::slice::from_raw_parts_mut(
-                deluge_streaming_chunk_payload(p as *mut c_void),
-                payload_len,
-            )
+            core::slice::from_raw_parts_mut(crate::chunk::payload(p as *mut c_void), payload_len)
         },
         unconverted_head: &next_state.first_three_bytes,
         start_converted: &mut next_state.start_converted,
@@ -310,29 +291,23 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
     // Write back the (possibly updated) convert-state -- self, and each neighbour actually
     // visited -- then release the neighbour leases taken above.
     // SAFETY: `chunk_backing` is still the valid, leased `StreamedChunk*` from `next()`.
-    unsafe {
-        deluge_streaming_chunk_set_convert_state(chunk_backing, from_logic_state(self_state))
-    };
+    unsafe { crate::chunk::set_convert_state(chunk_backing, from_logic_state(self_state)) };
     if let Some(p) = prev_lease {
         // SAFETY: `p` was leased by `deluge_resource_try_acquire` above and is still resident.
-        unsafe {
-            deluge_streaming_chunk_set_convert_state(p as *mut c_void, from_logic_state(prev_state))
-        };
+        unsafe { crate::chunk::set_convert_state(p as *mut c_void, from_logic_state(prev_state)) };
         // SAFETY: `p` was leased by `deluge_resource_try_acquire` above; released exactly
         // once, now that the stitch that needed it pinned alive is done.
         unsafe { deluge_resource_release(mgr, p) };
     }
     if let Some(p) = next_lease {
         // SAFETY: same as the prev write-back above.
-        unsafe {
-            deluge_streaming_chunk_set_convert_state(p as *mut c_void, from_logic_state(next_state))
-        };
+        unsafe { crate::chunk::set_convert_state(p as *mut c_void, from_logic_state(next_state)) };
         // SAFETY: same as the prev release above.
         unsafe { deluge_resource_release(mgr, p) };
     }
 
     // SAFETY: `chunk_backing` is still the valid, leased `StreamedChunk*` from `next()`.
-    unsafe { deluge_streaming_chunk_set_loaded(chunk_backing) };
+    unsafe { crate::chunk::set_loaded(chunk_backing) };
     // Manager-owned readiness: mirrors `finish_fill`'s own `deluge_resource_mark_ready`
     // call (`async_fill.cpp:169-173`) so the async/RT `try_acquire` path sees this chunk
     // ready.

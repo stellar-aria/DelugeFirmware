@@ -47,6 +47,13 @@ extern crate deluge_sample_fill;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_reader;
 
+// SIM (U4c Task 2): force-link the streaming-file slot registry into libdeluge_rust.a, same
+// reasoning as the reader above — nothing in this crate's Rust code references its items, so
+// without an explicit `extern crate` rustc/lld would drop its objects from the staticlib. No
+// consumer yet (a later task flips the C++ facade onto it), so retention alone suffices.
+#[cfg(feature = "sim")]
+extern crate deluge_sample_stream;
+
 // Bare-metal panic handler (device only); the host build uses std's. This is the
 // one panic handler for the entire dependency graph.
 #[cfg(target_os = "none")]

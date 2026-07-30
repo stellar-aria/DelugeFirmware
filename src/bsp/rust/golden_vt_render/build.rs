@@ -37,6 +37,23 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
     }
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
+    // U4c Task 2: no C++ caller of `deluge_sample_stream_*` exists yet (a later task flips the
+    // C++ facade onto this crate) — unlike `deluge_app_init` above, nothing has an unresolved
+    // reference into `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never
+    // pull its object in, and rustc's default `--gc-sections` would then prune each unreached
+    // `#[no_mangle]` function's own section even after the object is pulled. Force EACH of the six
+    // ABI entry points as a link root — proves the ABI compiles+links end-to-end ahead of a real
+    // caller.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
 
     println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
     let build_dir = env::var("DELUGE_HOSTAPP_BUILD_DIR")

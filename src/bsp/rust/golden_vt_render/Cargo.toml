@@ -91,6 +91,10 @@ deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features 
 # feature list in `../Cargo.toml`).
 deluge_sample_source = { path = "../../../../crates/deluge_sample_source", features = ["host_app"] }
 deluge_sample_reader = { path = "../../../../crates/deluge_sample_reader", features = ["host_app"] }
+# U4c Task 2: the streaming-file slot registry C ABI (`deluge_sample_stream_*`) — same reasoning as
+# the pair just above (added here so `golden_vt_render` links against the CURRENT `deluge_app`
+# object closure; no consumer yet, so this proves the symbols are present, nothing more).
+deluge_sample_stream = { path = "../../../../crates/deluge_sample_stream", features = ["host_app"] }
 
 # The same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
 # `deluge-bsp-rust`'s own `host_app` feature pulls in (see its Cargo.toml

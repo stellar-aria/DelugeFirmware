@@ -83,6 +83,7 @@ dependencies = [
  "deluge_sample_fill",
  "deluge_sample_reader",
  "deluge_sample_source",
+ "deluge_sample_stream",
 ]
 
 [[package]]

@@ -339,6 +339,7 @@ file(GLOB_RECURSE SIM_RUST_SOURCES CONFIGURE_DEPENDS
     ${SIM_RUST_WS}/deluge_sample_source/src/*.rs
     ${SIM_RUST_WS}/deluge_sample_fill/src/*.rs
     ${SIM_RUST_WS}/deluge_sample_reader/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_stream/src/*.rs
     ${SIM_RUST_WS}/deluge_rust/src/*.rs)
 # Always build the Rust region cursor (deluge_sample_source, SR2d-5) into the umbrella so the sim
 # resolves the SAME strong `deluge_sample_source_*`/`deluge_sample_region_*` cursor as
@@ -364,6 +365,7 @@ add_custom_command(
         ${SIM_RUST_WS}/deluge_sample_source/Cargo.toml
         ${SIM_RUST_WS}/deluge_sample_fill/Cargo.toml
         ${SIM_RUST_WS}/deluge_sample_reader/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_stream/Cargo.toml
     COMMENT "Building Rust deluge_rust staticlib (${SIM_RUST_TARGET})"
     VERBATIM
 )

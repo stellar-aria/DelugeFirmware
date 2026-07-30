@@ -59,6 +59,27 @@ fn main() {
     println!("cargo:rerun-if-changed=linker/memory_rtt.x");
     println!("cargo:rerun-if-changed=linker/sdram_sections.x");
 
+    // U4c Task 2: no C++ caller of `deluge_sample_stream_*` exists yet (a later task flips the
+    // C++ facade onto this crate) — unlike `deluge_app_init` below, nothing in this crate's own
+    // Rust code or the archived C++ closure has an unresolved reference into
+    // `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never pull its object
+    // in at all and its `#[no_mangle]` symbols would be absent from the final ELF even though the
+    // crate compiled clean. Force EACH of the six ABI entry points as a link root (rustc passes
+    // `--gc-sections` by default, which prunes unreached function sections one at a time even
+    // within an already-extracted object — a single `-u` root only keeps the one function its own
+    // call graph reaches, so each symbol needs its own root here). Mirrors `deluge_app_init`'s own
+    // `-u` just below, for the analogous reason on the C++ side.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+
     // ---------------------------------------------------------------------
     // Link the portable C++ application (built by CMake into the `build/` dir).
     // deluge_app is an OBJECT lib (no .a), so archive its objects here, then
@@ -257,6 +278,19 @@ fn run_host_app(
     // that, gc-sections would strip everything down to just the C++
     // global-constructor subset.
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
+    // U4c Task 2: same reasoning as the device path's identical block — no C++ caller of
+    // `deluge_sample_stream_*` exists yet, so without these roots `--gc-sections` (rustc's default)
+    // would prune every one of its `#[no_mangle]` functions from the final link.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
 
     // CMake-built host tree (`cmake -S sim -B build-embassy-hostapp
     // -DDELUGE_HOST_EMBASSY=... ; ninja -C build-embassy-hostapp deluge_app`).

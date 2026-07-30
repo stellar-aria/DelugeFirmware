@@ -39,6 +39,12 @@ critical-section = { version = "1", optional = true }
 # link against. No weak C++ fallback exists — force-link (extern crate below) only guarantees the member
 # is retained in the archive. Optional + only via the `sim` feature below.
 deluge_sample_reader = { path = "../deluge_sample_reader", optional = true }
+# SIM (U4c Task 2): the streaming-file slot registry, pulled into the sim's libdeluge_rust.a so its
+# deluge_sample_stream_* strong defs are present for a future migrated C++ consumer to link against.
+# No weak C++ fallback exists — force-link (extern crate below) only guarantees the member is
+# retained in the archive. Optional + only via the `sim` feature below. No consumer yet in this
+# task, so nothing calls these symbols; that is a later task's job.
+deluge_sample_stream = { path = "../deluge_sample_stream", optional = true }
 
 [features]
 # Forward the allocator's AddressSanitizer poisoning (host-sim ASan build only).
@@ -62,4 +68,6 @@ sim = [
     "critical-section/std",
     "dep:deluge_sample_reader",
     "deluge_sample_reader/sim",
+    "dep:deluge_sample_stream",
+    "deluge_sample_stream/sim",
 ]

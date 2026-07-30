@@ -398,6 +398,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "deluge_sample_stream"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -708,6 +715,7 @@ dependencies = [
  "deluge_sample_fill",
  "deluge_sample_reader",
  "deluge_sample_source",
+ "deluge_sample_stream",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync",

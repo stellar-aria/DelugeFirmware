@@ -122,6 +122,12 @@ deluge_sample_source = { path = "../../../crates/deluge_sample_source" }
 # in the header but not yet backed by a strong symbol here.
 deluge_sample_reader = { path = "../../../crates/deluge_sample_reader" }
 
+# U4c Task 2: the streaming-file slot registry C ABI (`deluge_sample_stream_*`,
+# include/libdeluge/sample_stream.h) -- pure build wiring, no consumer yet (a later task flips the
+# C++ facade onto it). Same shape as the reader dep just above: dependency-free feature selector, no
+# weak fallback, the first consumer's undefined ref pulls this archive member in.
+deluge_sample_stream = { path = "../../../crates/deluge_sample_stream" }
+
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
@@ -164,6 +170,11 @@ deluge_sample_source = { path = "../../../crates/deluge_sample_source", optional
 # never pulls it in.
 deluge_sample_reader = { path = "../../../crates/deluge_sample_reader", optional = true }
 
+# U4c Task 2: host-side sibling of the device dep above. Same `host_app`-gated pattern (its own
+# `host_app` feature is forwarded below, widening its `abi.rs` cfg_attr gate) so a plain host build
+# never pulls it in.
+deluge_sample_stream = { path = "../../../crates/deluge_sample_stream", optional = true }
+
 # R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack the
 # device path (above) uses, made available on host too — `efatfs_host_shim.rs`
 # (host_app-only) reuses the storage-generic `efatfs_core` unchanged, which
@@ -203,6 +214,8 @@ host_app = [
     "deluge_sample_source/host_app",
     "dep:deluge_sample_reader",
     "deluge_sample_reader/host_app",
+    "dep:deluge_sample_stream",
+    "deluge_sample_stream/host_app",
     "dep:block-device-driver",
     "dep:block-device-adapters",
     "dep:aligned",

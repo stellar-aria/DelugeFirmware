@@ -107,6 +107,11 @@ extern crate deluge_resource;
 // `host_app`-gated declarations for both crates).
 extern crate deluge_sample_reader;
 extern crate deluge_sample_source;
+// Link-only, same reasoning as the pair above: `deluge_sample_stream`'s `abi.rs` (a later task)
+// will define the `deluge_sample_stream_*` C ABI. Nothing here references it from Rust yet (no
+// consumer — that is a later task), so without this `extern crate` rustc/lld would drop the whole
+// rlib; this just proves the symbols are present and compile clean.
+extern crate deluge_sample_stream;
 
 /// Real bindgen'd libdeluge C-ABI types (see `build.rs`).
 #[allow(

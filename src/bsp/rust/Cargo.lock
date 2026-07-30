@@ -425,6 +425,7 @@ dependencies = [
  "deluge_sample_fill",
  "deluge_sample_reader",
  "deluge_sample_source",
+ "deluge_sample_stream",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync",
@@ -479,6 +480,13 @@ name = "deluge_sample_source"
 version = "0.1.0"
 dependencies = [
  "deluge_resource",
+]
+
+[[package]]
+name = "deluge_sample_stream"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync",
 ]
 
 [[package]]

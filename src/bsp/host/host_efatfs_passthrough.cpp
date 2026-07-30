@@ -101,10 +101,11 @@ std::string resolve_root_relative(const char* path) {
 
 extern "C" {
 
-bool deluge_efatfs_open(const char* path, uint32_t* out_handle) {
-	if (path == nullptr || out_handle == nullptr) {
+bool deluge_efatfs_open(const char* path, uint32_t* out_handle, bool* out_table_full) {
+	if (path == nullptr || out_handle == nullptr || out_table_full == nullptr) {
 		return false;
 	}
+	*out_table_full = false;
 	std::string full = resolve_root_relative(path);
 	if (full.empty()) {
 		return false; // DELUGE_SD_ROOT unset — no passthrough root configured.
@@ -132,7 +133,11 @@ bool deluge_efatfs_open(const char* path, uint32_t* out_handle) {
 			return true;
 		}
 	}
+	// 4096 slots (see kMaxHandles's comment) is far above any real project's concurrent-open-stream
+	// count, so this is not expected to fire in practice -- but report it distinguishably rather
+	// than silently colliding with a real "file not found" the way a single bool return would.
 	fprintf(stderr, "[host-efatfs] handle table full (%u slots)\n", kMaxHandles);
+	*out_table_full = true;
 	close(fd);
 	return false;
 }

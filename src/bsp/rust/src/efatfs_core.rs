@@ -41,9 +41,21 @@ use embedded_fatfs::{
 // drive the fill loop / absolute seek below.
 use embedded_io_async::{Read as _, Seek as _, SeekFrom, Write as _};
 
-/// Max concurrent streamed files. Small fixed cap — the live streaming engine
-/// holds only a handful of sample readers open at once.
-pub const MAX_HANDLES: usize = 16;
+/// Max concurrent streamed-READ files (the [`HANDLES`](crate::efatfs_fs)
+/// table). One resident [`Sample`](crate) holds one of these for its whole
+/// lifetime (see `SampleStream::open_read_stream`), so this bounds how many
+/// samples can be simultaneously resident in a song — 128 gives real
+/// multi-track projects (e.g. a 19-sample song) comfortable headroom over the
+/// previous 16, at a modest static cost (80 B/slot × 128 = 10 KiB).
+pub const MAX_HANDLES: usize = 128;
+
+/// Max concurrent persistent stream-WRITE handles (the sample recorder's
+/// `STREAM_WRITE_CTX` table, `efatfs_fs.rs`/`efatfs_host_shim.rs`). The
+/// recorder opens one write handle per in-progress recording; a handful of
+/// concurrent recordings (this device supports at most a few audio inputs at
+/// once) is the realistic ceiling, so this stays small and independent of
+/// [`MAX_HANDLES`] rather than paying the same 128-slot cost for no reason.
+pub const MAX_STREAM_WRITE_HANDLES: usize = 8;
 
 /// One handle-table slot: an optional detached [`FileContext`] plus a
 /// generation counter bumped on every claim (`insert`) and free (`remove`) of
@@ -54,23 +66,27 @@ struct Slot {
     ctx: Option<FileContext>,
 }
 
-/// A fixed-capacity table of detached [`FileContext`]s keyed by a `u32` handle.
+/// A fixed-capacity table of detached [`FileContext`]s keyed by a `u32`
+/// handle, generic over its slot count `N` so callers with very different
+/// concurrency needs ([`MAX_HANDLES`] for the streaming read path,
+/// [`MAX_STREAM_WRITE_HANDLES`] for the recorder write path) don't have to
+/// share one capacity.
 ///
 /// The device layer keeps one of these behind an async `Mutex`; host/sim
 /// callers own one directly. All methods are FS-agnostic except the two that
 /// take a `&FileSystem` ([`read_at_owned`] and, indirectly, the free functions
 /// [`open_context`] / [`read_context`] below).
-pub struct HandleTable {
-    slots: [Slot; MAX_HANDLES],
+pub struct HandleTable<const N: usize> {
+    slots: [Slot; N],
 }
 
-impl Default for HandleTable {
+impl<const N: usize> Default for HandleTable<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HandleTable {
+impl<const N: usize> HandleTable<N> {
     pub const fn new() -> Self {
         Self {
             slots: [const {
@@ -78,7 +94,7 @@ impl HandleTable {
                     generation: 0,
                     ctx: None,
                 }
-            }; MAX_HANDLES],
+            }; N],
         }
     }
 
@@ -159,6 +175,20 @@ impl HandleTable {
         self.commit(handle, generation, newctx);
         filled
     }
+}
+
+/// Outcome of an [`HandleTable::insert`]-backed streaming-read open
+/// (`efatfs_fs::open` / `efatfs_host_shim::open`): either a fresh handle, or
+/// specifically *why* it failed. Table-full is deliberately distinguishable
+/// from every other open failure (bad path, unmounted FS): it means a real,
+/// valid file is being silently dropped rather than that anything is
+/// actually missing, so the `deluge_efatfs_open` FFI bridges surface it to
+/// C++ as a dedicated `Error::TOO_MANY_OPEN_STREAMS`, not the generic
+/// `Error::FILE_NOT_FOUND` a bare `Option<u32>` would collapse it into.
+pub enum OpenOutcome {
+    Handle(u32),
+    NotFound,
+    TableFull,
 }
 
 /// Fill `dst` completely from `f`'s current position. Returns `true` if the
@@ -735,8 +765,9 @@ pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, secon
 // generation-guarded checkout/commit dance: its slots are claimed/read/freed
 // under one lock, never split across an FS-mutex await.
 
-/// Max concurrent task-context file handles (mirrors [`HandleTable`]'s
-/// `MAX_HANDLES` cap; task-context file I/O is not high-concurrency).
+/// Max concurrent task-context file handles. Kept independent of
+/// [`MAX_HANDLES`] — task-context file I/O (menu browsing, project
+/// save/load) is not high-concurrency the way resident streamed samples are.
 pub const MAX_TASK_FILES: usize = 16;
 
 struct TaskFileSlot {

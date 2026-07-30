@@ -27,7 +27,7 @@ use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 
-use crate::efatfs_core::{self, DirHandleTable, HandleTable, TaskFileTable};
+use crate::efatfs_core::{self, DirHandleTable, HandleTable, OpenOutcome, TaskFileTable};
 use crate::fat_block_device::SdBlockDevice;
 
 type Storage = StreamSlice<BufStream<SdBlockDevice, 512>>;
@@ -118,16 +118,30 @@ where
 
 /// `FileContext` is plain data (`DirEntryEditor` is `data`/`pos`/`dirty`, no
 /// `Rc`/`RefCell`), so [`HandleTable`] is `Send` and this static compiles.
-static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable> = Mutex::new(HandleTable::new());
+///
+/// Sized at [`efatfs_core::MAX_HANDLES`] (128) — a resident [`Sample`] holds
+/// one of these for its whole lifetime (see `SampleStream::open_read_stream`),
+/// so this is the ceiling on simultaneously-resident streamed samples in a
+/// song. The persistent stream-*write* table below ([`STREAM_WRITE_CTX`])
+/// deliberately does NOT share this capacity — see its own doc.
+static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable<{ efatfs_core::MAX_HANDLES }>> =
+    Mutex::new(HandleTable::new());
 
 /// Open `path`, detach it to a [`FileContext`], and stash it in a free slot.
-/// Returns the slot index as the handle, or `None` if the FS is unmounted, the
-/// open failed, or the table is full.
-pub async fn open(path: &str) -> Option<u32> {
+/// Returns the slot index as [`OpenOutcome::Handle`], or specifically why the
+/// open failed ([`OpenOutcome::NotFound`]: the FS is unmounted or the file
+/// open failed; [`OpenOutcome::TableFull`]: [`HANDLES`] has no free slot).
+pub async fn open(path: &str) -> OpenOutcome {
     // Open + detach under the FS mutex only; never touch HANDLES here (keeps the
     // FS→HANDLES order that pairs deadlock-free with read_at's HANDLES→FS).
-    let ctx = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await??;
-    HANDLES.lock().await.insert(ctx)
+    let Some(Some(ctx)) = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await
+    else {
+        return OpenOutcome::NotFound;
+    };
+    match HANDLES.lock().await.insert(ctx) {
+        Some(h) => OpenOutcome::Handle(h),
+        None => OpenOutcome::TableFull,
+    }
 }
 
 /// Read `dst.len()` bytes from absolute `byte_offset` of the file behind
@@ -173,10 +187,23 @@ use core::ffi::{CStr, c_char};
 /// C-ABI: open a sample file for streaming; writes the handle to `*out_handle`.
 /// Returns false (caller falls back to the C-FatFS map) if not on the worker
 /// fiber, the path/pointer is null or invalid, the FS is unmounted, or the open
-/// failed. See `include/libdeluge/streaming_fill.h` for the C-side contract.
+/// failed. `*out_table_full` is always written on a `false` return — true iff
+/// the failure was specifically [`HANDLES`] having no free slot (as opposed to
+/// a genuinely missing file or unmounted FS), so the caller can surface a
+/// distinguishable "too many open streams" error instead of a misleading
+/// "file not found". See `include/libdeluge/streaming_fill.h` for the C-side
+/// contract.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() || out_handle.is_null() {
+pub extern "C" fn deluge_efatfs_open(
+    path: *const c_char,
+    out_handle: *mut u32,
+    out_table_full: *mut bool,
+) -> bool {
+    if !crate::fiber::on_fiber()
+        || path.is_null()
+        || out_handle.is_null()
+        || out_table_full.is_null()
+    {
         return false;
     }
     // SAFETY: `path` is a NUL-terminated C string supplied by open_read_stream (Task 6),
@@ -186,15 +213,29 @@ pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) 
         Err(_) => return false,
     };
     match crate::fiber::block_on_fiber(open(path)) {
-        Some(h) => {
-            // SAFETY: `out_handle` is non-null (checked above) and points at a `u32` the C++
-            // caller owns for the duration of this synchronous call.
+        OpenOutcome::Handle(h) => {
+            // SAFETY: `out_handle`/`out_table_full` are non-null (checked above) and point at
+            // memory the C++ caller owns for the duration of this synchronous call.
             unsafe {
                 *out_handle = h;
+                *out_table_full = false;
             }
             true
         }
-        None => false,
+        OpenOutcome::TableFull => {
+            // SAFETY: see above.
+            unsafe {
+                *out_table_full = true;
+            }
+            false
+        }
+        OpenOutcome::NotFound => {
+            // SAFETY: see above.
+            unsafe {
+                *out_table_full = false;
+            }
+            false
+        }
     }
 }
 
@@ -745,8 +786,15 @@ pub extern "C" fn deluge_efatfs_set_time(
 // Same lock discipline as every other table in this module: [`STREAM_WRITE_CTX`] is never held
 // across a [`with_fs`] await -- checkout (release the table lock) -> FS work under `with_fs` ->
 // commit (re-lock, generation-gated).
-static STREAM_WRITE_CTX: Mutex<CriticalSectionRawMutex, HandleTable> =
-    Mutex::new(HandleTable::new());
+/// Sized at [`efatfs_core::MAX_STREAM_WRITE_HANDLES`] (8), deliberately much
+/// smaller than [`HANDLES`]'s 128: the recorder opens one write handle per
+/// in-progress recording, and this device supports at most a handful of
+/// concurrent recordings — there's no reason to pay 128 slots' worth of
+/// static memory for a table that only ever needs a few.
+static STREAM_WRITE_CTX: Mutex<
+    CriticalSectionRawMutex,
+    HandleTable<{ efatfs_core::MAX_STREAM_WRITE_HANDLES }>,
+> = Mutex::new(HandleTable::new());
 
 /// `DelugeStreamMode` mode selector matching `stream_io.h`'s C enum's implicit declaration-order
 /// values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW, 3 = WRITE_APPEND.

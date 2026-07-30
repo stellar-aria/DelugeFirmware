@@ -485,6 +485,7 @@ enum class Error {
 	INVALID_SYSEX_FORMAT,
 	POS_PAST_STRING,
 	FILE_NOT_SAVED,
+	TOO_MANY_OPEN_STREAMS,
 };
 
 enum class SampleRepeatMode {

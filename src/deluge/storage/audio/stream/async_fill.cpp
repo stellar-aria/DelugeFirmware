@@ -192,7 +192,10 @@ __attribute__((weak)) bool deluge_streaming_drain_queue_blocking(void) {
 // legacy C/C++ RZA1 BSP, committed for retirement in favour of the Rust BSP) open_read_stream()
 // therefore fails and streamed samples do not load; that BSP's streaming read is retired, not
 // silently falling back.
-__attribute__((weak)) bool deluge_efatfs_open(const char* /*path*/, uint32_t* /*out_handle*/) {
+__attribute__((weak)) bool deluge_efatfs_open(const char* /*path*/, uint32_t* /*out_handle*/, bool* out_table_full) {
+	if (out_table_full != nullptr) {
+		*out_table_full = false; // No efatfs handle table on this BSP/config -- never "full".
+	}
 	return false;
 }
 

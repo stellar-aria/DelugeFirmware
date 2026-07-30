@@ -72,7 +72,7 @@ use block_device_driver::BlockDevice;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
 
-use crate::efatfs_core::{self, DirHandleTable, HandleTable, TaskFileTable};
+use crate::efatfs_core::{self, DirHandleTable, HandleTable, OpenOutcome, TaskFileTable};
 
 /// Host `block_device_driver::BlockDevice<512>` that routes every read/write
 /// through `crate::sd::deluge_block_read`/`deluge_block_write` — the same
@@ -182,14 +182,22 @@ where
 // the FS await) — mirroring the device composition keeps this a faithful
 // shape-for-shape port, even though host's single executor thread means the
 // two orderings are equally deadlock-free here.
-static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable> = Mutex::new(HandleTable::new());
+static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable<{ efatfs_core::MAX_HANDLES }>> =
+    Mutex::new(HandleTable::new());
 
 /// Open `path`, detach it to a [`embedded_fatfs::FileContext`], and stash it in
-/// a free slot. Returns the slot index as the handle, or `None` if the FS is
-/// unmounted, the open failed, or the table is full.
-pub async fn open(path: &str) -> Option<u32> {
-    let ctx = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await??;
-    HANDLES.lock().await.insert(ctx)
+/// a free slot. Returns the slot index as [`OpenOutcome::Handle`], or
+/// specifically why the open failed — see the device `efatfs_fs::open`'s doc
+/// (this is a faithful mirror).
+pub async fn open(path: &str) -> OpenOutcome {
+    let Some(Some(ctx)) = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await
+    else {
+        return OpenOutcome::NotFound;
+    };
+    match HANDLES.lock().await.insert(ctx) {
+        Some(h) => OpenOutcome::Handle(h),
+        None => OpenOutcome::TableFull,
+    }
 }
 
 /// Read `dst.len()` bytes from absolute `byte_offset` of the file behind
@@ -229,10 +237,16 @@ use core::ffi::{CStr, c_char};
 
 /// C-ABI: open a sample file for streaming; writes the handle to `*out_handle`.
 /// Returns false if the path/pointer is null or invalid, the FS is unmounted,
-/// or the open failed.
+/// or the open failed. `*out_table_full` is always written on a `false`
+/// return — true iff the failure was specifically [`HANDLES`] being full (see
+/// the device `deluge_efatfs_open`'s doc, which this mirrors).
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) -> bool {
-    if path.is_null() || out_handle.is_null() {
+pub extern "C" fn deluge_efatfs_open(
+    path: *const c_char,
+    out_handle: *mut u32,
+    out_table_full: *mut bool,
+) -> bool {
+    if path.is_null() || out_handle.is_null() || out_table_full.is_null() {
         return false;
     }
     // SAFETY: `path` is a NUL-terminated C string supplied by the caller,
@@ -257,15 +271,29 @@ pub extern "C" fn deluge_efatfs_open(path: *const c_char, out_handle: *mut u32) 
         embassy_futures::block_on(open(path))
     };
     match opened {
-        Some(h) => {
-            // SAFETY: `out_handle` is non-null (checked above) and points at a
-            // `u32` the caller owns for the duration of this synchronous call.
+        OpenOutcome::Handle(h) => {
+            // SAFETY: `out_handle`/`out_table_full` are non-null (checked above) and point at
+            // memory the caller owns for the duration of this synchronous call.
             unsafe {
                 *out_handle = h;
+                *out_table_full = false;
             }
             true
         }
-        None => false,
+        OpenOutcome::TableFull => {
+            // SAFETY: see above.
+            unsafe {
+                *out_table_full = true;
+            }
+            false
+        }
+        OpenOutcome::NotFound => {
+            // SAFETY: see above.
+            unsafe {
+                *out_table_full = false;
+            }
+            false
+        }
     }
 }
 
@@ -858,8 +886,10 @@ pub extern "C" fn deluge_efatfs_set_time(
 // `block_on_fiber`/`block_on` dispatch every function in this module already uses. See that
 // file's doc comments for the design; comments here focus on host-specific differences only.
 
-static STREAM_WRITE_CTX: Mutex<CriticalSectionRawMutex, HandleTable> =
-    Mutex::new(HandleTable::new());
+static STREAM_WRITE_CTX: Mutex<
+    CriticalSectionRawMutex,
+    HandleTable<{ efatfs_core::MAX_STREAM_WRITE_HANDLES }>,
+> = Mutex::new(HandleTable::new());
 
 /// `DelugeStreamMode` mode selector matching `stream_io.h`'s C enum's implicit declaration-order
 /// values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW, 3 = WRITE_APPEND.

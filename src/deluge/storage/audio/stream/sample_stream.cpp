@@ -74,7 +74,7 @@ void SampleStream::release_asset() {
 	}
 }
 
-bool SampleStream::open_read_stream(std::string_view path) {
+Error SampleStream::open_read_stream(std::string_view path) {
 	// R1: efatfs IS the streaming read path — no C-FatFS fallback. Open the efatfs file handle; a
 	// failure to open is a stream-open failure propagated to the caller (the sample won't load).
 	// The old deluge::io::Stream (read_stream_) + its sdAddress sector seeding are gone. A
@@ -82,8 +82,9 @@ bool SampleStream::open_read_stream(std::string_view path) {
 	// path reopens one once recording finishes.
 	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
 	uint32_t handle = 0;
-	if (!deluge_efatfs_open(cpath.c_str(), &handle)) {
-		return false;
+	bool table_full = false;
+	if (!deluge_efatfs_open(cpath.c_str(), &handle, &table_full)) {
+		return table_full ? Error::TOO_MANY_OPEN_STREAMS : Error::FILE_NOT_FOUND;
 	}
 	efatfs_handle_ = handle;
 	// Re-register the fill-context now the handle is known (SR2d-4 Task 1): a no-op today on every
@@ -92,7 +93,7 @@ bool SampleStream::open_read_stream(std::string_view path) {
 	// there), but keeps the table correct if a future caller ever opens the stream after the asset was
 	// already defined.
 	register_fill_context();
-	return true;
+	return Error::NONE;
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {

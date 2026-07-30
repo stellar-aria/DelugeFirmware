@@ -109,9 +109,12 @@ public:
 	/// Opens the handle once (typically from `AudioFileManager::buildAudioFileFromCard`) for the rest of
 	/// the sample's life. R1: efatfs is the streaming read path outright — there is no C-FatFS fallback.
 	/// @param path Path to open.
-	/// @return `true` on success; `false` if the open failed, leaving the stream disengaged (callers map
-	///         this to `Error::FILE_NOT_FOUND`).
-	bool open_read_stream(std::string_view path);
+	/// @return `Error::NONE` on success, leaving the handle engaged; otherwise the stream is left
+	///         disengaged and the failure reason is distinguished: `Error::TOO_MANY_OPEN_STREAMS` if
+	///         the streaming-read handle table has no free slot (a real file being silently dropped,
+	///         not a missing one), `Error::FILE_NOT_FOUND` for every other open failure (bad path,
+	///         unmounted FS, off-fiber call).
+	Error open_read_stream(std::string_view path);
 
 	/// @brief Build this sample's read source.
 	///

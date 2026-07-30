@@ -45,7 +45,7 @@ fn efatfs_core_open_read_and_interleave_fat32() {
     let _disk = RamDisk::load(&fat32());
     let efatfs = EFatFs::mount();
     let fs = efatfs.raw();
-    let mut table = HandleTable::new();
+    let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
 
     block_on(async {
         // (a) open → insert → read_at_owned(0) → whole-file bytes.
@@ -120,7 +120,7 @@ fn efatfs_core_generation_guard_rejects_stale_commit() {
     let _disk = RamDisk::load(&fat32());
     let efatfs = EFatFs::mount();
     let fs = efatfs.raw();
-    let mut table = HandleTable::new();
+    let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
 
     block_on(async {
         let kick_path = "/SAMPLES/Kicks/Deep House Kick (loud).wav";
@@ -241,7 +241,7 @@ fn efatfs_core_sequential_read_transfer_overhead() {
         let ctx = efatfs_core::open_context(&fs, kick_path)
             .await
             .expect("open kick");
-        let mut table = HandleTable::new();
+        let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
         let h = table.insert(ctx).expect("insert");
 
         BLOCKS_READ.store(0, Ordering::Relaxed); // count only the streamed reads
@@ -318,7 +318,7 @@ fn efatfs_core_looping_playback_transfer_overhead() {
 
     block_on(async {
         let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
-        let mut table = HandleTable::new();
+        let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
         let h = table.insert(ctx).expect("insert");
 
         BLOCKS_READ.store(0, Ordering::Relaxed);
@@ -412,7 +412,7 @@ fn efatfs_core_adversarial_seek_transfer_overhead() {
 
         block_on(async {
             let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
-            let mut table = HandleTable::new();
+            let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
             let h = table.insert(ctx).expect("insert");
 
             BLOCKS_READ.store(0, Ordering::Relaxed);
@@ -486,7 +486,7 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
 
     block_on(async {
         let ctx = efatfs_core::open_context(&fs, path).await.expect("open");
-        let mut table = HandleTable::new();
+        let mut table = HandleTable::<{ efatfs_core::MAX_HANDLES }>::new();
         let h = table.insert(ctx).expect("insert");
         let mut buf = vec![0u8; cluster_bytes];
 

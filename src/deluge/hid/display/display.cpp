@@ -76,6 +76,9 @@ std::string_view getErrorMessage(Error error) {
 	case Error::FILE_NOT_SAVED:
 		return l10n::getView(STRING_FOR_ERROR_FILE_NOT_SAVED);
 
+	case Error::TOO_MANY_OPEN_STREAMS:
+		return l10n::getView(STRING_FOR_ERROR_TOO_MANY_OPEN_STREAMS);
+
 	default:
 		return l10n::getView(STRING_FOR_ERROR_GENERIC);
 	}

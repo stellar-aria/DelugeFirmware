@@ -249,13 +249,19 @@ bool deluge_streaming_drain_queue_blocking(void);
 /// The sync→async bridge for the streaming READ path: C++ calls this synchronously at sample-load,
 /// and the Rust implementation (`efatfs_fs.rs`, cargo feature `efatfs_streaming`) bridges to the
 /// async handle table via the worker fiber's `block_on_fiber`. Valid only while on the worker fiber.
-/// @param path       NUL-terminated absolute file path.
-/// @param out_handle Receives the opaque handle on success; untouched on failure.
+/// @param path           NUL-terminated absolute file path.
+/// @param out_handle     Receives the opaque handle on success; untouched on failure.
+/// @param out_table_full Always written (on both success and failure): true iff the open failed
+///                       specifically because the streaming-read handle table has no free slot (as
+///                       opposed to the file genuinely not existing, or the FS being unmounted) --
+///                       the caller maps a `true` value to a dedicated `Error::TOO_MANY_OPEN_STREAMS`
+///                       rather than the misleading `Error::FILE_NOT_FOUND`. Always `false` when
+///                       @p out_handle was written.
 /// @return true if the file was opened and @p out_handle written; false (caller falls back to the
 ///         C-FatFS sector path) if not on the worker fiber, the path/pointer is invalid, the FS is
 ///         unmounted, or the open failed. Every non-efatfs BSP/config links the weak no-op fallback
-///         in `async_fill.cpp`, which always returns false.
-bool deluge_efatfs_open(const char* path, uint32_t* out_handle);
+///         in `async_fill.cpp`, which always returns false and writes `*out_table_full = false`.
+bool deluge_efatfs_open(const char* path, uint32_t* out_handle, bool* out_table_full);
 
 /// @brief Close a streaming file handle previously returned by deluge_efatfs_open.
 ///

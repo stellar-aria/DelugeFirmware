@@ -23,6 +23,7 @@
 #include "dsp/stereo_sample.h"
 #include "io/file.hpp"
 #include "libdeluge/sample_source.h"
+#include "libdeluge/streaming_fill.h" // deluge_streaming_async_active / _drain_queue_blocking
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "storage/audio/stream/loader.h"
@@ -43,6 +44,21 @@ DelugeSampleSource* g_source = nullptr;
 int32_t expected24(uint32_t frameIndex, uint32_t channel) {
 	uint32_t v = (frameIndex * 97u + channel * 131u + 17u) % (1u << 24);
 	return static_cast<int32_t>(v) - (1 << 23);
+}
+
+// Drive the streaming fill one step so a pending region-acquire can progress LOADING->READY. On the
+// C-host sync path this is the fiber loader drain (loader::pump); on the Embassy path loader::pump
+// no-ops and the real drain is the async fill task, so route onto the rung-1 yield-and-drain
+// primitive (deluge_streaming_drain_queue_blocking) — valid because the probes run ON the storage
+// owner worker fiber there (dispatched by the recorder-roundtrip scenario). Mirrors
+// StemExport::renderWait's async-vs-sync fork.
+void driveFillDrain() {
+	if (deluge_streaming_async_active()) {
+		deluge_streaming_drain_queue_blocking();
+	}
+	else {
+		deluge::audio::stream::loader::pump();
+	}
 }
 
 int32_t rampSample(uint32_t frameIndex, uint32_t channel) {
@@ -200,7 +216,7 @@ uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, u
 	// deluge_harness_recorder_probe_poll() for the Rust-driven retry that also lets the ASYNC fill
 	// task (the thing that actually owns the drain on host_app) run between checks.
 	for (int i = 0; i < 32 && state == DELUGE_REGION_LOADING; i++) {
-		deluge::audio::stream::loader::pump();
+		driveFillDrain();
 		state = deluge_sample_region_acquire_ex(g_source, /*index=*/0, /*direction=*/+1, /*priority=*/0, &out);
 	}
 
@@ -216,7 +232,7 @@ uint8_t deluge_harness_recorder_probe_poll() {
 	// never itself progresses a fill) so a caller polling this in a loop actually gives EITHER drain
 	// mechanism -- the C++ pump on sim, or (by calling this repeatedly while its own async executor
 	// keeps ticking) the Rust async fill task on host_app -- a real chance to resolve the region.
-	deluge::audio::stream::loader::pump();
+	driveFillDrain();
 	DelugeSampleRegion out{};
 	DelugeRegionState state =
 	    deluge_sample_region_acquire_ex(g_source, /*index=*/0, /*direction=*/+1, /*priority=*/0, &out);
@@ -345,7 +361,7 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels
 	// async_streaming_loader (host_app), where deluge_harness_recorder_finalized_multicluster_probe_poll()
 	// is the Rust-driven counterpart.
 	for (int i = 0; i < 32 && state == DELUGE_REGION_LOADING; i++) {
-		deluge::audio::stream::loader::pump();
+		driveFillDrain();
 		state = deluge_sample_region_acquire_ex(g_finalizedSource, regionIndex, +1, 0, &out);
 	}
 	g_finalizedLastReady = (state == DELUGE_REGION_READY);
@@ -359,7 +375,7 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe_poll() {
 	if (g_finalizedSource == nullptr) {
 		return static_cast<uint8_t>(DELUGE_REGION_UNAVAILABLE);
 	}
-	deluge::audio::stream::loader::pump();
+	driveFillDrain();
 	DelugeSampleRegion out{};
 	DelugeRegionState state = deluge_sample_region_acquire_ex(g_finalizedSource, g_finalizedRegionIndex,
 	                                                          /*direction=*/+1, /*priority=*/0, &out);

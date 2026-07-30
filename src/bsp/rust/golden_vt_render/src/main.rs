@@ -4,10 +4,11 @@
 //! `../lens1_vt_sim/` pioneered for the streaming-underrun harness), mounts a
 //! fixture SD-card image, dispatches a real offline `StemExport` run onto the
 //! storage-owner worker fiber, copies the produced stem WAV(s) out of the
-//! image, and exits cleanly. No cluster fills drain yet under `async_active`
-//! (`loader::pump` no-ops — see [`run_stem_export_scenario`]'s doc), so a
-//! sample-backed fixture's stem content is still silence; that's a later
-//! rung's job (see the plan).
+//! image, and exits cleanly. Sample cluster fills drain through the real async
+//! Embassy `streaming_fill_task` during the offline render (the reader/overview
+//! and voice-playback paths route their fills onto that drain under
+//! `async_active`; `loader::pump` no-ops), so a sample-backed fixture renders
+//! real audio, not silence.
 //!
 //! # Why a sibling package, not a `lens1_vt_sim` `[[bin]]`
 //!
@@ -622,7 +623,7 @@ fn hard_exit(code: i32) -> ! {
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     unsafe {
         core::arch::asm!(
             "syscall",
@@ -631,6 +632,18 @@ fn hard_exit(code: i32) -> ! {
             options(noreturn, nostack)
         );
     }
-    #[cfg(not(target_os = "linux"))]
+    // 32-bit ARM EABI (the arm-linux/qemu golden oracle): exit_group is syscall
+    // 248, taken in r7, argument in r0, via `svc #0`. Same "skip C++ static
+    // destructors" rationale as the x86-64 path above.
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 248usize, // exit_group
+            in("r0") code,
+            options(noreturn, nostack)
+        );
+    }
+    #[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "arm"))))]
     std::process::exit(code);
 }

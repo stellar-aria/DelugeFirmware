@@ -26,7 +26,16 @@ fn main() {
     // `deluge_app_init` as a link root so --gc-sections keeps its whole
     // transitively-reachable graph instead of stripping to the C++ global-ctor
     // subset.
-    println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
+    //
+    // `--error-limit=0` is an lld-only flag (raises lld's default 20-diagnostic
+    // cap so a link failure prints everything). The x86-64 host oracle links
+    // with lld and accepts it; the arm-linux/qemu oracle links with GNU bfd `ld`
+    // (driven by arm-linux-gnueabihf-gcc), which has no such cap and rejects the
+    // option — so emit it only off the arm-linux path.
+    let target = env::var("TARGET").unwrap_or_default();
+    if target != "armv7-unknown-linux-gnueabihf" {
+        println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
+    }
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
 
     println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
@@ -107,10 +116,14 @@ fn main() {
     println!("cargo:rerun-if-changed={}", app_objs_dir.display());
 }
 
-/// Bindgen the libdeluge headers for the host x86-64 target — see
-/// `../build.rs`'s `run_bindgen` for the full rationale (identical logic, just
-/// not parametrized over `clang_target` since this package only ever bindgens
-/// for host).
+/// Bindgen the libdeluge headers for whichever host target this crate is being
+/// built for — see `../build.rs`'s `run_bindgen` for the full rationale. The
+/// clang target is taken from cargo's `TARGET` triple rather than hardcoded, so
+/// the same build script serves both the x86-64 host oracle
+/// (`x86_64-unknown-linux-gnu`) and the arm-linux/qemu oracle
+/// (`armv7-unknown-linux-gnueabihf`); a cargo target triple is a valid clang
+/// triple, and the POD layouts differ between ILP32 arm and LP64 x86-64, so the
+/// bindgen target must track the build target for the FFI structs to match.
 fn run_bindgen(
     repo_root: &std::path::Path,
     manifest_dir: &std::path::Path,
@@ -118,6 +131,7 @@ fn run_bindgen(
 ) {
     let include_dir = repo_root.join("include");
     let wrapper = manifest_dir.join("wrapper.h");
+    let clang_target = env::var("TARGET").expect("cargo sets TARGET for build scripts");
     let bindings = bindgen::Builder::default()
         .header(wrapper.to_str().unwrap())
         .clang_arg(format!("-I{}", include_dir.display()))
@@ -127,7 +141,7 @@ fn run_bindgen(
         // See ../build.rs: NO `-fshort-enums` — every libdeluge enum pins its
         // underlying type explicitly in its header, so both sides already
         // agree on each enum's width regardless of the flag.
-        .clang_arg("--target=x86_64-unknown-linux-gnu")
+        .clang_arg(format!("--target={clang_target}"))
         .layout_tests(false)
         .generate()
         .expect("bindgen failed on libdeluge headers");

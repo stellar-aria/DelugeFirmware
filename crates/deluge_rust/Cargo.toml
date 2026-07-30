@@ -27,10 +27,9 @@ deluge_resource = { path = "../deluge_resource" }
 # `__attribute__((weak))` fallback -- mirrors `deluge-bsp-rust`'s own direct dependency on
 # device (src/bsp/rust/Cargo.toml).
 deluge_sample_source = { path = "../deluge_sample_source", optional = true }
-# SIM (C2b): the Rust cluster fill, pulled into the sim's libdeluge_rust.a so its strong
-# deluge_streaming_begin_fill/_finish_fill/_set_fill_context override async_fill.cpp's (deleted) weak
-# C++ wrappers. native_fill = the manager-reaching fill; sim_convert = build convert shim-only (deluge_app
-# provides the convert objects). Optional + only pulled via the `sim` feature below.
+# SIM (C2b): the Rust cluster fill, pulled into the sim's libdeluge_rust.a. native_fill = the
+# manager-reaching fill (native_begin/native_finish); sim_convert = build convert shim-only
+# (deluge_app provides the convert objects). Optional + only pulled via the `sim` feature below.
 deluge_sample_fill = { path = "../deluge_sample_fill", optional = true }
 # SIM (C2b): std-backed critical-section impl for deluge_sample_fill's FILL_CONTEXTS mutex. Sim-only —
 # device links deluge_rust WITHOUT `sim` and gets the real impl from deluge-bsp-rust.

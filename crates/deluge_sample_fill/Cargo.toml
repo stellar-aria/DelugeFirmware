@@ -34,9 +34,8 @@ embassy-sync = "0.8.0"
 critical-section = { version = "1", features = ["std"] }
 
 [features]
-# Default-off. Gates the manager-reaching fill (native_begin/native_finish + the strong
-# deluge_streaming_begin_fill/_finish_fill overrides), which reference undefined
-# `extern "C"` manager/chunk symbols and so only compile where a final link provides them.
+# Default-off. Gates the manager-reaching fill (native_begin/native_finish), which reference
+# undefined `extern "C"` manager/chunk symbols and so only compile where a final link provides them.
 # Off by default so `cargo test -p deluge_sample_fill` (fill_logic + fill-context tier)
 # builds and links with nothing to resolve. Turned on by deluge-bsp-rust, deluge_rust's
 # `sim` feature, and region_fill_differential.

@@ -15,15 +15,15 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-/// libdeluge/streaming_fill.h — the split cluster-fill boundary.
+/// libdeluge/streaming_fill.h — the cluster-fill descriptor + resource-manager/asset C-ABI.
 ///
-/// `SampleStream::read_cluster_data` used to do "resolve where/how much to read, do the read,
-/// convert+stitch+publish" as one synchronous call. This header carries the C-ABI split of the
-/// two halves either side of the actual I/O: `deluge_streaming_begin_fill` resolves the
-/// destination buffer and physical sector range (pure lookup + arithmetic, no SD access, no
-/// FatFS), and `deluge_streaming_finish_fill` runs the post-read convert/stitch/publish tail.
-/// The caller (today: the synchronous fiber pump in read_cluster_data; later: the Rust async
-/// fill task) performs the actual read between the two calls.
+/// The Rust async fill task (deluge-bsp-rust's `streaming_loader.rs`, over `deluge_sample_fill`'s
+/// `native_begin`/`native_finish`) resolves each queued chunk's read geometry into a
+/// `StreamingFillDescriptor`, performs the read, then converts/stitches/publishes. This header
+/// carries the shared FFI types (the descriptor) plus the resource-manager/asset and
+/// signal/readiness entry points that cross the C++/Rust boundary. (The old synchronous C-ABI
+/// split — `deluge_streaming_begin_fill`/`_finish_fill` — was retired with
+/// `SampleStream::read_cluster_data`; the async task calls `native_begin`/`native_finish` directly.)
 #pragma once
 #include "libdeluge/types.h" // DelugeStatus
 #include <stdbool.h>
@@ -32,7 +32,8 @@
 
 typedef struct DelugeResource DelugeResource;
 
-/// @brief Descriptor filled by deluge_streaming_begin_fill: where to DMA, and how much.
+/// @brief Descriptor the fill resolves from a queued chunk's geometry (`native_begin`): where to
+///        DMA, and how much.
 typedef struct StreamingFillDescriptor {
 	uint8_t* dest;        ///< cluster payload base; write exactly num_sectors*512 bytes here
 	uint32_t num_sectors; ///< sectors to read (accounts for a short final cluster) — the read LENGTH
@@ -44,38 +45,6 @@ typedef struct StreamingFillDescriptor {
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/// @brief Resolve the destination buffer and physical sector range for a queued chunk fill.
-///
-/// Called from both fill paths: the synchronous fiber pump (`SampleStream::read_cluster_data`)
-/// and (indirectly, via its own native arithmetic rather than this symbol) the Rust async fill
-/// task. The definition is `__attribute__((weak))` in `async_fill.cpp` — the legacy fallback for
-/// BSPs that don't link the Rust crate. On the Rust/Embassy BSP a strong override
-/// (`streaming_loader.rs`) wins the link instead, routing the synchronous caller through the SAME
-/// native arithmetic the async task already uses.
-/// @note Pure lookup and arithmetic — touches no SD hardware and no FatFS.
-/// @param chunk_backing Opaque `StreamedChunk` backing pointer, as returned by
-///                       deluge_resource_loader_next.
-/// @return The fill descriptor; `ok` is false if the chunk is unloadable or the geometry lookup
-///         failed.
-StreamingFillDescriptor deluge_streaming_begin_fill(void* chunk_backing);
-
-/// @brief Convert, stitch, and publish readiness for a chunk's just-read payload.
-///
-/// Called from both fill paths: the synchronous fiber pump (`SampleStream::read_cluster_data`)
-/// after its own blocking read, and (indirectly, via its own native tail rather than this symbol)
-/// the Rust async fill task. The definition is `__attribute__((weak))` in `async_fill.cpp` — the
-/// legacy fallback for BSPs that don't link the Rust crate. On the Rust/Embassy BSP a strong
-/// override (`streaming_loader.rs`) wins the link instead, routing the synchronous caller through
-/// the SAME native convert/stitch/publish tail (and `StreamedChunk` convert-state store) the async
-/// task already uses.
-/// @param chunk_backing Opaque `StreamedChunk` backing pointer; the same value passed to the
-///                       matching deluge_streaming_begin_fill call.
-/// @param read_ok        False if the underlying sector read failed: the fill is abandoned (this
-///                        function returns false without touching the chunk) and the caller must
-///                        re-enqueue it at lowest priority, as pump() does.
-/// @return true on success.
-bool deluge_streaming_finish_fill(void* chunk_backing, bool read_ok);
 
 /// @brief The resource-manager instance the streaming loader queue lives on.
 /// @return The single DelugeResource instance — the same one returned by

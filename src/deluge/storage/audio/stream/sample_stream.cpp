@@ -29,9 +29,8 @@
 #include <string>
 #include <utility>
 
-#include "deluge_resource.h"                 // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
-#include "libdeluge/streaming_fill.h"        // deluge_streaming_signal_fill
-#include "storage/audio/stream/async_fill.h" // deluge_streaming_begin_fill/finish_fill (StreamingFillDescriptor)
+#include "deluge_resource.h"          // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "libdeluge/streaming_fill.h" // deluge_streaming_signal_fill
 
 namespace deluge::audio::stream {
 

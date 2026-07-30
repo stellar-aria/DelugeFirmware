@@ -1,8 +1,9 @@
-//! The manager-reaching synchronous cluster-fill core (C2a Task 3). Moved verbatim from
+//! The manager-reaching cluster-fill core (C2a Task 3). Moved verbatim from
 //! `deluge-bsp-rust`'s `streaming_loader.rs::prod` module (SR2d-4 Tasks 2-5) into this shared crate,
-//! so both the Rust BSP's async fill task (`ProdOps::begin`/`finish`) and, from Task 4 on, the sim can
-//! link the SAME `native_begin`/`native_finish` + their strong `deluge_streaming_begin_fill`/
-//! `_finish_fill` C-ABI overrides — one implementation instead of two. Gated behind the `native_fill`
+//! so the Rust BSP's async fill task (`ProdOps::begin`/`finish`) links the `native_begin`/
+//! `native_finish` implementation here. (The strong `deluge_streaming_begin_fill`/`_finish_fill`
+//! C-ABI overrides that also lived here — the bridge for the C++ synchronous fill path — were
+//! removed when `SampleStream::read_cluster_data` was deleted.) Gated behind the `native_fill`
 //! feature (default-off): every `unsafe extern "C" { … }` symbol below is a manager/chunk accessor this
 //! crate itself does not define, so this module only compiles where a final link — device,
 //! `host_app`, or a test harness supplying the real symbols (`region_fill_differential`) — will
@@ -338,45 +339,4 @@ pub fn native_finish(chunk_backing: *mut c_void, read_ok: bool) -> bool {
     // SAFETY: `mgr`/`chunk_backing` are both still valid.
     unsafe { deluge_resource_mark_ready(mgr, chunk_backing) };
     true
-}
-
-/// Strong override of `deluge_streaming_begin_fill` (SR2d-4 Task 4). This is the
-/// app→BSP down-call `SampleStream::read_cluster_data`'s SYNCHRONOUS fill path
-/// (`sample_stream.cpp`) makes to resolve where/how much to read; `async_fill.cpp`'s
-/// `deluge_streaming_begin_fill` body is now `__attribute__((weak))`, so on the Rust BSP
-/// this strong definition wins the link and the sync path runs through the exact same
-/// [`native_begin`] arithmetic (`fill_logic::begin` — SR2d-4 Task 4 proved byte-identical to
-/// the C++ `begin_fill` math) as the async fill task (`ProdOps::begin`, in `deluge-bsp-rust`'s
-/// `streaming_loader.rs`) already does. `begin` has no shared store to unify (unlike `finish`'s
-/// convert-state) — this exists purely for "one fill impl" symmetry with the `finish_fill`
-/// override above. Only compiled where [`native_begin`] itself is (this crate's `native_fill`
-/// feature); a build without that feature falls back to the weak legacy C++ body, same as before
-/// this task.
-///
-/// The async task is unaffected: `ProdOps::begin` still calls [`native_begin`] directly as a plain
-/// fn call, not through this symbol.
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_streaming_begin_fill(
-    chunk_backing: *mut c_void,
-) -> StreamingFillDescriptor {
-    native_begin(chunk_backing)
-}
-
-/// Strong override of `deluge_streaming_finish_fill` (SR2d-4 Task 3). This is the
-/// app→BSP down-call `SampleStream::read_cluster_data`'s SYNCHRONOUS fill path
-/// (`sample_stream.cpp`) makes after its own blocking read completes; `async_fill.cpp`'s
-/// `deluge_streaming_finish_fill` body is now `__attribute__((weak))`, so on the Rust BSP
-/// this strong definition wins the link and the sync path runs through the exact same
-/// [`native_finish`] tail (and therefore the same `StreamedChunk` convert-state store,
-/// via `deluge_streaming_chunk_convert_state`/`_set_convert_state`) as the async fill task
-/// (`ProdOps::finish`, in `deluge-bsp-rust`'s `streaming_loader.rs`) already does — no more
-/// separate convert-state copies for the two paths. Only compiled where [`native_finish`] itself
-/// is (this crate's `native_fill` feature); a build without that feature falls back to the weak
-/// legacy C++ body, same as before this task.
-///
-/// The async task is unaffected: `ProdOps::finish` still calls [`native_finish`] directly as a
-/// plain fn call, not through this symbol.
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_streaming_finish_fill(chunk_backing: *mut c_void, read_ok: bool) -> bool {
-    native_finish(chunk_backing, read_ok)
 }

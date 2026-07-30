@@ -42,9 +42,8 @@ deluge_sample_convert = { path = "sample_convert" }
 
 # C2a: the relocated cluster-fill core. `fill_logic` (Task 1) lands here; deluge-bsp-rust's
 # streaming_loader imports it instead of its own `mod fill_logic`. `native_fill` (Task 3) pulls in
-# the manager-reaching `native_begin`/`native_finish` + their strong `deluge_streaming_begin_fill`/
-# `_finish_fill` overrides -- streaming_loader.rs no longer defines those itself; `ProdOps::begin`/
-# `finish` now call straight into this crate.
+# the manager-reaching `native_begin`/`native_finish` -- streaming_loader.rs no longer defines those
+# itself; `ProdOps::begin`/`finish` now call straight into this crate.
 deluge_sample_fill = { path = "../../../crates/deluge_sample_fill", features = ["native_fill"] }
 
 # Sibling deluge-sdk BSP + HAL (DelugeFirmware and deluge-sdk cloned side by

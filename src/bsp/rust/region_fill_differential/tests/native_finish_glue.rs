@@ -6,22 +6,22 @@
 //! ORCHESTRATION only, with plain local `ConvertState` values standing in for the real store
 //! (`tests/host_end_to_end.rs`, this crate). None of them drive
 //! `deluge_sample_fill::native_finish` itself — its `try_acquire` → payload-accessor →
-//! convert-state-accessor → stitch → write-back chain — over the REAL `StreamedChunk` accessors.
+//! convert-state-accessor → stitch → write-back chain — over the REAL streamed-chunk accessors.
 //! That gap is exactly where SR2d-4's Task 2 review found TWO real, silent-corruption Criticals (see
 //! `.superpowers/sdd/progress.md`'s "SR2d-4-UNIFY execution"):
 //!
 //!  1. **The convert-state double-store**: before this arc's unification (commits c8be0f8ae..66e584de2),
 //!     the synchronous C++ fill path (`read_cluster_data` → `finish_fill`) wrote convert-state directly
-//!     onto `StreamedChunk`, while the async Rust fill task wrote a SEPARATE Rust-side sidecar table —
-//!     two disjoint stores. A boundary stitch between a sync-loaded cluster and an async-prefetched
+//!     onto the chunk, while the async Rust fill task wrote a SEPARATE Rust-side sidecar table — two
+//!     disjoint stores. A boundary stitch between a sync-loaded cluster and an async-prefetched
 //!     neighbour read the EMPTY store, corrupting the boundary silently on every affected note.
-//!     Structurally fixed by routing BOTH paths through `native_finish` over the ONE `StreamedChunk`
-//!     accessor store (`deluge_streaming_chunk_convert_state`/`_set_convert_state`) — this test proves
-//!     that unification actually holds by driving what were the "two paths" (two separate `finish`
-//!     calls, mirroring a sync-loaded neighbour and an async-loaded self) through the SAME real store
-//!     and confirming the second call reads the first's write-back, not a zeroed default.
+//!     Structurally fixed by routing BOTH paths through `native_finish` over the ONE chunk accessor
+//!     store (`deluge_streaming_chunk_convert_state`/`_set_convert_state`) — this test proves that
+//!     unification actually holds by driving what were the "two paths" (two separate `finish` calls,
+//!     mirroring a sync-loaded neighbour and an async-loaded self) through the SAME real store and
+//!     confirming the second call reads the first's write-back, not a zeroed default.
 //!  2. **Backing-vs-payload** (commit 9585be616): `native_finish` built each neighbour's payload slice
-//!     directly from the raw `try_acquire` pointer (`StreamedChunk*`, the chunk's BACKING) instead of
+//!     directly from the raw `try_acquire` pointer (the chunk's BACKING) instead of
 //!     `deluge_streaming_chunk_payload(p)` (`backing + kChunkPayloadOffset`, the chunk's PAYLOAD) — the
 //!     neighbour stitch read/wrote the neighbour's header bytes instead of its samples.
 //!
@@ -39,29 +39,29 @@
 //! `deluge_sample_fill::native`'s `unsafe extern "C"` block (gated `native_fill`) declares 9 symbols
 //! this test must supply. Four (`deluge_resource_chunk_ident`, `_try_acquire`, `_release`,
 //! `_mark_ready`) are real `#[no_mangle]` Rust symbols from the `deluge_resource` crate (already a
-//! dev-dependency) — genuinely real, no test double. The remaining five are C++-defined in production
-//! (`async_fill.cpp`). Compiling THAT file directly was rejected: it is one translation unit whose
-//! OTHER functions (the legacy `begin_fill`/`finish_fill` bodies, ~25 weak efatfs fallbacks) reference
-//! `Sample`/`SampleStream`/`GeneralMemoryAllocator` and the rest of the app's storage/model closure —
-//! the exact "large C++ closure" trap `tests/host_end_to_end.rs`'s module doc already documents
-//! empirically for the `host_app` feature (20+ undefined boot-surface symbols). Since a `cc`-compiled
-//! `.cpp` is ONE link-time object, pulling in even one symbol from it would drag in every other
-//! undefined reference in the same file.
+//! dev-dependency) — genuinely real, no test double. **U4d relocated the streamed chunk's storage
+//! (construct + the seven field accessors) out of C++ entirely, into this same `deluge_sample_fill`
+//! crate** (`chunk.rs`, `#[unsafe(no_mangle)]` C-ABI exports) — so the four remaining accessors
+//! (`deluge_streaming_chunk_payload`/`_set_loaded`/`_convert_state`/`_set_convert_state`) are now
+//! ALSO real, no-test-double symbols, satisfied by `deluge_sample_fill`'s own object code (this
+//! crate already depends on it). Before U4d this file `cc`-compiled a small C++ slice
+//! (`cpp/native_finish_shim.cpp`) that re-stated those four accessor bodies verbatim over a real,
+//! placement-new'd C++ `StreamedChunk` — that struct (and the shim) no longer exist; U4d Task 3
+//! retired both, since redefining the same four symbols here now would be a link-time duplicate
+//! against `deluge_sample_fill`'s own copies, not a meaningful test double.
 //!
-//! So `cpp/native_finish_shim.cpp` (this crate's own `cc`-compiled slice, built by `build.rs`) is the
-//! MINIMAL testable seam: it includes ONLY the real, unmodified `storage/cluster/cluster.h` — so
-//! `StreamedChunk`'s field layout, `kChunkPayloadOffset`, and `payload()`/`payload_with_trailing_slack()`
-//! are the REAL, compiler-computed production ones — and re-states the four accessor bodies
-//! (`deluge_streaming_chunk_payload`/`_set_loaded`/`_convert_state`/`_set_convert_state`)
-//! CHARACTER-FOR-CHARACTER identical to `async_fill.cpp`'s own definitions (see
-//! `accessor_bodies_match_async_fill_cpp_verbatim` below, which greps the live source and fails loudly
-//! on drift). The fifth symbol the extern block needs (`deluge_streaming_resource_manager`) is NOT
-//! part of either Critical's bug surface (both bugs were in `native_finish`'s own
-//! neighbour-payload/convert-state wiring, not in "which manager is the global one") — a test-local
-//! stand-in, the same tier `tests/host_end_to_end.rs` already uses for its own
-//! `ENTER_CRITICAL_SECTION`/`EXIT_CRITICAL_SECTION`/`deluge_in_interrupt`. (The shim also still
-//! defines `deluge_streaming_chunk_unloadable`, a leftover from when this test drove the fill through
-//! `ProdOps`; harmless, just unreferenced by this test now.)
+//! The ONE symbol this test still has to provide by hand is `deluge_streaming_resource_manager`
+//! (below) — NOT part of either Critical's bug surface (both bugs were in `native_finish`'s own
+//! neighbour-payload/convert-state wiring, not in "which manager is the global one"); real
+//! production code resolves it via `GeneralMemoryAllocator::get().resourceManager()`, which this
+//! host test doesn't compile, so it stands in with a plain `AtomicPtr` set by [`ChunkHarness::new`] —
+//! the same test-local tier `tests/host_end_to_end.rs` already uses for its own
+//! `ENTER_CRITICAL_SECTION`/`EXIT_CRITICAL_SECTION`/`deluge_in_interrupt`.
+//!
+//! Chunk construction goes straight through `deluge_sample_fill::chunk::deluge_streaming_chunk_construct`
+//! too (via [`construct_streamed_chunk`], a thin signature-matching wrapper — see its own doc for why
+//! it needs to exist at all) — the SAME callback the resource manager invokes for a real streamed
+//! SAMPLE chunk in production (`chunk_residency.cpp`), not a hand-rolled stand-in.
 //!
 //! ## What this test does NOT exercise
 //!
@@ -69,9 +69,8 @@
 //!   (both were `finish`-side), already covered byte-identically by `fill_logic_host.rs`'s `begin`
 //!   tests and `differential.rs`. This test seeds each chunk's payload directly, mirroring "the read
 //!   already completed".
-//! - The real C++ legacy `begin_fill`/`finish_fill` bodies, `Sample`/`SampleStream`, or
-//!   `GeneralMemoryAllocator` — deliberately out of reach (see above); `cluster.sample`/`resource_slot`
-//!   are never dereferenced by anything this test calls.
+//! - `Sample`/`SampleStream`, or `GeneralMemoryAllocator` — this test never touches the app's
+//!   storage/model closure; only the relocated Rust chunk + the shared resource manager.
 //! - The efatfs read (`ProdOps::read`, in `deluge-bsp-rust`) — this test never calls it; covered
 //!   elsewhere (`fs_differential`, `streaming_fill_host.rs`'s descriptor-plumbing test).
 //! - On-device timing/DMA — this is a host, single-threaded, synchronous exercise of the same calls
@@ -84,7 +83,7 @@
 //! checkout`-restored immediately after) and the failure output captured — see the Task 6 report for
 //! the exact diffs and failure text. The mechanism each perturbation breaks:
 //! - **Backing-vs-payload**: [`CLUSTER_SIZE`] is chosen so `CLUSTER_SIZE + 7` lands STRICTLY between
-//!   `sizeof(StreamedChunk)` and `kChunkPayloadOffset` (see [`geometry_and_layout_invariants_hold`]) —
+//!   `size_of::<StreamedChunk>()` and the payload offset (see [`geometry_and_layout_invariants_hold`]) —
 //!   a neighbour-payload read/write from the raw backing pointer instead of the payload accessor would
 //!   read/corrupt the struct's own fields and the unnamed front-guard padding, never reaching the real
 //!   seeded payload ramp at all, so the stitched output diverges from the C++ reference immediately.
@@ -109,12 +108,14 @@
 
 use core::ffi::c_void;
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use deluge_resource::{
     BACKING_HEAP, DelugeResource, deluge_resource_create, deluge_resource_define_asset,
     deluge_resource_request, deluge_resource_set_construct,
 };
 use deluge_sample_fill::FillContext;
+use deluge_sample_fill::chunk::StreamedChunk;
 
 // Single-threaded-per-test critical section: `deluge_resource`'s `sync::Masked` calls these three
 // C-ABI symbols; this test never models the audio-ISR context, so inert no-op stand-ins are
@@ -129,42 +130,51 @@ extern "C" fn deluge_in_interrupt() -> bool {
     false
 }
 
-/// The C++ shim's (`cpp/native_finish_shim.cpp`) test-only entry points: real `StreamedChunk`
-/// construction/introspection plus the two non-Critical-surface plumbing setters (see the module
-/// doc). NOT the four accessors under test themselves — those are called only indirectly, through
-/// `deluge_sample_fill::native`'s own `unsafe extern "C"` block — EXCEPT
-/// `deluge_streaming_chunk_convert_state`, independently re-declared here too (same real C++
-/// symbol, same signature) so a test can read a chunk's convert-state back WITHOUT going through
-/// `native_finish` again — see `neighbour_convert_state_is_read_back_through_the_shared_store`.
-mod shim {
-    use core::ffi::c_void;
+/// The one process-wide resource manager pointer `deluge_streaming_resource_manager` (just below)
+/// hands back to `deluge_sample_fill::native_begin`/`native_finish` — see the module doc's "How this
+/// test drives the REAL glue" section for why this is the one piece of plumbing this test still
+/// provides by hand.
+static ACTIVE_MANAGER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-    unsafe extern "C" {
-        pub fn region_fill_diff_set_cluster_size(size: usize, magnitude: usize);
-        pub fn region_fill_diff_chunk_payload_offset() -> usize;
-        pub fn region_fill_diff_chunk_backing_size(cluster_size: usize) -> usize;
-        pub fn region_fill_diff_chunk_header_size() -> usize;
-        pub fn region_fill_diff_chunk_construct(
-            ctx: *mut c_void,
-            owner: *mut c_void,
-            index: u32,
-            dest: *mut u8,
+#[unsafe(no_mangle)]
+extern "C" fn deluge_streaming_resource_manager() -> *mut c_void {
+    ACTIVE_MANAGER.load(Ordering::Relaxed)
+}
+
+/// Placement-construct callback matching `deluge_resource::ConstructFn`'s exact signature
+/// (`dest: *mut u8`), forwarding to the real `deluge_sample_fill::chunk::deluge_streaming_chunk_construct`
+/// — the SAME callback the resource manager invokes for a real streamed SAMPLE chunk in production
+/// (`chunk_residency.cpp`). A thin wrapper is needed only because that function's own `dest` parameter
+/// is typed `*mut c_void` (its C-ABI declared shape) while `ConstructFn` requires `*mut u8` — the two
+/// are ABI-identical (both a plain data pointer), just declared with different pointee types on each
+/// side of the boundary, so Rust's function-pointer typing (unlike C's) won't let one satisfy the
+/// other directly.
+unsafe extern "C" fn construct_streamed_chunk(
+    ctx: *mut c_void,
+    owner: *mut c_void,
+    index: u32,
+    dest: *mut u8,
+) {
+    // SAFETY: forwards `dest` unchanged (only its declared pointee type differs) to the real
+    // construct function, under the same manager construct-contract this function's own caller
+    // (`deluge_resource_request`, via `deluge_resource_set_construct`) upholds.
+    unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+            ctx,
+            owner,
+            index,
+            dest as *mut c_void,
         );
-        pub fn region_fill_diff_set_active_manager(mgr: *mut c_void);
-        // Independent re-declaration of the SAME real accessor `native_finish` itself calls (see
-        // `native_finish_shim.cpp`) — used only for read-back assertions, never to drive the fill.
-        pub fn deluge_streaming_chunk_convert_state(
-            chunk_backing: *mut c_void,
-        ) -> deluge_sample_fill::DelugeChunkConvertState;
     }
 }
 
-/// Small cluster (64 bytes) chosen so `CLUSTER_SIZE + 7` (a neighbour's full
-/// `payload_with_trailing_slack()` span) lands strictly between `sizeof(StreamedChunk)` (40 bytes,
-/// verified below) and `kChunkPayloadOffset` (72 bytes, verified below) — see
+/// Small cluster (32 bytes) chosen so `CLUSTER_SIZE + 7` (a neighbour's full payload-plus-trailing-slack
+/// span, 39 bytes) lands strictly between `size_of::<StreamedChunk>()` (24 bytes) and the chunk's
+/// payload offset (56 bytes, `RUST_CHUNK_PAYLOAD_OFFSET` — queried at runtime via
+/// [`ChunkHarness::payload_offset`], not hard-coded here) — see
 /// [`geometry_and_layout_invariants_hold`] and the module doc's "Teeth" section.
-const CLUSTER_SIZE: u32 = 64;
-const CLUSTER_MAGNITUDE: u32 = 6; // 2^6 = 64
+const CLUSTER_SIZE: u32 = 32;
+const CLUSTER_MAGNITUDE: u32 = 5; // 2^5 = 32
 
 /// Misaligned start (mirrors `fill_logic`'s own `stitch_geo()`), UNSIGNED_8 (non-native — the
 /// corruption class the task brief calls out), audio data long enough that none of clusters 0/1/2 is
@@ -195,9 +205,9 @@ fn cpp_geo() -> region_fill_differential::cpp_ref::Geometry {
     }
 }
 
-/// A manager over a throwaway test heap with one requestable, `StreamedChunk`-backed test asset —
+/// A manager over a throwaway test heap with one requestable, real-`StreamedChunk`-backed test asset —
 /// mirrors `tests/host_end_to_end.rs::TestManager`, except `construct` placement-news a REAL
-/// `StreamedChunk` (`shim::region_fill_diff_chunk_construct`) instead of stamping raw bytes.
+/// `StreamedChunk` ([`construct_streamed_chunk`]) instead of stamping raw bytes.
 struct ChunkHarness {
     handle: *mut DelugeResource,
     asset: u32,
@@ -229,32 +239,21 @@ impl ChunkHarness {
                 BACKING_HEAP,
             )
         };
-        // SAFETY: `handle`/`asset` are live and valid; `region_fill_diff_chunk_construct` has the
-        // exact `ConstructFn` C-ABI signature.
+        // SAFETY: `handle`/`asset` are live and valid; `construct_streamed_chunk` has the exact
+        // `ConstructFn` C-ABI signature.
         unsafe {
-            deluge_resource_set_construct(
-                handle,
-                asset,
-                Some(shim::region_fill_diff_chunk_construct),
-            );
+            deluge_resource_set_construct(handle, asset, Some(construct_streamed_chunk));
         }
-        // SAFETY: pure queries, no preconditions.
-        let payload_offset = unsafe { shim::region_fill_diff_chunk_payload_offset() };
-        let header_size = unsafe { shim::region_fill_diff_chunk_header_size() };
-        let backing_size =
-            unsafe { shim::region_fill_diff_chunk_backing_size(CLUSTER_SIZE as usize) };
-        // SAFETY: sets `Cluster::size`/`size_magnitude` before any chunk's payload is touched (no
-        // chunk has been requested yet).
-        unsafe {
-            shim::region_fill_diff_set_cluster_size(
-                CLUSTER_SIZE as usize,
-                CLUSTER_MAGNITUDE as usize,
-            )
-        };
-        // SAFETY: `handle` is the live manager just created; `region_fill_diff_set_active_manager`
-        // stores it for `deluge_streaming_resource_manager` to hand back — must happen before
-        // any `native_begin`/`native_finish` call reads it.
-        unsafe { shim::region_fill_diff_set_active_manager(handle as *mut c_void) };
+        // Pure queries, no preconditions: the payload offset is Rust-owned (U4d) and reported over
+        // its own C-ABI; the header size is this crate's own reflection of the (pub) Rust struct's
+        // real, compiler-computed size — not a hand-derived guess.
+        let payload_offset =
+            deluge_sample_fill::chunk::deluge_streamed_chunk_payload_offset() as usize;
+        let header_size = core::mem::size_of::<StreamedChunk>();
+        let backing_size = payload_offset + CLUSTER_SIZE as usize + 7;
+        // SAFETY: `handle` is the live manager just created; stored for `deluge_streaming_resource_manager`
+        // to hand back — must happen before any `native_begin`/`native_finish` call reads it.
+        ACTIVE_MANAGER.store(handle as *mut c_void, Ordering::Relaxed);
 
         // Register this asset's fill-context — `native_finish`'s `resolve()` looks this up via
         // `deluge_sample_fill::fill_context_for(asset)`; without it every `finish` call fails
@@ -276,12 +275,12 @@ impl ChunkHarness {
     /// pointer (`== StreamedChunk*`, offset 0 — NOT the payload; see [`Self::payload_of`]).
     fn request(&self, index: u32) -> *mut u8 {
         // SAFETY: `self.handle`/`self.asset` are live and valid; `self.backing_size` is exactly what
-        // `region_fill_diff_chunk_construct` (via `Cluster::size`, already set) expects.
+        // `construct_streamed_chunk` (via `deluge_streamed_chunk_payload_offset`) expects.
         unsafe { deluge_resource_request(self.handle, self.asset, index, self.backing_size) }
     }
 
-    /// The chunk's payload base (`backing + kChunkPayloadOffset`), as a byte slice covering its full
-    /// `payload_with_trailing_slack()` span (`CLUSTER_SIZE + 7` bytes).
+    /// The chunk's payload base (`backing + payload_offset`), as a byte slice covering its full
+    /// `CLUSTER_SIZE + 7`-byte trailing-slack span.
     ///
     /// # Safety
     /// `backing` must be a live, exclusively-held chunk backing from [`Self::request`], and the
@@ -298,9 +297,8 @@ impl ChunkHarness {
         }
     }
 
-    /// The unnamed front-guard padding `[sizeof(StreamedChunk), kChunkPayloadOffset)` — never a real
-    /// `StreamedChunk` field, so a correct `finish` must never touch it. See the module doc's
-    /// "Teeth" section.
+    /// The unnamed front-guard padding `[header_size, payload_offset)` — never a real `StreamedChunk`
+    /// field, so a correct `finish` must never touch it. See the module doc's "Teeth" section.
     ///
     /// # Safety
     /// Same contract as [`Self::payload_of`].
@@ -548,11 +546,15 @@ fn neighbour_convert_state_is_read_back_through_the_shared_store(
     prev: &SeededChunk,
     next: &SeededChunk,
 ) {
-    // SAFETY: `prev.backing`/`next.backing` are still resident, still valid `StreamedChunk*`s.
-    let prev_state_now =
-        unsafe { shim::deluge_streaming_chunk_convert_state(prev.backing as *mut c_void) };
-    let next_state_now =
-        unsafe { shim::deluge_streaming_chunk_convert_state(next.backing as *mut c_void) };
+    // SAFETY: `prev.backing`/`next.backing` are still resident, still valid, live constructed
+    // `StreamedChunk`s (this crate's own [`ChunkHarness`] never releases or evicts them).
+    let prev_state_now = unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_convert_state(prev.backing as *mut c_void)
+    };
+    // SAFETY: same as above.
+    let next_state_now = unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_convert_state(next.backing as *mut c_void)
+    };
 
     // self's own edges being converted (asserted above) implies BOTH neighbours' shared boundary
     // flags were flipped true by self's write-back — the exact bit a disjoint-store bug would leave
@@ -572,63 +574,25 @@ fn neighbour_convert_state_is_read_back_through_the_shared_store(
 
 /// Sanity/self-check on this test's own layout assumptions (see the module doc's "Teeth" section):
 /// `CLUSTER_SIZE + 7` (a neighbour's full payload span) must land strictly between
-/// `sizeof(StreamedChunk)` and `kChunkPayloadOffset` — otherwise a hypothetical backing-vs-payload
-/// bug's wrong `[0, CLUSTER_SIZE+7)` span could either (a) stay entirely within the struct's own
-/// named fields without ever reaching the recognizable front-guard marker, or (b) reach all the way
-/// into the REAL payload region, muddying whether a failure came from the right cause. If this ever
-/// fails (e.g. `StreamedChunk` grows a field), `CLUSTER_SIZE` needs raising to match — a loud build/
-/// test failure here, not silently losing this test's teeth.
+/// `size_of::<StreamedChunk>()` and the chunk's payload offset — otherwise a hypothetical
+/// backing-vs-payload bug's wrong `[0, CLUSTER_SIZE+7)` span could either (a) stay entirely within
+/// the struct's own named fields without ever reaching the recognizable front-guard marker, or (b)
+/// reach all the way into the REAL payload region, muddying whether a failure came from the right
+/// cause. If this ever fails (e.g. `StreamedChunk` grows a field), `CLUSTER_SIZE` needs raising to
+/// match — a loud build/test failure here, not silently losing this test's teeth.
 #[test]
 fn geometry_and_layout_invariants_hold() {
-    // SAFETY: pure queries, no preconditions.
-    let header_size = unsafe { shim::region_fill_diff_chunk_header_size() };
-    let payload_offset = unsafe { shim::region_fill_diff_chunk_payload_offset() };
+    let header_size = core::mem::size_of::<StreamedChunk>();
+    let payload_offset = deluge_sample_fill::chunk::deluge_streamed_chunk_payload_offset() as usize;
     let wrong_span_len = CLUSTER_SIZE as usize + 7;
     assert!(
         wrong_span_len > header_size,
-        "CLUSTER_SIZE + 7 ({wrong_span_len}) must exceed sizeof(StreamedChunk) ({header_size}) so a \
-         backing-vs-payload bug's wrong span reaches the front-guard marker"
+        "CLUSTER_SIZE + 7 ({wrong_span_len}) must exceed size_of::<StreamedChunk>() \
+         ({header_size}) so a backing-vs-payload bug's wrong span reaches the front-guard marker"
     );
     assert!(
         wrong_span_len <= payload_offset,
-        "CLUSTER_SIZE + 7 ({wrong_span_len}) must not exceed kChunkPayloadOffset ({payload_offset}) \
+        "CLUSTER_SIZE + 7 ({wrong_span_len}) must not exceed the payload offset ({payload_offset}) \
          so a backing-vs-payload bug's wrong span never reaches the REAL payload region"
     );
-}
-
-/// Guards `cpp/native_finish_shim.cpp`'s four accessor bodies against silently drifting from
-/// `async_fill.cpp`'s own production definitions (see the module doc's "How this test drives the
-/// REAL glue" section for why the shim can't compile that file directly). Each body below is a
-/// character-for-character copy — if a future edit to `async_fill.cpp` changes any of these four
-/// functions without updating the shim to match, this test fails loudly instead of the shim quietly
-/// testing stale/wrong bodies.
-#[test]
-fn accessor_bodies_match_async_fill_cpp_verbatim() {
-    let live = include_str!("../../../../deluge/storage/audio/stream/async_fill.cpp");
-    let bodies = [
-        (
-            "deluge_streaming_chunk_payload",
-            "uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {\n\treturn reinterpret_cast<uint8_t*>(reinterpret_cast<StreamedChunk*>(chunk_backing)->payload().data());\n}",
-        ),
-        (
-            "deluge_streaming_chunk_set_loaded",
-            "void deluge_streaming_chunk_set_loaded(void* chunk_backing) {\n\treinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;\n}",
-        ),
-        (
-            "deluge_streaming_chunk_convert_state",
-            "DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing) {\n\tauto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);\n\tDelugeChunkConvertState state{};\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tstate.first_three_bytes[i] = static_cast<uint8_t>(cluster->first_three_bytes_pre_data_conversion[i]);\n\t}\n\tstate.start_converted = cluster->extra_bytes_at_start_converted;\n\tstate.end_converted = cluster->extra_bytes_at_end_converted;\n\treturn state;\n}",
-        ),
-        (
-            "deluge_streaming_chunk_set_convert_state",
-            "void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state) {\n\tauto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tcluster->first_three_bytes_pre_data_conversion[i] = static_cast<char>(state.first_three_bytes[i]);\n\t}\n\tcluster->extra_bytes_at_start_converted = state.start_converted;\n\tcluster->extra_bytes_at_end_converted = state.end_converted;\n}",
-        ),
-    ];
-    for (name, body) in bodies {
-        assert!(
-            live.contains(body),
-            "async_fill.cpp's `{name}` body no longer matches cpp/native_finish_shim.cpp's copy — \
-             update the shim (and this test's expected text) to match, so the shim keeps testing \
-             what's actually shipped"
-        );
-    }
 }

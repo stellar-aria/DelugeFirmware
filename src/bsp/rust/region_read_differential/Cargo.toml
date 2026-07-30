@@ -1,8 +1,13 @@
 # region-read-differential — U1 Task 5: the sample range-reader's byte-identical GATE. Standalone
-# harness crate (NOT a workspace member — mirrors `region_fill_differential`/`region_differential`):
-# it `cc`-compiles a slice of the app's REAL C++ (`storage/cluster/cluster.h`'s `StreamedChunk`,
-# including its real `frame_read_origin`/`payload_with_trailing_slack` — the current non-voice read
-# path's oracle) into its own test binary, and must not perturb the firmware/BSP Cargo graph.
+# harness crate (NOT a workspace member — mirrors `region_fill_differential`/`region_differential`).
+#
+# Pure Rust (U4d): this crate used to `cc`-compile a slice of the app's C++ (`storage/cluster/
+# cluster.h`'s `StreamedChunk`, including its real `frame_read_origin`/`payload_with_trailing_slack`)
+# into its own test binary as the current-read-path oracle. U4d relocated the streamed chunk's
+# storage (construct + accessors) into `deluge_sample_fill::chunk` (Rust) and deleted
+# `frame_read_origin` for the streamed role entirely, so this crate's own oracle
+# (`tests/differential.rs`'s `oracle_frame`) now reads a chunk's resident payload directly through
+# the Rust accessor — no C++ shim, no `cc` build-dependency, needed at all.
 #
 # `edition = "2024"`: this crate's test file uses `unsafe extern "C"` blocks (matching the reader
 # crate under test and its own dependency graph, all `edition = "2021"`/`"2024"` with that syntax
@@ -19,8 +24,7 @@ license = "GPL-3.0-or-later"
 # the stateless `deluge_sample_read` (Tasks 1, 3, 4). Pulls in `deluge_sample_fill` (native_fill,
 # which itself pulls in `deluge_sample_convert` — already `cc`-compiling `convert.cpp`/`stitch.cpp`
 # via ITS OWN build.rs, so this crate needs no argon/SIMDe fetch of its own) and `deluge_resource`
-# transitively — this crate's own `cc`-compiled shim (see build.rs) only needs `storage/cluster/
-# cluster.h`, nothing convert/stitch-related.
+# transitively.
 deluge_sample_reader = { path = "../../../../crates/deluge_sample_reader" }
 
 [dev-dependencies]
@@ -37,6 +41,3 @@ deluge_alloc = { path = "../../../../crates/deluge_alloc" }
 # a registered `critical-section` implementation to link them — same std-backed impl every sibling
 # host test in this dependency graph already uses.
 critical-section = { version = "1", features = ["std"] }
-
-[build-dependencies]
-cc = "1"

@@ -1,34 +1,50 @@
 //! U1 Task 5 — the reader differential, the rung's gate: drives `deluge_sample_reader`'s
-//! `open`/`window`/`advance`/`deluge_sample_read` over REAL, placement-new'd `StreamedChunk`s
-//! (a real `deluge_resource` manager, a synthetic sample whose converted cluster bytes are KNOWN)
-//! and asserts the bytes it returns are BYTE-IDENTICAL to the CURRENT non-voice read path — the
-//! real `StreamedChunk::frame_read_origin`/`payload_with_trailing_slack()` (`storage/cluster/
-//! cluster.h`), reached through `cpp/harness_shim.cpp`'s `region_read_diff_frame_direct`/
-//! `_via_origin` oracle (see that file's own module doc for the derivation from the real
-//! production function).
+//! `open`/`window`/`advance`/`deluge_sample_read` over REAL, constructed streamed chunks (a real
+//! `deluge_resource` manager, a synthetic sample whose converted cluster bytes are KNOWN) and asserts
+//! the bytes it returns are BYTE-IDENTICAL to a direct read of each chunk's own resident payload
+//! buffer (this file's own oracle, [`oracle_frame`]) at the location this crate's independently
+//! reimplemented frame -> (cluster, byte-offset) arithmetic ([`mapping`]) computes.
 //!
 //! ## Why this is a genuine, non-vacuous cross-check
 //!
 //! [`mapping`] (this crate's `src/mapping.rs`) is an INDEPENDENT reimplementation of the
 //! frame -> (cluster, byte-offset) arithmetic, kept deliberately separate from
 //! `deluge_sample_reader::reader`'s own (private) `locate`/`Geometry` — see that module's own doc.
-//! The oracle bytes this file fetches come from the REAL `StreamedChunk` via the REAL
-//! `frame_read_origin`/`payload_with_trailing_slack()` (C++, `cc`-compiled, untouched by this
-//! crate), addressed using this crate's OWN mapping. The reader under test resolves clusters and
-//! offsets through its OWN (different) code path (`Reader::window`'s `locate`/`acquire_and_fill`/
-//! the self-pin). If either side's arithmetic — or the reader's straddle/stitch handling — diverges
-//! from the real read path, the byte comparison below catches it directly, not a hand-derived
-//! approximation of it.
+//! [`oracle_frame`] fetches its bytes straight from a chunk's own resident payload buffer (through
+//! `deluge_streaming_chunk_payload`, `deluge_sample_fill::chunk`), addressed using this crate's OWN
+//! mapping — never through the reader under test. The reader resolves clusters and offsets through
+//! its OWN (different) code path (`Reader::window`'s `locate`/`acquire_and_fill`/the self-pin). If
+//! either side's arithmetic — or the reader's straddle/stitch handling — diverges, the byte
+//! comparison below catches it directly, not a hand-derived approximation of it.
+//!
+//! Every cluster's trailing 7-byte slack (the straddle mechanism both the reader and this file's
+//! oracle rely on) is published by the REAL `deluge_sample_fill::native_finish` — the SAME stitch
+//! (`deluge_sample_convert::stitch_boundaries`) production fills use — so a straddling frame's oracle
+//! bytes are the real stitched bytes, not hand-seeded ones (see [`ChunkHarness::new`]).
+//!
+//! **U4d note.** Before U4d, this file's oracle instead read through the real, unmodified C++
+//! `StreamedChunk::frame_read_origin`/`payload_with_trailing_slack()` (`storage/cluster/cluster.h`,
+//! via a `cc`-compiled shim, `cpp/harness_shim.cpp`) — an extra proof that the byte-copy oracle
+//! below agreed with the actual production accessor, not just with itself
+//! (`direct_oracle_matches_frame_read_origin_oracle`, since deleted). U4d relocated the streamed
+//! chunk's storage into Rust and deleted `frame_read_origin` for the streamed SAMPLE role entirely
+//! (it survives only on the unrelated `ComputedChunk`/SampleCache role, `storage/cluster/cluster.h`)
+//! — so that self-consistency proof no longer has a production function to check against, and was
+//! retired along with the C++ shim and its `region_read_diff_frame_via_origin` entry point (U4d
+//! Task 3). [`oracle_frame`] itself is unchanged in substance: `payload_with_trailing_slack()` was
+//! always just "the payload pointer, `cluster_size + 7` bytes" — expressed directly here now,
+//! through the same `deluge_streaming_chunk_payload` accessor the reader itself uses, with no C++
+//! involved at all.
 //!
 //! ## The synthetic sample
 //!
 //! Every case builds a fresh [`ChunkHarness`]: a real `deluge_resource` manager (slab-backed, the
-//! same backing kind production streaming clusters use) over a real heap, with `N` real
-//! `StreamedChunk`s placement-new'd via `deluge_resource_request` (never payload == backing — the
-//! SR2d-4 lesson `deluge_sample_reader`'s own tests already flag; payload is always reached through
-//! the real `deluge_streaming_chunk_payload` accessor). Each cluster's own `cluster_size` bytes are
-//! seeded with a deterministic, per-cluster-index ramp (`region_read_differential::ramp`), then
-//! EVERY cluster is `native_finish`ed, in increasing index order, so the REAL stitch
+//! same backing kind production streaming clusters use) over a real heap, with `N` real streamed
+//! chunks constructed via `deluge_resource_request` (never payload == backing — the SR2d-4 lesson
+//! `deluge_sample_reader`'s own tests already flag; payload is always reached through the real
+//! `deluge_streaming_chunk_payload` accessor). Each cluster's own `cluster_size` bytes are seeded
+//! with a deterministic, per-cluster-index ramp (`region_read_differential::ramp`), then EVERY
+//! cluster is `native_finish`ed, in increasing index order, so the REAL stitch
 //! (`deluge_sample_convert::stitch_boundaries`, via `deluge_sample_fill::native_finish`) publishes
 //! each cluster's own head into its predecessor's trailing 7-byte slack — the exact mechanism
 //! `Reader::window`'s own straddle handling relies on (see its doc). Every geometry here uses
@@ -42,6 +58,7 @@
 
 use core::ffi::c_void;
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use deluge_resource::{
     BACKING_SLAB, deluge_resource_create, deluge_resource_define_asset, deluge_resource_request,
@@ -103,47 +120,49 @@ extern "C" fn deluge_streaming_fill_chunk_blocking(_chunk_backing: *mut c_void) 
     false
 }
 
-/// `cpp/harness_shim.cpp`'s own entry points — real `StreamedChunk` construction/introspection plus
-/// the differential's own oracle reads. See that file's module doc for what each does.
-mod shim {
-    use core::ffi::c_void;
+/// The one process-wide resource manager pointer `deluge_streaming_resource_manager` (just below)
+/// hands back to `deluge_sample_fill::native_finish` (called by [`ChunkHarness::new`] to seed each
+/// cluster's real stitched trailing slack) — the same test-local plumbing
+/// `region_fill_differential`'s `tests/native_finish_glue.rs` uses for its own `ACTIVE_MANAGER`.
+static ACTIVE_MANAGER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-    unsafe extern "C" {
-        pub fn region_read_diff_set_cluster_size(size: usize, magnitude: usize);
-        pub fn region_read_diff_chunk_backing_size(cluster_size: usize) -> usize;
-        pub fn region_read_diff_chunk_construct(
-            ctx: *mut c_void,
-            owner: *mut c_void,
-            index: u32,
-            dest: *mut u8,
+#[unsafe(no_mangle)]
+extern "C" fn deluge_streaming_resource_manager() -> *mut c_void {
+    ACTIVE_MANAGER.load(Ordering::Relaxed)
+}
+
+/// Placement-construct callback matching `deluge_resource::ConstructFn`'s exact signature
+/// (`dest: *mut u8`), forwarding to the real `deluge_sample_fill::chunk::deluge_streaming_chunk_construct`
+/// — the SAME callback the resource manager invokes for a real streamed SAMPLE chunk in production
+/// (`chunk_residency.cpp`). A thin wrapper is needed only because that function's own `dest`
+/// parameter is typed `*mut c_void` (its C-ABI declared shape) while `ConstructFn` requires
+/// `*mut u8` — the two are ABI-identical (both a plain data pointer), just declared with different
+/// pointee types on each side of the boundary, so Rust's function-pointer typing (unlike C's) won't
+/// let one satisfy the other directly.
+unsafe extern "C" fn construct_streamed_chunk(
+    ctx: *mut c_void,
+    owner: *mut c_void,
+    index: u32,
+    dest: *mut u8,
+) {
+    // SAFETY: forwards `dest` unchanged (only its declared pointee type differs) to the real
+    // construct function, under the same manager construct-contract this function's own caller
+    // (`deluge_resource_request`, via `deluge_resource_set_construct`) upholds.
+    unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+            ctx,
+            owner,
+            index,
+            dest as *mut c_void,
         );
-        pub fn region_read_diff_set_active_manager(mgr: *mut c_void);
-        pub fn region_read_diff_frame_direct(
-            chunk_backing: *mut c_void,
-            byte_offset: u32,
-            frame_bytes: u32,
-            out: *mut u8,
-        );
-        pub fn region_read_diff_frame_via_origin(
-            chunk_backing: *mut c_void,
-            byte_offset: u32,
-            byte_depth: u8,
-            num_channels: u8,
-            out: *mut u8,
-        );
-        // Needed here too (not just internally by `deluge_sample_fill`/`deluge_sample_reader`) so
-        // this harness can seed a chunk's payload through the REAL accessor, never payload ==
-        // backing (the SR2d-4 lesson).
-        pub fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
     }
 }
 
 /// Serializes every test in this file — mirrors `deluge_sample_reader`'s own `host_streaming_stubs::TEST_LOCK`:
 /// `deluge_sample_fill`'s per-asset `FILL_CONTEXTS` table is a GLOBAL static keyed by bare asset id
-/// (each fresh manager hands out ids starting from 0), and `cpp/harness_shim.cpp`'s
-/// `g_active_manager` is a single (non-thread-local) global too — two tests running concurrently
-/// (`cargo test`'s default) could otherwise collide on either. Every test takes this lock for its
-/// whole run.
+/// (each fresh manager hands out ids starting from 0), and this file's own `ACTIVE_MANAGER` is a
+/// single (non-thread-local) global too — two tests running concurrently (`cargo test`'s default)
+/// could otherwise collide on either. Every test takes this lock for its whole run.
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 512 bytes (`2^9`) — realistic minimum cluster size (>= one 512-byte sector), matching
@@ -188,7 +207,7 @@ fn map_geometry(ctx: &FillContext) -> MapGeo {
     }
 }
 
-/// A real manager + real, placement-new'd `StreamedChunk`s over a real heap — see the module doc.
+/// A real manager + real, constructed streamed chunks over a real heap — see the module doc.
 struct ChunkHarness {
     asset: u32,
     /// Cluster index -> its resident backing pointer. Every entry is held under a lease taken by
@@ -215,8 +234,12 @@ impl ChunkHarness {
         let heap = unsafe { deluge_alloc::deluge_heap_create(base, words * 16) };
         assert!(!heap.is_null());
 
-        let backing_size =
-            unsafe { shim::region_read_diff_chunk_backing_size(CLUSTER_SIZE as usize) };
+        // The Rust-owned streamed-chunk payload offset (U4d) — the real, compiler-computed value
+        // reported over its own C-ABI (`deluge_streamed_chunk_payload_offset`), not hand-derived.
+        let payload_offset =
+            deluge_sample_fill::chunk::deluge_streamed_chunk_payload_offset() as usize;
+        let backing_size = payload_offset + CLUSTER_SIZE as usize + 7; // + kTrailingSlackBytes
+
         // SAFETY: `heap` is the live handle just created above; capacity comfortably exceeds every
         // case's own cluster count.
         let slab =
@@ -239,26 +262,14 @@ impl ChunkHarness {
                 BACKING_SLAB,
             )
         };
-        // SAFETY: `handle`/`asset` are live/valid; `region_read_diff_chunk_construct` has the exact
+        // SAFETY: `handle`/`asset` are live/valid; `construct_streamed_chunk` has the exact
         // `ConstructFn` C-ABI signature.
         unsafe {
-            deluge_resource_set_construct(
-                handle,
-                asset,
-                Some(shim::region_read_diff_chunk_construct),
-            );
+            deluge_resource_set_construct(handle, asset, Some(construct_streamed_chunk));
         }
-        // SAFETY: sets `Cluster::size`/`size_magnitude` before any chunk's payload is touched (no
-        // chunk has been requested yet).
-        unsafe {
-            shim::region_read_diff_set_cluster_size(
-                CLUSTER_SIZE as usize,
-                CLUSTER_MAGNITUDE as usize,
-            )
-        };
-        // SAFETY: `handle` is the live manager just created; must happen before any reader call or
-        // `native_finish` call reads it back.
-        unsafe { shim::region_read_diff_set_active_manager(handle as *mut c_void) };
+        // SAFETY: `handle` is the live manager just created; stored for `deluge_streaming_resource_manager`
+        // to hand back — must happen before any reader call or `native_finish` call reads it.
+        ACTIVE_MANAGER.store(handle as *mut c_void, Ordering::Relaxed);
         deluge_streaming_set_fill_context(ptr::null_mut(), asset, ctx);
 
         let mut backings = Vec::with_capacity(prefill as usize);
@@ -271,7 +282,9 @@ impl ChunkHarness {
             // SAFETY: `backing` was just resident-constructed above; its payload is `CLUSTER_SIZE`
             // bytes, reached through the REAL accessor (never payload == backing -- the SR2d-4
             // lesson).
-            let payload = unsafe { shim::deluge_streaming_chunk_payload(backing as *mut c_void) };
+            let payload = unsafe {
+                deluge_sample_fill::chunk::deluge_streaming_chunk_payload(backing as *mut c_void)
+            };
             let seed = ramp(index, CLUSTER_SIZE as usize);
             // SAFETY: `payload` is `CLUSTER_SIZE` bytes, exclusively held here (nothing else
             // touches it until `native_finish` below); `seed` is exactly `CLUSTER_SIZE` bytes.
@@ -301,9 +314,13 @@ impl ChunkHarness {
     }
 }
 
-/// Fetch one frame's `frame_bytes` bytes via the direct oracle (`region_read_diff_frame_direct`) --
-/// the current read path's own bytes at `(cluster_index, byte_offset)`, straight from the real,
-/// resident `StreamedChunk`.
+/// The differential's own oracle: `frame_bytes` bytes of a frame's interleaved samples, starting at
+/// within-cluster byte offset `byte_offset`, read straight from the chunk's resident payload buffer
+/// (`deluge_streaming_chunk_payload`) — valid for any `byte_offset + frame_bytes <= cluster_size + 7`
+/// (the straddle case; every real chunk this harness constructs is backed by exactly that many bytes
+/// past the payload base — see [`ChunkHarness::new`]'s `backing_size`). See the module doc's U4d note
+/// for why this reads the payload pointer directly rather than through a C++
+/// `payload_with_trailing_slack()` call: the two were always the same bytes.
 fn oracle_frame(
     h: &ChunkHarness,
     cluster_index: u32,
@@ -311,16 +328,19 @@ fn oracle_frame(
     frame_bytes: u32,
 ) -> Vec<u8> {
     let backing = h.backing(cluster_index);
+    // SAFETY: `backing` is a resident, `native_finish`ed chunk (`ChunkHarness::new`).
+    let payload = unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_payload(backing as *mut c_void)
+    };
     let mut out = vec![0u8; frame_bytes as usize];
-    // SAFETY: `backing` is a resident, `native_finish`ed chunk (`ChunkHarness::new`); `byte_offset +
-    // frame_bytes` stays within `payload_with_trailing_slack()`'s `cluster_size + 7` bytes for
-    // every case this file drives (frame_bytes <= 4, byte_offset < cluster_size).
+    // SAFETY: `payload` is backed by `cluster_size + 7` valid bytes (this harness's own
+    // `backing_size`); `byte_offset + frame_bytes` stays within that span for every case this file
+    // drives (frame_bytes <= 4, byte_offset < cluster_size).
     unsafe {
-        shim::region_read_diff_frame_direct(
-            backing as *mut c_void,
-            byte_offset,
-            frame_bytes,
+        core::ptr::copy_nonoverlapping(
+            payload.add(byte_offset as usize),
             out.as_mut_ptr(),
+            frame_bytes as usize,
         )
     };
     out
@@ -673,78 +693,6 @@ fn forced_read_failure_sets_not_ok_distinct_from_eof() {
     );
     // SAFETY: `ptr` is live, not used again.
     unsafe { deluge_sample_reader_close(ptr) };
-}
-
-// =====================================================================================================
-// Oracle self-check: the simpler `_direct` oracle used throughout this file agrees with the
-// brief-mandated `frame_read_origin`-based oracle, so using `_direct` everywhere above stays tied,
-// by proof, to the real production function.
-// =====================================================================================================
-
-#[test]
-fn direct_oracle_matches_frame_read_origin_oracle() {
-    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let ctx = fill_context(2, 0); // 2 full clusters -- enough to exercise a straddle near cluster 0's tail
-    let h = ChunkHarness::new(ctx, 2);
-
-    // A spread of byte offsets in cluster 0, including two that reach past `CLUSTER_SIZE` (512)
-    // into cluster 1's stitched trailing slack: byte_offset 510's 3-byte frame is [510, 511, 512],
-    // and 511's is [511, 512, 513] -- both genuinely straddle the boundary.
-    for &byte_offset in &[0u32, 1, 61, 400, 509, 510, 511] {
-        let mut via_origin = vec![0u8; FRAME_STRIDE as usize];
-        // SAFETY: `h.backing(0)` is resident and `native_finish`ed; `byte_offset + BYTE_DEPTH *
-        // NUM_CHANNELS` stays within `payload_with_trailing_slack()`'s span for every offset above.
-        unsafe {
-            shim::region_read_diff_frame_via_origin(
-                h.backing(0) as *mut c_void,
-                byte_offset,
-                BYTE_DEPTH,
-                NUM_CHANNELS,
-                via_origin.as_mut_ptr(),
-            )
-        };
-        let direct = oracle_frame(&h, 0, byte_offset, FRAME_STRIDE);
-        assert_eq!(
-            via_origin, direct,
-            "the direct oracle and the frame_read_origin oracle disagreed at byte_offset {byte_offset}"
-        );
-    }
-}
-
-/// Guards `cpp/harness_shim.cpp`'s four `StreamedChunk` accessor bodies against silently drifting
-/// from `async_fill.cpp`'s own production definitions — the same drift guard
-/// `region_fill_differential`'s `tests/native_finish_glue.rs` already runs over ITS OWN copy of
-/// these bodies; this crate keeps a THIRD copy (see `harness_shim.cpp`'s own doc), so it needs the
-/// same guard.
-#[test]
-fn accessor_bodies_match_async_fill_cpp_verbatim() {
-    let live = include_str!("../../../../deluge/storage/audio/stream/async_fill.cpp");
-    let bodies = [
-        (
-            "deluge_streaming_chunk_payload",
-            "uint8_t* deluge_streaming_chunk_payload(void* chunk_backing) {\n\treturn reinterpret_cast<uint8_t*>(reinterpret_cast<StreamedChunk*>(chunk_backing)->payload().data());\n}",
-        ),
-        (
-            "deluge_streaming_chunk_set_loaded",
-            "void deluge_streaming_chunk_set_loaded(void* chunk_backing) {\n\treinterpret_cast<StreamedChunk*>(chunk_backing)->loaded = true;\n}",
-        ),
-        (
-            "deluge_streaming_chunk_convert_state",
-            "DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing) {\n\tauto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);\n\tDelugeChunkConvertState state{};\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tstate.first_three_bytes[i] = static_cast<uint8_t>(cluster->first_three_bytes_pre_data_conversion[i]);\n\t}\n\tstate.start_converted = cluster->extra_bytes_at_start_converted;\n\tstate.end_converted = cluster->extra_bytes_at_end_converted;\n\treturn state;\n}",
-        ),
-        (
-            "deluge_streaming_chunk_set_convert_state",
-            "void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state) {\n\tauto* cluster = reinterpret_cast<StreamedChunk*>(chunk_backing);\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tcluster->first_three_bytes_pre_data_conversion[i] = static_cast<char>(state.first_three_bytes[i]);\n\t}\n\tcluster->extra_bytes_at_start_converted = state.start_converted;\n\tcluster->extra_bytes_at_end_converted = state.end_converted;\n}",
-        ),
-    ];
-    for (name, body) in bodies {
-        assert!(
-            live.contains(body),
-            "async_fill.cpp's `{name}` body no longer matches cpp/harness_shim.cpp's copy -- update \
-             the shim (and this test's expected text) to match, so the shim keeps testing what's \
-             actually shipped"
-        );
-    }
 }
 
 // =====================================================================================================

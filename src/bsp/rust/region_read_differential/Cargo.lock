@@ -134,7 +134,6 @@ dependencies = [
 name = "region-read-differential"
 version = "0.1.0"
 dependencies = [
- "cc",
  "critical-section",
  "deluge_alloc",
  "deluge_resource",

@@ -1,34 +1,38 @@
 //! SR2d-5's payload-offset gate: drives the Rust region-port cursor
 //! (`deluge_sample_source::cursor::SampleSource<ManagerResidency>`) over a REAL
-//! `deluge_resource` manager whose chunk backing is a REAL `StreamedChunk` — not
+//! `deluge_resource` manager whose chunk backing is a REAL streamed chunk — not
 //! the Vec-backed fake `region_differential`'s own `RustBackend`/`HarnessResidency`
 //! seeds (`rust_backend.rs`), which stores each cluster's "payload" directly in a
 //! bare `Vec<u8>` with NO header in front of it, so `payload == backing` there by
 //! construction. That made `ManagerPin::payload()`'s pre-fix bug — returning the
-//! raw manager backing pointer (the `StreamedChunk` HEADER) instead of routing
-//! through `deluge_streaming_chunk_payload` (`backing + kChunkPayloadOffset`, the
-//! real PAYLOAD) — invisible to every existing gate. Fixed in commit `b40ae65c6`;
+//! raw manager backing pointer (the chunk HEADER) instead of routing through
+//! `deluge_streaming_chunk_payload` (`backing + payload_offset`, the real
+//! PAYLOAD) — invisible to every existing gate. Fixed in commit `b40ae65c6`;
 //! this test proves the fix against the geometry that actually exercises it.
 //!
-//! ## How the real `StreamedChunk` backing is built
+//! ## How the real streamed-chunk backing is built
 //!
-//! Reuses `region_fill_differential`'s cc-compiled shim verbatim (see `build.rs`,
-//! which compiles that sibling crate's `cpp/native_finish_shim.cpp` directly, not
-//! a copy): `region_fill_diff_chunk_construct` placement-news a real `StreamedChunk`
-//! at a `deluge_resource` asset's slab-slot base, with `payload_ = base +
-//! kChunkPayloadOffset` (`ChunkHarness::new`, mirroring
+//! U4d relocated the streamed chunk's storage (construct + all seven field
+//! accessors) into `deluge_sample_fill::chunk` (Rust) — this gate used to reuse
+//! `region_fill_differential`'s cc-compiled C++ shim (`cpp/native_finish_shim.cpp`,
+//! since deleted) for this; now it drives the real Rust construct/accessors
+//! directly, no C++ at all. [`construct_streamed_chunk`] (a thin signature-matching
+//! wrapper — see its own doc) placement-constructs a real `StreamedChunk` at a
+//! `deluge_resource` asset's slab-slot base, with its payload pointer set to
+//! `base + payload_offset` (`ChunkHarness::new`, mirroring
 //! `native_finish_glue.rs::ChunkHarness::new`). `ChunkHarness::seed_and_mark_ready`
 //! then writes `make_ramp(index)` through the REAL `deluge_streaming_chunk_payload`
 //! accessor (the same real, compiler-computed offset `ManagerPin::payload()` itself
 //! calls through) — never a raw `backing.add(b)` write, which would land in the
 //! header instead of the payload. The manager backing pointer (`try_acquire`'s
 //! return, offset 0) and the payload pointer (`deluge_streaming_chunk_payload`'s
-//! return, offset `kChunkPayloadOffset`, always non-zero — see cluster.h) are
-//! therefore GENUINELY DIFFERENT addresses, exactly the geometry a
-//! backing-vs-payload confusion needs to be byte-detectable: the header bytes
-//! `StreamedChunk`'s own fields hold (a payload_ pointer, cluster_index, a few
-//! bools) don't coincidentally equal `make_ramp`'s pattern, so a cursor reading
-//! from the wrong pointer fails the ramp comparison immediately.
+//! return, offset `payload_offset`, always non-zero — see
+//! `deluge_sample_fill::chunk`'s own doc) are therefore GENUINELY DIFFERENT
+//! addresses, exactly the geometry a backing-vs-payload confusion needs to be
+//! byte-detectable: the header bytes `StreamedChunk`'s own fields hold (a payload
+//! pointer, cluster_index, a few bools) don't coincidentally equal `make_ramp`'s
+//! pattern, so a cursor reading from the wrong pointer fails the ramp comparison
+//! immediately.
 //!
 //! ## How the cursor is driven
 //!
@@ -145,27 +149,34 @@ extern "C" fn deluge_sample_stream_asset_id(_stream_backing: *mut c_void) -> u32
     0
 }
 
-/// `region_fill_differential`'s cc-compiled real-`StreamedChunk` shim
-/// (`cpp/native_finish_shim.cpp`, compiled by THIS crate's own `build.rs` — see
-/// its module doc), reused verbatim. Only the chunk-construct/payload-offset
-/// surface is redeclared here; `deluge_streaming_chunk_payload` is the SAME real
-/// symbol `deluge_sample_source::manager_residency::ManagerPin::payload()` calls
-/// through — independently re-declared here too (same trick
-/// `native_finish_glue.rs::shim` uses for `deluge_streaming_chunk_convert_state`)
-/// so this test's own seeding code can write into a chunk's real payload region.
-mod shim {
-    use core::ffi::c_void;
-
-    unsafe extern "C" {
-        pub fn region_fill_diff_set_cluster_size(size: usize, magnitude: usize);
-        pub fn region_fill_diff_chunk_backing_size(cluster_size: usize) -> usize;
-        pub fn region_fill_diff_chunk_construct(
-            ctx: *mut c_void,
-            owner: *mut c_void,
-            index: u32,
-            dest: *mut u8,
+/// Placement-construct callback matching `deluge_resource::ConstructFn`'s exact
+/// signature (`dest: *mut u8`), forwarding to the real
+/// `deluge_sample_fill::chunk::deluge_streaming_chunk_construct` — the SAME
+/// callback the resource manager invokes for a real streamed SAMPLE chunk in
+/// production (`chunk_residency.cpp`). A thin wrapper is needed only because
+/// that function's own `dest` parameter is typed `*mut c_void` (its C-ABI
+/// declared shape) while `ConstructFn` requires `*mut u8` — the two are
+/// ABI-identical (both a plain data pointer), just declared with different
+/// pointee types on each side of the boundary, so Rust's function-pointer
+/// typing (unlike C's) won't let one satisfy the other directly. Mirrors
+/// `region_fill_differential::tests::native_finish_glue::construct_streamed_chunk`.
+unsafe extern "C" fn construct_streamed_chunk(
+    ctx: *mut c_void,
+    owner: *mut c_void,
+    index: u32,
+    dest: *mut u8,
+) {
+    // SAFETY: forwards `dest` unchanged (only its declared pointee type differs) to
+    // the real construct function, under the same manager construct-contract this
+    // function's own caller (`deluge_resource_request`, via
+    // `deluge_resource_set_construct`) upholds.
+    unsafe {
+        deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+            ctx,
+            owner,
+            index,
+            dest as *mut c_void,
         );
-        pub fn deluge_streaming_chunk_payload(chunk_backing: *mut c_void) -> *mut u8;
     }
 }
 
@@ -177,14 +188,13 @@ mod shim {
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const CLUSTER_SIZE: u32 = 64;
-const CLUSTER_MAGNITUDE: u32 = 6; // 2^6 = 64
 const CHUNK_CAP: u32 = 32; // generous headroom over this gate's handful of indices
 
 /// A real `deluge_resource` manager over a throwaway test heap, with one
-/// requestable asset whose `construct` places a REAL `StreamedChunk` (payload at
-/// `backing + kChunkPayloadOffset`) at each chunk's slab-slot base. Mirrors
+/// requestable asset whose `construct` places a REAL streamed chunk (payload at
+/// `backing + payload_offset`) at each chunk's slab-slot base. Mirrors
 /// `native_finish_glue.rs::ChunkHarness`, minus the fill-orchestration pieces
-/// this gate doesn't need (no `region_fill_diff_set_active_manager`,
+/// this gate doesn't need (no active-manager plumbing —
 /// `deluge_streaming_resource_manager` isn't in this gate's call path — the
 /// cursor is driven directly over `handle`/`asset`, not through that lookup).
 struct ChunkHarness {
@@ -216,26 +226,16 @@ impl ChunkHarness {
                 BACKING_HEAP,
             )
         };
-        // SAFETY: `handle`/`asset` are live and valid; `region_fill_diff_chunk_construct`
+        // SAFETY: `handle`/`asset` are live and valid; `construct_streamed_chunk`
         // has the exact `ConstructFn` C-ABI signature.
         unsafe {
-            deluge_resource_set_construct(
-                handle,
-                asset,
-                Some(shim::region_fill_diff_chunk_construct),
-            );
+            deluge_resource_set_construct(handle, asset, Some(construct_streamed_chunk));
         }
-        let backing_size =
-            // SAFETY: pure query, no preconditions.
-            unsafe { shim::region_fill_diff_chunk_backing_size(CLUSTER_SIZE as usize) };
-        // SAFETY: sets `Cluster::size`/`size_magnitude` before any chunk's payload is
-        // touched (no chunk has been requested yet).
-        unsafe {
-            shim::region_fill_diff_set_cluster_size(
-                CLUSTER_SIZE as usize,
-                CLUSTER_MAGNITUDE as usize,
-            )
-        };
+        // The Rust-owned streamed-chunk payload offset (U4d) — the real,
+        // compiler-computed value reported over its own C-ABI, not hand-derived.
+        let payload_offset =
+            deluge_sample_fill::chunk::deluge_streamed_chunk_payload_offset() as usize;
+        let backing_size = payload_offset + CLUSTER_SIZE as usize + 7; // + kTrailingSlackBytes
 
         ChunkHarness {
             handle,
@@ -258,8 +258,8 @@ impl ChunkHarness {
         let ptr = unsafe { deluge_resource_try_acquire(self.handle, self.asset, index) };
         let ptr = if ptr.is_null() {
             // SAFETY: `self.handle`/`self.asset` are live/valid; `self.backing_size`
-            // is exactly what `region_fill_diff_chunk_construct` (via `Cluster::size`,
-            // already set) expects.
+            // is exactly what `construct_streamed_chunk` (via
+            // `deluge_streamed_chunk_payload_offset`) expects.
             let p = unsafe {
                 deluge_resource_request(self.handle, self.asset, index, self.backing_size)
             };
@@ -269,9 +269,11 @@ impl ChunkHarness {
             ptr
         };
         // SAFETY: `ptr` is a live, resident `StreamedChunk*` backing from the call
-        // above; `deluge_streaming_chunk_payload` returns `ptr + kChunkPayloadOffset`,
+        // above; `deluge_streaming_chunk_payload` returns `ptr + payload_offset`,
         // `CLUSTER_SIZE` bytes of which are this chunk's own payload allocation.
-        let payload = unsafe { shim::deluge_streaming_chunk_payload(ptr as *mut c_void) };
+        let payload = unsafe {
+            deluge_sample_fill::chunk::deluge_streaming_chunk_payload(ptr as *mut c_void)
+        };
         let ramp = region_source_differential::make_ramp(index, CLUSTER_SIZE as usize);
         // SAFETY: `payload` is non-null and valid for `CLUSTER_SIZE` writable bytes
         // per the call above; `ramp` holds exactly that many bytes.
@@ -319,7 +321,7 @@ fn geo() -> Geometry {
 /// the offset-correctness assertion this whole gate exists to make: if
 /// `ManagerPin::payload()` ever again returns the `StreamedChunk` HEADER (the
 /// pre-fix bug — see the module doc's "Teeth" section) instead of the payload
-/// (`backing + kChunkPayloadOffset`), the header's own field bytes (a pointer, an
+/// (`backing + payload_offset`), the header's own field bytes (a pointer, an
 /// index, a couple of bools) will not coincidentally match this pattern and this
 /// assertion fails immediately.
 fn assert_payload_matches_ramp(out: &RegionOut, index: u32, label: &str) {

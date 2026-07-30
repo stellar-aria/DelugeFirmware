@@ -1,9 +1,9 @@
 //! `region-source-differential` — SR2d-5's payload-offset gate: proves
 //! `deluge_sample_source::cursor::SampleSource<ManagerResidency>` resolves a
-//! region's REAL payload (not the `StreamedChunk` header) when driven over a
-//! real `StreamedChunk` chunk backing, reusing `region_fill_differential`'s
-//! cc-compiled shim (see `build.rs`). See `tests/real_chunk_gate.rs` for the
-//! gate itself.
+//! region's REAL payload (not the chunk header) when driven over a real
+//! streamed chunk backing (`deluge_sample_fill::chunk::StreamedChunk`, U4d —
+//! pure Rust, no C++ shim). See `tests/real_chunk_gate.rs` for the gate
+//! itself.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 /// The cluster-index-dependent, byte-distinguishable seed pattern: cluster

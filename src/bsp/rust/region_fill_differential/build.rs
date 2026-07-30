@@ -64,11 +64,6 @@ fn main() {
 
     let shim_cpp = manifest.join("cpp/harness_shim.cpp");
     println!("cargo:rerun-if-changed={}", shim_cpp.display());
-    let native_finish_shim_cpp = manifest.join("cpp/native_finish_shim.cpp");
-    println!(
-        "cargo:rerun-if-changed={}",
-        native_finish_shim_cpp.display()
-    );
     println!("cargo:rerun-if-changed=build.rs");
 
     // Reused from sample_convert's own fetch (see the module doc above) — NOT fetched again here.
@@ -111,20 +106,11 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .compile("region_fill_diff_cpp");
 
-    // SR2d-4 Task 6's native_finish glue harness (`tests/native_finish_glue.rs`): a SEPARATE
-    // `cc::Build`/static-lib output from the fill-differential reference slice above -- this TU only
-    // needs `storage/cluster/cluster.h` + `libdeluge/streaming_fill.h` (no convert.h/stitch.h, no
-    // argon/SIMDe), and keeping it a distinct archive avoids any accidental interaction with the
-    // other shim's link-search directives. See native_finish_shim.cpp's own doc for why it compiles
-    // ONLY these two headers and not async_fill.cpp itself.
-    cc::Build::new()
-        .cpp(true)
-        .std("c++26")
-        .file(&native_finish_shim_cpp)
-        .include(&src) // definitions_cxx.hpp, board_config.h
-        .include(&src_deluge) // storage/cluster/cluster.h, memory/general_memory_allocator.h
-        .include(&include) // libdeluge/streaming_fill.h
-        .define("DELUGE_HOST", None)
-        .flag_if_supported("-Wno-unused-parameter")
-        .compile("region_fill_diff_native_finish_cpp");
+    // `tests/native_finish_glue.rs` (SR2d-4 Task 6's native_finish glue harness) used to need a
+    // SECOND `cc::Build`/static-lib output here — a C++ slice (`cpp/native_finish_shim.cpp`) that
+    // placement-new'd a real C++ `StreamedChunk` and re-stated its four field accessors. U4d
+    // relocated the streamed chunk's storage (construct + all seven accessors) into
+    // `deluge_sample_fill::chunk` (Rust); that crate is already this crate's normal dependency, so
+    // `native_finish_glue.rs` now drives it directly with no C++ shim at all. See that test's own
+    // module doc for the current seam.
 }

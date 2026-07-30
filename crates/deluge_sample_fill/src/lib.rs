@@ -9,6 +9,7 @@ use core::ffi::c_void;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
+pub mod chunk;
 pub mod fill_logic;
 
 // ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────

@@ -149,6 +149,11 @@ DelugeChunkConvertState deluge_streaming_chunk_convert_state(void* chunk_backing
 /// @param state The convert-state to store.
 void deluge_streaming_chunk_set_convert_state(void* chunk_backing, DelugeChunkConvertState state);
 
+/// @brief The byte offset a streamed chunk's payload sits at within its slab slot (U4d). The C++
+///        slab setup sizes the shared cluster slot as max(this, ComputedChunk's kChunkPayloadOffset)
+///        + Cluster::size + trailing guard. Rust-owned (deluge_sample_fill).
+uint32_t deluge_streamed_chunk_payload_offset(void);
+
 /// @brief Whether the Rust async streaming-fill task (`streaming_fill_task`, cargo feature
 ///        `async_streaming_loader`) owns the loader queue on this build/BSP.
 ///

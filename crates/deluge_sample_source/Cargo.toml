@@ -5,6 +5,13 @@ edition = "2021"
 
 [dependencies]
 deluge_resource = { path = "../deluge_resource" }
+# `ManagerPin::payload` reads a leased chunk's payload base directly instead of hopping through the
+# `deluge_streaming_chunk_payload` C-ABI (U4d Task 6). Default-features (no `native_fill`): this
+# crate's `chunk` module is a lean, unconditional module (the struct + accessors only, no
+# manager-reaching fill machinery), so this dependency pulls in nothing beyond that -- it does NOT
+# widen this crate's dep-light region-port design the way `deluge_sample_reader`'s own
+# `features = ["native_fill"]` dependency does.
+deluge_sample_fill = { path = "../deluge_sample_fill" }
 
 [dev-dependencies]
 deluge_alloc = { path = "../deluge_alloc" }

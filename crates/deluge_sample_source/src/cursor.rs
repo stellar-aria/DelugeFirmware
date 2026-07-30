@@ -353,19 +353,38 @@ mod tests {
     const CLUSTER_SIZE: usize = 16;
     const CHUNK_CAP: usize = 16;
 
-    /// `construct` seeds a per-index ramp: `dest[b] = index as u8 + b as u8`.
-    unsafe extern "C" fn make_ramp_construct(
-        _ctx: *mut c_void,
-        _owner: *mut c_void,
+    /// Per-slot slab size: the real `StreamedChunk` front guard
+    /// (`deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET`) plus this test's `CLUSTER_SIZE`
+    /// payload, 16-aligned — mirrors production's own `kChunkPayloadOffset`-sized `BACKING_SLAB`
+    /// slots (`general_memory_allocator.cpp`) and `deluge_sample_reader`'s own `BACKING_SIZE` test
+    /// harness (`reader.rs`'s `window_tests` module).
+    const BACKING_SIZE: usize =
+        (deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET + CLUSTER_SIZE).next_multiple_of(16);
+
+    /// The real construct callback production registers for streamed-chunk assets
+    /// (`chunk_residency.cpp`), reached through a thin `ConstructFn`-shaped forwarder
+    /// (`deluge_resource::manager::ConstructFn` takes `dest: *mut u8`; the real construct's C-ABI
+    /// signature takes `dest: *mut c_void` — the two function pointer types don't unify, so this
+    /// wrapper is the cast, not a behavioural stand-in). Mirrors `deluge_sample_reader`'s own
+    /// `real_chunk_construct` (`reader.rs`).
+    ///
+    /// # Safety
+    /// `dest` must be a writable slab slot of at least `BACKING_SIZE` bytes — this module's own
+    /// slab satisfies that.
+    unsafe extern "C" fn real_chunk_construct(
+        ctx: *mut c_void,
+        owner: *mut c_void,
         index: u32,
         dest: *mut u8,
     ) {
-        for b in 0..CLUSTER_SIZE {
-            // SAFETY: `dest` is the manager's just-allocated `CLUSTER_SIZE`-byte
-            // backing for this chunk (per `ConstructFn`'s contract).
-            unsafe {
-                *dest.add(b) = index.wrapping_add(b as u32) as u8;
-            }
+        // SAFETY: forwarding the caller's contract (above) to the real construct.
+        unsafe {
+            deluge_sample_fill::chunk::deluge_streaming_chunk_construct(
+                ctx,
+                owner,
+                index,
+                dest as *mut c_void,
+            );
         }
     }
 
@@ -375,8 +394,10 @@ mod tests {
         _buf: Vec<u128>,
     }
 
-    /// Build a manager over a fresh test heap and leak its backing arena, mirroring
-    /// `manager_residency::tests::test_manager_handle`.
+    /// Build a manager + `BACKING_SIZE`-slotted slab over a fresh test heap and leak the arena,
+    /// mirroring `manager_residency::tests::test_manager_handle` (and
+    /// `deluge_sample_reader`'s own slab-backed `window_tests::harness`) — real streamed-chunk
+    /// assets are `BACKING_SLAB` in production (`chunk_residency.cpp`), not `BACKING_HEAP`.
     fn test_manager_handle() -> *mut DelugeResource {
         let words = (256 * 1024usize).div_ceil(16);
         let mut buf: Vec<u128> = std::vec![0u128; words];
@@ -385,15 +406,23 @@ mod tests {
         // binary's life, matching `ManagerResidency::new`'s boot-singleton contract.
         let h = unsafe { deluge_alloc::deluge_heap_create(ptr, words * 16) };
         std::mem::forget(TestHeap { _buf: buf });
+        // SAFETY: `h` is the live heap handle just created above; `CHUNK_CAP` slots of
+        // `BACKING_SIZE` bytes each is ample for these tests (at most a handful resident at once).
+        let slab =
+            unsafe { deluge_alloc::slab::deluge_slab_create_unmanaged(h, BACKING_SIZE, CHUNK_CAP) };
+        assert!(!slab.is_null());
         // SAFETY: `h` is the live heap handle just created above.
         let handle = unsafe { deluge_resource::deluge_resource_create(h, 4, CHUNK_CAP) };
         assert!(!handle.is_null());
+        // SAFETY: `handle`/`slab` are both live, over the same heap.
+        unsafe { deluge_resource::deluge_resource_set_slab(handle, slab) };
         handle
     }
 
-    /// Define a requestable asset whose `construct` seeds `make_ramp(index, 16)`
-    /// (no `materialize` — this cursor drives readiness through `mark_index_ready`,
-    /// standing in for the loader, which is a later task).
+    /// Define a requestable, slab-backed asset whose `construct` is the real
+    /// `deluge_streaming_chunk_construct` (no `materialize` — matching production, which never
+    /// registers one for streamed chunks either; this cursor drives readiness through
+    /// `mark_index_ready`, standing in for the loader's `mark_ready`).
     fn define_ramp_asset(h: *mut DelugeResource) -> u32 {
         // SAFETY: `h` is a live handle (from `test_manager_handle`); the callback
         // has the required C-ABI signature.
@@ -405,20 +434,21 @@ mod tests {
                 None,
                 core::ptr::null_mut(),
                 COST_IO,
-                deluge_resource::manager::BACKING_HEAP,
+                deluge_resource::manager::BACKING_SLAB,
             )
         };
         // SAFETY: `h`/`asset` are live/valid per the call above.
         unsafe {
-            deluge_resource::deluge_resource_set_construct(h, asset, Some(make_ramp_construct));
+            deluge_resource::deluge_resource_set_construct(h, asset, Some(real_chunk_construct));
         }
         asset
     }
 
-    /// Drive readiness through the manager directly (standing in for the loader
-    /// this provider only schedules — real fill is a later task). Releases the
-    /// lease it takes to reserve/find the chunk, so it doesn't skew a test's
-    /// subsequent lease-count assertions.
+    /// Drive readiness through the manager directly (standing in for the loader this provider
+    /// only schedules — real fill is a later task), seeding the chunk's PAYLOAD region (not its
+    /// slot base) with the per-index ramp `payload[b] = index as u8 + b as u8` the byte-check test
+    /// below reads. Releases the lease it takes to reserve/find the chunk, so it doesn't skew a
+    /// test's subsequent lease-count assertions.
     fn mark_index_ready(h: *mut DelugeResource, asset: u32, index: u32) {
         // SAFETY: `h` is a live handle; these are the same FFI-safe C-ABI calls the
         // facade wraps.
@@ -432,6 +462,15 @@ mod tests {
         } else {
             ptr
         };
+        // SAFETY: `ptr` is a live chunk backing `real_chunk_construct` already placement-wrote a
+        // `StreamedChunk` into (via `request`/`try_acquire` above).
+        let payload = unsafe { deluge_sample_fill::chunk::payload(ptr as *mut c_void) };
+        for b in 0..CLUSTER_SIZE {
+            // SAFETY: `payload` is the chunk's own `CLUSTER_SIZE`-byte payload region.
+            unsafe {
+                *payload.add(b) = index.wrapping_add(b as u32) as u8;
+            }
+        }
         // SAFETY: `h`/`ptr` are live/valid per the calls above.
         unsafe { deluge_resource::deluge_resource_mark_ready(h, ptr) };
         // SAFETY: `h`/`ptr` are live/valid.

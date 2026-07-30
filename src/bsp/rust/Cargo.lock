@@ -480,6 +480,7 @@ name = "deluge_sample_source"
 version = "0.1.0"
 dependencies = [
  "deluge_resource",
+ "deluge_sample_fill",
 ]
 
 [[package]]

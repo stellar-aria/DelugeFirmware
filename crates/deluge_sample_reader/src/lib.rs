@@ -82,10 +82,11 @@ mod host_critical_section_stubs {
 // crate's test binary needs (never duplicated per-test-module — a `#[no_mangle]` symbol may only
 // be defined once in a linked binary), used by both `reader::tests` and `abi::tests`.
 //
-// Does NOT stub the `deluge_streaming_chunk_*` accessors any more (U4d): those are now real Rust
-// exports of `deluge_sample_fill::chunk`, unconditionally compiled into every binary that links
-// that crate (this crate always does — see its own `Cargo.toml`), so a same-named mock definition
-// here would collide with them at link time (a `#[no_mangle]` symbol may only be defined once).
+// Does NOT stub the chunk field accessors any more (U4d): `deluge_sample_fill::chunk::payload`/
+// `set_loaded`/`loaded`/`unloadable`/`set_unloadable`/`convert_state`/`set_convert_state` are plain
+// `pub fn`s (Task 8 deleted their `#[no_mangle]` C-ABI wrappers), unconditionally compiled into
+// every binary that links that crate (this crate always does — see its own `Cargo.toml`) — there is
+// no C-ABI symbol left to shadow, so a test just calls them directly by path instead of stubbing.
 // `reader.rs`'s own tests instead construct genuine `StreamedChunk` backings (via
 // `deluge_sample_fill::chunk::deluge_streaming_chunk_construct`, registered as the asset's own
 // construct callback — see `reader::tests::window_tests::real_chunk_construct`) and read them
@@ -153,13 +154,11 @@ pub(crate) mod host_streaming_stubs {
         ACTIVE_MANAGER.with(|m| m.get())
     }
 
-    // `deluge_streaming_chunk_payload`/`_set_loaded`/`_unloadable`/`_set_unloadable`/
-    // `_convert_state`/`_set_convert_state` are deliberately NOT stubbed here (U4d) — see the
-    // module doc for why: they are real, unconditionally-compiled Rust exports of
-    // `deluge_sample_fill::chunk` now, and a same-named mock here would collide with them at link
-    // time. Tests that need them go through the real accessors directly
-    // (`deluge_sample_fill::chunk::payload`/`unloadable`/etc.) over a genuinely constructed
-    // `StreamedChunk` backing.
+    // `deluge_sample_fill::chunk::payload`/`set_loaded`/`loaded`/`unloadable`/`set_unloadable`/
+    // `convert_state`/`set_convert_state` are deliberately NOT stubbed here (U4d) — see the module
+    // doc for why: they are plain `pub fn`s on `deluge_sample_fill::chunk` (no `#[no_mangle]` C-ABI
+    // wrapper left since Task 8), so there is nothing to shadow. Tests that need them go through the
+    // real accessors directly over a genuinely constructed `StreamedChunk` backing.
 
     /// No-op stand-in for the real async-fill wake signal (`streaming_fill.h`'s
     /// `deluge_streaming_signal_fill`) — this test binary has no async loader task to wake;

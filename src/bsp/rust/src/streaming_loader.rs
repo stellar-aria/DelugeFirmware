@@ -425,9 +425,9 @@ mod prod {
 
             // No startup capacity guard here (SR2d-4 Task 2 retired it along with the earlier
             // per-chunk convert-state sidecar it protected): convert-state now lives directly on
-            // each `StreamedChunk` via `deluge_streaming_chunk_convert_state`/`_set_convert_state`,
-            // which has no separate capacity to overflow (it's a plain field access on a chunk the
-            // caller already holds), so there is nothing left to guard.
+            // each `StreamedChunk` via `deluge_sample_fill::chunk::convert_state`/
+            // `set_convert_state`, which has no separate capacity to overflow (it's a plain field
+            // access on a chunk the caller already holds), so there is nothing left to guard.
             Self { mgr }
         }
     }

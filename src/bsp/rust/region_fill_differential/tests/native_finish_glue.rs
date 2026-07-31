@@ -41,10 +41,10 @@
 //! `_mark_ready`) are real `#[no_mangle]` Rust symbols from the `deluge_resource` crate (already a
 //! dev-dependency) — genuinely real, no test double. **U4d relocated the streamed chunk's storage
 //! (construct + the seven field accessors) out of C++ entirely, into this same `deluge_sample_fill`
-//! crate** (`chunk.rs`, `#[unsafe(no_mangle)]` C-ABI exports) — so the four remaining accessors
-//! (`deluge_streaming_chunk_payload`/`_set_loaded`/`_convert_state`/`_set_convert_state`) are now
-//! ALSO real, no-test-double symbols, satisfied by `deluge_sample_fill`'s own object code (this
-//! crate already depends on it). Before U4d this file `cc`-compiled a small C++ slice
+//! crate** (`chunk.rs`) — so the four remaining accessors (`chunk::payload`/`set_loaded`/
+//! `convert_state`/`set_convert_state`, plain `pub fn`s since U4d Task 8 deleted their `#[no_mangle]`
+//! C-ABI wrappers) are now ALSO real, no-test-double calls, satisfied by `deluge_sample_fill`'s own
+//! object code (this crate already depends on it). Before U4d this file `cc`-compiled a small C++ slice
 //! (`cpp/native_finish_shim.cpp`) that re-stated those four accessor bodies verbatim over a real,
 //! placement-new'd C++ `StreamedChunk` — that struct (and the shim) no longer exist; U4d Task 3
 //! retired both, since redefining the same four symbols here now would be a link-time duplicate
@@ -536,7 +536,7 @@ fn cross_path_finish_matches_cpp_reference_over_real_streamed_chunks() {
 }
 
 /// Independent proof that prev/next's convert-state, as read back through the REAL
-/// `deluge_streaming_chunk_convert_state` accessor AFTER self's `finish` wrote it back, matches what
+/// `deluge_sample_fill::chunk::convert_state` accessor AFTER self's `finish` wrote it back, matches what
 /// self's `finish` actually computed — NOT the zeroed default `ConvertState::default()` a
 /// disjoint/empty second store (the pre-unification double-store bug's observable symptom) would
 /// report. Split out as its own function (rather than inlined above) so its intent reads as a
@@ -548,13 +548,11 @@ fn neighbour_convert_state_is_read_back_through_the_shared_store(
 ) {
     // SAFETY: `prev.backing`/`next.backing` are still resident, still valid, live constructed
     // `StreamedChunk`s (this crate's own [`ChunkHarness`] never releases or evicts them).
-    let prev_state_now = unsafe {
-        deluge_sample_fill::chunk::deluge_streaming_chunk_convert_state(prev.backing as *mut c_void)
-    };
+    let prev_state_now =
+        unsafe { deluge_sample_fill::chunk::convert_state(prev.backing as *mut c_void) };
     // SAFETY: same as above.
-    let next_state_now = unsafe {
-        deluge_sample_fill::chunk::deluge_streaming_chunk_convert_state(next.backing as *mut c_void)
-    };
+    let next_state_now =
+        unsafe { deluge_sample_fill::chunk::convert_state(next.backing as *mut c_void) };
 
     // self's own edges being converted (asserted above) implies BOTH neighbours' shared boundary
     // flags were flipped true by self's write-back — the exact bit a disjoint-store bug would leave

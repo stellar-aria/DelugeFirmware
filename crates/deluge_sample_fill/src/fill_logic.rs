@@ -151,10 +151,10 @@ pub fn begin(index: u32, geo: &FillGeometry) -> BeginResult {
 /// The per-chunk convert-state `finish`'s convert/stitch tail reads/writes for a chunk and its
 /// neighbours: `first_three_bytes` is the pre-conversion first 3 bytes a neighbour's stitch reads;
 /// `start_converted`/`end_converted` are the boundary idempotency guards. Deliberately a SEPARATE
-/// type, not a re-export of `streaming_loader::DelugeChunkConvertState` (the C-ABI mirror of the
-/// live `StreamedChunk` convert-state store): that type needs
-/// `deluge_streaming_chunk_convert_state`/`_set_convert_state`, so it only compiles on the device or
-/// under `host_app` (`async_streaming_loader`-gated in `streaming_loader.rs`), while this module
+/// type, not a re-export of [`crate::DelugeChunkConvertState`] (the live `StreamedChunk`
+/// convert-state store's own type): that type needs `crate::chunk::convert_state`/
+/// `set_convert_state`, so it only compiles on the device or under `host_app`
+/// (`async_streaming_loader`-gated in `streaming_loader.rs`), while this module
 /// (and [`finish_convert_stitch`]) stays a plain, FFI-free buffer operation that compiles and tests
 /// on EVERY tier, including a bare host build with neither feature — the same reason [`FillGeometry`]
 /// doesn't reuse `streaming_loader::FillContext` either. `streaming_loader::prod::ProdOps::finish`

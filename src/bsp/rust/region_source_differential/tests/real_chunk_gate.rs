@@ -6,7 +6,7 @@
 //! bare `Vec<u8>` with NO header in front of it, so `payload == backing` there by
 //! construction. That made `ManagerPin::payload()`'s pre-fix bug — returning the
 //! raw manager backing pointer (the chunk HEADER) instead of routing through
-//! `deluge_streaming_chunk_payload` (`backing + payload_offset`, the real
+//! `deluge_sample_fill::chunk::payload` (`backing + payload_offset`, the real
 //! PAYLOAD) — invisible to every existing gate. Fixed in commit `b40ae65c6`;
 //! this test proves the fix against the geometry that actually exercises it.
 //!
@@ -21,11 +21,11 @@
 //! `deluge_resource` asset's slab-slot base, with its payload pointer set to
 //! `base + payload_offset` (`ChunkHarness::new`, mirroring
 //! `native_finish_glue.rs::ChunkHarness::new`). `ChunkHarness::seed_and_mark_ready`
-//! then writes `make_ramp(index)` through the REAL `deluge_streaming_chunk_payload`
+//! then writes `make_ramp(index)` through the REAL `deluge_sample_fill::chunk::payload`
 //! accessor (the same real, compiler-computed offset `ManagerPin::payload()` itself
 //! calls through) — never a raw `backing.add(b)` write, which would land in the
 //! header instead of the payload. The manager backing pointer (`try_acquire`'s
-//! return, offset 0) and the payload pointer (`deluge_streaming_chunk_payload`'s
+//! return, offset 0) and the payload pointer (`deluge_sample_fill::chunk::payload`'s
 //! return, offset `payload_offset`, always non-zero — see
 //! `deluge_sample_fill::chunk`'s own doc) are therefore GENUINELY DIFFERENT
 //! addresses, exactly the geometry a backing-vs-payload confusion needs to be
@@ -247,7 +247,7 @@ impl ChunkHarness {
 
     /// Reserve (constructing a REAL `StreamedChunk` if not already resident),
     /// write `make_ramp(index, CLUSTER_SIZE)` through the REAL
-    /// `deluge_streaming_chunk_payload` accessor (never a raw backing-pointer
+    /// `deluge_sample_fill::chunk::payload` accessor (never a raw backing-pointer
     /// write — see the module doc), mark it ready, and release the reservation
     /// lease this call itself took. Mirrors `manager_residency.rs`'s/`cursor.rs`'s
     /// own `mark_index_ready` test helper, except the seed write goes through the
@@ -269,11 +269,9 @@ impl ChunkHarness {
             ptr
         };
         // SAFETY: `ptr` is a live, resident `StreamedChunk*` backing from the call
-        // above; `deluge_streaming_chunk_payload` returns `ptr + payload_offset`,
+        // above; `deluge_sample_fill::chunk::payload` returns `ptr + payload_offset`,
         // `CLUSTER_SIZE` bytes of which are this chunk's own payload allocation.
-        let payload = unsafe {
-            deluge_sample_fill::chunk::deluge_streaming_chunk_payload(ptr as *mut c_void)
-        };
+        let payload = unsafe { deluge_sample_fill::chunk::payload(ptr as *mut c_void) };
         let ramp = region_source_differential::make_ramp(index, CLUSTER_SIZE as usize);
         // SAFETY: `payload` is non-null and valid for `CLUSTER_SIZE` writable bytes
         // per the call above; `ramp` holds exactly that many bytes.

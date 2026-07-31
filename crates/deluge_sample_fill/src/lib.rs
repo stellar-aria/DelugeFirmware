@@ -182,29 +182,20 @@ const _: () = {
     assert!(size_of::<StreamingFillDescriptor>() == size_of::<*mut u8>() + 16);
 };
 
-/// Mirrors `include/libdeluge/streaming_fill.h`'s `DelugeChunkConvertState` exactly (verbatim
-/// field order/types) — the per-chunk convert-state get/set accessors added in SR2d-4 Task 1,
-/// which `native_finish` reads/writes directly (SR2d-4 Task 2) as the single store for this state.
-/// Declared unconditionally alongside [`StreamingFillDescriptor`] since it shares that struct's
-/// C-ABI-mirror role.
-#[repr(C)]
+/// The per-chunk convert-state: `first_three_bytes` is the PRE-conversion first 3 raw bytes of the
+/// chunk's payload (a neighbour's boundary stitch needs the byte pattern spanning the cluster
+/// boundary before this chunk's own in-place conversion overwrote it); `start_converted`/
+/// `end_converted` are idempotency guards so a boundary is never re-stitched once it's already been
+/// handled from the other side. A plain in-crate type (U4d Task 8): it no longer crosses the C-ABI
+/// — [`crate::chunk::convert_state`]/[`crate::chunk::set_convert_state`] read/write it directly
+/// against the Rust-owned `StreamedChunk`, and `native_finish` (`native.rs`) is its only other
+/// consumer — so it carries no `#[repr(C)]`/layout guard.
 #[derive(Clone, Copy)]
 pub struct DelugeChunkConvertState {
     pub first_three_bytes: [u8; 3],
     pub start_converted: bool,
     pub end_converted: bool,
 }
-
-/// FFI layout guard (SR2d-4 Task 1), mirroring the `static_assert`s in `async_fill.cpp` — see that
-/// file's comment for the byte-offset derivation. No pointer members, and every member (`[u8; 3]`
-/// then two `bool`s) is 1-byte-aligned, so the layout is identical on the 32-bit device and the
-/// 64-bit host_app build: no padding anywhere, laid out back-to-back.
-const _: () = {
-    assert!(core::mem::offset_of!(DelugeChunkConvertState, first_three_bytes) == 0);
-    assert!(core::mem::offset_of!(DelugeChunkConvertState, start_converted) == 3);
-    assert!(core::mem::offset_of!(DelugeChunkConvertState, end_converted) == 4);
-    assert!(size_of::<DelugeChunkConvertState>() == 5);
-};
 
 // ── native_fill-gated sync fill core (C2a Task 3) ───────────────────────────
 // Moved verbatim from `deluge-bsp-rust`'s `streaming_loader.rs::prod` module (SR2d-4 Tasks 2-5) --

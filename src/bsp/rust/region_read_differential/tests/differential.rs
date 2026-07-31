@@ -11,7 +11,7 @@
 //! frame -> (cluster, byte-offset) arithmetic, kept deliberately separate from
 //! `deluge_sample_reader::reader`'s own (private) `locate`/`Geometry` — see that module's own doc.
 //! [`oracle_frame`] fetches its bytes straight from a chunk's own resident payload buffer (through
-//! `deluge_streaming_chunk_payload`, `deluge_sample_fill::chunk`), addressed using this crate's OWN
+//! `deluge_sample_fill::chunk::payload`), addressed using this crate's OWN
 //! mapping — never through the reader under test. The reader resolves clusters and offsets through
 //! its OWN (different) code path (`Reader::window`'s `locate`/`acquire_and_fill`/the self-pin). If
 //! either side's arithmetic — or the reader's straddle/stitch handling — diverges, the byte
@@ -33,7 +33,7 @@
 //! retired along with the C++ shim and its `region_read_diff_frame_via_origin` entry point (U4d
 //! Task 3). [`oracle_frame`] itself is unchanged in substance: `payload_with_trailing_slack()` was
 //! always just "the payload pointer, `cluster_size + 7` bytes" — expressed directly here now,
-//! through the same `deluge_streaming_chunk_payload` accessor the reader itself uses, with no C++
+//! through the same `deluge_sample_fill::chunk::payload` accessor the reader itself uses, with no C++
 //! involved at all.
 //!
 //! ## The synthetic sample
@@ -42,7 +42,7 @@
 //! same backing kind production streaming clusters use) over a real heap, with `N` real streamed
 //! chunks constructed via `deluge_resource_request` (never payload == backing — the SR2d-4 lesson
 //! `deluge_sample_reader`'s own tests already flag; payload is always reached through the real
-//! `deluge_streaming_chunk_payload` accessor). Each cluster's own `cluster_size` bytes are seeded
+//! `deluge_sample_fill::chunk::payload` accessor). Each cluster's own `cluster_size` bytes are seeded
 //! with a deterministic, per-cluster-index ramp (`region_read_differential::ramp`), then EVERY
 //! cluster is `native_finish`ed, in increasing index order, so the REAL stitch
 //! (`deluge_sample_convert::stitch_boundaries`, via `deluge_sample_fill::native_finish`) publishes
@@ -282,9 +282,7 @@ impl ChunkHarness {
             // SAFETY: `backing` was just resident-constructed above; its payload is `CLUSTER_SIZE`
             // bytes, reached through the REAL accessor (never payload == backing -- the SR2d-4
             // lesson).
-            let payload = unsafe {
-                deluge_sample_fill::chunk::deluge_streaming_chunk_payload(backing as *mut c_void)
-            };
+            let payload = unsafe { deluge_sample_fill::chunk::payload(backing as *mut c_void) };
             let seed = ramp(index, CLUSTER_SIZE as usize);
             // SAFETY: `payload` is `CLUSTER_SIZE` bytes, exclusively held here (nothing else
             // touches it until `native_finish` below); `seed` is exactly `CLUSTER_SIZE` bytes.
@@ -316,7 +314,7 @@ impl ChunkHarness {
 
 /// The differential's own oracle: `frame_bytes` bytes of a frame's interleaved samples, starting at
 /// within-cluster byte offset `byte_offset`, read straight from the chunk's resident payload buffer
-/// (`deluge_streaming_chunk_payload`) — valid for any `byte_offset + frame_bytes <= cluster_size + 7`
+/// (`deluge_sample_fill::chunk::payload`) — valid for any `byte_offset + frame_bytes <= cluster_size + 7`
 /// (the straddle case; every real chunk this harness constructs is backed by exactly that many bytes
 /// past the payload base — see [`ChunkHarness::new`]'s `backing_size`). See the module doc's U4d note
 /// for why this reads the payload pointer directly rather than through a C++
@@ -329,9 +327,7 @@ fn oracle_frame(
 ) -> Vec<u8> {
     let backing = h.backing(cluster_index);
     // SAFETY: `backing` is a resident, `native_finish`ed chunk (`ChunkHarness::new`).
-    let payload = unsafe {
-        deluge_sample_fill::chunk::deluge_streaming_chunk_payload(backing as *mut c_void)
-    };
+    let payload = unsafe { deluge_sample_fill::chunk::payload(backing as *mut c_void) };
     let mut out = vec![0u8; frame_bytes as usize];
     // SAFETY: `payload` is backed by `cluster_size + 7` valid bytes (this harness's own
     // `backing_size`); `byte_offset + frame_bytes` stays within that span for every case this file

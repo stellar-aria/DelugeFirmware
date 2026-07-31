@@ -120,8 +120,6 @@ unsafe extern "C" {
     fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
     /// Enqueue the chunk at `slot` for loading at `priority` (`deluge_resource.h`).
     fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
-    /// The chunk's `loaded` flag (`streaming_fill.h`) — flipped true by the drain's `native_finish`.
-    fn deluge_streaming_chunk_loaded(chunk_backing: *mut c_void) -> bool;
     /// Non-destructive "loader queue non-empty" predicate (`deluge_resource.h`): true while any
     /// queued+leased chunk remains — the condition the drain-all-queued wait below polls to empty.
     fn deluge_resource_loader_has_any(mgr: *mut c_void) -> bool;
@@ -146,7 +144,7 @@ impl core::future::Future for WaitChunkLoaded {
     ) -> core::task::Poll<bool> {
         // SAFETY: `chunk` is the leased backing the caller passed and holds a lease on for this
         // whole call, so it stays resident while we poll its `loaded` flag.
-        if unsafe { deluge_streaming_chunk_loaded(self.chunk) } {
+        if unsafe { deluge_sample_fill::chunk::loaded(self.chunk) } {
             return core::task::Poll::Ready(true);
         }
         if self.remaining == 0 {
@@ -289,7 +287,7 @@ pub trait FillOps {
     /// queue is empty (`deluge_resource_loader_next`).
     fn next(&self) -> *mut c_void;
     /// Whether `chunk` has been marked unloadable since it was enqueued
-    /// (`deluge_streaming_chunk_unloadable`) — mirrors `pump()`'s safety-net
+    /// (`deluge_sample_fill::chunk::unloadable`) — mirrors `pump()`'s safety-net
     /// skip right after `next()` (`loader.cpp`'s "Safety net" comment): already
     /// dequeued, so skipping can't loop, and it doesn't count against the fill
     /// budget.
@@ -400,7 +398,6 @@ mod prod {
 
     unsafe extern "C" {
         fn deluge_streaming_resource_manager() -> *mut c_void;
-        fn deluge_streaming_chunk_unloadable(chunk_backing: *mut c_void) -> bool;
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
@@ -443,7 +440,7 @@ mod prod {
 
         fn is_unloadable(&self, chunk: *mut c_void) -> bool {
             // SAFETY: `chunk` was just returned by `next()`.
-            unsafe { deluge_streaming_chunk_unloadable(chunk) }
+            unsafe { deluge_sample_fill::chunk::unloadable(chunk) }
         }
 
         fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor {

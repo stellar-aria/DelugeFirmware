@@ -36,7 +36,7 @@ __pycache__
 *.srctrl*
 
 .deluge_hex_key
-**/target/
+**/target*/
 /deluge_host_out.wav
 /sim/build/
 /sim/deluge_host_out.wav

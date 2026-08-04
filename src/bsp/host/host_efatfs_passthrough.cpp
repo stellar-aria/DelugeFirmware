@@ -15,36 +15,45 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-/// Host-sim streaming-read passthrough: STRONG definitions of the three
-/// `libdeluge/streaming_fill.h` efatfs-read symbols (`deluge_efatfs_open` / `_close` / `_read_at`),
-/// overriding the `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time.
+/// Host-sim efatfs passthrough: STRONG definitions of the `libdeluge/streaming_fill.h`
+/// streaming-read symbols (`deluge_efatfs_open` / `_close` / `_read_at`) and the
+/// `libdeluge/file_io.h` task-context file symbols (`deluge_efatfs_file_*`), overriding the
+/// `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time.
 ///
-/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) is efatfs-only — there is
-/// no C-FatFS fallback for the streaming read. The host-sim `deluge_render`/
-/// `deluge_loadcheck` link no Rust efatfs provider (that only exists on the Rust/Embassy BSP), so
-/// without this file every streamed sample fails to open and the golden renders are silent. This
-/// gives the host sim a real streaming-read backend over plain POSIX file I/O against the
-/// RECONSTRUCTED PROJECT DIRECTORY (not the packed FAT image used for task-context I/O — see
-/// `host_render_main.cpp`'s `DELUGE_SD_ROOT` setenv).
+/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) and `deluge::io::File`
+/// (file.cpp, when `deluge_streaming_efatfs_active()` is true) are efatfs-only — there is no
+/// C-FatFS fallback for either path. The host-sim `deluge_render`/`deluge_loadcheck` link no Rust
+/// efatfs provider (that only exists on the Rust/Embassy BSP), so without this file every streamed
+/// sample fails to open and every task-context file operation no-ops. This gives the host sim a
+/// real backend for both over plain POSIX file I/O against the RECONSTRUCTED PROJECT DIRECTORY
+/// (not the packed FAT image a real device uses — see `host_render_main.cpp`'s `DELUGE_SD_ROOT`
+/// setenv).
 ///
-/// Design: a small fixed handle table (handle -> open fd), no heap churn per read. `read_at`
-/// mirrors `efatfs_core::fill`'s (src/bsp/rust/src/efatfs_core.rs) over-EOF behaviour exactly: a
-/// read that runs past the end of the file is zero-padded rather than failed (the short-final-cluster
-/// fix) and reports `*out_read == count` on success regardless of how many bytes actually came off
-/// disk.
+/// Design: a small fixed handle table per concern (`g_slots` for streaming reads, `g_files` for
+/// task-context files), no heap churn per read. The streaming `read_at` mirrors
+/// `efatfs_core::fill`'s (src/bsp/rust/src/efatfs_core.rs) over-EOF behaviour exactly: a read that
+/// runs past the end of the file is zero-padded rather than failed (the short-final-cluster fix)
+/// and reports `*out_read == count` on success regardless of how many bytes actually came off disk.
+/// `deluge_efatfs_file_read` matches that same FILL convention; `deluge_efatfs_file_read_exact` is
+/// the EOF-honest counterpart `deluge::io::File::read` actually wants (see file_io.h).
 
+#include "libdeluge/file_io.h"
+#include "libdeluge/stream_io.h"
 #include "libdeluge/streaming_fill.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <string>
 #include <strings.h> // strcasecmp
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace {
@@ -60,6 +69,39 @@ struct HandleSlot {
 };
 
 std::array<HandleSlot, kMaxHandles> g_slots{};
+
+// Task-context files/dirs/streams are few-at-a-time (parse, save, recorder); 64 slots is well above
+// any concurrent use and keeps the tables small. (Streaming samples use the larger g_slots table.)
+constexpr uint32_t kMaxAuxHandles = 64;
+
+struct FileSlot {
+	int fd = -1;
+	uint32_t pos = 0;
+};
+std::array<FileSlot, kMaxAuxHandles> g_files{};
+
+FileSlot* file_slot(uint32_t handle) {
+	if (handle == 0 || handle > kMaxAuxHandles) {
+		return nullptr;
+	}
+	FileSlot& s = g_files[handle - 1];
+	return s.fd >= 0 ? &s : nullptr;
+}
+
+// mkdir -p the parent directory chain of a resolved absolute path (matches efatfs's create-parents).
+void mkdir_parents(const std::string& full) {
+	size_t last = full.find_last_of('/');
+	if (last == std::string::npos || last == 0) {
+		return;
+	}
+	for (size_t i = 1; i < last; i++) {
+		if (full[i] == '/') {
+			std::string prefix = full.substr(0, i);
+			mkdir(prefix.c_str(), 0777); // ignore result; EEXIST is fine
+		}
+	}
+	mkdir(full.substr(0, last).c_str(), 0777);
+}
 
 // Case-insensitive retry on just the final path component (see file comment / streaming_fill.h):
 // Deluge paths are conventionally uppercase and the reconstructed project trees match, so an
@@ -184,6 +226,172 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 	}
 	*out_read = count;
 	return true;
+}
+
+bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+	if (path == nullptr || out_handle == nullptr) {
+		return false;
+	}
+	std::string full = resolve_root_relative(path);
+	if (full.empty()) {
+		return false;
+	}
+	int flags = 0;
+	switch (mode) {
+	case DELUGE_FILE_READ:
+		flags = O_RDONLY;
+		break;
+	case DELUGE_FILE_WRITE_CREATE:
+		flags = O_RDWR | O_CREAT | O_TRUNC;
+		break;
+	case DELUGE_FILE_WRITE_CREATE_NEW:
+		flags = O_RDWR | O_CREAT | O_EXCL;
+		break;
+	default:
+		return false;
+	}
+	if (mode != DELUGE_FILE_READ) {
+		mkdir_parents(full); // WRITE modes auto-create missing parent dirs (efatfs create_context)
+	}
+	int fd = open(full.c_str(), flags, 0666);
+	if (fd < 0 && mode == DELUGE_FILE_READ) {
+		std::string retry = case_insensitive_retry(full);
+		if (!retry.empty()) {
+			fd = open(retry.c_str(), O_RDONLY);
+		}
+	}
+	if (fd < 0) {
+		return false;
+	}
+	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {
+		if (g_files[i].fd < 0) {
+			g_files[i] = {fd, 0};
+			*out_handle = i + 1;
+			return true;
+		}
+	}
+	close(fd);
+	return false;
+}
+
+bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr || dst == nullptr || out_read == nullptr) {
+		return false;
+	}
+	auto* buf = static_cast<uint8_t*>(dst);
+	uint32_t filled = 0;
+	while (filled < count) {
+		ssize_t n = pread(s->fd, buf + filled, count - filled, static_cast<off_t>(s->pos) + filled);
+		if (n == 0) {
+			std::memset(buf + filled, 0, count - filled); // EOF: zero-pad the remainder
+			break;
+		}
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		filled += static_cast<uint32_t>(n);
+	}
+	s->pos += count;   // FILL semantics: advance by the full requested count
+	*out_read = count; // always the full count on success
+	return true;
+}
+
+bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr || dst == nullptr || out_read == nullptr) {
+		return false;
+	}
+	auto* buf = static_cast<uint8_t*>(dst);
+	uint32_t got = 0;
+	while (got < count) {
+		ssize_t n = pread(s->fd, buf + got, count - got, static_cast<off_t>(s->pos) + got);
+		if (n == 0) {
+			break; // EOF: stop, do NOT zero-pad
+		}
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		got += static_cast<uint32_t>(n);
+	}
+	s->pos += got; // advance by the true bytes read
+	*out_read = got;
+	return true;
+}
+
+bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr || src == nullptr || out_written == nullptr) {
+		return false;
+	}
+	const auto* buf = static_cast<const uint8_t*>(src);
+	uint32_t done = 0;
+	while (done < count) {
+		ssize_t n = pwrite(s->fd, buf + done, count - done, static_cast<off_t>(s->pos) + done);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+		if (n == 0) {
+			break;
+		}
+		done += static_cast<uint32_t>(n);
+	}
+	s->pos += done;
+	*out_written = done;
+	return true;
+}
+
+bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr) {
+		return false;
+	}
+	s->pos = offset; // absolute; no FS access (matches efatfs TaskFileTable::seek)
+	return true;
+}
+
+bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr || out_size == nullptr) {
+		return false;
+	}
+	struct stat st{};
+	if (fstat(s->fd, &st) != 0) {
+		return false;
+	}
+	*out_size = static_cast<uint32_t>(st.st_size); // cursor untouched
+	return true;
+}
+
+bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr) {
+		return false;
+	}
+	struct stat st{};
+	if (fstat(s->fd, &st) != 0) {
+		return false;
+	}
+	uint32_t clamped = std::min<uint32_t>(new_len, static_cast<uint32_t>(st.st_size)); // shrink-only
+	return ftruncate(s->fd, clamped) == 0;                                             // cursor untouched
+}
+
+void deluge_efatfs_file_close(uint32_t handle) {
+	FileSlot* s = file_slot(handle);
+	if (s == nullptr) {
+		return;
+	}
+	close(s->fd);
+	s->fd = -1;
 }
 
 } // extern "C"

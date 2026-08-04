@@ -220,13 +220,17 @@ static SLOTS: [TaskSlot; MAX_TASKS] = [const { TaskSlot::new() }; MAX_TASKS];
 /// `*ForCurrentTask` C-ABI calls. -1 when no handle is running.
 static CURRENT: AtomicI8 = AtomicI8::new(-1);
 
-/// Resource gates (RESOURCE_SD / RESOURCE_USB). A task holding one of these in its
-/// schedule acquires the corresponding gate for the duration of its (synchronous)
-/// handle, so two same-resource tasks can't run concurrently. Inert in the current
-/// run-to-completion model (handles never overlap) but correct once storage
-/// waits become truly async. Audio (RESOURCE_NONE) never touches these, so the
-/// audio interrupt-executor never blocks on them.
-static SD_GATE: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+/// Resource gate (RESOURCE_USB). A task holding it in its schedule acquires the
+/// gate for the duration of its (synchronous) handle, so two same-resource tasks
+/// can't run concurrently. Audio (RESOURCE_NONE) never touches this, so the
+/// audio interrupt-executor never blocks on it.
+///
+/// There is no equivalent RESOURCE_SD gate: that serialization is provided by the
+/// single-owner storage discipline (the storage owner IS the worker fiber; see
+/// `deluge_storage_on_owner` in sd.rs and the `storage-owner-audit` feature) plus
+/// the `block_on_fiber` flip in sd.rs, which yields the fiber mid-transfer instead
+/// of parking the executor. `RESOURCE_SD_ROUTINE` tasks still get a hold-off, but
+/// via `fiber::sd_routine_held()` below, not a gate.
 static USB_GATE: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
@@ -268,6 +272,40 @@ fn audio_spawner() -> Option<SendSpawner> {
     unsafe { *core::ptr::addr_of!(AUDIO_SPAWNER) }
 }
 
+/// Lens-1-only (deterministic virtual-time streaming-underrun harness)
+/// override for the priority-0 (audio) task's schedule. `AudioEngine::routine_task`'s
+/// registered period (`deluge.cpp`: `8 / 44100.` seconds) is a scheduler poll/backoff
+/// hint tuned for the DEVICE's real DMA-paced render throttling
+/// (`AudioEngine::routine` decides internally whether a new block is actually due,
+/// based on the free-running DMA play head) — the host null-sink render pump
+/// (`audio_host.rs`'s `deluge_audio_drive`) has no such throttling and renders
+/// exactly one block every call, so on host the REGISTERED period does not
+/// correspond to "one real-time block period" at all (it fires ~1.6ms apart, vs.
+/// the true 128/44100s ≈ 2.9ms block period). Lens 1's virtual-time race needs the
+/// audio consumer to advance in a KNOWN, exact per-block virtual-time increment to
+/// make the SD-latency race meaningful, so it overrides the audio slot's
+/// `period_us`/`backoff_us` at spawn time via this knob. `None` (unset, the
+/// default) preserves today's behavior for every other consumer (device, Lens 2,
+/// manual host_app runs) — see [`claim`]'s use of this below. Host-only: the whole
+/// mechanism is `#[cfg(not(target_os = "none"))]`, so it costs the device build
+/// nothing (not even a dead branch).
+#[cfg(not(target_os = "none"))]
+static AUDIO_PERIOD_OVERRIDE_US: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static AUDIO_BACKOFF_OVERRIDE_US: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static AUDIO_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
+
+/// See [`AUDIO_PERIOD_OVERRIDE_US`]'s doc comment. Call once at startup, before
+/// `deluge_app_init` runs `registerTasks()` (i.e. before the audio task is
+/// claimed).
+#[cfg(not(target_os = "none"))]
+pub fn set_audio_period_override_us(period_us: u64, backoff_us: u64) {
+    AUDIO_PERIOD_OVERRIDE_US.store(period_us, Ordering::Relaxed);
+    AUDIO_BACKOFF_OVERRIDE_US.store(backoff_us, Ordering::Relaxed);
+    AUDIO_OVERRIDE_SET.store(true, Ordering::Relaxed);
+}
+
 /// Claim a free slot, populate it, and spawn its runner. Returns the slot index as
 /// the `TaskID`, or -1 if the table is full or the spawner is unavailable.
 fn claim(
@@ -280,6 +318,20 @@ fn claim(
     enabled: bool,
     on_audio: bool,
 ) -> TaskID {
+    // Lens 1 only: substitute the virtual-time block-period override for the
+    // audio task's registered schedule — see `AUDIO_PERIOD_OVERRIDE_US`'s doc
+    // comment. A no-op (`period_us`/`backoff_us` pass through unchanged) unless
+    // `set_audio_period_override_us` was called, which only Lens 1 ever does.
+    #[cfg(not(target_os = "none"))]
+    let (period_us, backoff_us) = if on_audio && AUDIO_OVERRIDE_SET.load(Ordering::Relaxed) {
+        (
+            AUDIO_PERIOD_OVERRIDE_US.load(Ordering::Relaxed),
+            AUDIO_BACKOFF_OVERRIDE_US.load(Ordering::Relaxed),
+        )
+    } else {
+        (period_us, backoff_us)
+    };
+
     // Route the audio task to the preemptive audio interrupt-executor when it's
     // available; everything else (and audio, if that executor isn't up) runs on
     // the cooperative thread executor.
@@ -397,16 +449,23 @@ async fn task_runner(slot: &'static TaskSlot) {
             continue;
         }
 
-        // Acquire the resource gates the schedule asks for, held across the
-        // (synchronous) handle so same-resource tasks can't overlap. Consistent
-        // order — SD before USB — avoids deadlock with a task holding both.
         let resource = slot.resource.load(Ordering::Relaxed) as ResourceID;
+
+        // Hold off RESOURCE_SD_ROUTINE tasks while an SD-routine op is in flight on
+        // the worker (fiber.rs SD_ROUTINE_HELD). Mirrors the cooperative BSP's
+        // isSDRoutineActive() gate: a task that would free an object such an op is
+        // mid-way through (discardRecorder freeing the recorder) must not run. The
+        // counter lingers across the whole in-flight window (sd.rs `block_on_fiber`
+        // makes SD transfers actually yield), not just a synchronous
+        // run-to-completion instant, so this is the real hold-off.
+        if resource & RESOURCE_SD_ROUTINE != 0 && crate::fiber::sd_routine_held() {
+            continue;
+        }
+
+        // Acquire the resource gate(s) the schedule asks for, held across the
+        // (synchronous) handle so same-resource tasks can't overlap. (RESOURCE_SD
+        // has no gate here — see the comment on `USB_GATE` above.)
         let run_us = {
-            let _sd = if resource & (RESOURCE_SD | RESOURCE_SD_ROUTINE) != 0 {
-                Some(SD_GATE.lock().await)
-            } else {
-                None
-            };
             let _usb = if resource & RESOURCE_USB != 0 {
                 Some(USB_GATE.lock().await)
             } else {
@@ -424,7 +483,7 @@ async fn task_runner(slot: &'static TaskSlot) {
             let run_us = t0.elapsed().as_micros();
             CURRENT.store(prev, Ordering::Relaxed);
             run_us
-            // _sd / _usb gates released here, before the once-check and back-off.
+            // _usb gate released here, before the once-check and back-off.
         };
         slot.record(run_us);
 

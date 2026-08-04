@@ -17,7 +17,7 @@
 
 /// deluge_loadcheck — headless "load these audio files and print their parsed descriptors" utility.
 ///
-/// Drives the real file-loading path (AudioFileManager::getAudioFileFromFilename → ClusterByteSource →
+/// Drives the real file-loading path (AudioFileManager::getAudioFileFromFilename → FileByteSource →
 /// parseAudioFileHeader → buildSample) against a FAT disk image, so it exercises the construction path
 /// end-to-end (FAT cluster walk + on-demand cluster streaming + header parse). It is the Tier-2 regression
 /// net for the file-loading redesign: load known WAV/AIFF files off a card image and dump every descriptor
@@ -236,6 +236,10 @@ int main(int argc, char** argv) {
 		at_quick_exit(cleanup_temp_image);
 		atexit(cleanup_temp_image);
 		setenv("DELUGE_SD_IMAGE", g_temp_image, 1);
+		// The streaming-read path (SampleStream::open_read_stream) is efatfs-only and bypasses
+		// the packed FAT image entirely — point the host passthrough (host_efatfs_passthrough.cpp)
+		// at the reconstructed project directory itself so streamed samples actually load.
+		setenv("DELUGE_SD_ROOT", project, 1);
 	}
 	else {
 		setenv("DELUGE_SD_IMAGE", image, 1);

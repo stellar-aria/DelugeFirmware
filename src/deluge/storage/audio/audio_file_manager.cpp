@@ -27,7 +27,9 @@
 #include "io/midi/midi_device_manager.h"
 #include "io/stream.hpp"
 #include "libdeluge/block_device.h"
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/stream_io.h"
+#include "libdeluge/system.h" // deluge_in_interrupt
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
 
@@ -36,10 +38,9 @@
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
-#include "storage/audio/cluster_byte_source.h"
-#include "storage/audio/deserializer_byte_source.h"
-#include "storage/audio/stream/loader.h"
+#include "storage/audio/file_byte_source.h"
 #include "storage/cluster/cluster.h"
+#include "storage/owner.h" // deluge::storage::Coalescer
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
 #include "util/string.h"
@@ -57,14 +58,9 @@ extern "C" {
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 extern int currentlySearchingForCluster;
 
-// FatFs porting symbols. Service the audio cluster-streaming queue before every FatFs
-// sector access (an app priority concern), then do the plain sector I/O via the
-// libdeluge block-device boundary. Inverts what used to be a HAL->app upcall (diskio.c
-// calling loadAnyEnqueuedClustersRoutine): the streaming policy lives in the app and
-// calls *down* into the block device.
+// FatFs porting symbols: plain sector I/O via the libdeluge block-device boundary. (Cluster
+// streaming is drained by the async fill task now, not pumped from the diskio callbacks.)
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
-
 	DelugeStatus status =
 	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 
@@ -76,7 +72,6 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-	deluge::audio::stream::loader::pump(); // always ensure SD streaming is fulfilled first
 	DelugeStatus status =
 	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
 	return status == DELUGE_OK ? RES_OK : RES_ERROR;
@@ -241,9 +236,9 @@ clusterSizeChangedButItsOk:
 					auto firstSector = sampleStream->sector_of(0);
 					// sampleStream's destructor closes the handle once it goes out of scope below.
 
-					// If we couldn't resolve cluster 0's sector, or its address changed, we can't be sure
-					// enough the file hasn't changed
-					if (!firstSector || *firstSector != ((Sample*)thisAudioFile)->stream().sd_address_at(0)) {
+					// If we couldn't resolve cluster 0's sector at all, the file is gone/unreadable on the
+					// reinserted card. A successful open + resolvable sector 0 is the whole check.
+					if (!firstSector) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;
 					}
@@ -326,7 +321,6 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 			staticDIR = *maybeDIR;
 
 			while (true) {
-				deluge::audio::stream::loader::pump();
 				/* Read a directory item */
 				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
 					return Error::SD_CARD; // error if invalid
@@ -795,10 +789,8 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->filePath = filePath;
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
-		// Open the stream_io.h boundary once for this Sample's lifetime; SampleStream::read_cluster_data
-		// (called per-cluster during playback) reads through it. sdAddress stays populated too -- it feeds
-		// AudioFileManager's cold-path "did the card's file change" re-validation check, a separate,
-		// FatFS-specific concern outside the real-time read path.
+		// Open the stream_io.h boundary once for this Sample's lifetime; the per-cluster playback reads
+		// (the async streaming-fill task, over this Sample's efatfs handle) go through it.
 		//
 		// `filePath` is only the file's *actual* on-disk location when it wasn't resolved via the
 		// alternate-load-dir mechanism (see resolveFilePointer): when `usingAlternateLocation` is
@@ -808,15 +800,29 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
-		if (!sampleFile->stream().open_read_stream(pathToOpen, DELUGE_STREAM_READ, numClusters)) {
-			*error = Error::FILE_NOT_FOUND;
+		Error openStreamError = sampleFile->stream().open_read_stream(pathToOpen);
+		if (openStreamError != Error::NONE) {
+			*error = openStreamError;
 			destroyAudioFileObject(*audioFile);
 			return nullptr;
 		}
 
-		// The byte source streams the clusters; its destructor releases the held cluster's reason.
-		ClusterByteSource source{*sampleFile, effectiveFilePointer.objsize};
+		// The byte source reads the header raw off the sample's efatfs handle (through the file-io boundary),
+		// block by block, taking no manager lease and touching no StreamedChunk.
+		FileByteSource source{std::make_unique<ReadSourceBlockReader>(sampleFile->stream().make_read_source()),
+		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts);
+
+		// loadFile() parses the WAV header, which is what finally populates the Sample's geometry
+		// (byteDepth/numChannels/audioDataStartPosBytes/audioDataLengthBytes). Both earlier
+		// registrations of the streaming fill-context -- open_read_stream() above and the header-parse
+		// getCluster's define_asset() -- ran while that geometry was still zero, so the context was
+		// snapshotted with a zero frame stride. Refresh it now that the geometry is final; otherwise
+		// every fill-context consumer (the sample range-reader and its passive peek) resolves a
+		// zero-stride geometry and returns nothing for this sample.
+		if (*error == Error::NONE) {
+			sampleFile->stream().register_fill_context();
+		}
 	}
 	else {
 		audioFile = new (audioFileMemory) WaveTable;
@@ -840,13 +846,15 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 		// One deserializer-backed source serves both the header parse (via the AudioByteSource surface) and
 		// WaveTable::setup's zero-copy band read (via its cluster accessors) — hence passed both ways.
-		DeserializerByteSource source{static_cast<uint32_t>(effectiveFilePointer.objsize)};
+		FileByteSource source{std::make_unique<DeserializerBlockReader>(),
+		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts, &source);
 	}
 
 	if (*error != Error::NONE) {
-		// ~AudioFile removes the pointers back to the Sample / SampleClusters from any Clusters;
-		// destroyAudioFileObject also un-adopts + frees (through the manager if adopted).
+		// ~AudioFile (for a Sample, via ~SampleStream::release_asset) releases the streaming asset back to
+		// the resource manager, freeing any resident clusters; destroyAudioFileObject also un-adopts +
+		// frees (through the manager if adopted).
 		destroyAudioFileObject(*audioFile);
 		return nullptr;
 	}
@@ -867,6 +875,26 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 // Only needs calling a couple times per second. Must be called outside of the audio / SD-reading routine
 // Call this repeatedly so SD card is re-initialized on re-insert before we actually urgently need audio from it
+namespace {
+// Plain coalesced dispatch of the card re-init onto the storage owner. No lifetime
+// coupling (unlike the recorder) → plain Owner::run, not the SD-routine flavor.
+// Single-flight so a slow initSD on the fiber can't stack across slowRoutine ticks.
+deluge::storage::Coalescer g_card_init_coalescer{/*sd_routine=*/false};
+
+void card_init_fill(void*) {
+	audioFileManager.reinitEjectedCard();
+}
+} // namespace
+
+void AudioFileManager::reinitEjectedCard() {
+	if (cardEjected) {
+		Error error = StorageManager::initSD();
+		if (error == Error::NONE) {
+			cardEjected = false;
+		}
+	}
+}
+
 void AudioFileManager::slowRoutine() {
 
 	// Drain card-detect events from the BSP (pull-based; the card-detect ISR
@@ -876,11 +904,15 @@ void AudioFileManager::slowRoutine() {
 		setCardEjected();
 	}
 
-	// If we know the card's been ejected...
-	if (cardEjected && !isSDRoutineActive()) {
-		Error error = StorageManager::initSD();
-		if (error == Error::NONE) {
-			cardEjected = false;
+	// If we know the card's been ejected, re-init via the storage owner (inline on
+	// legacy/host → byte-identical; coalesced on the fiber on Embassy). The fill
+	// re-checks cardEjected, so a coalesced-away duplicate is a safe no-op.
+	if (cardEjected && !isSDRoutineActive() && !deluge_in_interrupt()) {
+		if (deluge_storage_on_owner()) {
+			card_init_fill(nullptr);
+		}
+		else {
+			g_card_init_coalescer.request(card_init_fill, nullptr);
 		}
 	}
 

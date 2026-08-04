@@ -22,10 +22,22 @@
 #include "gui/ui/slicer.h"
 #include "hid/display/display.h"
 #include "storage/file_item.h"
+#include "storage/owner.h"
 #include "util/functions.h"
 
 namespace deluge::gui::context_menu::sample_browser {
 Kit kit{};
+
+namespace {
+/// The dispatched op for Kit::acceptCurrentOption case 0 ("Load All"): runs
+/// importFolderAsKit() and, on failure, closes just the ContextMenu (the browser fn already
+/// closes everything, including this menu, on success via its own close()).
+void runAcceptOp(void*) {
+	if (!sampleBrowser.importFolderAsKit()) {
+		kit.close();
+	}
+}
+} // namespace
 
 char const* Kit::getTitle() {
 	using enum l10n::String;
@@ -53,8 +65,15 @@ bool Kit::isCurrentOptionAvailable() {
 bool Kit::acceptCurrentOption() {
 	switch (currentOption) {
 	case 0: // Import whole folder
-		return sampleBrowser.importFolderAsKit();
-	default: // Slicer
+		// Dispatch onto the storage owner so pitch-detection (deep inside
+		// importFolderAsKit()) doesn't block the executor on SD reads (bug B6). The load is
+		// now fire-and-forget, so this can't honestly report the eventual success/failure back
+		// to ContextMenu::buttonAction() synchronously — always return true (never trigger its
+		// synchronous close()) and do the close-on-failure ourselves inside the op once the
+		// real result is known.
+		deluge::storage::Owner::run_or_inline(&runAcceptOp, nullptr);
+		return true;
+	default: // Slicer — unaffected, no pitch detection involved.
 		openUI(&slicer);
 		return true;
 	}

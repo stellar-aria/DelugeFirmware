@@ -18,14 +18,17 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
-#include "model/sample/sample_cluster.h"
+#include "model/sample/overview_cache_entry.h"
+#include "model/sample/sample_length_sentinel.h"
 #include "model/sample/sample_perc_cache_zone.h"
 #include "storage/audio/audio_file.h"
 #include "storage/audio/stream/convert.h"
 #include "storage/audio/stream/sample_stream.h"
+#include "storage/cluster/cluster.h" // Cluster::size_magnitude, for geometricClusterCount()
 #include "util/containers.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
+#include "util/segmented_vector.h" // deluge::SegmentedVector, for overviewCache_
 #include <array>
 #include <cstdint>
 
@@ -82,7 +85,6 @@ public:
 	                                int32_t* latestPixellatedPos);
 	bool getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int32_t crossfadeLengthSamples,
 	                             int32_t playDirection, int32_t lengthToAverageEach);
-	void convertDataOnAnyClustersIfNecessary();
 	int32_t getMaxPeakFromZero();
 	int32_t getFoundValueCentrePoint();
 	int32_t getValueSpan();
@@ -101,9 +103,22 @@ public:
 	[[nodiscard]] deluge::audio::stream::SampleStream& stream() { return stream_; }
 	/// @copydoc stream()
 	///
-	/// Const overload -- lets a `const Sample&` consumer (e.g. BlockReadSource) reach read-only
-	/// accessors (sd_address_at et al.) without dropping const.
+	/// Const overload -- lets a `const Sample&` consumer reach read-only accessors without dropping
+	/// const.
 	[[nodiscard]] const deluge::audio::stream::SampleStream& stream() const { return stream_; }
+
+	/// @return The physical entry count of the waveform overview cache (`overviewCache_.size()`).
+	[[nodiscard]] size_t overviewCacheSize() const { return overviewCache_.size(); }
+	/// @brief Access the waveform overview cache entry for cluster @p index.
+	[[nodiscard]] OverviewCacheEntry& overviewCacheEntry(uint32_t index) { return overviewCache_[index]; }
+	/// @copydoc overviewCacheEntry(uint32_t)
+	[[nodiscard]] const OverviewCacheEntry& overviewCacheEntry(uint32_t index) const { return overviewCache_[index]; }
+	/// @brief Resize the waveform overview cache to exactly @p n entries.
+	///
+	/// Sized at the same hooks a sample's cluster count can change at (initialize, finalize-grow,
+	/// truncate-shrink -- see those call sites). Never grown concurrently with a reader, so no
+	/// `reserve()` pre-sizing is needed.
+	void resizeOverviewCache(size_t n) { overviewCache_.resize(n); }
 
 	// Floating point
 	[[nodiscard]] q31_t convertToNative(float value) const { return q31_from_float(value); }
@@ -117,6 +132,26 @@ public:
 	uint32_t sampleRate{44100};
 	uint32_t audioDataStartPosBytes; // That is, the offset from the start of the WAV file
 	uint64_t audioDataLengthBytes;
+
+	/// @brief Sentinel value for `audioDataLengthBytes` / `lengthInSamples` meaning "not yet known".
+	///
+	/// Set while a recording is in progress and its final length hasn't been determined yet.
+	/// @see deluge::sample_length::kUnknownLengthSentinel (sample_length_sentinel.h) -- the same
+	///      value, standalone for consumers that don't want the full `Sample` class.
+	static constexpr uint64_t kUnknownLengthSentinel = deluge::sample_length::kUnknownLengthSentinel;
+	/// @return Whether this Sample's length has been determined (i.e. is not the "unknown" sentinel).
+	[[nodiscard]] bool isLengthKnown() const { return audioDataLengthBytes != kUnknownLengthSentinel; }
+
+	/// @return The cluster count implied purely by this sample's audio-data extent (start + length),
+	///         rounded up. Only meaningful once `isLengthKnown()` -- the caller's job to check.
+	[[nodiscard]] uint32_t geometricClusterCount() const {
+		return ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1;
+	}
+
+	/// @return The sample's logical cluster count, derived: the geometry implied by its audio-data extent
+	///         once `isLengthKnown()`, else the live recorder's captured-cluster count while recording.
+	[[nodiscard]] size_t num_clusters() const;
+
 	uint32_t bitMask{0};
 
 	uint64_t lengthInSamples;
@@ -170,12 +205,18 @@ public:
 
 	uint32_t waveTableCycleSize{0}; // In case this later gets used for a WaveTable
 
-	/// Owns the read-stream handle, the resource-manager Asset, and the cluster residency table
-	/// itself. See storage/audio/stream/sample_stream.h.
+	/// @brief Owns the read-stream handle and the resource-manager Asset.
 	///
-	/// @note ~Sample releases the Asset explicitly, before `stream_` (and so the table it owns)
-	///       destructs -- see ~Sample's definition.
+	/// See storage/audio/stream/sample_stream.h.
+	/// @note ~Sample releases the Asset explicitly, before `stream_` destructs -- see ~Sample's
+	///       definition.
 	deluge::audio::stream::SampleStream stream_{*this};
+
+	/// @brief The waveform overview cache: one `OverviewCacheEntry` per cluster of the file.
+	///
+	/// A stable-address `SegmentedVector` so a `OverviewCacheEntry&` handed out by
+	/// overviewCacheEntry() stays valid across later growth -- see `resizeOverviewCache()`.
+	deluge::SegmentedVector<OverviewCacheEntry, 256, deluge::memory::fast_allocator> overviewCache_{};
 
 protected:
 	// Project-relevance hooks (the object's hard-lease 0↔1 transitions): toggle the soft-reference on

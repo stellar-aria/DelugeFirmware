@@ -27,13 +27,21 @@
 #define LIBDELUGE_SIGNALS_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/// A named board digital line. Boards implement the subset they have.
-typedef enum DelugeSignal {
+/// @brief A named board digital line. Boards implement the subset they have.
+///
+/// @note Fixed underlying type (`: uint8_t`): this enum crosses the C-ABI FFI boundary, so its
+///       width must be pinned explicitly rather than left to the compiler's default
+///       (arm-none-eabi defaults to `-fshort-enums`, laying it out as 1 byte, while a host/bindgen
+///       build without that flag would otherwise emit a wider `int`-sized enum) — an explicit
+///       underlying type is authoritative in C and C++ regardless of `-fshort-enums`, so every
+///       build target agrees.
+typedef enum DelugeSignal : uint8_t {
 	// Outputs
 	DELUGE_SIGNAL_SYNC_LED = 0,    ///< external-clock "synced" indicator LED
 	DELUGE_SIGNAL_BATTERY_LED = 1, ///< low-battery indicator LED (open-drain)

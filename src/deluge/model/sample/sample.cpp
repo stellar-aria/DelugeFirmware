@@ -21,9 +21,12 @@
 #include "dsp/fft/fft_config_manager.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "io/debug/log.h"
+#include "libdeluge/sample_reader.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_perc_cache_zone.h"
+#include "model/sample/sample_reader_bridge.h"
+#include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // audioFileManager (overviewScanAllDone)
 #include "storage/cluster/cluster.h"
@@ -33,6 +36,28 @@
 #include <new>
 
 #include "deluge_resource.h" // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+
+namespace {
+// While a Sample's length is still unknown (mid-recording), its cluster count is the number of clusters
+// the recorder has captured so far. Mirrors the unsynchronized walk in
+// WaveformRenderer::investigateWholeCluster (waveform_renderer.cpp).
+//
+// PRECONDITION: this unsynchronized list walk is safe only because num_clusters() reaches it just for
+// still-recording samples (isLengthKnown() == false), which are never consumed by the preemptive
+// streaming/region-port playback path (a recording target never opens a read stream). Its callers run
+// in the same cooperative/UI/diagnostic context as firstRecorder's structural mutation. If a future
+// change lets num_clusters() run on a recording sample from a truly preemptive context, this walk would
+// need synchronization against the card-routine add/remove.
+size_t liveRecorderClusterCount(const Sample& sample) {
+	for (SampleRecorder* recorder = AudioEngine::firstRecorder; recorder != nullptr; recorder = recorder->next) {
+		if (recorder->sample == &sample) {
+			int32_t index = recorder->currentRecordClusterIndex.load(std::memory_order_acquire);
+			return index < 0 ? 0 : static_cast<size_t>(index);
+		}
+	}
+	return 0;
+}
+} // namespace
 
 #if SAMPLE_DO_LOCKS
 #define LOCK_ENTRY                                                                                                     \
@@ -97,15 +122,17 @@ Error Sample::initialize(int32_t newNumClusters) {
 	fileExplicitlySpecifiesSelfAsWaveTable = false;
 
 	try {
-		stream().resize(stream().num_clusters() + newNumClusters);
+		overviewCache_.resize(overviewCache_.size() + newNumClusters);
 	} catch (deluge::exception&) {
 		return Error::INSUFFICIENT_RAM;
 	}
 	return Error::NONE;
 }
 
-// The SAMPLE-cluster resource-manager Source (materialize / construct / evict callbacks),
-// ensure_resource_asset(), and the residency table itself all live on
+// The SAMPLE-cluster resource-manager Source's construct callback (materialize and evict are both
+// null -- eviction needs no callback; a StreamedChunk is a trivially-destructible slab POD) and the
+// asset-definition entry deluge_streaming_define_asset() live in
+// storage/audio/stream/chunk_residency.cpp; the Asset id cache lives on
 // deluge::audio::stream::SampleStream -- storage/audio/stream/sample_stream.{h,cpp}.
 
 // === Resource-manager Source for the perc cache (per play-direction) =========
@@ -140,12 +167,11 @@ Sample::~Sample() {
 	// stream_ destructs below (a disengaged optional does nothing; an engaged one destructs its
 	// Stream, closing it).
 
-	// Retire our Asset first (frees any clusters the manager still has resident, via
-	// SampleStream::cluster_evict, which nulls the residency table's entries) so the SampleCluster
-	// destructors (which run when `stream_` -- and so its table -- destructs below) see nothing to
-	// free. No-op if we never defined one. This ordering is load-bearing -- see sample_stream.h's
-	// release_asset() doc comment -- so it's an explicit call
-	// here rather than left to stream_'s own (member-order-dependent) destruction.
+	// Retire our Asset first so the manager frees every backing this sample still has resident
+	// (directly -- there is no evict callback; a StreamedChunk is a trivially-destructible POD in the
+	// manager's slab). No-op if we never defined one. This explicit, early call is the clean ordering
+	// (see sample_stream.h's release_asset() doc); ~SampleStream() also calls it, as an idempotent
+	// backstop, once stream_ destructs below.
 	stream_.release_asset();
 
 	deletePercCache(true);
@@ -192,6 +218,10 @@ void Sample::deletePercCache(bool beingDestructed) {
 	}
 }
 
+size_t Sample::num_clusters() const {
+	return isLengthKnown() ? geometricClusterCount() : liveRecorderClusterCount(*this);
+}
+
 void Sample::workOutBitMask() {
 	bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 }
@@ -202,23 +232,17 @@ void Sample::markAsUnloadable() {
 	// The on-disk audio may have changed, so the cached waveform overview can no longer be trusted.
 	resetOverviewScan();
 
-	// If any Clusters in the load-queue, remove them from there
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-		StreamedChunk* cluster = stream().chunk_at(c);
-		if (cluster != nullptr) {
-			cluster->unloadable = true;
-			deluge_resource_loader_remove(mgr, cluster->resource_slot);
-		}
-	}
+	// Cancel any pending loads and flag resident clusters, so a mid-flight fill won't complete with
+	// stale bytes (the residency lives in the Rust manager now).
+	deluge_sample_invalidate(deluge::sample::source_id_for(*this));
 }
 
 void Sample::resetOverviewScan() {
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-		SampleCluster& sampleCluster = stream().entry(c);
-		sampleCluster.investigatedWholeLength = false;
-		sampleCluster.minValue = 127;
-		sampleCluster.maxValue = -128;
+	for (int32_t c = 0; c < static_cast<int32_t>(overviewCacheSize()); c++) {
+		OverviewCacheEntry& cacheEntry = overviewCacheEntry(c);
+		cacheEntry.investigated = false;
+		cacheEntry.min = 127;
+		cacheEntry.max = -128;
 	}
 	overviewScanNextCluster = getFirstClusterIndexWithAudioData();
 	audioFileManager.overviewScanAllDone = false; // This sample now has work to pre-scan again (#4460)
@@ -402,6 +426,8 @@ Error Sample::fillPercCache(TimeStretcher* timeStretcher, int32_t startPosSample
 
 	int32_t bytesPerSample = numChannels * byteDepth;
 	int32_t posIncrement = bytesPerSample * playDirection;
+
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
 
 	int32_t i;
 	if (!reversed) {
@@ -645,10 +671,12 @@ doLoading:
 			percCacheNow = percCacheMemory[reversed];
 		}
 
-		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff.
-		StreamedChunk* cluster = stream().chunk_at(sourceClusterIndex);
-		if (!cluster || !cluster->loaded) {
-			goto getOut;
+		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff. This
+		// peek is genuinely zero-lease.
+		const uint64_t frame = (uint32_t)(sourceBytePos - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+		const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
+		if (window.frames == nullptr) {
+			goto getOut; // Not resident / not ready.
 		}
 
 		int32_t bytePosWithinCluster = sourceBytePos & (Cluster::size - 1);
@@ -667,9 +695,10 @@ doLoading:
 		    numSamplesThisClusterReadWrite * playDirection; // Do this now, in case the next Cluster fails
 		sourceBytePos += numSamplesThisClusterReadWrite * posIncrement;
 
-		// Alright, load those samples
-		char* currentPos =
-		    reinterpret_cast<char*>(cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
+		// Alright, load those samples. `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4`
+		// aligns for the `int32`-over-`byteDepth` read below, and the `bytesLeftThisSourceCluster` clamp keeps a
+		// boundary-straddling frame reading this cluster's own physical slack.
+		char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepth - 4;
 
 		do {
 			int32_t numSamplesThisPercPixelSegment = numSamplesThisClusterReadWrite;
@@ -808,6 +837,8 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 	int32_t numChannelsNow = numChannels;
 	int32_t bytesPerSample = byteDepthNow * numChannelsNow;
 
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
+
 	// This can happen. Not 100% sure if it should, but we'll return false just below in this case anyway, so I think
 	// it's ok
 	if (ALPHA_OR_BETA_VERSION && startBytePos < (int32_t)audioDataStartPosBytes) {
@@ -869,9 +900,10 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				FREEZE_WITH_ERROR("EEEE");
 			}
 
-			StreamedChunk* cluster = stream().chunk_at(whichCluster);
-			if (!cluster || !cluster->loaded) {
-				return false;
+			const uint64_t frame = (uint32_t)(readByte - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+			const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
+			if (window.frames == nullptr) {
+				return false; // Not resident / not ready.
 			}
 
 			int32_t bytePosWithinCluster = readByte & (Cluster::size - 1);
@@ -885,9 +917,11 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 				numSamplesThisRead = (uint32_t)bytesLeftThisCluster / (uint8_t)bytesPerSample;
 			}
 
-			// Alright, read those samples
-			char* currentPos = reinterpret_cast<char*>(
-			    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepthNow)));
+			// Alright, read those samples. `window.frames` points AT this frame's own bytes; the
+			// `+ byteDepthNow - 4` aligns for the `int32`-over-`byteDepth` read below (its high 16
+			// bits are the sample), and the `bytesLeftThisCluster` clamp keeps a boundary-straddling
+			// frame reading this cluster's own physical slack.
+			char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepthNow - 4;
 			char* endPos = currentPos + numSamplesThisRead * bytesPerSample * playDirection;
 
 			do {
@@ -1083,12 +1117,14 @@ int32_t Sample::getFirstClusterIndexWithAudioData() {
 }
 
 int32_t Sample::getFirstClusterIndexWithNoAudioData() {
-	uint32_t clusterIndex =
-	    ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1; // Rounds up
-	if (clusterIndex > static_cast<int32_t>(stream().num_clusters())) {
-		clusterIndex = static_cast<int32_t>(stream().num_clusters());
-	}
-	return clusterIndex;
+	// Pure geometric count, unclamped: for a loaded sample finalizeAfterLoad() guarantees
+	// audioDataStartPosBytes + audioDataLengthBytes <= fileSize, so this is <= the overview cache's
+	// physical size. It is also reached for a still-recording sample (via advanceOverviewScan's
+	// background scan), where audioDataLengthBytes is the kUnknownLengthSentinel; the sentinel's
+	// bit-pattern deliberately makes this expression truncate (in the uint32 geometricClusterCount())
+	// to 1 for every realistic cluster-size magnitude, so the scan stays bounded to cluster 0. Keep
+	// that property in mind before changing the sentinel value.
+	return static_cast<int32_t>(geometricClusterCount());
 }
 
 void Sample::workOutMIDINote(bool doingSingleCycle, float minFreqHz, float maxFreqHz, bool doPrimeTest) {
@@ -1395,6 +1431,12 @@ float Sample::determinePitch(bool doingSingleCycle, float minFreqHz, float maxFr
 		beginningOffsetForPitchDetection = audioDataStartPosBytes;
 	}
 
+	const uint32_t sourceId = deluge::sample::source_id_for(*this);
+
+	// One sample-period across all channels, matching the reader's own frame geometry (see
+	// SampleFrameReader) - the frame count a window reports is always a whole number of these.
+	const uint32_t frameSizeBytes = static_cast<uint32_t>(numChannels) * byteDepth;
+
 startAgain:
 
 #if PITCH_DETECT_DEBUG_LEVEL
@@ -1404,18 +1446,18 @@ startAgain:
 
 	// Load the sample into memory
 	int32_t currentOffset = beginningOffsetForPitchDetection;
-	uint32_t currentClusterIndex = currentOffset >> Cluster::size_magnitude;
 	int32_t writeIndex = 0;
 
-	StreamedChunk* cluster = stream().get_cluster(currentClusterIndex, CLUSTER_LOAD_IMMEDIATELY);
-	if (!cluster) {
+	uint32_t audioByteOffset = static_cast<uint32_t>(currentOffset) - audioDataStartPosBytes;
+	deluge::sample::SampleFrameReader reader{sourceId, audioByteOffset / frameSizeBytes, 1, DELUGE_READ_SCAN};
+	DelugeFrameWindow window = reader.window();
+	uint32_t bufPos = audioByteOffset % frameSizeBytes;
+	if (!reader.ok() || window.frame_count == 0) {
 		D_PRINTLN("failed to load first");
 getOut:
 		delugeDealloc(fftInput);
 		return 0;
 	}
-
-	StreamedChunk* nextCluster = nullptr;
 
 	int32_t biggestValueFound = 0;
 
@@ -1430,16 +1472,6 @@ getOut:
 
 	while (true) {
 continueWhileLoop:
-		// If there's no "next" Cluster, load it now
-		if (!nextCluster && currentClusterIndex + 1 < getFirstClusterIndexWithNoAudioData()) {
-			nextCluster = stream().get_cluster(currentClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY);
-			if (!nextCluster) {
-				deluge::cluster::remove_reason(*cluster, "imcwn4o");
-				D_PRINTLN("failed to load next");
-				goto getOut;
-			}
-		}
-
 		int32_t thisValue = 0;
 
 		// We may want to average several samples into just one - crudely downsampling, but the aliasing shouldn't hurt
@@ -1451,27 +1483,33 @@ continueWhileLoop:
 			}
 			count++;
 
-			int32_t individualSampleValue = *(int32_t*)cluster->frame_read_origin(currentOffset & (Cluster::size - 1),
-			                                                                      static_cast<uint8_t>(byteDepth))
-			                                & bitMask;
+			// Pull the next window once this one's exhausted - the reader stitches cluster boundaries
+			// internally, so this is the only "load more" the loop ever needs.
+			if (bufPos >= window.frame_count * frameSizeBytes) {
+				reader.advance(window.frame_count);
+				window = reader.window();
+				bufPos = 0;
+				if (!reader.ok() || window.frame_count == 0) {
+					D_PRINTLN("failed to load next");
+					goto getOut;
+				}
+			}
+
+			// Left-justify this byteDepth-byte little-endian sample into the top of a 32-bit word (the
+			// same placement frame_read_origin's overlapping 4-byte read used to produce), leaving the
+			// low bits zero rather than reading them out of bounds.
+			int32_t individualSampleValue = 0;
+			std::memcpy(reinterpret_cast<std::byte*>(&individualSampleValue) + (4 - byteDepth),
+			            static_cast<const std::byte*>(window.frames) + bufPos, byteDepth);
+			individualSampleValue &= bitMask;
 			thisValue += (individualSampleValue >> lengthDoublingsNow);
 
 			currentOffset += byteDepth;
+			bufPos += byteDepth;
 
 			// If reached end of file
 			if (currentOffset >= audioDataLengthBytes + audioDataStartPosBytes) {
 				goto doneReading;
-			}
-
-			uint32_t newClusterIndex = currentOffset >> Cluster::size_magnitude;
-
-			// If passed Cluster end...
-			if (newClusterIndex != currentClusterIndex) {
-				currentClusterIndex = newClusterIndex;
-
-				deluge::cluster::remove_reason(*cluster, "hset");
-				cluster = nextCluster;
-				nextCluster = nullptr; // It'll soon get filled
 			}
 
 			// Rudimentary audio start-detection. We need this, because detecting the tone of percussive sounds relies
@@ -1522,11 +1560,6 @@ continueWhileLoop:
 	}
 
 doneReading:
-	deluge::cluster::remove_reason(*cluster, "kncd");
-	if (nextCluster != nullptr) {
-		deluge::cluster::remove_reason(*nextCluster, "ljpp");
-	}
-
 	// If we didn't find any sound...
 	if (!beginningOffsetForPitchDetectionFound) {
 
@@ -1751,23 +1784,6 @@ doneReading:
 	return freq;
 }
 
-void Sample::convertDataOnAnyClustersIfNecessary() {
-	if (rawDataFormat != RawDataFormat::NATIVE) {
-		for (int32_t c = getFirstClusterIndexWithAudioData(); c < getFirstClusterIndexWithNoAudioData(); c++) {
-			StreamedChunk* cluster = stream().chunk_at(c);
-			if (cluster != nullptr) {
-
-				// Add reason in case it would get stolen
-				deluge::cluster::add_lease(cluster);
-
-				cluster->convert_data_if_necessary();
-
-				deluge::cluster::remove_reason(*cluster, "E231");
-			}
-		}
-	}
-}
-
 int32_t Sample::getMaxPeakFromZero() {
 	// Comes out one >> of the value we actually want
 	int32_t halfValue = std::abs(getFoundValueCentrePoint() >> 1) + (maxValueFound >> 2) - (minValueFound >> 2);
@@ -1788,11 +1804,6 @@ int32_t Sample::getValueSpan() {
 void Sample::finalizeAfterLoad(uint32_t fileSize) {
 
 	audioDataLengthBytes = std::min<uint64_t>(audioDataLengthBytes, fileSize - audioDataStartPosBytes);
-
-	// If floating point file, Clusers can only be float-processed (as they're loaded) once we've found the data
-	// start-pos, which we just did, and since we've already loaded that first cluster which contains data, we'd better
-	// float-process it now!
-	convertDataOnAnyClustersIfNecessary();
 
 	uint32_t bytesPerSample = byteDepth * numChannels;
 
@@ -1843,48 +1854,4 @@ void Sample::numReasonsDecreasedToZero([[maybe_unused]] char const* errorCode) {
 	// No longer project-relevant → drop the soft-references (assets stay resident but now evict before
 	// current-song data under pressure).
 	applyProjectReference(false);
-
-#if ALPHA_OR_BETA_VERSION
-	// Count up the individual reasons, as a bug check
-	int32_t numClusterReasons = 0;
-	for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-
-		StreamedChunk* cluster = stream().chunk_at(c);
-		if (cluster) {
-
-			if (cluster->cluster_index != c) {
-				// Leo got! Aug 2020. Suspect some sort of memory corruption... And then Michael got, Feb 2021
-				FREEZE_WITH_ERROR(errorCode);
-			}
-
-			numClusterReasons += static_cast<int32_t>(deluge::cluster::lease_count(cluster->resource_slot));
-		}
-	}
-
-	if (numClusterReasons) {
-		D_PRINTLN("reason dump---");
-		for (int32_t c = 0; c < static_cast<int32_t>(stream().num_clusters()); c++) {
-
-			StreamedChunk* cluster = stream().chunk_at(c);
-			if (cluster) {
-				D_PRINT("cluster->lease_count[%d]", deluge::cluster::lease_count(cluster->resource_slot));
-
-				if (!cluster->loaded) {
-					D_PRINTLN(" (unloaded)");
-				}
-				else {
-					D_PRINTLN("");
-				}
-			}
-			else {
-				D_PRINTLN("*");
-			}
-		}
-		D_PRINTLN("/reason dump---");
-
-		// LegsMechanical got, V4.0.0-beta2.
-		// https://forums.synthstrom.com/discussion/4106/v4-0-beta2-e078-crash-when-recording-audio-clip
-		FREEZE_WITH_ERROR("E078");
-	}
-#endif
 }

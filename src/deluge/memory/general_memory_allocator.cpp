@@ -22,6 +22,7 @@
 #include "definitions_cxx.hpp"
 #include "deluge_resource.h" // resource manager: the sole SDRAM reclaim coordinator
 #include "io/debug/log.h"
+#include "libdeluge/streaming_fill.h" // deluge_streamed_chunk_payload_offset(): Rust chunk's slot geometry
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/audio_file_manager.h" // setCardRead() — commit the cluster size before slab sizing
 #include "storage/cluster/cluster.h"          // kChunkPayloadOffset/kChunkTrailingGuard + Cluster::size: slab slot
@@ -72,10 +73,13 @@ bool GeneralMemoryAllocator::ensureClusterSystem() {
 	// a smaller reinserted card simply under-fills its slots.
 	audioFileManager.setCardRead();
 	// Slot geometry (cluster.h): [chunk header][front guard][Cluster::size payload][trailing guard].
-	// kChunkPayloadOffset already covers the larger header + a cache-line front guard, so this is
-	// the full slot and is >= the payload region for BOTH chunk types by construction (payload_ = base +
-	// kChunkPayloadOffset never reaches past base + slot).
-	size_t slot = kChunkPayloadOffset + Cluster::size + kChunkTrailingGuard;
+	// The uniform slab slot must fit BOTH chunk roles: the C++ ComputedChunk (its payload sits at
+	// kChunkPayloadOffset) and the Rust-owned streamed chunk (its own payload offset, reported across
+	// the C-ABI). Each role stores its own payload pointer at construction, so their offsets may
+	// differ; the slot just fits the larger of the two front regions (payload_ = base + offset never
+	// then reaches past base + slot for either role).
+	size_t chunkOffset = std::max<size_t>(kChunkPayloadOffset, deluge_streamed_chunk_payload_offset());
+	size_t slot = chunkOffset + Cluster::size + kChunkTrailingGuard;
 	size_t slabCapacity = (deluge::memory::sdram_size() / slot) + 1; // table never the limiter
 	clusterSlab_ = deluge_slab_create_unmanaged(deluge::memory::sdram_heap(), slot, slabCapacity);
 	if (clusterSlab_ == nullptr) {

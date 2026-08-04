@@ -21,8 +21,37 @@
 #include "gui/menu_item/dx/cartridge.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/oled.h"
+#include "storage/owner.h"
+#include <string>
 
 using namespace deluge::gui;
+
+namespace {
+// --- DX cartridge preview dispatch ------------------------------------------------------------
+//
+// DxCartridge::tryLoad() reads+parses the cartridge file (FatFS open/read); its result gates
+// whether we enter the cartridge submenu. That's a preview-style read, not a beginListing(Open)
+// browser listing, so it dispatches directly onto the storage owner with the submenu-enter moved
+// into the op's success path. Single caller (DxSyxBrowser::enterKeyPress, below): a file-static
+// path buffer + single-flight guard are enough — no need for a heap-allocated context.
+
+/// Path of the cartridge file to load; populated just before dispatch, read back by the op.
+std::string g_cartridgeLoadPath;
+/// True while a dispatched load is in flight. Guards against a second dispatch stomping
+/// g_cartridgeLoadPath before the first op reads it (defensive: enterKeyPress already close()s
+/// the browser before dispatching, so a second call can't normally land while one's in flight).
+bool g_cartridgeLoadInFlight = false;
+
+/// Owner-op trampoline: read+parse the cartridge (tryLoad already shows its own error popups on
+/// failure), then on success enter the submenu — the "enter on success" tail for enterKeyPress.
+void runCartridgeLoadOp(void*) {
+	bool loaded = menu_item::dxCartridge.tryLoad(g_cartridgeLoadPath);
+	g_cartridgeLoadInFlight = false;
+	if (loaded) {
+		soundEditor.enterSubmenu(&menu_item::dxCartridge);
+	}
+}
+} // namespace
 
 DxSyxBrowser::DxSyxBrowser() {
 	fileIcon = deluge::hid::display::OLED::waveIcon;
@@ -46,20 +75,19 @@ bool DxSyxBrowser::opened() {
 	fileIndexSelected = 0;
 
 	Error error = StorageManager::initSD();
-	if (error != Error::NONE)
-		goto sdError;
+	if (error != Error::NONE) {
+		display->displayError(error);
+		return false;
+	}
 
 	currentDir = "DX7";
 
 	// TODO: fill in last used name!
-	error = arrivedInNewFolder(1, "", "DX7");
-	if (error != Error::NONE)
-		goto sdError;
+	// The listing now happens async: dispatch it and return optimistically. Failure goes through
+	// the base Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing({.action = ListingAction::Open, .direction = 1, .filenameToStartAt = "", .defaultDir = "DX7"});
 
 	return true;
-sdError:
-	display->displayError(error);
-	return false;
 }
 
 // TODO: this is identical to SampleBrowser, move to parent class?
@@ -89,21 +117,20 @@ void DxSyxBrowser::enterKeyPress() {
 		        .c_str(); // Extremely weirdly, if we try to just put this inside the parentheses in the next line,
 		                  // it returns an empty string (&nothing). Surely this is a compiler error??
 
-		Error error = goIntoFolder(filenameChars);
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
+		goIntoFolder(filenameChars);
 	}
 	else {
 		// TODO: c.f. slotbrowser, we might just be able to pass a file pointer to the FAT loader
 		std::string path = getCurrentFilePath();
 		close();
 
-		if (!path.empty()) {
-			if (menu_item::dxCartridge.tryLoad(path.c_str())) {
-				soundEditor.enterSubmenu(&menu_item::dxCartridge);
+		if (!path.empty() && !g_cartridgeLoadInFlight) {
+			g_cartridgeLoadPath = std::move(path);
+			g_cartridgeLoadInFlight = true;
+			if (!deluge::storage::Owner::run(&runCartridgeLoadOp, nullptr)) {
+				g_cartridgeLoadInFlight = false; // dispatch dropped -> op won't run; drop the request
 			}
 		}
 

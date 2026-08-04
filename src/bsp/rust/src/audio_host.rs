@@ -99,6 +99,77 @@ pub fn audio_thread_render_seen() -> bool {
     AUDIO_THREAD_RENDER_SEEN.load(Ordering::Relaxed)
 }
 
+/// Render-mode gate: mirrors `host_audio.c`'s own `DELUGE_RENDER` env-var check
+/// (cached once, same shape). `host_app`/`lens1_vt_sim` never set this variable,
+/// so this reads `false` and changes nothing for them.
+///
+/// Purely a diagnostic trim: when set, skips the per-call bookkeeping below (a
+/// thread-name `String` allocation plus `log::info!` calls) that would
+/// otherwise run on every single rendered block of what can be a multi-minute
+/// offline export. `deluge_app_render` itself is unaffected by this flag — see
+/// [`should_skip_render`] for the guard that actually matters.
+fn render_mode() -> bool {
+    static RENDER_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RENDER_MODE.get_or_init(|| {
+        std::env::var("DELUGE_RENDER")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Whether THIS `deluge_audio_drive` call must skip `deluge_app_render`
+/// entirely — the real null-sink guard (`render_mode` above is a separate,
+/// cosmetic trim).
+///
+/// `deluge_audio_drive` is reached from two fundamentally different callers
+/// that share this one function, and only one of them is safe to render from
+/// on a single-executor host harness (`golden_vt_render`/`lens1_vt_sim`, which
+/// — per this repo's "deterministic single-threaded executor ONLY" constraint —
+/// never call [`crate::scheduler::set_audio_spawner`], so the priority-0 audio
+/// task falls back to running on the SAME executor as the storage worker
+/// fiber, not a separate thread):
+///
+/// - **On the storage worker fiber** (`crate::fiber::on_fiber()` true) —
+///   `StemExport::renderWait`'s offline loop drives `AudioEngine::routine()`
+///   directly, which calls this at `audio_engine.cpp:1116` to drain the
+///   just-rendered block into any live `SampleRecorder`. Load-bearing; never
+///   skipped.
+/// - **Before the worker fiber exists** (`crate::fiber::worker_started()`
+///   false) — `AudioEngine::runRoutine()`'s one-time pre-registration call from
+///   `deluge_boot()` (see this module's doc comment: skipping it freezes
+///   boot). Never skipped.
+/// - **Off the fiber, after it's started** — the independent priority-0
+///   `AudioEngine::routine_task`'s own periodic tick (spawned by
+///   `registerTasks()`, polled on its own schedule by this crate's
+///   `scheduler::task_runner`). On a real two-OS-thread `host_app` boot
+///   (`crate::scheduler::set_audio_spawner` called, the audio task runs on a
+///   genuinely separate `"deluge-audio"` OS thread) this is the NORMAL,
+///   load-bearing render path and must never be skipped either — hence the
+///   thread-name check below, which is `false` there. On a single-executor
+///   harness, though, this same call can reach C++ sample-playback code that
+///   does a SYNCHRONOUS efatfs read off the storage worker fiber
+///   (`efatfs_host_shim.rs`'s `on_fiber()`-gated FFI bridge) — under
+///   `sim_latency` that read needs a `Timer` fired by a separate task
+///   (`sim_latency::pump`) to ever resolve, and the off-fiber branch is a
+///   non-yielding `embassy_futures::block_on` that can never let that task get
+///   polled: a full-process livelock (a real offline `StemExport` run
+///   against a sample-backed song hung at 100% CPU inside exactly this call
+///   chain). Skipping this
+///   specific case is safe: the render this call would have produced is
+///   discarded anyway (a null sink), and the harness doesn't need the
+///   priority-0 task ticking between fiber-driven operations the way
+///   `host_app`'s own boot smoke (`audio_thread_render_seen`/`drive_count`)
+///   does.
+fn should_skip_render() -> bool {
+    if !crate::fiber::worker_started() || crate::fiber::on_fiber() {
+        return false;
+    }
+    // Off-fiber, worker started: skip UNLESS this is host_app's real separate
+    // audio OS thread, where this is the legitimate, load-bearing render path.
+    let thread_name = std::thread::current().name().unwrap_or("").to_string();
+    thread_name != "deluge-audio"
+}
+
 /// Total `deluge_audio_drive` calls observed so far (monotonic). Polled by
 /// `main.rs`'s `host_app` boot path to bound the post-boot concurrency soak by
 /// render-cycle count as well as wall-clock time.
@@ -123,10 +194,16 @@ pub extern "C" fn deluge_audio_sample_rate() -> u32 {
 /// Per the `audio_io.h` contract, the return value is the number of times
 /// `deluge_app_render` was invoked this call (0 = no new audio needed), NOT a
 /// frame count — mirrors device `audio.rs` and the C host backend
-/// `host_audio.c`. This null-sink pump always renders exactly one block per
-/// call, so it always returns 1.
+/// `host_audio.c`. This null-sink pump renders exactly one block per call and
+/// returns 1, UNLESS [`should_skip_render`] says this specific call must skip
+/// `deluge_app_render` entirely, in which case it returns 0 (a normal,
+/// contract-valid "no new audio needed" outcome).
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_audio_drive() -> u32 {
+    if should_skip_render() {
+        return 0;
+    }
+
     let block_start = CURSOR.load(Ordering::Relaxed);
     BLOCK_START.store(block_start, Ordering::Relaxed);
 
@@ -146,6 +223,11 @@ pub extern "C" fn deluge_audio_drive() -> u32 {
     CURSOR.store(block_start + APP_BLOCK_FRAMES as u64, Ordering::Relaxed);
 
     let n = DRIVE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if render_mode() {
+        // See render_mode()'s doc: skip the diagnostic bookkeeping only — the
+        // render above already happened unconditionally.
+        return 1;
+    }
     let thread_name = std::thread::current()
         .name()
         .unwrap_or("<unnamed>")

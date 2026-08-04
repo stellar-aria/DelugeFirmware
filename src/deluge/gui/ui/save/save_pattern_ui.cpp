@@ -109,15 +109,16 @@ tryDefaultDir:
 	fileIconPt2 = deluge::hid::display::OLED::midiIconPt2;
 	fileIconPt2Width = 0;
 
-	error = arrivedInNewFolder(0, enteredText.c_str(), defaultDir.c_str());
-	if (error != Error::NONE) {
-gotError:
-		display->displayError(error);
-		goto doReturnFalse;
-	}
-
-	focusRegained();
+	// The listing dispatches asynchronously; return optimistically here. onBrowserOpened() runs
+	// the focusRegained tail once the listing succeeds. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()).
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = enteredText, .defaultDir = defaultDir});
 	return true;
+}
+
+void SavePatternUI::onBrowserOpened() {
+	focusRegained();
 }
 
 ActionResult SavePatternUI::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {

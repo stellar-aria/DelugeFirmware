@@ -25,13 +25,14 @@
 #define LIBDELUGE_BOARD_H
 
 #include "types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/// Primary display kind present on the board.
-typedef enum DelugeDisplayKind {
+/// @brief Primary display kind present on the board.
+typedef enum DelugeDisplayKind : uint8_t {
 	DELUGE_DISPLAY_NONE = 0,
 	DELUGE_DISPLAY_OLED = 1,         ///< graphical framebuffer display
 	DELUGE_DISPLAY_SEVEN_SEGMENT = 2 ///< 4-digit numeric display

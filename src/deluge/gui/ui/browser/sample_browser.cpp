@@ -16,8 +16,8 @@
  */
 
 #include "definitions_cxx.hpp"
-#include "fatfs.hpp"
 #include "hid/button.h"
+#include "io/file.hpp"
 #include "model/sample/sample.h"
 #include "util/try.h"
 #include <iterator>
@@ -65,11 +65,11 @@
 #include "processing/sound/sound_drum.h"
 #include "processing/source.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/cluster/cluster.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h"
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
 #include "util/functions.h"
@@ -124,7 +124,6 @@ bool SampleBrowser::opened() {
 
 	Error error = StorageManager::initSD();
 	if (error != Error::NONE) {
-sdError:
 		display->displayError(error);
 		return false;
 	}
@@ -166,11 +165,18 @@ sdError:
 
 dissectionDone:
 
-	error = arrivedInNewFolder(1, searchFilename, "SAMPLES");
-	if (error != Error::NONE) {
-		goto sdError;
-	}
+	// The listing (and its post-listing tail, in onBrowserOpened()) happens async: dispatch it and
+	// return optimistically. Failure goes through the base Browser::onListingFailed() (displayError
+	// + close(), not goBackToSoundEditor(), which would left-scroll) once the listing completes.
+	beginListing({.action = ListingAction::Open,
+	              .direction = 1,
+	              .filenameToStartAt = searchFilename ? searchFilename : "",
+	              .defaultDir = "SAMPLES"});
 
+	return true;
+}
+
+void SampleBrowser::onBrowserOpened() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, getCurrentOutputType() == OutputType::SYNTH);
 	indicator_leds::setLedState(IndicatorLED::KIT, soundEditor.editingKit());
 
@@ -185,8 +191,6 @@ dissectionDone:
 	}
 
 	possiblySetUpBlinking();
-
-	return true;
 }
 
 void SampleBrowser::possiblySetUpBlinking() {
@@ -382,9 +386,17 @@ void SampleBrowser::enterKeyPress() {
 
 		// Otherwise, load it normally
 		else {
-			claimCurrentFile();
+			// Dispatch onto the storage owner so pitch-detection (Sample::determinePitch, deep
+			// inside claimCurrentFile()) doesn't block the executor on SD reads. Fire-and-forget:
+			// the result is discarded, and claimCurrentFile() handles its own loading-animation/
+			// close-on-success internally.
+			deluge::storage::Owner::run_or_inline(&SampleBrowser::runClaimCurrentFileOp, nullptr);
 		}
 	}
+}
+
+void SampleBrowser::runClaimCurrentFileOp(void*) {
+	sampleBrowser.claimCurrentFile();
 }
 
 ActionResult SampleBrowser::backButtonAction() {
@@ -523,117 +535,144 @@ void SampleBrowser::previewIfPossible(int32_t movementDirection) {
 	}
 	*/
 
-	bool didDraw = false;
-
 	FileItem* currentFileItem = getCurrentFileItem();
 
-	// Preview the WAV file, if we're allowed
-	if (currentFileItem && !currentFileItem->isFolder) {
+	// Nothing to preview (empty selection or a folder) — just tear down any preview onscreen.
+	if (!currentFileItem || currentFileItem->isFolder) {
+		clearPreviewDisplay(movementDirection);
+		return;
+	}
 
-		std::string filePath = getCurrentFilePath();
+	// Snapshot the target so the dispatched op loads the file pointed at now, even if the
+	// selection moves on before it runs (fast cursor-scroll under async dispatch).
+	PreviewTarget target{
+	    .path = getCurrentFilePath(),
+	    .movementDirection = movementDirection,
+	};
 
-		// This more formally does the thing that actually was happening accidentally for ages, as found by Michael B.
-		lastFilePathLoaded = filePath;
+	// Coalesce latest-wins onto one owner op: while one preview is loading, a newer request
+	// is queued and dispatched on completion, so rapid scrolls converge on the file landed on.
+	if (previewCoalescer_.request(target)) {
+		if (!deluge::storage::Owner::run(&SampleBrowser::runPreviewOp, this)) {
+			// Owner queue full → the op won't run, so release the guard or the coalescer
+			// would wedge single-flight forever. The next cursor move re-requests.
+			previewCoalescer_.reset();
+		}
+	}
+}
 
-		bool shouldActuallySound = false;
+void SampleBrowser::runPreviewOp(void* self) {
+	auto* browser = static_cast<SampleBrowser*>(self);
+	browser->renderPreviewForTarget(browser->previewCoalescer_.current());
+	// If a newer target arrived while this ran, dispatch it (latest-wins).
+	if (auto next = browser->previewCoalescer_.complete(); next.has_value()) {
+		if (!deluge::storage::Owner::run(&SampleBrowser::runPreviewOp, self)) {
+			browser->previewCoalescer_.reset(); // re-dispatch dropped — release (see previewIfPossible)
+		}
+	}
+}
 
-		// Decide if we're actually going to sound it.
-		if (!instrumentClipView.fileBrowserShouldNotPreview) {
-			switch (FlashStorage::sampleBrowserPreviewMode) {
-			case PREVIEW_ONLY_WHILE_NOT_PLAYING:
-				if (playbackHandler.playbackState) {
-					break;
-				}
-				// No break
+void SampleBrowser::renderPreviewForTarget(const PreviewTarget& target) {
 
-			case PREVIEW_ON:
-				shouldActuallySound = true;
+	bool didDraw = false;
+
+	// This more formally does the thing that actually was happening accidentally for ages, as found by Michael B.
+	lastFilePathLoaded = target.path;
+
+	bool shouldActuallySound = false;
+
+	// Decide if we're actually going to sound it.
+	if (!instrumentClipView.fileBrowserShouldNotPreview) {
+		switch (FlashStorage::sampleBrowserPreviewMode) {
+		case PREVIEW_ONLY_WHILE_NOT_PLAYING:
+			if (playbackHandler.playbackState) {
 				break;
 			}
-		}
+			// No break
 
-		AudioEngine::previewSample(filePath, &currentFileItem->filePointer, shouldActuallySound);
-
-		if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
-			// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
-			// as if you had confirmed with the Select encoder, but keeping the browser open.
-			claimCurrentFile(1, 1, 1, true);
-		}
-
-		/*
-		if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].pos > 0 &&
-		numFilesFoundInRightDirection > 1) { D_PRINTLN("returned 2"); return;
-		}
-		*/
-
-		// If the Sample at least loaded, even if we didn't sound it, then try to render its waveform.
-		if (std::ssize(AudioEngine::sampleForPreview->sources[0].ranges) >= 1) {
-			AudioFile* sample = ((MultisampleRange*)AudioEngine::sampleForPreview->sources[0].ranges.getElement(0))
-			                        ->sampleHolder.audioFile;
-
-			if (sample) {
-				uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
-
-				currentlyShowingSamplePreview = true;
-				PadLEDs::reassessGreyout(true);
-
-				waveformBasicNavigator.sample = (Sample*)sample;
-				waveformBasicNavigator.opened();
-
-				// If want scrolling animation
-				if (movementDirection && !qwertyAlwaysVisible) {
-					waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
-					                                  waveformBasicNavigator.xZoom, PadLEDs::imageStore,
-					                                  &waveformBasicNavigator.renderData);
-					memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
-					PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
-
-					currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
-				}
-
-				// Or if want instant snap render
-				else {
-					if ((qwertyVisible && !qwertyCurrentlyDrawnOnscreen) || qwertyAlwaysVisible) {
-						drawKeys();
-					}
-					else if (!qwertyVisible) {
-						waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
-						                                  waveformBasicNavigator.xZoom, PadLEDs::image,
-						                                  &waveformBasicNavigator.renderData);
-						PadLEDs::sendOutMainPadColours();
-					}
-					qwertyCurrentlyDrawnOnscreen = qwertyVisible;
-				}
-				PadLEDs::sendOutSidebarColours(); // For greyout (wait what?)
-
-				didDraw = true;
-			}
+		case PREVIEW_ON:
+			shouldActuallySound = true;
+			break;
 		}
 	}
 
-	// If did not just preview a sample...
-	if (!didDraw) {
+	// previewSample always resolves target.path fresh, the same as any other path-based open.
+	AudioEngine::previewSample(target.path, nullptr, shouldActuallySound);
 
-		// But if we need to get rid of whatever was onscreen...
-		if ((currentlyShowingSamplePreview || (qwertyCurrentlyDrawnOnscreen && !qwertyVisible))
-		    && !qwertyAlwaysVisible) {
+	if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
+		// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
+		// as if you had confirmed with the Select encoder, but keeping the browser open.
+		claimCurrentFile(1, 1, 1, true);
+	}
 
-			currentlyShowingSamplePreview = false;
-			qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+	// If the Sample at least loaded, even if we didn't sound it, then try to render its waveform.
+	if (std::ssize(AudioEngine::sampleForPreview->sources[0].ranges) >= 1) {
+		AudioFile* sample =
+		    ((MultisampleRange*)AudioEngine::sampleForPreview->sources[0].ranges.getElement(0))->sampleHolder.audioFile;
 
-			if (movementDirection) {
-				getRootUI()->renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
-				//((ViewScreen*)getRootUI())->renderToStore(0, true, false);
-				if (getRootUI() != &keyboardScreen) {
-					PadLEDs::reassessGreyout(true);
-				}
+		if (sample) {
+			uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
+
+			currentlyShowingSamplePreview = true;
+			PadLEDs::reassessGreyout(true);
+
+			waveformBasicNavigator.sample = (Sample*)sample;
+			waveformBasicNavigator.opened();
+
+			// If want scrolling animation
+			if (target.movementDirection && !qwertyAlwaysVisible) {
+				waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
+				                                  waveformBasicNavigator.xZoom, PadLEDs::imageStore,
+				                                  &waveformBasicNavigator.renderData);
 				memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
-				PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
+				PadLEDs::horizontal::setupScroll(target.movementDirection, kDisplayWidth);
+
 				currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
 			}
 
-			possiblySetUpBlinking();
+			// Or if want instant snap render
+			else {
+				if ((qwertyVisible && !qwertyCurrentlyDrawnOnscreen) || qwertyAlwaysVisible) {
+					drawKeys();
+				}
+				else if (!qwertyVisible) {
+					waveformRenderer.renderFullScreen(waveformBasicNavigator.sample, waveformBasicNavigator.xScroll,
+					                                  waveformBasicNavigator.xZoom, PadLEDs::image,
+					                                  &waveformBasicNavigator.renderData);
+					PadLEDs::sendOutMainPadColours();
+				}
+				qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+			}
+			PadLEDs::sendOutSidebarColours(); // For greyout (wait what?)
+
+			didDraw = true;
 		}
+	}
+
+	if (!didDraw) {
+		clearPreviewDisplay(target.movementDirection);
+	}
+}
+
+void SampleBrowser::clearPreviewDisplay(int32_t movementDirection) {
+	// If we need to get rid of whatever was onscreen...
+	if ((currentlyShowingSamplePreview || (qwertyCurrentlyDrawnOnscreen && !qwertyVisible)) && !qwertyAlwaysVisible) {
+
+		currentlyShowingSamplePreview = false;
+		qwertyCurrentlyDrawnOnscreen = qwertyVisible;
+
+		if (movementDirection) {
+			getRootUI()->renderMainPads(0xFFFFFFFF, PadLEDs::imageStore, PadLEDs::occupancyMaskStore);
+			//((ViewScreen*)getRootUI())->renderToStore(0, true, false);
+			if (getRootUI() != &keyboardScreen) {
+				PadLEDs::reassessGreyout(true);
+			}
+			memset(PadLEDs::transitionTakingPlaceOnRow, 1, sizeof(PadLEDs::transitionTakingPlaceOnRow));
+			PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth);
+			currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
+		}
+
+		possiblySetUpBlinking();
 	}
 }
 
@@ -1178,7 +1217,11 @@ bool SampleBrowser::loadAllSamplesInFolder(bool detectPitch, int32_t* getNumSamp
 		previouslyViewedFilename = currentFileItem->filename.c_str();
 	}
 
-	staticDIR = D_TRY_CATCH(FatFS::Directory::open(dirToLoad.c_str()), error, {
+	// Local RAII handle (not the shared FatFS::Directory staticDIR global) - the port selector picks
+	// efatfs or C-FatFS underneath; the destructor closes it on every return path below (including via
+	// the removeReasonsFromSamplesAndGetOut goto target further down), so there's no manual close() to
+	// forget or double up on.
+	auto dir = D_TRY_CATCH_MOVE(deluge::io::Directory::open(dirToLoad), error, {
 		display->displayError(Error::SD_CARD);
 		return false;
 	});
@@ -1226,24 +1269,21 @@ removeReasonsFromSamplesAndGetOut:
 	}
 
 	while (true) {
-		deluge::audio::stream::loader::pump();
-		FilePointer thisFilePointer;
-
 		/* Read a directory item */
-		std::tie(staticFNO, thisFilePointer) = D_TRY_CATCH(staticDIR.read_and_get_filepointer(), error, {
+		std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir.read(), error, {
 			break; // break on error
 		});
 
-		if (staticFNO.fname[0] == 0) {
+		if (!entry.has_value()) {
 			break; // Break on end of dir
 		}
-		if (staticFNO.fname[0] == '.') {
+		if (entry->name[0] == '.') {
 			continue; // Ignore dot entry
 		}
-		if (staticFNO.fattrib & AM_DIR) {
+		if (entry->is_directory) {
 			continue; // Ignore folders
 		}
-		if (!isAudioFilename(staticFNO.fname)) {
+		if (!isAudioFilename(entry->name)) {
 			continue; // Ignore anything that's not an audio file
 		}
 
@@ -1255,21 +1295,21 @@ removeReasonsFromSamplesAndGetOut:
 		if (numSamples > 0) {
 
 			for (int32_t i = 0; i < numCharsInPrefixForFolderLoad; i++) {
-				if (!staticFNO.fname[i] || staticFNO.fname[i] != previouslyViewedFilename[i]) {
+				if (!entry->name[i] || entry->name[i] != previouslyViewedFilename[i]) {
 					numCharsInPrefixForFolderLoad = i;
 					break;
 				}
 			}
 		}
 
-		filePath.resize(dirWithSlashLength), filePath.append(staticFNO.fname);
+		filePath.resize(dirWithSlashLength), filePath.append(entry->name);
 
-		// We really want to be able to pass a file pointer in here
+		// The port's directory entries don't expose a cluster locator, so resolve fresh by path,
+		// the same as any other open.
 		auto* newSample = static_cast<Sample*>(
-		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, &thisFilePointer, AudioFileType::SAMPLE));
+		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, nullptr, AudioFileType::SAMPLE));
 		if (error != Error::NONE || newSample == nullptr) {
 			// Clean up any samples we loaded in this folder load attempt
-			staticDIR.close();
 			goto removeReasonsFromSamplesAndGetOut;
 		}
 
@@ -1290,7 +1330,6 @@ removeReasonsFromSamplesAndGetOut:
 
 		numSamples++;
 	}
-	staticDIR.close();
 
 	if (getPrefixAndDirLength) {
 		// If just one file, there's no prefix.
@@ -1866,7 +1905,8 @@ doReturnFalse:
 				range = source->getOrCreateFirstRange();
 				if (!range) {
 getOut:
-					staticDIR.close();
+					// loadAllSamplesInFolder() (called above) already closed its own directory handle via
+					// RAII when it returned - nothing left here to close.
 					display->displayError(Error::INSUFFICIENT_RAM);
 					goto doReturnFalse;
 				}

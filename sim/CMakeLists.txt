@@ -312,7 +312,8 @@ add_subdirectory(${REPO_ROOT}/src/fatfs      ${CMAKE_BINARY_DIR}/fatfs)      # f
 add_subdirectory(${REPO_ROOT}/src/OSLikeStuff ${CMAKE_BINARY_DIR}/scheduler) # deluge_scheduler
 add_subdirectory(${REPO_ROOT}/src/deluge     ${CMAKE_BINARY_DIR}/app)        # deluge_app + deluge_dsp + generators
 
-# --- Rust core (crates/ workspace: deluge_rust umbrella = alloc + slab + resource) -
+# --- Rust core (crates/ workspace: deluge_rust umbrella = alloc + slab + resource,
+# + the region cursor (deluge_sample_source) under its `sim` feature, SR3a Task 1) -
 # Build the umbrella as a host staticlib matching the sim's word size and link it
 # into the sim executables. The deluge_app allocator (heaps + the GMA coordinator)
 # is unconditionally backed by it; the legacy C++ MemoryRegion path has been retired.
@@ -335,13 +336,23 @@ set(SIM_RUST_LIB ${SIM_RUST_WS}/target/${SIM_RUST_TARGET}/release/libdeluge_rust
 file(GLOB_RECURSE SIM_RUST_SOURCES CONFIGURE_DEPENDS
     ${SIM_RUST_WS}/deluge_alloc/src/*.rs
     ${SIM_RUST_WS}/deluge_resource/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_source/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_fill/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_reader/src/*.rs
+    ${SIM_RUST_WS}/deluge_sample_stream/src/*.rs
     ${SIM_RUST_WS}/deluge_rust/src/*.rs)
-# Under the ASan sim build, turn on the allocator's poison hooks so use-after-free
-# within a heap is caught (the __asan_*_memory_region calls resolve from libasan at
-# the final C++ link). The feature is a no-op in the crate otherwise.
-set(SIM_RUST_FEATURES "")
+# Always build the Rust region cursor (deluge_sample_source, SR2d-5) into the umbrella so the sim
+# resolves the SAME strong `deluge_sample_source_*`/`deluge_sample_region_*` cursor as
+# device/host_app. Since SR3f deleted the C++ weak fallback (sample_source.cpp), the Rust cursor is
+# the sole definition of those symbols here (proved via nm on the sim binary; golden byte-identical).
+# `deluge_rust/sim` forwards to `deluge_sample_source`'s own `sim` feature, which widens abi.rs's cfg
+# gate to actually emit the symbols (see that crate's Cargo.toml).
+# Under the ASan sim build, also turn on the allocator's poison hooks so use-after-free within a
+# heap is caught (the __asan_*_memory_region calls resolve from libasan at the final C++ link).
+# That feature is a no-op in the crate otherwise.
+set(SIM_RUST_FEATURES --features deluge_rust/sim)
 if(DELUGE_SIM_SANITIZE)
-    set(SIM_RUST_FEATURES --features deluge_rust/asan)
+    list(APPEND SIM_RUST_FEATURES --features deluge_rust/asan)
 endif()
 add_custom_command(
     OUTPUT ${SIM_RUST_LIB}
@@ -351,6 +362,10 @@ add_custom_command(
         ${SIM_RUST_WS}/Cargo.lock
         ${SIM_RUST_WS}/Cargo.toml ${SIM_RUST_WS}/deluge_alloc/Cargo.toml
         ${SIM_RUST_WS}/deluge_resource/Cargo.toml ${SIM_RUST_WS}/deluge_rust/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_source/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_fill/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_reader/Cargo.toml
+        ${SIM_RUST_WS}/deluge_sample_stream/Cargo.toml
     COMMENT "Building Rust deluge_rust staticlib (${SIM_RUST_TARGET})"
     VERBATIM
 )
@@ -359,6 +374,20 @@ add_library(deluge_rust_sim STATIC IMPORTED GLOBAL)
 set_target_properties(deluge_rust_sim PROPERTIES IMPORTED_LOCATION ${SIM_RUST_LIB})
 add_dependencies(deluge_rust_sim sim_deluge_rust_build)
 # Libs the host Rust std staticlib references; linked into the sim executables below.
+#
+# Plain (lazily-extracted) static archive linkage: every `deluge_sample_source_*`/`deluge_resource_*`
+# symbol the Rust umbrella exports is referenced as an *undefined* symbol by deluge_app's C++ (the
+# region-port bridge in sample_low_level_reader.cpp, the resource-manager callers), so ordinary
+# archive-member extraction pulls the Rust definitions from libdeluge_rust.a normally.
+#
+# Historical note (SR3a..SR3f): this link used to need `$<LINK_LIBRARY:WHOLE_ARCHIVE,...>` because
+# the now-deleted C++ mirror storage/audio/stream/sample_source.cpp contributed `__attribute__((weak))`
+# `deluge_sample_source_*` bodies via deluge_app (an OBJECT library, always included) BEFORE this
+# archive -- so those symbols were already (weakly) defined by the time ld reached the archive, and
+# plain extraction never pulled the strong Rust override (empirically all 7 showed as `W` in `nm`).
+# WHOLE_ARCHIVE force-extracted the whole umbrella so strong/weak resolution could pick Rust. SR3f
+# deleted that mirror, so the symbols are genuinely undefined here and the workaround is no longer
+# needed (verified: `nm deluge_render` shows all 7 as `T`, golden byte-identical, without it).
 set(SIM_ALLOC_LINK deluge_rust_sim pthread dl m)
 if(APPLE)
     # host_pcm.c's native CoreAudio (AudioQueue) audio backend.
@@ -379,6 +408,7 @@ add_executable(deluge_host
     ${REPO_ROOT}/src/bsp/host/host_midi.c
     ${REPO_ROOT}/src/bsp/host/host_main.c
     ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
 )
 # host_debug.cpp reaches into the app's reason_check (memory/reason_check.h) for the host-sim leak triggers - allowed
 # (the boundary check only forbids the app depending on the BSP, not the reverse), so put src/deluge on the path.
@@ -386,30 +416,6 @@ target_include_directories(deluge_host PRIVATE ${HOST_INCLUDE_DIRS} ${REPO_ROOT}
 target_link_libraries(deluge_host PRIVATE deluge_app deluge_scheduler ${SIM_ALLOC_LINK})
 if(RT_LIB)
     target_link_libraries(deluge_host PRIVATE ${RT_LIB})
-endif()
-
-# deluge_render: the headless "project -> stems" utility. Same app + host BSP as
-# deluge_host, but its own main()/render-driver (host_render_main.cpp) instead of
-# host_main.c, and it drives the existing offline StemExport engine against a FAT
-# disk image (the shared host_platform.c diskio backend). Requires mtools at runtime
-# (--project packing). See host_render_main.cpp for usage.
-add_executable(deluge_render
-    ${REPO_ROOT}/src/bsp/host/host_bsp.c
-    ${REPO_ROOT}/src/bsp/host/host_platform.c
-    ${REPO_ROOT}/src/bsp/host/host_audio.c
-    ${REPO_ROOT}/src/bsp/host/host_link.c
-    ${REPO_ROOT}/src/bsp/host/host_ws.c
-    ${REPO_ROOT}/src/bsp/host/host_pcm.c
-    ${REPO_ROOT}/src/bsp/host/host_midi.c
-    ${REPO_ROOT}/src/bsp/host/host_render_main.cpp
-    ${REPO_ROOT}/src/bsp/host/host_debug.cpp
-)
-# host_debug.cpp provides deluge_host_debug_poll() (called from host_audio.c) + reaches the app's reason_check;
-# src/deluge on the path for memory/reason_check.h (the boundary check only forbids app→BSP, not BSP→app).
-target_include_directories(deluge_render PRIVATE ${HOST_INCLUDE_DIRS} ${REPO_ROOT}/src/deluge)
-target_link_libraries(deluge_render PRIVATE deluge_app deluge_scheduler ${SIM_ALLOC_LINK})
-if(RT_LIB)
-    target_link_libraries(deluge_render PRIVATE ${RT_LIB})
 endif()
 
 # deluge_loadcheck: headless "load these audio files, print their parsed descriptors" utility — the Tier-2
@@ -426,6 +432,7 @@ add_executable(deluge_loadcheck
     ${REPO_ROOT}/src/bsp/host/host_midi.c
     ${REPO_ROOT}/src/bsp/host/host_loadcheck_main.cpp
     ${REPO_ROOT}/src/bsp/host/host_debug.cpp
+    ${REPO_ROOT}/src/bsp/host/host_efatfs_passthrough.cpp
 )
 # host_debug.cpp provides deluge_host_debug_poll() (called from host_audio.c) + reaches the app's reason_check;
 # src/deluge on the path for memory/reason_check.h (the boundary check only forbids app→BSP, not BSP→app).
@@ -435,27 +442,10 @@ if(RT_LIB)
     target_link_libraries(deluge_loadcheck PRIVATE ${RT_LIB})
 endif()
 
-# ---------------------------------------------------------------------------
-# Layout-invariance guard (CTest). Render each fixture at two heap-pad layouts
-# (DELUGE_SIM_HEAP_PAD via scripts/golden_mixdown.sh padsweep) and assert the
-# outputs are bit-identical — proving no render depends on allocation addresses.
-# This is the regression net for the shared-PRNG / overread class of layout-
-# coupled bug (a passing `golden check` does NOT prove this; it's pinned to one
-# layout). The real backup songs live only on the developer's machine
-# (DELUGE_BACKUP), so each test SKIPs (exit 77) when its fixture is absent — a
-# fixtureless CI runner skips rather than fails. Slow (two full renders each);
-# build deluge_render first, then opt in with `ctest -L padsweep`.
-enable_testing()
-foreach(fixture cordae highsiderr icoustic)
-    add_test(
-        NAME padsweep_${fixture}
-        COMMAND ${CMAKE_COMMAND} -E env
-                FIXTURE=${fixture} PADS=64 NO_BUILD=1 BUILD_DIR=${CMAKE_BINARY_DIR}
-                bash ${REPO_ROOT}/scripts/golden_mixdown.sh padsweep
-    )
-    set_tests_properties(padsweep_${fixture} PROPERTIES
-        SKIP_RETURN_CODE 77
-        LABELS padsweep
-        TIMEOUT 1200
-    )
-endforeach()
+# NOTE: the C-host `deluge_render` / `deluge_recorder_roundtrip` renderers and their CTests
+# (the padsweep layout-invariance guard + the SampleRecorder round-trip oracle) were retired
+# when the sample-streaming golden moved onto the async Embassy renderer: `deluge_render` is
+# superseded by `src/bsp/rust/golden_vt_render` (`scripts/golden_embassy_diff.sh`), and the
+# recorder round-trip oracle now runs there too (`GOLDEN_SCENARIO=recorder_roundtrip`). The
+# padsweep layout-invariance guard has no Embassy replacement yet — a tracked follow-up.
+# `deluge_loadcheck` (parse-only, no sample streaming) stays.

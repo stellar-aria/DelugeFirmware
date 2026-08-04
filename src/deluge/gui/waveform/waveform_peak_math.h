@@ -22,7 +22,11 @@ struct WaveformPeak {
 WaveformPeak scanClusterPeak(const char* clusterData, int32_t startByte, int32_t endByte, int32_t byteDepth,
                              int32_t numChannels);
 
-// Coarse int8 peak, rounded toward zero (matches the SampleCluster min/max storage).
+/// @brief Round a peak value to the coarse int8 representation used for waveform overview storage.
+///
+/// Rounds toward zero, matching the OverviewCacheEntry min/max storage encoding.
+/// @param value Raw peak value to convert.
+/// @return The coarse int8 peak.
 int8_t toCoarsePeak(int32_t value);
 
 // Exclusive end byte of audio within the final audio cluster. Rounds UP, so audio that ends

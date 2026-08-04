@@ -1,0 +1,19 @@
+[package]
+# SPIKE (SR2b) — THROWAWAY de-risk crate, superseded by SR2d. NOT a workspace member.
+# Mirrors src/bsp/rust/fs_differential/: a standalone crate whose build.rs `cc::Build`-compiles app
+# C++ (convert.cpp + stitch.cpp + their argon SIMD) into a Rust test binary. Proves the two TUs compile
+# under `cc` for BOTH the x86 host (SIMDe) and the armv7a-NEON device target at C++26, and that the
+# x86 objects behave correctly (FFI round-trip mirroring tests/spec_audio_stream/*_spec.cpp).
+name = "argon-cc-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"

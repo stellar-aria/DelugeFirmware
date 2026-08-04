@@ -40,6 +40,7 @@ public:
 	UIType getUIType() override { return UIType::SAVE_INSTRUMENT_PRESET; }
 
 protected:
+	void onBrowserOpened() override;
 	// int32_t arrivedInNewFolder(int32_t direction);
 };
 

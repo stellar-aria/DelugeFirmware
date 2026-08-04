@@ -38,6 +38,8 @@ __pycache__
 .deluge_hex_key
 **/target/
 /deluge_host_out.wav
+/sim/build/
+/sim/deluge_host_out.wav
 
 # Local Claude Code config / skills (not shared)
 .claude/
@@ -45,3 +47,8 @@ __pycache__
 # Superpowers process artifacts (specs, plans, ledger) — local, not shared
 .superpowers/
 docs/superpowers/
+/rtt-rust.log
+/rtt-bench.log
+/rtt.log
+tools/__pycache__/
+__pycache__/

@@ -416,6 +416,26 @@ set_target_properties(deluge
 # Deluge sources
 add_subdirectory(src)
 
+# --- Legacy RZA1 BSP retirement guard -------------------------------------
+# efatfs (the streaming sample-read path) is Rust-BSP-only, so the RZA1
+# firmware links only the weak `deluge_efatfs_open` no-op and its sample loading
+# is non-functional at runtime (see scripts/cmake/retired_rza1_bsp_guard.cmake).
+# Fail the RZA1 executable build LOUDLY so a dead image can't ship silently.
+# PRE_LINK on the `deluge` executable => fires only when that image is actually
+# linked: the Rust BSP builds the `deluge_app` staticlib (never links `deluge`),
+# and the host-sim is a separate CMake project (DelugeHostSim, no `deluge`
+# target), so neither is affected. Overridable for deliberate non-streaming
+# bring-up / bisecting. (Must live here in the root scope where `deluge` is
+# created — add_custom_command(TARGET) requires the target's own directory.)
+option(DELUGE_ALLOW_RETIRED_RZA1_BSP
+    "Build the retired legacy C/C++ RZA1 firmware anyway (its streaming sample-read path is non-functional as of R1)."
+    OFF)
+if(NOT DELUGE_ALLOW_RETIRED_RZA1_BSP)
+    add_custom_command(TARGET deluge PRE_LINK
+        COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/scripts/cmake/retired_rza1_bsp_guard.cmake
+        VERBATIM)
+endif()
+
 # find_program(PRETTYSIZE_CMD prettysize prettysize.py)
 
 # if(NOT PRETTYSIZE_CMD STREQUAL "PRETTYSIZE_CMD-NOTFOUND")

@@ -72,14 +72,9 @@ void SaveUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem && currentFileItem->isFolder) {
-
-		Error error = goIntoFolder(currentFileItem->filename.c_str());
-
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
+		goIntoFolder(currentFileItem->filename.c_str());
 	}
 
 	else if (enteredText.empty()) {} // Previously had &&currentFolderIsEmpty ... why?

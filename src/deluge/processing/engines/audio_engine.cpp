@@ -40,7 +40,9 @@
 #include "libdeluge/app.h"
 #include "libdeluge/audio_io.h"
 #include "libdeluge/signals.h"
+#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/system.h"
+#include "libdeluge/worker.h"
 #include "memory/general_memory_allocator.h"
 #include "memory/stack_guard.h"
 #include "model/instrument/kit.h"
@@ -60,9 +62,9 @@
 #include "processing/sound/sound_instrument.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h" // deluge::storage::Coalescer (SD-routine dispatch)
 #include "storage/storage_manager.h"
 #include "sync/sd_access.h"
 #include "util/functions.h"
@@ -381,12 +383,10 @@ int32_t getNumVoices() {
 	                             [](auto sound) { return sound->voices().size(); });
 }
 
-void routineWithClusterLoading(bool mayProcessUserActionsBetween) {
+void routineWithClusterLoading() {
 	logAction("AudioDriver::routineWithClusterLoading");
 
 	routineBeenCalled = false;
-
-	deluge::audio::stream::loader::pump(128, mayProcessUserActionsBetween);
 
 	if (!routineBeenCalled) {
 		// bypassCulling = true; // yolo? Sean: not sure if this is necessary
@@ -1077,9 +1077,28 @@ void routine() {
 	}
 	else {
 		if (!isSDRoutineActive()) {
-			auto timeNow = getSystemTime();
-			while (getSystemTime() < timeNow + 32 / 44100.) {
-				size_t numSamples = 32;
+			// An offline render is by definition NOT paced by real time, so the work done per
+			// audioRoutine call must never be bounded by the wall clock: the block count per call
+			// must not depend on host speed, host load, or how long the work inside each iteration
+			// happens to take. That count decides how rendering interleaves with the cluster loader,
+			// the SD routine and the recorder's cluster write-out, which decides eviction and
+			// underrun behaviour, which changes the rendered audio -- fragile enough that adding a
+			// bare fprintf to an unrelated translation unit could tip a call's block count and flip a
+			// fixture's rendered payload.
+			//
+			// So the batch is bounded by a fixed block count. Do not reintroduce any time-based bound
+			// here (the real-time branch above is the one that legitimately paces off the clock).
+			//
+			// The batch is still a batch - the point of looping is to amortise the surrounding
+			// machinery (the loader pump and the slow/recorder routines run between audioRoutine
+			// calls, see StemExport::renderWait) rather than pay it per 32 frames. The size is one
+			// output-buffer quantum, SSI_TX_BUFFER_NUM_SAMPLES frames: the same amount of audio the
+			// real-time path produces per driver pass, so the offline cadence matches the one the rest
+			// of the engine is built around - and now it is identical on every host and on the device.
+			constexpr size_t kOfflineFramesPerBlock = 32;
+			constexpr int32_t kOfflineBlocksPerRoutine = SSI_TX_BUFFER_NUM_SAMPLES / kOfflineFramesPerBlock;
+			for (int32_t block = 0; block < kOfflineBlocksPerRoutine; ++block) {
+				size_t numSamples = kOfflineFramesPerBlock;
 				tickSongFinalizeWindows(numSamples);
 
 				numSamplesLastTime = numSamples;
@@ -1116,8 +1135,6 @@ void routine() {
 						}
 					}
 				}
-
-				deluge::audio::stream::loader::pump(128, false);
 			}
 		}
 	}
@@ -1524,6 +1541,34 @@ void doRecorderCardRoutines() {
 	}
 }
 
+namespace {
+// Coalesced SD-routine dispatch of the recorder card-write drain onto the storage
+// owner (the worker fiber on Embassy). SD-routine-class: while a drain is in flight
+// the RESOURCE_SD_ROUTINE gate holds off audioRecorder.slowRoutine (discardRecorder),
+// so the recorder can't be freed mid-drain. Only ever touched on the main executor.
+deluge::storage::Coalescer g_recorder_coalescer{/*sd_routine=*/true};
+
+void recorder_card_routines_fill(void*) {
+	doRecorderCardRoutines();
+}
+} // namespace
+
+void requestRecorderCardRoutines() {
+	// Never from an ISR / the audio interrupt-executor: deluge_storage_on_owner() is false there
+	// and we'd race the coalescer's main-executor-only state. The recorder drain is never driven
+	// from an ISR.
+	if (deluge_in_interrupt()) {
+		return;
+	}
+	// Already on the owner (fiber on Embassy; always on legacy/host) — run inline, so a
+	// fiber-context caller doesn't re-dispatch onto the fiber it already runs on.
+	if (deluge_storage_on_owner()) {
+		doRecorderCardRoutines();
+		return;
+	}
+	g_recorder_coalescer.request(recorder_card_routines_fill, nullptr);
+}
+
 void slowRoutine() {
 	if (isSDRoutineActive()) {
 		// can happen if the SD routine is yielding
@@ -1548,8 +1593,9 @@ void slowRoutine() {
 
 	createdNewRecorder = false;
 
-	// Go through all SampleRecorders, getting them to write etc
-	doRecorderCardRoutines();
+	// Go through all SampleRecorders, getting them to write etc — via the storage
+	// owner (SD-routine-class; inline on legacy/host, coalesced on the fiber on Embassy).
+	requestRecorderCardRoutines();
 }
 
 // will need to take in the config argument

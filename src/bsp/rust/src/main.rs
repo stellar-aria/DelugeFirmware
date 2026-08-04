@@ -45,6 +45,41 @@ extern crate deluge_resource;
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_resource;
 
+// Link-only, same reasoning as the `deluge_resource` pair above. The C++ reader
+// (sample_low_level_reader.cpp) CALLS the `deluge_sample_source_*`/`deluge_sample_region_*` C ABI;
+// `deluge_sample_source`'s crate (`abi.rs`) is the sole definition of those symbols -- there is no
+// C++ fallback in sample_source.cpp -- gated `cfg(any(target_os = "none", feature =
+// "host_app"))` to match these two `extern crate` arms exactly. Without this, rustc/lld would never pull
+// `deluge_sample_source`'s single-object rlib into the link at all (nothing in this crate's own Rust
+// code references it), leaving those C ABI symbols undefined at link time on device/host_app.
+#[cfg(target_os = "none")]
+extern crate deluge_sample_source;
+/// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_sample_source;
+
+// Link-only, same reasoning as the `deluge_sample_source` pair above. Its `abi.rs`
+// defines the lifecycle trio of the `deluge_sample_reader_*` C ABI (`include/libdeluge/
+// sample_reader.h`), gated identically. Nothing calls it yet (no consumer has migrated to it), so
+// without this `extern crate` rustc/lld would drop the whole rlib from the link; this just
+// proves the symbols are present and compile clean end-to-end ahead of a real caller being wired up.
+#[cfg(target_os = "none")]
+extern crate deluge_sample_reader;
+/// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_sample_reader;
+
+// Link-only, same reasoning as the `deluge_sample_reader` pair above. Its `abi.rs`
+// will define the `deluge_sample_stream_*` C ABI (`include/libdeluge/
+// sample_stream.h`). Nothing calls it yet (no consumer has migrated to it), so
+// without this `extern crate` rustc/lld would drop the whole rlib from the link; this just proves
+// the symbols are present and compile clean end-to-end ahead of the facade wiring a real caller.
+#[cfg(target_os = "none")]
+extern crate deluge_sample_stream;
+/// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+extern crate deluge_sample_stream;
+
 /// libdeluge POD types generated from include/libdeluge/*.h (types only; the
 /// service functions are defined in [`ffi`]). No C++ app is linked on host
 /// unless `host_app` is enabled (see build.rs), so there is no bindgen output
@@ -83,6 +118,10 @@ mod audio;
 /// stub in `host_link_stubs.rs`.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod audio_host;
+/// On-device read-throughput benchmark, `embedded-fatfs` vs the
+/// vendored C FatFS — see its module doc. Non-default: `bench_fs` feature.
+#[cfg(all(target_os = "none", feature = "bench_fs"))]
+mod bench_fs;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
 /// too under `host_app` (the descriptor/probe are pure data/logic; the GPIO/CV
 /// bring-up bodies get host no-op siblings — see board.rs).
@@ -98,6 +137,36 @@ mod control;
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
+/// Storage-generic, host-testable core of the efatfs read path
+/// (`HandleTable` + `FileContext` detach/reattach + generation guard + fill
+/// loop). `efatfs_fs` wraps it with the device statics/mutexes/FFI; host tests
+/// and `lens1_vt_sim` drive it directly. Also reachable under `host_app`
+/// (any target, independent of `efatfs_streaming`) so `efatfs_host_shim` — the
+/// host counterpart of `efatfs_fs` — can reuse it unchanged; see that module's
+/// doc.
+#[cfg(any(
+    all(target_os = "none", feature = "efatfs_streaming"),
+    feature = "host_app"
+))]
+mod efatfs_core;
+/// The single-owner `embedded-fatfs` mount — one `FileSystem` behind an
+/// async `Mutex`, the only way live code touches the vendored FS. Non-default:
+/// `efatfs_streaming` feature. `mount()`/`with_fs()` are invoked from this
+/// crate's boot path and the streaming read path once the feature is
+/// enabled.
+#[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
+mod efatfs_fs;
+/// Host counterpart of `efatfs_fs` — mounts `embedded-fatfs` over a
+/// block device backed by the SD_BUS-guarded async helpers (see that
+/// module's doc) so a host harness can measure the real efatfs read path.
+/// Test infrastructure only; no device path touched.
+#[cfg(feature = "host_app")]
+mod efatfs_host_shim;
+/// `block_device_driver::BlockDevice<512>` over the real SD driver
+/// (`deluge_bsp::sd`), feeding the `BufStream`/`embedded-fatfs` stack —
+/// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.
+#[cfg(target_os = "none")]
+mod fat_block_device;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
 /// Compiled on host too under `host_app` (bodies are already host-safe).
 #[cfg(any(target_os = "none", feature = "host_app"))]
@@ -122,16 +191,45 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
+/// Does a FINALIZED multi-cluster recording's residency table get sized correctly,
+/// and does region index 1+ read back correctly through the region port on THIS target? See its
+/// module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod recorder_finalize_probe;
+/// Does a still-recording sample's live read-back resolve on THIS target
+/// (`async_streaming_loader` on)? See its module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod recorder_probe;
+/// Streaming-underrun harness: the reusable, thread-agnostic scenario driver
+/// (load a real song, start playback, start a concurrent recording, step N audio
+/// blocks) — see its module doc. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod scenario;
 /// scheduler.h / OSLikeStuff scheduler_api.h — the cooperative task scheduler,
 /// implemented on the Embassy executor (one task per registered Deluge task).
 mod scheduler;
 /// block_device.h + FatFS diskio — SD card over deluge_bsp::sd.
 mod sd;
+/// Streaming-underrun harness: packs a real FAT SD image from the golden
+/// harness's song/sample corpus for [`scenario`] to load. `host_app`-only.
+#[cfg(all(not(target_os = "none"), feature = "host_app"))]
+mod sd_image;
 /// Real impls of the simplest services (system.h, clock.h, memory.h).
 mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
 #[cfg(target_os = "none")]
 mod signals;
+/// The async cluster-fill task (R1) and its selector/wakeup C ABI (R2.1): drains
+/// the resource manager's loader queue on this executor, awaiting the SD read
+/// instead of running it inline on the fiber as the old C++ `loader::pump()`
+/// did. Compiled on the Embassy
+/// BSP unconditionally (device, or host under `host_app`) so
+/// `deluge_streaming_async_active`/`deluge_streaming_signal_fill` always link;
+/// the task itself (spawned below) and the rest of the drain machinery stay
+/// gated behind `async_streaming_loader` — see its module doc's "Two
+/// compilation tiers".
+#[cfg(any(target_os = "none", feature = "host_app"))]
+mod streaming_loader;
 /// USB device bring-up — USB-MIDI 1.0 peripheral (Deluge → computer).
 #[cfg(target_os = "none")]
 mod usb;
@@ -159,6 +257,30 @@ unsafe extern "C" {
 /// allocates from SRAM yet; sized small.
 #[cfg(target_os = "none")]
 static mut RUST_SRAM_POOL: [u8; 64 * 1024] = [0; 64 * 1024];
+
+/// `#[global_allocator]` binding for `extern crate alloc` — required as
+/// soon as any dependency needs it, which `fat_block_device.rs`'s
+/// `embedded-fatfs` (`alloc` feature) is the first to on this target; nothing
+/// else here used `alloc` before. Backed by `fs_alloc::DelugeGlobalAlloc` — the
+/// same TLSF heap *implementation* `deluge_resource` uses for the residency
+/// engine's C ABI, but a DISTINCT instance/arena (its own `DelugeHeap`, not
+/// shared with `deluge_resource`'s). Aliased to the `fs_alloc` crate name to
+/// avoid colliding with the sibling deluge-sdk `deluge-alloc` crate
+/// (`RUST_SRAM_POOL`/`allocator`, above) — both would otherwise normalize to
+/// the identifier `deluge_alloc`.
+///
+/// NOT YET INITIALISED with a real backing arena (`fs_alloc::DelugeGlobalAlloc
+/// ::init` is never called): this registration exists purely so `alloc` has a
+/// `GlobalAlloc` impl to bind to at link time, satisfying the whole-stack
+/// cross-compile. `deluge_alloc::deluge_alloc`'s null-handle guard makes an
+/// allocation through an uninitialised instance return null (not UB), so this
+/// is safe to add now without a live heap — but nothing that actually needs
+/// `alloc` (e.g. a real on-device `embedded-fatfs` mount) can run correctly
+/// until a future task calls `.init()` with a real arena and decides where it
+/// comes from (dedicated pool vs. shared with an existing heap).
+#[cfg(target_os = "none")]
+#[global_allocator]
+static FS_ALLOCATOR: fs_alloc::DelugeGlobalAlloc = fs_alloc::DelugeGlobalAlloc::new();
 
 #[cfg(target_os = "none")]
 #[panic_handler]
@@ -335,6 +457,12 @@ pub extern "C" fn main() -> ! {
         spawner.spawn(usb::midi_rx_task(usb_midi.ep_out).unwrap());
         spawner.spawn(usb::midi_tx_task(usb_midi.ep_in).unwrap());
         spawner.spawn(app_task().unwrap());
+        // R2.1: the async cluster-fill task, selectable via `async_streaming_loader`.
+        // Owns the streaming loader queue when active (feature `async_streaming_loader`);
+        // inert (never polled beyond its idle wait) unless the C++ enqueue path
+        // signals `FILL_WAKE`.
+        #[cfg(feature = "async_streaming_loader")]
+        spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
     });
 }
 
@@ -372,6 +500,66 @@ async fn app_task() {
     // block_on (integrated timer queue).
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
+
+    // With `efatfs_streaming` enabled (the default): give the
+    // FS allocator a real backing arena, then mount the single-owner
+    // embedded-fatfs `FileSystem` — BEFORE `deluge_app_init` so the FS is ready
+    // for the first C++ sample-load. A failed mount must NOT brick boot — but note
+    // the streaming read is efatfs-only with NO C-FatFS fallback, so a
+    // failed mount means streamed samples won't load (open_read_stream fails), not
+    // that C++ silently reverts to C-FatFS. The SD block driver is already up
+    // (boot_init above) and nothing has touched the card yet.
+    //
+    // CAVEAT: this and `bench_fs` BOTH init `crate::FS_ALLOCATOR` over
+    // their own arena — enabling both features at once would double-init it.
+    // Don't: `bench_fs` is a throwaway benchmark feature, `efatfs_streaming` is
+    // the real read path.
+    #[cfg(feature = "efatfs_streaming")]
+    {
+        // Backing arena for `crate::FS_ALLOCATOR` (see its doc): embedded-fatfs's
+        // `alloc` feature needs a live heap before its first allocation (LFN
+        // directory-scan scratch, handle-table strings). 96 KiB matches the size
+        // `bench_fs` proved on-device — plain `.bss`, well within the RZ/A1L's
+        // on-chip SRAM.
+        const EFATFS_ARENA_SIZE: usize = 96 * 1024;
+        static mut EFATFS_ARENA: [u8; EFATFS_ARENA_SIZE] = [0; EFATFS_ARENA_SIZE];
+
+        // SAFETY: `EFATFS_ARENA` is a function-local static this block alone ever
+        // touches; this runs at most once (app_task runs once). `addr_of_mut!` +
+        // `size_of_val(&*p)` (not `&mut EFATFS_ARENA` directly) mirrors the exact
+        // idiom `bench_fs::init_allocator` / `RUST_SRAM_POOL` use, avoiding a
+        // `static_mut_refs` reference to the static itself.
+        let (base, size) = unsafe {
+            let p = core::ptr::addr_of_mut!(EFATFS_ARENA);
+            (p.cast::<u8>(), core::mem::size_of_val(&*p))
+        };
+        // SAFETY: `base`/`size` describe that same live, exclusively-owned
+        // 'static arena; `deluge_heap_create` only ever writes within
+        // `[base, base+size)`.
+        let handle = unsafe { fs_alloc::deluge_heap_create(base, size) };
+        assert!(
+            !handle.is_null(),
+            "efatfs: {EFATFS_ARENA_SIZE}-byte arena too small for a DelugeHeap control block"
+        );
+        crate::FS_ALLOCATOR.init(handle);
+        log::info!(
+            "efatfs: FS_ALLOCATOR initialised over a {} KiB arena",
+            EFATFS_ARENA_SIZE / 1024
+        );
+
+        match crate::efatfs_fs::mount().await {
+            Ok(()) => log::info!("efatfs: mounted"),
+            Err(()) => log::warn!("efatfs: mount failed — streaming falls back to C FatFS"),
+        }
+    }
+
+    // With `bench_fs` enabled (off by default): run the on-device
+    // embedded-fatfs-vs-C-FatFS read-throughput benchmark right here — the SD
+    // block driver is up but nothing has touched the card yet, so its two
+    // reads are genuinely uncontended. Prints its `SP1_BENCH …` result line
+    // over RTT/log and returns either way; boot continues normally after.
+    #[cfg(feature = "bench_fs")]
+    bench_fs::run().await;
 
     log::info!("deluge-rust: deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this
@@ -411,10 +599,19 @@ async fn app_task() {
 /// one-time bring-up, run on the host executor spawned by `fn main`'s
 /// `host_app` boot path. Mirrors the device sequencing exactly (wait for the
 /// PIC handshake, bring SD up, then `deluge_app_init`), minus the device-only
-/// SYNC LED blink (no GPIO on host) and the worker-fiber pump loop (nothing on
-/// the boot-and-idle path dispatches a yielding op onto the worker fiber — see
-/// `fiber.rs`'s module doc — so there is nothing for this task to pump; it
-/// parks instead, exactly as this fn's doc promises).
+/// SYNC LED blink (no GPIO on host).
+///
+/// After init, this runs the SAME worker-fiber pump loop as the device
+/// [`app_task`] (see its doc comment for the full rationale) rather than
+/// parking. The loop is needed here too: it drives the worker ring, so
+/// owner-dispatched storage work actually runs. Coalesced owner ops (the
+/// recorder card-write drain, card re-init) enqueue onto that ring; without the
+/// loop draining it, a `Coalescer`'s single-flight guard latches
+/// `in_flight_ = true` on its first dispatch and never releases
+/// (`run_and_release` never runs), so every later request silently no-ops. It
+/// is also what lets a real streaming cluster read (once one is queued — see
+/// the `sim_latency`/streaming-underrun harness) genuinely reach the fiber and,
+/// under `sim_latency`, suspend it.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[embassy_executor::task]
 async fn host_app_task() {
@@ -423,16 +620,50 @@ async fn host_app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
+    // Host counterpart of `app_task`'s efatfs mount (see its comment) —
+    // mount the shim's embedded-fatfs `FileSystem` BEFORE `deluge_app_init` so
+    // the app's first sample-load can open an efatfs handle. No FS_ALLOCATOR
+    // arena needed here (unlike the device): `efatfs_host_shim.rs`'s module doc
+    // notes embedded-fatfs's `alloc` feature just uses the host's implicit std
+    // allocator. A failed mount must NOT abort boot — but the streaming read
+    // is efatfs-only, so a failed mount means streamed samples won't load
+    // rather than reverting to C-FatFS, exactly like the device. No `sim_latency::set_off_fiber_instant`
+    // dance is needed on this path either: this mount's block device awaits the
+    // SD_BUS-guarded async helpers directly (see the shim's module doc) rather
+    // than bridging through a synchronous off-fiber dispatch that would need
+    // that workaround, and in any case `sim_latency::pump` runs on the
+    // dedicated audio OS thread (spawned above in `main`, before this task),
+    // so this task's `block_on` busy-spin never starves it (see Appendix A of
+    // the R0 design doc for why Lens 1's single-threaded shape is different).
+    #[cfg(feature = "efatfs_streaming")]
+    match crate::efatfs_host_shim::mount().await {
+        Ok(()) => log::info!("efatfs: mounted (host)"),
+        Err(()) => log::warn!("efatfs: host mount failed — streaming falls back to C FatFS"),
+    }
+
     log::info!("deluge-bsp-rust: host deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this
     // executor via scheduler::set_spawner's stashed spawner. They begin running
-    // as soon as we park below.
+    // as soon as we yield below.
     unsafe { deluge_app_init(board::deluge_board()) };
-    log::info!("deluge-bsp-rust: host scheduler running; app_task parking");
+    log::info!("deluge-bsp-rust: host scheduler running; pumping async worker");
 
-    // The scheduler's task runners now own all app work; this task has nothing
-    // left to do (see doc comment above re: the worker-fiber pump).
-    core::future::pending::<()>().await;
+    // Same wake-driven pump shape as the device `app_task` — see there for the
+    // full rationale (busy: race WORKER_WAKE against a coarse 8ms fallback;
+    // idle: sleep on WORKER_WAKE alone).
+    use embassy_futures::select::select;
+    loop {
+        let busy = fiber::worker_poll();
+        if busy {
+            let _ = select(
+                fiber::WORKER_WAKE.wait(),
+                embassy_time::Timer::after_millis(8),
+            )
+            .await;
+        } else {
+            fiber::WORKER_WAKE.wait().await;
+        }
+    }
 }
 
 /// Host harness entry (`cargo build`/`cargo test` off-target, no `target_os =
@@ -455,27 +686,80 @@ fn main() {
     // deluge_block_write, read it back via deluge_block_read, and verify the
     // bytes survive — proves the file-backed shim actually persists data, not
     // just that it links. Sector 1 (not 0): leaves a notional boot sector alone.
-    const TEST_SECTOR: u32 = 1;
-    let mut pattern = [0u8; 512];
-    for (i, b) in pattern.iter_mut().enumerate() {
-        *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+    //
+    // Deliberately called here, synchronously, before any executor/fiber
+    // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
+    // not an app FatFS access, so it has no owner to route through yet. Under
+    // `storage-owner-audit`'s pre-flight gate this does NOT
+    // trip `sd.rs`'s `on_fiber()` debug_assert!: the assert's guard is
+    // `on_fiber() || !worker_started()`, and `worker_started()` only latches
+    // true once the first `worker_poll()` runs, which is after this
+    // synchronous self-test returns — so it runs unconditionally in both
+    // configs.
+    //
+    // `sim_latency`-on only: SKIPPED here instead. Under `sim_latency`,
+    // `deluge_block_write`/`deluge_block_read` route through
+    // `sim_latency::modeled_write`/`modeled_read` (see sd.rs's module doc),
+    // which pends on `sim_latency::pump` — a genuinely-spawned Embassy task —
+    // to resolve the modeled delay. No executor exists yet at this point in
+    // `fn main()`, so nothing could ever spawn `pump`, and the off-fiber
+    // `block_on` below would busy-spin forever waiting on a modeled transfer
+    // nobody services. The same round trip (write + read, byte-for-byte data
+    // assertion) stays covered under `sim_latency` by
+    // `tests/sim_latency_host.rs`'s exercise, which brings up a real executor
+    // with `sim_latency::pump` running before issuing any transfer.
+    //
+    // Also SKIPPED whenever `host_app` is on. This write is destructive
+    // (it clobbers sector 1 of WHATEVER image `DELUGE_SD_IMAGE` names) and, on
+    // a `host_app` build, that can be a real, externally-supplied FAT image —
+    // e.g. `preemptive_race_tsan/run.sh`'s own documented, recommended
+    // `DELUGE_SD_IMAGE=<cached image>` workflow (its header comment: reusing an
+    // already-packed image is "100% reliable", vs. packing fresh in-process).
+    // This self-test's synthetic byte pattern lands on FAT32's FSInfo sector,
+    // which C-FatFS's `f_mount`
+    // tolerates (it just re-derives the free-cluster count) but
+    // `embedded-fatfs`'s stricter mount validation rejects outright
+    // (`CorruptedFileSystem`) — so enabling `efatfs_streaming` on this path
+    // surfaced a pre-existing landmine that C-FatFS-only builds never
+    // triggered. Under `host_app`, the real app's own boot (FatFS/efatfs mount
+    // + whatever scenario runs) already exercises the same
+    // `deluge_block_write`/`deluge_block_read` ABI end-to-end with real data,
+    // making this synthetic smoke test both redundant and unsafe there.
+    #[cfg(any(feature = "sim_latency", feature = "host_app"))]
+    log::info!(
+        "deluge-bsp-rust: sd round-trip SKIPPED ({})",
+        if cfg!(feature = "host_app") {
+            "host_app is on — this write is destructive and DELUGE_SD_IMAGE may name a \
+             real caller-supplied FAT image; the app's own boot exercises the same ABI"
+        } else {
+            "sim_latency has no executor/pump yet at this bootstrap point — see \
+             tests/sim_latency_host.rs for the covered equivalent"
+        }
+    );
+    #[cfg(not(any(feature = "sim_latency", feature = "host_app")))]
+    {
+        const TEST_SECTOR: u32 = 1;
+        let mut pattern = [0u8; 512];
+        for (i, b) in pattern.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let status = sd::deluge_block_write(0, pattern.as_ptr(), TEST_SECTOR, 1);
+        assert_eq!(
+            status, 0,
+            "sd round-trip: deluge_block_write failed (status={status})"
+        );
+        let mut readback = [0u8; 512];
+        let status = sd::deluge_block_read(0, readback.as_mut_ptr(), TEST_SECTOR, 1);
+        assert_eq!(
+            status, 0,
+            "sd round-trip: deluge_block_read failed (status={status})"
+        );
+        assert_eq!(
+            pattern, readback,
+            "sd round-trip: readback did not match what was written"
+        );
+        log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
     }
-    let status = sd::deluge_block_write(0, pattern.as_ptr(), TEST_SECTOR, 1);
-    assert_eq!(
-        status, 0,
-        "sd round-trip: deluge_block_write failed (status={status})"
-    );
-    let mut readback = [0u8; 512];
-    let status = sd::deluge_block_read(0, readback.as_mut_ptr(), TEST_SECTOR, 1);
-    assert_eq!(
-        status, 0,
-        "sd round-trip: deluge_block_read failed (status={status})"
-    );
-    assert_eq!(
-        pattern, readback,
-        "sd round-trip: readback did not match what was written"
-    );
-    log::info!("deluge-bsp-rust: sd round-trip OK (sector {TEST_SECTOR}, 512 bytes)");
 
     // --- Whole-BSP host boot smoke (no C++ app; `host_app` OFF) ------------
     // Bring up a host Embassy executor (platform-std) and spawn the four
@@ -542,6 +826,122 @@ fn main() {
         use std::sync::{Arc, Barrier};
         use std::time::{Duration, Instant};
 
+        // --- Streaming-underrun harness: opt-in scenario mode --------------
+        // Off by default (env var unset) — the boot-and-idle smoke below is byte-for-
+        // byte unchanged from before this task. Set DELUGE_STREAMING_SCENARIO_SONG
+        // (e.g. "SONGS/Cordae.XML") to switch this run into the scenario: pack a real
+        // FAT SD image from the golden harness's corpus (unless DELUGE_SD_IMAGE is
+        // already set, in which case that image is used as-is — must already contain
+        // the requested song), load it, start real-time playback + a concurrent
+        // output recording, and step until DELUGE_STREAMING_SCENARIO_BLOCKS audio
+        // blocks (default 500) have rendered. This MUST run before anything below
+        // touches SD (the audio thread spawn is SD-inert, but `host_app_task` mounts
+        // the card as soon as it starts) — see sd_image.rs's module doc.
+        let scenario_cfg = std::env::var("DELUGE_STREAMING_SCENARIO_SONG")
+            .ok()
+            .map(|song| {
+                if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
+                    let fixture = std::env::var("DELUGE_STREAMING_SCENARIO_FIXTURE")
+                        .unwrap_or_else(|_| "cordae".to_string());
+                    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .ancestors()
+                        .nth(3)
+                        .expect("CARGO_MANIFEST_DIR (src/bsp/rust) has a repo root 3 levels up")
+                        .to_path_buf();
+                    let img = crate::sd_image::pack_golden_fixture(&repo_root, &fixture);
+                    // SAFETY: called before any thread below is spawned (no concurrent
+                    // env access yet) — same precondition sim_latency_host_exercise.rs
+                    // documents for its own DELUGE_SD_IMAGE set_var.
+                    unsafe { std::env::set_var("DELUGE_SD_IMAGE", &img) };
+                }
+                let target_blocks = std::env::var("DELUGE_STREAMING_SCENARIO_BLOCKS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(500u64);
+                // Widen the per-step poll budget for a manual demo run (e.g. a very long
+                // `DELUGE_STREAMING_SCENARIO_BLOCKS` window), default unchanged.
+                let step_timeout_secs = std::env::var("DELUGE_STREAMING_SCENARIO_STEP_TIMEOUT_S")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20u64);
+                // Optional `sd::sim_latency` override, applied by `scenario::run` right
+                // after song load completes (see `ScenarioConfig::post_load_sim_latency`'s
+                // doc comment for why post-load, not pre-load) — lets a manual `cargo run`
+                // dial the modeled SD latency from "trivially fast" (unset — no effect) to
+                // "absurdly slow" without a rebuild, to demonstrate the
+                // `deluge_sim_underrun_*_count()` counters are wired to real fill-vs-drain
+                // behaviour. No effect unless the `sim_latency` feature is enabled.
+                #[cfg(feature = "sim_latency")]
+                let post_load_sim_latency = {
+                    let bps = std::env::var("DELUGE_SIM_LATENCY_THROUGHPUT_BPS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    let us = std::env::var("DELUGE_SIM_LATENCY_OVERHEAD_US")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok());
+                    match (bps, us) {
+                        (None, None) => None,
+                        (b, u) => {
+                            // Defaults mirror `sd::sim_latency`'s own un-overridden constants
+                            // (20MB/s throughput, 500us overhead) so setting only one of the
+                            // two env vars still produces a sane pair.
+                            let bps = b.unwrap_or(20_000_000);
+                            let us = u.unwrap_or(500);
+                            log::info!(
+                                "deluge-bsp-rust: post-load sim_latency override = {bps} bytes/sec, {us} us overhead"
+                            );
+                            Some((bps, us))
+                        }
+                    }
+                };
+                #[cfg(not(feature = "sim_latency"))]
+                let post_load_sim_latency = None;
+                crate::scenario::ScenarioConfig {
+                    song_full_path: Box::leak(song.into_boxed_str()),
+                    target_blocks,
+                    step_timeout: embassy_time::Duration::from_secs(step_timeout_secs),
+                    post_load_sim_latency,
+                }
+            });
+
+        // --- Opt-in recorder live-readback probe ----------------------------
+        // Off by default. Set DELUGE_RECORDER_PROBE=1 to switch this run into the diagnostic:
+        // construct a real SampleRecorder, feed it audio, and probe whether a still-recording
+        // sample's data can be read back through the region port on THIS target — see
+        // recorder_probe.rs's module doc. Mutually exclusive with the streaming-underrun
+        // scenario above in practice (both would work concurrently, but nothing exercises them
+        // together) — this task only needs the boot-ready signal, not a loaded song.
+        let recorder_probe_requested = std::env::var("DELUGE_RECORDER_PROBE").as_deref() == Ok("1");
+        let recorder_probe_step_timeout_ms: u64 =
+            std::env::var("DELUGE_RECORDER_PROBE_STEP_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20_000);
+        let recorder_probe_poll_window_ms: u64 =
+            std::env::var("DELUGE_RECORDER_PROBE_POLL_WINDOW_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5_000);
+
+        // --- Opt-in finalized multi-cluster regression probe -----------------
+        // Off by default. Set DELUGE_RECORDER_FINALIZE_PROBE=1 to switch this run into the
+        // regression gate: construct a real SampleRecorder, drive it to RecorderStatus::COMPLETE,
+        // and confirm the residency table was sized correctly + region index 1 reads back
+        // correctly through the region port on THIS target — see recorder_finalize_probe.rs's
+        // module doc. Mutually exclusive with the other opt-in probes/scenarios in practice.
+        let recorder_finalize_probe_requested =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE").as_deref() == Ok("1");
+        let recorder_finalize_probe_step_timeout_ms: u64 =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE_STEP_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20_000);
+        let recorder_finalize_probe_poll_window_ms: u64 =
+            std::env::var("DELUGE_RECORDER_FINALIZE_PROBE_POLL_WINDOW_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5_000);
+
         // --- Second host executor thread for the audio task ----------------
         // Device routes the priority-0 (audio) task onto `AUDIO_EXEC`, a
         // preemptive GIC-SGI interrupt-executor (see `main`, above), so it runs
@@ -571,6 +971,22 @@ fn main() {
             .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
+                    // sim_latency harness only: spawned HERE — on this separate OS
+                    // thread's executor, not the host-app executor's — deliberately.
+                    // `deluge_app_init` (called synchronously, off-fiber, from
+                    // `host_app_task` below) can itself issue a `sim_latency`-modeled
+                    // transfer (e.g. the boot-time FatFS mount read) via a plain
+                    // `block_on`, which hijacks its OS thread with a busy poll loop
+                    // and never yields back to that thread's executor — so a `pump`
+                    // spawned on the SAME (host-app) executor would never get polled
+                    // and the transfer would spin forever. `pump` only touches
+                    // cross-thread-safe primitives (`Signal`/`AtomicWaker` over
+                    // `CriticalSectionRawMutex`, `embassy_time::Timer` off the shared
+                    // std time driver — see sd.rs's module doc), so running it on this
+                    // independent thread lets it keep making progress while the
+                    // host-app thread is busy-spinning.
+                    #[cfg(feature = "sim_latency")]
+                    spawner.spawn(crate::sd::sim_latency::pump().unwrap());
                     crate::scheduler::set_audio_spawner(spawner.make_send());
                     log::info!(
                         "deluge-bsp-rust: host audio executor up on thread {:?} — set_audio_spawner done",
@@ -593,7 +1009,7 @@ fn main() {
 
         std::thread::Builder::new()
             .name("deluge-bsp-host-app".into())
-            .spawn(|| {
+            .spawn(move || {
                 let executor: &'static mut Executor = Box::leak(Box::new(Executor::new()));
                 executor.run(|spawner: Spawner| {
                     crate::scheduler::set_spawner(spawner);
@@ -601,7 +1017,47 @@ fn main() {
                     spawner.spawn(control::pad_render().unwrap());
                     spawner.spawn(control::encoder_wake_pump().unwrap());
                     spawner.spawn(display::oled_render().unwrap());
+                    // NOTE: `sim_latency::pump` is deliberately NOT spawned on this
+                    // executor — see the audio-thread executor closure above for why
+                    // (this thread's `host_app_task` calls `deluge_app_init`
+                    // synchronously, off-fiber, which can itself busy-spin a
+                    // `block_on`'d sim_latency transfer and would starve a
+                    // same-thread `pump`).
                     spawner.spawn(host_app_task().unwrap());
+                    // R2.1: same async cluster-fill task as the device `main` above,
+                    // spawned on this executor (the one `host_app_task`'s worker-fiber
+                    // pump loop and the C++ enqueue path also run on) — required for
+                    // `host_app async_streaming_loader` to actually own the loader
+                    // queue rather than just link the symbol.
+                    #[cfg(feature = "async_streaming_loader")]
+                    spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
+                    // Streaming-underrun harness: spawned on THIS executor —
+                    // the same one `host_app_task`'s worker-fiber pump loop runs on —
+                    // so `scenario::run`'s C-ABI calls interleave cooperatively with
+                    // the real app's own task graph, exactly like a real HID event
+                    // handler would (see scenario.rs's module doc: it never spawns a
+                    // thread itself).
+                    if let Some(cfg) = scenario_cfg {
+                        spawner.spawn(crate::scenario::scenario_task(cfg).unwrap());
+                    }
+                    if recorder_probe_requested {
+                        spawner.spawn(
+                            crate::recorder_probe::recorder_probe_task(
+                                recorder_probe_step_timeout_ms,
+                                recorder_probe_poll_window_ms,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    if recorder_finalize_probe_requested {
+                        spawner.spawn(
+                            crate::recorder_finalize_probe::recorder_finalize_probe_task(
+                                recorder_finalize_probe_step_timeout_ms,
+                                recorder_finalize_probe_poll_window_ms,
+                            )
+                            .unwrap(),
+                        );
+                    }
                 });
             })
             .expect("spawning the host app executor thread");
@@ -664,6 +1120,198 @@ fn main() {
                 );
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Streaming-underrun harness: if scenario mode was requested, wait
+        // for `scenario::scenario_task` (spawned above, on the host-app executor) to
+        // finish, report its outcome, and exit — this REPLACES the generic soak below
+        // (the scenario's own block-count step already keeps both executors running
+        // concurrently for the requested window; a soak on top would just be dead
+        // time). Bounded by a generous overall deadline so a wedged scenario still
+        // exits nonzero instead of hanging the process forever.
+        if let Some(cfg) = scenario_cfg {
+            // std::time::Duration, not embassy_time::Duration (cfg.step_timeout's type) —
+            // this loop runs on the plain OS thread, same as every other polling loop in
+            // this block.
+            let watchdog = Duration::from_millis(cfg.step_timeout.as_millis() * 8);
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::scenario::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP scenario TIMED OUT after {watchdog:?} with no \
+                         result (scenario_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP scenario result: song='{}' boot_ready={} \
+                 load_dispatched={} listing_completed={} load_committed={} load_completed={} \
+                 playback_started={} playback_confirmed_active={} recording_started={} \
+                 blocks_rendered={} cluster_reads={} recorder_writes={} underrun_wait={} \
+                 underrun_unassign={}",
+                cfg.song_full_path,
+                result.boot_ready,
+                result.song_load_dispatched,
+                result.listing_completed,
+                result.load_committed,
+                result.load_completed,
+                result.playback_started,
+                result.playback_confirmed_active,
+                result.recording_started,
+                result.blocks_rendered,
+                result.cluster_reads,
+                result.recorder_writes,
+                result.underrun_wait,
+                result.underrun_unassign,
+            );
+            let ok = result.load_completed
+                && result.playback_confirmed_active
+                && result.recording_started
+                && result.blocks_rendered >= cfg.target_blocks
+                && result.cluster_reads > 0
+                && result.recorder_writes > 0;
+            if ok {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP scenario PASSED — song streamed + recorded, \
+                     real dispatch drained (cluster_reads={}, recorder_writes={})",
+                    result.cluster_reads,
+                    result.recorder_writes
+                );
+                hard_exit(0);
+            } else {
+                log::error!("deluge-bsp-rust: HOST APP scenario FAILED (see fields above)");
+                hard_exit(1);
+            }
+        }
+
+        // If the recorder live-readback probe was requested, wait for it
+        // (spawned above, on the host-app executor) to finish, report the finding, and exit —
+        // same shape as the scenario block above. A diagnostic, not a normative gate: any
+        // outcome (READY, LOADING-forever, UNAVAILABLE) is a valid, reportable finding, so this
+        // only hard_exit(1)s if the HARNESS itself failed (couldn't even set up the recorder /
+        // never reached boot), not on an unresolved read.
+        if recorder_probe_requested {
+            let watchdog = Duration::from_millis(
+                recorder_probe_step_timeout_ms + recorder_probe_poll_window_ms + 10_000,
+            );
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::recorder_probe::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP recorder probe TIMED OUT after {watchdog:?} \
+                         with no result (recorder_probe_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP recorder live-readback probe result: boot_ready={} \
+                 initial_state={} final_state={} poll_iterations={} resolved_ready={} \
+                 (state: 0=harness-error 1=READY 2=LOADING 3=UNAVAILABLE)",
+                result.boot_ready,
+                result.initial_state,
+                result.final_state,
+                result.poll_iterations,
+                result.resolved_ready,
+            );
+            if !result.boot_ready
+                || result.initial_state == crate::recorder_probe::STATE_HARNESS_ERROR
+            {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder probe HARNESS FAILURE (see fields above)"
+                );
+                hard_exit(1);
+            }
+            if result.resolved_ready {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP recorder probe FINDING — a still-recording \
+                     sample's data DID resolve READY on this target (async_streaming_loader on)."
+                );
+            } else {
+                log::warn!(
+                    "deluge-bsp-rust: HOST APP recorder probe FINDING — a still-recording \
+                     sample's data did NOT resolve READY on this target within the poll window \
+                     (final_state={}) — matches the SR3b routing spike's prediction that the \
+                     async loader cannot read a handle-less recording.",
+                    result.final_state,
+                );
+            }
+            hard_exit(0);
+        }
+
+        // If the finalized multi-cluster regression probe was requested, wait for it
+        // (spawned above, on the host-app executor) to finish, report the finding, and exit. This
+        // one IS a normative gate (unlike the live-readback probe above): a finalized recording's
+        // residency table MUST be sized correctly and region index 1+ MUST read back correctly, on
+        // every target, or this is a critical regression.
+        if recorder_finalize_probe_requested {
+            let watchdog = Duration::from_millis(
+                recorder_finalize_probe_step_timeout_ms
+                    + recorder_finalize_probe_poll_window_ms
+                    + 10_000,
+            );
+            let deadline = Instant::now() + watchdog;
+            let result = loop {
+                if let Some(r) = crate::recorder_finalize_probe::take_result() {
+                    break r;
+                }
+                if Instant::now() >= deadline {
+                    log::error!(
+                        "deluge-bsp-rust: HOST APP recorder finalize probe TIMED OUT after \
+                         {watchdog:?} with no result (recorder_finalize_probe_task wedged?)"
+                    );
+                    hard_exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            log::info!(
+                "deluge-bsp-rust: HOST APP recorder finalize probe result: boot_ready={} \
+                 initial_state={} final_state={} poll_iterations={} table_clusters={} \
+                 expected_clusters={} bytes_ok={} passed={} \
+                 (state: 0=harness-error 1=READY 2=LOADING 3=UNAVAILABLE)",
+                result.boot_ready,
+                result.initial_state,
+                result.final_state,
+                result.poll_iterations,
+                result.table_clusters,
+                result.expected_clusters,
+                result.bytes_ok,
+                result.passed,
+            );
+            if !result.boot_ready
+                || result.initial_state == crate::recorder_finalize_probe::STATE_HARNESS_ERROR
+            {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe HARNESS FAILURE (see fields above)"
+                );
+                hard_exit(1);
+            }
+            if result.passed {
+                log::info!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe PASSED — finalized \
+                     multi-cluster recording's residency table sized correctly \
+                     (table_clusters={} >= expected_clusters={}), region 1 read back READY with \
+                     correct bytes.",
+                    result.table_clusters,
+                    result.expected_clusters,
+                );
+                hard_exit(0);
+            } else {
+                log::error!(
+                    "deluge-bsp-rust: HOST APP recorder finalize probe FAILED — SR3b Task 3 \
+                     regression present (see fields above)"
+                );
+                hard_exit(1);
+            }
         }
 
         // --- Widen the concurrent window before exit ------------------------

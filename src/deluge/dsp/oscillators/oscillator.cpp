@@ -20,6 +20,7 @@
 #include "processing/render_wave.h"
 #include "storage/wave_table/wave_table.h"
 #include "util/fixedpoint.h"
+#include <algorithm>
 
 namespace deluge::dsp {
 PLACE_INTERNAL_FRUNK int32_t oscSyncRenderingBuffer[SSI_TX_BUFFER_NUM_SAMPLES + 4]
@@ -136,11 +137,31 @@ Oscillator::renderOsc(OscType type, int32_t amplitude, int32_t* bufferStart, int
 	if (doOscSync) [[unlikely]] {
 doOscSyncSetup:
 
-		resetterDivideByPhaseIncrement = // You should >> 47 if multiplying by this.
-		    (uint32_t)2147483648u
-		    / (uint16_t)((resetterPhaseIncrement + 65535)
-		                 >> 16); // Round resetterPhaseIncrement up first, so resetterDivideByPhaseIncrement gets a tiny
-		                         // bit smaller, so things multiplied by it don't get a bit too big and overflow.
+		// A resetter that never completes a cycle can't sync anything, so don't try: every sync path below divides by
+		// its increment, and a zero divisor is undefined. Voice::adjustPitch reports success while producing a zero
+		// increment whenever its pitch multiply rounds down to nothing, and the pulse-width path above feeds the
+		// oscillator's OWN increment in here, out of reach of Voice's "if freq too high" guard (voice.cpp).
+		//
+		// Dividing by it was invisible on the legacy target -- libgcc's __aeabi_uidiv masks its shift and quietly
+		// returns garbage -- but Rust's compiler_builtins supplies the same intrinsic in the Embassy BSP and traps
+		// (`udf`), taking the machine down mid-render.
+		//
+		// Clearing the flag rather than clamping the increment is deliberate. A clamped-to-1 increment still breaks
+		// renderOscSync(): its (distance - 1) / increment overflows the window length to zero, so bufferStartThisSync
+		// walks backwards a sample per iteration while the remaining-sample count grows -- an endless loop writing
+		// outside the buffer. Falling back to an unsynced render reuses paths that are already exercised.
+		if (resetterPhaseIncrement == 0) [[unlikely]] {
+			doOscSync = false;
+		}
+		else {
+			// Round resetterPhaseIncrement up first, so resetterDivideByPhaseIncrement gets a tiny bit smaller, so
+			// things multiplied by it don't get a bit too big and overflow. That round-up wraps for an increment above
+			// 0xFFFF0000 -- which adjustPitch can produce, since it only rejects results at or above 1<<32 -- landing
+			// back on a zero divisor, hence the clamp.
+			auto resetterIncrementRoundedUp = static_cast<uint16_t>((resetterPhaseIncrement + 65535) >> 16);
+			resetterDivideByPhaseIncrement = // You should >> 47 if multiplying by this.
+			    2147483648u / std::max<uint16_t>(resetterIncrementRoundedUp, 1);
+		}
 	}
 
 skipPastOscSyncStuff:

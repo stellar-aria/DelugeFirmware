@@ -38,13 +38,13 @@
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstring>
 #include <new>
 
-#include "deluge_resource.h" // mark_dirty: hold recording clusters un-evictable until flushed
-
-extern "C" {
-#include "fatfs/diskio.h"
-}
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+              "recorder hand-off relies on a lock-free atomic index on this target");
 
 #define MAX_FILE_SIZE_MAGNITUDE 32
 
@@ -65,49 +65,55 @@ SampleRecorder::~SampleRecorder() {
 // is being deleted IMPORTANT!!!! You have to set sample to NULL after calling this, if not destructing
 void SampleRecorder::detachSample() {
 
-	// If we were holding onto the reasons for the first couple of Clusters, release them now
-	if (keepingReasonsForFirstClusters) {
-		int32_t numClustersToRemoveFor =
-		    std::min(kNumClustersLoadedAhead, static_cast<int32_t>(sample->stream().num_clusters()));
-		numClustersToRemoveFor = std::min(numClustersToRemoveFor, firstUnwrittenClusterIndex);
-
-		for (int32_t l = 0; l < numClustersToRemoveFor; l++) {
-			StreamedChunk* cluster = sample->stream().chunk_at(l);
-
-			// Some bug-hunting
-			if (!cluster->num_reasons_held_by_sample_recorder) {
-				FREEZE_WITH_ERROR("E345");
-			}
-			cluster->num_reasons_held_by_sample_recorder--;
-
-			deluge::cluster::remove_reason(*cluster, "E257");
-		}
-	}
-
-	int32_t removeForClustersUntilIndex = currentRecordClusterIndex;
-	if (currentRecordCluster) {
-		removeForClustersUntilIndex++; // If there's a currentRecordCluster (usually will be if aborting), need to
-		                               // remove its "reason" too
-	}
-
-	while (firstUnwrittenClusterIndex < removeForClustersUntilIndex) {
-		StreamedChunk* cluster = sample->stream().chunk_at(firstUnwrittenClusterIndex);
-
-		if (!cluster) {
-			FREEZE_WITH_ERROR("E363");
-		}
-
-		// Some bug-hunting
-		if (!cluster->num_reasons_held_by_sample_recorder) {
-			FREEZE_WITH_ERROR("E346");
-		}
-		cluster->num_reasons_held_by_sample_recorder--;
-
-		deluge::cluster::remove_reason(*cluster, "E249");
-		firstUnwrittenClusterIndex++;
-	}
+	// Our capture buffers are privately owned (never registered with the shared residency
+	// table), so there are no "reasons"/leases to drop here -- just free whatever we still hold:
+	// any undrained buffers (an abort mid-recording) plus anything sitting in the recycle ring.
+	releaseCaptureBuffers();
 
 	sample->removeReason("E400");
+}
+
+// Frees every capture buffer we still own -- undrained bufferTable_ entries (firstUnwrittenClusterIndex
+// through the last assigned index, which covers a live currentRecordBuffer too, since it's always the
+// last entry assigned) plus anything sitting in the recycle ring. Called from detachSample(), which by
+// its own contract only ever runs once the fiber is done touching this recorder (status has reached
+// ABORTED or >= COMPLETE) -- so this is single-threaded, no concurrent push/pop to race.
+void SampleRecorder::releaseCaptureBuffers() {
+	for (int32_t i = firstUnwrittenClusterIndex; static_cast<size_t>(i) < bufferTable_.size(); i++) {
+		std::byte* buffer = bufferTable_[i];
+		if (buffer != nullptr) {
+			delugeDealloc(buffer);
+		}
+	}
+
+	std::byte* recycled = nullptr;
+	while (freeBuffers_.try_pop(recycled)) {
+		delugeDealloc(recycled);
+	}
+}
+
+// [audio thread] Get a capture buffer -- a recycled one if the fiber's returned any, otherwise
+// grow by allocating fresh. Either way this never blocks and never fails silently by dropping audio;
+// the only failure mode is genuine RAM exhaustion (nullptr), same as the shared-table allocation this
+// replaces. Sized Cluster::size plus a few trailing bytes of overshoot slack -- a sample frame can
+// straddle the boundary between one buffer and the next (see createNextCluster()'s overshoot copy).
+std::byte* SampleRecorder::allocateBuffer() {
+	std::byte* recycled = nullptr;
+	if (freeBuffers_.try_pop(recycled)) {
+		return recycled;
+	}
+	return static_cast<std::byte*>(deluge::memory::alloc_external(Cluster::size + kTrailingSlackBytes, 16));
+}
+
+// [fiber] Return a flushed buffer's memory for reuse. Best-effort -- if the recycle ring is
+// full (the audio thread has fallen far behind draining it, unlikely given its small capacity here
+// only bounds *reuse*, not availability), just free the buffer outright; the audio thread will
+// allocate fresh next time it needs one. Either way, no audio data is at risk: this only runs after
+// the buffer's contents are already safely on disk.
+void SampleRecorder::recycleBuffer(std::byte* buffer) {
+	if (!freeBuffers_.try_push(buffer)) {
+		delugeDealloc(buffer);
+	}
 }
 
 // config stuff
@@ -116,6 +122,10 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
                             Output* outputRecordingFrom_, RecorderConfig config) {
 
 	outputRecordingFrom = outputRecordingFrom_;
+	// The recorder no longer touches the shared residency table at all, so this no longer gates any
+	// shared-cluster "reason" bookkeeping -- kept/stored for future watermark-based read-bound wiring
+	// (a still-recording AudioClip's live-loop monitor wants its first few buffers to stay quickly
+	// available).
 	keepingReasonsForFirstClusters = newKeepingReasons;
 	recordingExtraMargins = shouldRecordExtraMargins;
 	folderID = newFolderID;
@@ -127,6 +137,15 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 	}
 
 	sample = new (sample_memory) Sample;
+
+	// Reserve our own buffer table's segment-pointer index to the max recording size up front
+	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that
+	// growth never reallocates the index under the fiber's concurrent operator[] reads (B2: the
+	// SegmentedVector keeps element addresses stable, but its pointer index must be pre-reserved
+	// to stay stable under concurrent growth). maxClusters is derived from the runtime cluster size,
+	// so this imposes no recording-length limit beyond the existing MAX_FILE_SIZE cap.
+	bufferTable_.reserve(1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude));
+
 	audioFileManager.adoptAudioFileObject(sample); // resource-manager evictable object (before addReason)
 	sample->addReason(); // Must call this so it's protected from stealing, before we call initialize().
 	Error error = sample->initialize(1);
@@ -136,34 +155,34 @@ gotError:
 		return error;
 	}
 
-	currentRecordCluster = sample->stream().get_cluster(0, CLUSTER_DONT_LOAD); // Adds a "reason" to it, too
-	if (!currentRecordCluster) {
+	currentRecordBuffer = allocateBuffer();
+	if (!currentRecordBuffer) {
 		error = Error::INSUFFICIENT_RAM;
 		goto gotError;
 	}
-
-	// Bug hunting - newly gotten Cluster
-	if (currentRecordCluster->num_reasons_held_by_sample_recorder) {
-		FREEZE_WITH_ERROR("E360");
+	try {
+		bufferTable_.resize(1);
+	} catch (deluge::exception&) {
+		delugeDealloc(currentRecordBuffer);
+		currentRecordBuffer = nullptr;
+		error = Error::INSUFFICIENT_RAM;
+		goto gotError;
 	}
-	currentRecordCluster->num_reasons_held_by_sample_recorder++;
+	bufferTable_[0] = currentRecordBuffer;
 
 	// Give the sample some stuff
 	sample->audioDataStartPosBytes = recordingExtraMargins ? 112 : 44;
 	sample->byteDepth = 3;
 	sample->numChannels = newNumChannels;
-	sample->lengthInSamples = 0x8FFFFFFFFFFFFFFF;
-	sample->audioDataLengthBytes = 0x8FFFFFFFFFFFFFFF; // If you ever change this value, update the check for it in
-	                                                   // SampleStream::read_cluster_data()
+	sample->lengthInSamples = Sample::kUnknownLengthSentinel;
+	sample->audioDataLengthBytes = Sample::kUnknownLengthSentinel; // If you ever change this value, update
+	                                                               // Sample::kUnknownLengthSentinel and its users
 	sample->sampleRate = kSampleRate;
 	sample->workOutBitMask();
 
-	currentRecordCluster->loaded =
-	    true; // I think this is ok - mark it as loaded even though we're yet to record into it
-
 	pointerHeldElsewhere = true;
 	mode = newMode;
-	currentRecordClusterIndex = 0;
+	currentRecordClusterIndex.store(0, std::memory_order_relaxed);
 
 	numSamplesToRunBeforeBeginningCapturing = numSamplesExtraToCaptureAtEndSyncingWise =
 	    (mode < AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) ? kAudioRecordLagCompensation : 0;
@@ -230,8 +249,8 @@ gotError:
 	recordMax = -2147483648;
 	recordMin = 2147483647;
 
-	writePos = reinterpret_cast<char*>(currentRecordCluster->payload().data());
-	clusterEndPos = reinterpret_cast<char*>(currentRecordCluster->payload().data() + Cluster::size);
+	writePos = reinterpret_cast<char*>(currentRecordBuffer);
+	clusterEndPos = reinterpret_cast<char*>(currentRecordBuffer + Cluster::size);
 
 	numSamplesBeenRunning = 0;
 	numSamplesCaptured = 0;
@@ -345,14 +364,18 @@ void SampleRecorder::setRecordingThreshold(RecorderConfig config) {
 // status, then do the descrutcion and file deletion when we know we're out of the card routine. Also, this gets called
 // in audio routine! So don't do anything drastic.
 void SampleRecorder::abort() {
-	status = RecorderStatus::ABORTED; // Note: it may already equal this!
+	// RELEASE: abort() is callable cross-thread (audio or fiber); pairs with the acquire loads in
+	// cardRoutine()/finalizeRecordedFile() so a fiber that observes ABORTED also observes any writes
+	// that preceded this call on whichever thread invoked it.
+	status.store(RecorderStatus::ABORTED, std::memory_order_release); // Note: it may already equal this!
 }
 
 // Returns error if one occurred just now - not if one was already noted before
 Error SampleRecorder::cardRoutine() {
 
 	// If aborted, delete the file.
-	if (status == RecorderStatus::ABORTED) {
+	// ACQUIRE: synchronizes-with abort()'s release store.
+	if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 
 aborted:
 		if (sample != nullptr) { // This might get called multiple times, so check we haven't already detached it.
@@ -383,6 +406,19 @@ aborted:
 		// Delete the file if one was created
 		if (!filePathCreated.empty()) {
 
+			// Flush and close any persistent write context BEFORE deleting the file. On the efatfs
+			// backend `file` is write-through for cluster data but defers the directory-entry
+			// (size/first_cluster/mtime) update to close()/flush_context -- if we deleted the file
+			// first, f_unlink() below would see a stale (near-empty) directory entry with
+			// first_cluster still ~0 and free no clusters (an orphaned-cluster leak), and a same-name
+			// file that later recycles this freed short-name slot (see the counter tick-back below)
+			// could have this now-dangling handle's deferred flush land on ITS entry instead. reset()
+			// here first makes the flush observe the file still on disk, so it writes a CONSISTENT
+			// entry; f_unlink then frees the real chain and no dirty handle survives into the next
+			// recording. reset() on an already-disengaged optional (C-FatFS backend, or abort before
+			// the file was ever opened) is a safe no-op.
+			this->file.reset();
+
 			deluge_file_invalidate_cache();
 			FRESULT result = f_unlink(filePathCreated.c_str());
 
@@ -403,12 +439,14 @@ aborted:
 		// only happen from AudioRecorder. Or if the abort comes from a failure within this class and the AudioClip
 		// hasn't realised yet?
 		if (!pointerHeldElsewhere) {
-			status = RecorderStatus::AWAITING_DELETION;
+			// RELAXED: fiber-owned write; no other thread reads AWAITING_DELETION as a hand-off signal.
+			status.store(RecorderStatus::AWAITING_DELETION, std::memory_order_relaxed);
 		}
 		return Error::NONE;
 	}
 
-	if (status >= RecorderStatus::COMPLETE) {
+	// ACQUIRE: cardRoutine() decision read.
+	if (status.load(std::memory_order_acquire) >= RecorderStatus::COMPLETE) {
 		return Error::NONE;
 	}
 
@@ -460,7 +498,8 @@ aborted:
 				error = audioFileManager.getUnusedAudioRecordingFilePath(filePath, &tempFilePathForRecording, folderID,
 				                                                         &audioFileNumber, name, &currentSong->name);
 			}
-			if (status == RecorderStatus::ABORTED) {
+			// ACQUIRE: cardRoutine() decision read.
+			if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 				goto aborted; // In case aborted during
 			}
 			if (error != Error::NONE) {
@@ -534,7 +573,8 @@ cutRecordingFolderPathAndTryCreating:
 				this->file = std::move(openedStream.value());
 			}
 
-			if (status == RecorderStatus::ABORTED) {
+			// ACQUIRE: cardRoutine() decision read.
+			if (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED) {
 				goto aborted; // In case aborted during
 			}
 
@@ -552,7 +592,7 @@ cutRecordingFolderPathAndTryCreating:
 		}
 
 		// Might want to write just one cluster
-		if (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+		if (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 			error = writeOneCompletedCluster();
 
 			if (error != Error::NONE) {
@@ -562,7 +602,7 @@ gotError:
 
 			else {
 				// If more clusters still to write, come back later to do them
-				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+				if (true || firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_relaxed)) {
 					goto allDoneForNow;
 				}
 			}
@@ -570,7 +610,9 @@ gotError:
 	}
 
 	// If we've actually finished recording...
-	if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
+	// ACQUIRE: synchronizes-with finishCapturing()'s release store, publishing the audio thread's final
+	// currentRecordClusterIndex/payload writes before we take over as producer in finalizeRecordedFile().
+	if (status.load(std::memory_order_acquire) == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		if (!hadCardError) {
 			error = finalizeRecordedFile();
 			if (error != Error::NONE) {
@@ -584,12 +626,15 @@ gotError:
 				abort();
 			}
 			else {
-				status = RecorderStatus::COMPLETE;
+				// RELAXED: fiber-owned write.
+				status.store(RecorderStatus::COMPLETE, std::memory_order_relaxed);
 			}
 			error = Error::MAX_FILE_SIZE_REACHED;
 		}
 		else {
-			status = autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE;
+			// RELAXED: fiber-owned write.
+			status.store(autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE,
+			             std::memory_order_relaxed);
 		}
 	}
 
@@ -598,12 +643,12 @@ allDoneForNow:
 }
 
 Error SampleRecorder::writeAnyCompletedClusters() {
-	while (firstUnwrittenClusterIndex < currentRecordClusterIndex) {
+	while (firstUnwrittenClusterIndex < currentRecordClusterIndex.load(std::memory_order_acquire)) {
 
 		Error error = writeOneCompletedCluster();
 
-		// If there was an error, we can only return now after removing that reason, because we'd already incremented
-		// firstUnwrittenClusterIndex, and we can't leave that incremented without removing the reason
+		// On error, just return -- the buffer writeOneCompletedCluster() couldn't flush stays put in
+		// bufferTable_ (never recycled), so it's still safely freed later by releaseCaptureBuffers().
 		if (error != Error::NONE) {
 			return error;
 		}
@@ -615,43 +660,19 @@ Error SampleRecorder::writeAnyCompletedClusters() {
 Error SampleRecorder::writeOneCompletedCluster() {
 	int32_t writingClusterIndex = firstUnwrittenClusterIndex;
 
-#if ALPHA_OR_BETA_VERSION
-	// Trying to pin down E347 which Leo got, below
-	StreamedChunk* cluster = sample->stream().chunk_at(writingClusterIndex);
-	if (!cluster->num_reasons_held_by_sample_recorder) {
-		FREEZE_WITH_ERROR("E374");
-	}
-#endif
-
 	firstUnwrittenClusterIndex++; // Have to increment this before writing, cos while writing, the audio routine will be
 	                              // called, and we need to be counting this cluster as "written", as in too late for it
 	                              // to be modified (by writing a final length to it)
 
-	Error error = writeCluster(writingClusterIndex, Cluster::size);
-
-	// We no longer have a reason to require this Cluster to be kept in memory
-	if (!keepingReasonsForFirstClusters || writingClusterIndex >= kNumClustersLoadedAhead) {
-		StreamedChunk* cluster = sample->stream().chunk_at(writingClusterIndex);
-
-		// Some bug-hunting
-		if (!cluster->num_reasons_held_by_sample_recorder) {
-			// Leo got!!! And Vinz, and keyman. May be solved now that fixed so detachSample() doesn't get called during
-			// card routine.
-			FREEZE_WITH_ERROR("E347");
-		}
-		cluster->num_reasons_held_by_sample_recorder--;
-
-		deluge::cluster::remove_reason(*cluster, "E015");
-	}
-
-	// If there was an error, we can only return now after removing that reason, because we'd already incremented
-	// firstUnwrittenClusterIndex, and we can't leave that incremented without removing the reason
-	return error;
+	// writeCluster() recycles this buffer's memory back to the free-list once the write succeeds --
+	// no separate "reason" to drop; we privately own it outright.
+	return writeCluster(writingClusterIndex, Cluster::size);
 }
 
 Error SampleRecorder::finalizeRecordedFile() {
 
-	if (ALPHA_OR_BETA_VERSION && (status == RecorderStatus::ABORTED || hadCardError)) {
+	// ACQUIRE: cardRoutine() decision read (debug assertion, same fiber path as the flip observation above).
+	if (ALPHA_OR_BETA_VERSION && (status.load(std::memory_order_acquire) == RecorderStatus::ABORTED || hadCardError)) {
 		FREEZE_WITH_ERROR("E273");
 	}
 
@@ -678,35 +699,29 @@ Error SampleRecorder::finalizeRecordedFile() {
 		}
 	}
 
-	// And we probably need to write some of the final cluster(s) to file. (If it's NULL, it means that it couldn't be
+	// And we probably need to write some of the final buffer to file. (If it's NULL, it means that it couldn't be
 	// created, cos or RAM or file size limit.)
-	if (currentRecordCluster) {
+	if (currentRecordBuffer) {
 
-		int32_t bytesToWrite = writePos - reinterpret_cast<char*>(currentRecordCluster->payload().data());
+		int32_t bytesToWrite = writePos - reinterpret_cast<char*>(currentRecordBuffer);
 		if (bytesToWrite > 0) { // Will always be true
-			Error error = writeCluster(currentRecordClusterIndex, bytesToWrite);
+			Error error = writeCluster(currentRecordClusterIndex.load(std::memory_order_relaxed), bytesToWrite);
 			if (error != Error::NONE) {
 				return error;
 			}
 		}
+		else {
+			// writeCluster() (above) is what recycles this buffer -- if we didn't call it, recycle
+			// directly so this buffer's memory isn't leaked.
+			recycleBuffer(currentRecordBuffer);
+			// Same drained-slot nulling writeCluster() does -- see its comment.
+			// currentRecordClusterIndex still refers to this now-recycled buffer's slot here.
+			bufferTable_[currentRecordClusterIndex.load(std::memory_order_relaxed)] = nullptr;
+		}
 
 		firstUnwrittenClusterIndex++;
-
-		// Having incremented firstUnwrittenClusterIndex, we need to remove the "reason" for that final cluster.
-		// Normally that happens in writeAnyCompletedClusters(), but well this cluster wasn't "complete" so we're doing
-		// the whole thing here instead
-		if (!keepingReasonsForFirstClusters || currentRecordClusterIndex >= kNumClustersLoadedAhead) {
-
-			// Some bug-hunting
-			if (!currentRecordCluster->num_reasons_held_by_sample_recorder) {
-				FREEZE_WITH_ERROR("E348");
-			}
-			currentRecordCluster->num_reasons_held_by_sample_recorder--;
-
-			deluge::cluster::remove_reason(*currentRecordCluster, "E047");
-		}
-		currentRecordClusterIndex++;    // We've finished with that cluster
-		currentRecordCluster = nullptr; // But currentRecordClusterIndex now refers to a cluster that'll never exist
+		currentRecordClusterIndex.fetch_add(1, std::memory_order_relaxed); // We've finished with that cluster
+		currentRecordBuffer = nullptr; // But currentRecordClusterIndex now refers to a cluster that'll never exist
 	}
 
 	uint32_t idealFileSizeBeforeAction = sample->audioDataStartPosBytes + sample->audioDataLengthBytes;
@@ -787,51 +802,41 @@ Error SampleRecorder::finalizeRecordedFile() {
 			Error error = truncateFileDownToSize(correctLength);
 		}
 
+		// If the actual audio data length we ended up with is not the same as was written in the headers in the first
+		// cluster (very likely; various reasons)
+		bool headerNeedsPatch =
+		    sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
+		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile);
+
+		// The buffer that held the header (bufferTable_[0]) may have already been recycled --
+		// it was flushed to disk before we ever reach here (the pending-cluster flush above always
+		// runs first), so its physical memory could be reused for a later index by now. Read the
+		// header sector BACK from our own still-open write context instead (positional read_at_via
+		// on the deluge::io::Stream), patch it, and write it right back. EOF-honest: reads
+		// (and so re-writes) only as many bytes as actually exist on disk, never padding past the
+		// real file extent.
+		//
+		// This goes out through the still-open persistent write context via Stream::write_at
+		// -- write_at needs an open handle, so this must happen BEFORE file->close() below.
+		if (headerNeedsPatch) {
+			audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
+			loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
+
+			constexpr uint32_t kFirstSectorBytes = 512;
+			std::array<std::byte, kFirstSectorBytes> headerSector{};
+			auto readResult = file->read_at_via(0, std::span<std::byte>(headerSector));
+			if (readResult && *readResult > 0) {
+				std::span<std::byte> headerBytes(headerSector.data(), *readResult);
+				updateDataLengthInHeader(headerBytes);
+				(void)file->write_at(0, std::span<const std::byte>(headerBytes.data(), headerBytes.size()));
+				// If that failed, well, that's a shame, but we don't need to do anything.
+			}
+		}
+
 		auto closeResult = this->file->close();
 		this->file.reset();
 		if (!closeResult) {
 			return Error::SD_CARD;
-		}
-
-		// If the actual audio data length we ended up with is not the same as was written in the headers in the first
-		// cluster (very likely; various reasons)
-		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
-		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
-
-			// Update data length as written in first cluster
-			SampleCluster& firstSampleCluster = sample->stream().entry(0);
-			StreamedChunk* cluster =
-			    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-			if (cluster) {
-
-				// Bug hunting - newly gotten Cluster
-				cluster->num_reasons_held_by_sample_recorder++;
-
-				// Do a last-ditch check that the SD address doesn't look invalid
-				if (firstSampleCluster.sdAddress == 0) {
-					FREEZE_WITH_ERROR("E268");
-				}
-				if ((firstSampleCluster.sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-					FREEZE_WITH_ERROR("E269");
-				}
-
-				audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
-				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
-				updateDataLengthInFirstCluster(cluster);
-
-				// Write just that one first sector back to the card
-				disk_write(0, (BYTE*)cluster->payload().data(), firstSampleCluster.sdAddress, 1);
-
-				// If that failed, well, that's a shame, but we don't need to do anything
-
-				// Some bug-hunting
-				if (!cluster->num_reasons_held_by_sample_recorder) {
-					FREEZE_WITH_ERROR("E349");
-				}
-				cluster->num_reasons_held_by_sample_recorder--;
-
-				deluge::cluster::remove_reason(*cluster, "E026");
-			}
 		}
 	}
 
@@ -842,6 +847,38 @@ Error SampleRecorder::finalizeRecordedFile() {
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
 
+	// Ensure the waveform overview cache (Sample::overviewCache_, one entry per cluster) is sized to
+	// the real, final cluster count once the recording's true length is known, so later zoomed-out
+	// waveform rendering can index every cluster of the finished file. This runs for BOTH finalize
+	// outcomes:
+	//   - the alterFile branch above never touches overviewCache_ -- alterFile() is a positional
+	//     file->file transform over deluge::io::Stream (read_at_via/write_at), with no overview-cache
+	//     involvement whatsoever. So overviewCache_ is still sitting at the single entry
+	//     Sample::initialize(1) set in setup() when we reach here, and this resize is an ACTUAL grow
+	//     (1 -> finalClusterCount), not a no-op.
+	//   - the common, no-alteration else-branch -- the ONLY path AudioClip recording takes -- never
+	//     touches overviewCache_ either, so without this it likewise stays that single entry.
+	//
+	// Grow-only (never shrink here): SegmentedVector::resize() to a SMALLER size destroys the
+	// removed tail, which would be wrong here -- shrinking is truncateFileDownToSize()'s job, not
+	// finalize's.
+	{
+		uint32_t idealFileSizeAfterAction =
+		    sample->audioDataStartPosBytes + static_cast<uint32_t>(sample->audioDataLengthBytes);
+		uint32_t finalClusterCount = ((idealFileSizeAfterAction - 1) >> Cluster::size_magnitude) + 1;
+		// Guard on the PHYSICAL cache size, not num_clusters(): num_clusters() is derived from this
+		// same geometric formula, so guarding on it would be tautologically false and skip this grow,
+		// leaving overviewCache_ at its initialize(1) size while derived num_clusters() reports the
+		// true count -- an OOB when later waveform rendering indexes the cache up to that count.
+		if (finalClusterCount > sample->overviewCacheSize()) {
+			try {
+				sample->resizeOverviewCache(finalClusterCount);
+			} catch (deluge::exception&) {
+				return Error::INSUFFICIENT_RAM;
+			}
+		}
+	}
+
 	if (sample->tempFilePathForRecording.empty()) {
 		sampleBrowser.lastFilePathLoaded = sample->filePath;
 	}
@@ -849,76 +886,65 @@ Error SampleRecorder::finalizeRecordedFile() {
 	return Error::NONE;
 }
 
-void SampleRecorder::updateDataLengthInFirstCluster(StreamedChunk* cluster) {
-	uint32_t data32;
-
+void SampleRecorder::updateDataLengthInHeader(std::span<std::byte> headerBuf) {
 	// Write top-level RIFF chunk size
-	*(uint32_t*)(cluster->payload().data() + 4) =
+	*reinterpret_cast<uint32_t*>(headerBuf.data() + 4) =
 	    audioDataLengthBytesAsWrittenToFile + sample->audioDataStartPosBytes - 8;
 
 	// Write data chunk size
-	*(uint32_t*)(cluster->payload().data() + (sample->audioDataStartPosBytes - 4)) =
+	*reinterpret_cast<uint32_t*>(headerBuf.data() + (sample->audioDataStartPosBytes - 4)) =
 	    audioDataLengthBytesAsWrittenToFile;
 
 	if (recordingExtraMargins) {
 		// Write loop end point
-		*(uint32_t*)(cluster->payload().data() + 92) = loopEndSampleAsWrittenToFile;
+		*reinterpret_cast<uint32_t*>(headerBuf.data() + 92) = loopEndSampleAsWrittenToFile;
 	}
 }
 
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 
-// You'll want to remove the "reason" after calling this
+// Called by the fiber (writeOneCompletedCluster()/finalizeRecordedFile()) for a buffer whose
+// index is already < currentRecordClusterIndex (or the final partial one), so bufferTable_[clusterIndex]
+// is stable -- the audio thread never rewrites an already-assigned slot, only appends new ones (see
+// bufferTable_'s doc). Flushes it to disk, advances the committed-length watermark, then recycles the
+// buffer's memory for reuse.
 Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
-	// D_PRINTLN("writeCluster");
-
-	SampleCluster* sampleCluster = &sample->stream().entry(clusterIndex);
+	std::byte* buffer = bufferTable_[clusterIndex];
 
 	uint32_t byteOffset = static_cast<uint32_t>(clusterIndex) << Cluster::size_magnitude;
-	auto writeResult =
-	    file->write_at(byteOffset, std::span<const std::byte>(sampleCluster->cluster->payload().data(), numBytes));
+	auto writeResult = file->write_at(byteOffset, std::span<const std::byte>(buffer, numBytes));
 	if (!writeResult || *writeResult != numBytes) {
 		return Error::SD_CARD;
 	}
 
-	// MUST re-get this - while writing above, the audio routine is being called, and that could
-	// allocate new SampleClusters and move them around!
-	sampleCluster = &sample->stream().entry(clusterIndex);
+	recycleBuffer(buffer);
+	// Null the table slot now that its buffer has been recycled -- this
+	// index is drained (< firstUnwrittenClusterIndex once the caller advances it) and must never be
+	// read again, but leaving a dangling pointer here would let a stale/reused buffer linger at a
+	// drained index. Nulling it here keeps bufferTable_ free of dangling drained-buffer pointers;
+	// releaseCaptureBuffers() already tolerates a null entry here (its `if (buffer != nullptr)`
+	// guard).
+	bufferTable_[clusterIndex] = nullptr;
 
-	// Grab the SD address, for later
-	uint32_t sector = 0;
-	auto sectorResult = file->sector_of(static_cast<uint32_t>(clusterIndex));
-	if (sectorResult) {
-		sector = *sectorResult;
-	}
-	sampleCluster->sdAddress = sector;
-
-	// Now flushed to the card with its sdAddress recorded, this cluster is reconstructable like any
-	// sample cluster (materialize re-reads it) — so clear dirty, letting the manager evict + reload
-	// it under pressure. (Until now it was held dirty so the unflushed audio could not be evicted.)
-	if (sampleCluster->cluster != nullptr) {
-		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-		if (mgr != nullptr) {
-			deluge_resource_mark_dirty(mgr, sampleCluster->cluster, false);
-		}
-	}
 	return Error::NONE;
 }
 
 Error SampleRecorder::createNextCluster() {
 
-	StreamedChunk* oldRecordCluster =
-	    currentRecordCluster; // Cos we're gonna set that to NULL just below here, but still
-	                          // want to be able to access the old one a bit further down
+	std::byte* oldRecordBuffer = currentRecordBuffer; // Cos we're gonna set that to NULL just below here, but still
+	                                                  // want to be able to access the old one a bit further down
 
-	currentRecordClusterIndex++; // Mark record-cluster we were on as finished
+	// Mark the record-buffer we were on as finished. RELEASE: publishes that the just-completed
+	// buffer's payload writes are visible to a consumer that later acquire-loads this index.
+	int32_t newIndex = currentRecordClusterIndex.load(std::memory_order_relaxed) + 1;
+	currentRecordClusterIndex.store(newIndex, std::memory_order_release);
 
-	currentRecordCluster = nullptr; // Note that we haven't yet created our next record-cluster - we'll do that below
-	                                // if no error first; and if there is an error and we don't create one, this has to
-	                                // remain NULL to indicate that we never created one
+	currentRecordBuffer = nullptr; // Note that we haven't yet created our next record-buffer - we'll do that below
+	                               // if no error first; and if there is an error and we don't create one, this has to
+	                               // remain NULL to indicate that we never created one
 
 	// If this new cluster would actually put us past the 4GB limit...
-	if (currentRecordClusterIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
+	if (newIndex >= (1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude))) {
 
 		// See if we actually already had any bytes to write into that new cluster we can't have...
 		int32_t bytesTilClusterEnd = clusterEndPos - writePos;
@@ -933,38 +959,33 @@ Error SampleRecorder::createNextCluster() {
 		return Error::MAX_FILE_SIZE_REACHED;
 	}
 
-	// We need to allocate our next Cluster
-	try {
-		sample->stream().resize(sample->stream().num_clusters() + 1);
-	} catch (deluge::exception&) {
-		return Error::INSUFFICIENT_RAM;
-	}
+	// We need our next capture buffer -- a recycled one if the free-list has one, otherwise grow by
+	// allocating fresh (the "grow if the fiber's fallen behind" case; see bufferTable_'s doc).
+	std::byte* newBuffer = allocateBuffer();
 
-	currentRecordCluster = sample->stream().get_cluster(currentRecordClusterIndex, CLUSTER_DONT_LOAD);
-
-	// If couldn't allocate cluster (would normally only happen if no SD card present so recording only to RAM)
-	if (!currentRecordCluster) {
+	// If couldn't allocate a buffer (would normally only happen if no SD card present so recording only to RAM)
+	if (!newBuffer) {
 		D_PRINTLN("SampleRecorder::createNextCluster() fail");
 		return Error::INSUFFICIENT_RAM;
 	}
 
-	// Bug hunting - newly gotten Cluster
-	if (currentRecordCluster->num_reasons_held_by_sample_recorder) {
-		FREEZE_WITH_ERROR("E362");
+	try {
+		bufferTable_.resize(static_cast<size_t>(newIndex) + 1);
+	} catch (deluge::exception&) {
+		delugeDealloc(newBuffer);
+		return Error::INSUFFICIENT_RAM;
 	}
-	currentRecordCluster->num_reasons_held_by_sample_recorder++;
+	bufferTable_[newIndex] = newBuffer;
+	currentRecordBuffer = newBuffer;
 
-	// Copy those extra bytes from the end of the old record cluster to the start of the new cluster
-	memcpy(currentRecordCluster->payload().data(), oldRecordCluster->payload().data() + Cluster::size,
+	// Copy those extra bytes from the end of the old record buffer to the start of the new buffer
+	memcpy(currentRecordBuffer, oldRecordBuffer + Cluster::size,
 	       5); // 5 is the max number of bytes we could have overshot
 
 	int32_t bytesOvershot = writePos - clusterEndPos;
 
-	currentRecordCluster->loaded =
-	    true; // I think this is ok - mark it as loaded even though we're yet to record into it
-
-	writePos = (char*)(currentRecordCluster->payload().data() + bytesOvershot);
-	clusterEndPos = (char*)(currentRecordCluster->payload().data() + Cluster::size);
+	writePos = reinterpret_cast<char*>(currentRecordBuffer + bytesOvershot);
+	clusterEndPos = reinterpret_cast<char*>(currentRecordBuffer + Cluster::size);
 
 	return Error::NONE;
 }
@@ -972,13 +993,14 @@ Error SampleRecorder::createNextCluster() {
 // Gets called when we've captured all the samples of audio that we wanted - either as a direct result of user
 // action, or after being fed a few more samples to make up for latency.
 void SampleRecorder::finishCapturing() {
-	status = RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING;
+	// RELEASE: this is the producer-role hand-off to the fiber. Pairs with the acquire load in
+	// cardRoutine() so the fiber, on seeing this status, also observes our final currentRecordClusterIndex
+	// and payload writes before it takes over as producer in finalizeRecordedFile(). See B3.
+	status.store(RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING, std::memory_order_release);
 
 	// A freshly recorded sample now has a final length and needs its waveform overview pre-scanned. Re-arm
 	// the background scan, which may have gone idle after all previously-loaded samples were scanned (#4460).
-	// (The scan skips clusters the recorder is still writing and retries them once its reasons are released.)
 	audioFileManager.overviewScanAllDone = false;
-
 	if (getRootUI()) {
 		getRootUI()->sampleNeedsReRendering(sample);
 	}
@@ -1004,7 +1026,9 @@ void SampleRecorder::feedAudio(std::span<StereoSample> input, bool applyGain, ui
 		else {
 			int32_t samplesLeft;
 
-			if (status == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
+			// RELAXED: audio-thread-owned (only feedAudio/endSyncedRecording/finishCapturing, all on the
+			// audio side, write this value before the release hand-off).
+			if (status.load(std::memory_order_relaxed) == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
 
 				samplesLeft = sample->lengthInSamples - numSamplesCaptured;
 				if (samplesLeft <= 0) {
@@ -1147,8 +1171,8 @@ doFinishCapturing:
 					auto* endpos = (char*)writePosNow;
 					ptrdiff_t num_bytes = samples_to_copy * 3 * recordingNumChannels;
 					char* audio_start_pos = endpos - num_bytes;
-					char* cluster_start_pos = reinterpret_cast<char*>(currentRecordCluster->payload().data()
-					                                                  + sample->audioDataStartPosBytes);
+					char* cluster_start_pos =
+					    reinterpret_cast<char*>(currentRecordBuffer + sample->audioDataStartPosBytes);
 					if (audio_start_pos > cluster_start_pos) {
 						memcpy(cluster_start_pos, audio_start_pos, num_bytes);
 						writePos = cluster_start_pos + num_bytes;
@@ -1169,19 +1193,21 @@ doFinishCapturing:
 
 void SampleRecorder::endSyncedRecording(int32_t buttonLatencyForTempolessRecording) {
 #if ALPHA_OR_BETA_VERSION
-	if (status == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
+	// RELAXED: audio-thread-owned debug assertions (this function only runs on the audio side, before the
+	// release hand-off in finishCapturing()/abort()).
+	if (status.load(std::memory_order_relaxed) == RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP) {
 		FREEZE_WITH_ERROR("E272");
 	}
-	else if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		FREEZE_WITH_ERROR("E288");
 	}
-	else if (status == RecorderStatus::COMPLETE) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::COMPLETE) {
 		FREEZE_WITH_ERROR("E289");
 	}
-	else if (status == RecorderStatus::ABORTED) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::ABORTED) {
 		FREEZE_WITH_ERROR("E290");
 	}
-	else if (status == RecorderStatus::AWAITING_DELETION) {
+	else if (status.load(std::memory_order_relaxed) == RecorderStatus::AWAITING_DELETION) {
 		FREEZE_WITH_ERROR("E291");
 	}
 #endif
@@ -1209,7 +1235,8 @@ void SampleRecorder::endSyncedRecording(int32_t buttonLatencyForTempolessRecordi
 			finishCapturing();
 		}
 		else {
-			status = RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP;
+			// RELAXED: audio-thread-owned write (pre-hand-off).
+			status.store(RecorderStatus::CAPTURING_DATA_WAITING_TO_STOP, std::memory_order_relaxed);
 		}
 	}
 	else {
@@ -1231,18 +1258,18 @@ void SampleRecorder::totalSampleLengthNowKnown(uint32_t totalLengthSamples, uint
 		sample->fileLoopEndSamples = loopEndPointSamples;
 	}
 
-	// If we haven't written the first cluster yet, quick - update it with the actual length
+	// If we haven't written the first buffer yet, quick - update it with the actual length. bufferTable_[0]
+	// is still ours (not yet flushed/recycled), so patch it in place -- the (now-correct) header goes to
+	// disk when this buffer is flushed normally, with nothing left to repatch at finalize.
 	if (firstUnwrittenClusterIndex == 0) {
-		StreamedChunk* cluster =
-		    sample->stream().chunk_at(0); // It should still be there, cos it hasn't been written to card yet
-		if (ALPHA_OR_BETA_VERSION && !cluster) {
+		if (ALPHA_OR_BETA_VERSION && (bufferTable_.size() == 0 || bufferTable_[0] == nullptr)) {
 			FREEZE_WITH_ERROR("E274");
 		}
 
 		audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
 		loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples; // Even if we're not actually writing loop points
 		                                                           // to the file, this is harmless
-		updateDataLengthInFirstCluster(cluster);
+		updateDataLengthInHeader(std::span<std::byte>(bufferTable_[0], Cluster::size));
 	}
 }
 
@@ -1254,378 +1281,172 @@ bool SampleRecorder::inputHasNoRightChannel() {
 	return (recordSumR < (recordSumL >> 6));
 }
 
-// Only call this if currentRecordCluster points to a real cluster
-void SampleRecorder::setExtraBytesOnPreviousCluster(StreamedChunk* currentCluster, int32_t currentClusterIndex) {
-	if (currentClusterIndex <= 0) {
-		return;
-	}
-
-	StreamedChunk* prevCluster = sample->stream().chunk_at(currentClusterIndex - 1);
-
-	// It might have since been deallocated, which is just fine. But if not...
-	if (prevCluster) {
-		memcpy(prevCluster->payload().data() + Cluster::size, currentCluster->payload().data(), 5);
-	}
+namespace {
+/// @brief Reconstruct the int32 value `alterFile()`'s per-frame transform operates on from a
+///        stored 24-bit little-endian sample: bytes [0,1,2] of @p src become bits [8,31] of the
+///        result, with bits [0,7] always 0.
+int32_t read24AsShiftedInt32(const std::byte* src) {
+	uint32_t b0 = static_cast<uint32_t>(src[0]);
+	uint32_t b1 = static_cast<uint32_t>(src[1]);
+	uint32_t b2 = static_cast<uint32_t>(src[2]);
+	return static_cast<int32_t>((b0 | (b1 << 8) | (b2 << 16)) << 8);
 }
+
+/// @brief Inverse of the above: write bytes [1,2,3] of @p processed (its top 3 bytes, little-endian)
+///        to @p dst as a 3-byte frame -- the exact bytes `alterFile()`'s normalize/downmix gain
+///        produces per output frame.
+void writeShiftedInt32As24(int32_t processed, std::byte* dst) {
+	uint32_t u = static_cast<uint32_t>(processed);
+	dst[0] = static_cast<std::byte>((u >> 8) & 0xFF);
+	dst[1] = static_cast<std::byte>((u >> 16) & 0xFF);
+	dst[2] = static_cast<std::byte>((u >> 24) & 0xFF);
+}
+} // namespace
 
 Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
                                 uint64_t dataLengthAfterAction) {
 
 	D_PRINTLN("altering file");
-	int32_t currentReadClusterIndex = 0;
-	int32_t currentWriteClusterIndex = 0;
 
-	StreamedChunk* currentReadCluster =
-	    sample->stream().get_cluster(0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-	if (!currentReadCluster) {
+	// This function's SD writes go through a persistent write context -- opened here, at
+	// the top, and held open for the WHOLE alteration. Every write below reuses it via
+	// Stream::write_at, and it's closed exactly once: either by the end-of-alteration truncate
+	// block, or, if that branch doesn't run (no truncation was needed), right before this function
+	// returns. The recorder is efatfs-only.
+	//
+	// This whole function is a positional file->file transform over two independent
+	// byte cursors on the SAME open stream -- an input read cursor and an output write cursor, both
+	// starting at `audioDataStartPosBytes`. Output is never longer than input (mono output frames are
+	// <= the mono/stereo input frames they're derived from), so in-place positional writes never
+	// clobber input the read cursor hasn't reached yet -- no cluster residency, no get_cluster/
+	// num_reasons bookkeeping, and no cluster-straddle "extra bytes" juggling: positional
+	// `read_at_via`/`write_at` read and write any byte range directly, so there's no 32768-byte
+	// window to straddle in the first place.
+	auto openedStream = deluge::io::Stream::open(sample->filePath, DELUGE_STREAM_WRITE_APPEND);
+	if (!openedStream) {
+		return Error::SD_CARD;
+	}
+	this->file = std::move(openedStream.value());
+
+	// Header fixups: read the header back through this SAME write context, patch it in a small
+	// scratch buffer, and write it straight back. `audioDataStartPosBytes` is always 44 or 112 (see
+	// setup()), well within this buffer.
+	std::array<std::byte, 128> headerScratch{};
+	if (ALPHA_OR_BETA_VERSION && sample->audioDataStartPosBytes > headerScratch.size()) {
+		FREEZE_WITH_ERROR("E286");
+	}
+	std::span<std::byte> headerBuf(headerScratch.data(), sample->audioDataStartPosBytes);
+	auto headerReadResult = file->read_at_via(0, headerBuf);
+	if (!headerReadResult || *headerReadResult != headerBuf.size()) {
 		return Error::SD_CARD;
 	}
 
-	// Bug hunting - newly gotten Cluster
-	currentReadCluster->num_reasons_held_by_sample_recorder++;
-
-	int32_t numClustersBeforeAction = ((idealFileSizeBeforeAction - 1) >> Cluster::size_magnitude) + 1; // Rounds up
-	if (ALPHA_OR_BETA_VERSION && numClustersBeforeAction > static_cast<int32_t>(sample->stream().num_clusters())) {
-		FREEZE_WITH_ERROR("E286");
-	}
-
-	StreamedChunk* nextReadCluster = nullptr;
-
-	if (numClustersBeforeAction >= 2) {
-		nextReadCluster = sample->stream().get_cluster(1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-		if (!nextReadCluster) {
-
-			// Some bug-hunting
-			if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
-				FREEZE_WITH_ERROR("E350");
-			}
-			currentReadCluster->num_reasons_held_by_sample_recorder--;
-
-			deluge::cluster::remove_reason(*currentReadCluster, "E017");
-			return Error::SD_CARD;
-		}
-
-		// Bug hunting - newly gotten Cluster
-		nextReadCluster->num_reasons_held_by_sample_recorder++;
-	}
-
-	StreamedChunk* currentWriteCluster =
-	    sample->stream().get_cluster(0, CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
-	// That one can't fail, fortunately, cos we already grabbed Cluster 0 above, so it exists
-
-	// Bug hunting - newly gotten Cluster
-	currentWriteCluster->num_reasons_held_by_sample_recorder++;
-
-	uint32_t data32;
-	uint16_t data16;
-
 	audioDataLengthBytesAsWrittenToFile = dataLengthAfterAction;
 	loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
-	updateDataLengthInFirstCluster(currentWriteCluster);
+	updateDataLengthInHeader(headerBuf);
 
 	if (action != MonitoringAction::NONE) {
 		// Write num channels
-		data16 = 1;
-		memcpy(currentWriteCluster->payload().data() + 22, &data16, 2);
+		uint16_t data16 = 1;
+		memcpy(headerBuf.data() + 22, &data16, 2);
 
 		// Data rate
-		data32 = kSampleRate * 1 * 3;
-		memcpy(currentWriteCluster->payload().data() + 28, &data32, 4);
+		uint32_t data32 = kSampleRate * 1 * 3;
+		memcpy(headerBuf.data() + 28, &data32, 4);
 
 		// Data block size
 		data16 = 1 * 3;
-		memcpy(currentWriteCluster->payload().data() + 32, &data16, 2);
+		memcpy(headerBuf.data() + 32, &data16, 2);
 	}
 
-	char* readPos = reinterpret_cast<char*>(currentReadCluster->payload().data() + sample->audioDataStartPosBytes);
-	char* writePos = reinterpret_cast<char*>(currentWriteCluster->payload().data() + sample->audioDataStartPosBytes);
-
-	uint32_t bytesFinalCluster = idealFileSizeBeforeAction & (Cluster::size - 1);
-	if (bytesFinalCluster == 0) {
-		bytesFinalCluster = Cluster::size;
+	auto headerWriteResult = file->write_at(0, headerBuf);
+	if (!headerWriteResult || *headerWriteResult != headerBuf.size()) {
+		return Error::SD_CARD;
 	}
 
-	uint32_t count = 0;
+	// Input region: `idealFileSizeBeforeAction` total bytes from the start of the file, i.e.
+	// `idealFileSizeBeforeAction - audioDataStartPosBytes` audio bytes, in frames of
+	// `inputFrameBytes` each (mono in for NONE, stereo in for the two channel-combining actions).
+	const uint32_t inputFrameBytes = (action == MonitoringAction::NONE) ? 3 : 6;
+	const uint32_t audioInputBytes = idealFileSizeBeforeAction - sample->audioDataStartPosBytes;
+	const uint32_t numFrames = audioInputBytes / inputFrameBytes;
 
-	// TODO: this is really inefficient - checks a bunch of stuff for every single audio sample. Should check in
-	// advance how many samples we can process at a time
+	// Process in frame-aligned batches -- big enough to make the SD traffic efficient, small enough
+	// to keep the periodic cooperative yield (every 256 frames, as before) meaningful.
+	constexpr uint32_t kBatchFrames = 256;
+	std::array<std::byte, kBatchFrames * 6> inputScratch{};
+	std::array<std::byte, kBatchFrames * 3> outputScratch{};
 
-	while (true) {
+	uint32_t readCursor = sample->audioDataStartPosBytes;
+	uint32_t writeCursor = sample->audioDataStartPosBytes;
+	uint32_t framesDone = 0;
 
-		if (!(count & 0b11111111)) { // 10x 1's seems to work ok. So we go down to 8 to be sure
-			AudioEngine::routineWithClusterLoading();
+	while (framesDone < numFrames) {
+		AudioEngine::routineWithClusterLoading();
+		uiTimerManager.routine();
+		deluge_control_flush();
 
-			uiTimerManager.routine();
+		uint32_t batchFrames = std::min(kBatchFrames, numFrames - framesDone);
+		uint32_t inputBytesThisBatch = batchFrames * inputFrameBytes;
+		uint32_t outputBytesThisBatch = batchFrames * 3;
 
-			deluge_control_flush();
-		}
-
-		count++;
-
-		int32_t* input = (int32_t*)(readPos - 1);
-		readPos += 3;
-		int32_t value = *input & 0xFFFFFF00;
-
-		if (action == MonitoringAction::SUBTRACT_RIGHT_CHANNEL) {
-			input = (int32_t*)(readPos - 1);
-			readPos += 3;
-			value = (value >> 1) - ((int32_t)(*input & 0xFFFFFF00) >> 1);
-		}
-
-		else if (action == MonitoringAction::REMOVE_RIGHT_CHANNEL) {
-			readPos += 3;
-		}
-		int32_t processed = value << lshiftAmount;
-
-		char* processedPos = (char*)&processed + 1;
-		*(writePos++) = *(processedPos++);
-		*(writePos++) = *(processedPos++);
-		*(writePos++) = *(processedPos++);
-
-		// If need to advance write-head past the end of a cluster, then we'll write that current cluster to disk
-		// and carry on
-		int32_t writeOvershot =
-		    writePos - reinterpret_cast<char*>(currentWriteCluster->payload().data() + Cluster::size);
-		if (writeOvershot >= 0) {
-
-			// If reached very end of file, break
-			if (currentWriteClusterIndex == numClustersBeforeAction - 1) {
-				break;
-			}
-
-			D_PRINTLN("write advance");
-
-			currentWriteCluster->loaded = true; // I don't think this is necessary anymore
-
-			uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
-
-			// Do a last-ditch check that the SD address doesn't look invalid
-			if (sdAddress == 0) {
-				FREEZE_WITH_ERROR("E268");
-			}
-			if ((sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-				FREEZE_WITH_ERROR("E275");
-			}
-
-			// Write the Cluster we just finished processing to card
-			DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, Cluster::size >> 9);
-
-			// Grab any overshot / extra bytes from the end of the Cluster we just finished...
-			uint8_t extraBytes[5]; // 5 is the max number of bytes we could have overshot
-			if (writeOvershot) {
-				memcpy(extraBytes, currentWriteCluster->payload().data() + Cluster::size, writeOvershot);
-			}
-
-			// And from the Cluster we just finished, give the Cluster *before that* the extra bytes from its start
-			setExtraBytesOnPreviousCluster(currentWriteCluster, currentWriteClusterIndex);
-
-			// We don't need that old Cluster anymore
-
-			// Some bug-hunting
-			if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
-				FREEZE_WITH_ERROR("E351");
-			}
-			currentWriteCluster->num_reasons_held_by_sample_recorder--;
-
-			deluge::cluster::remove_reason(*currentWriteCluster, "E023");
-			currentWriteCluster = nullptr;
-
-			// If write operation failed, now's the time to get out
-			if (result) {
-writeFailed:
-				// Before we get out, remove "reasons" from the clusters we've been reading from
-
-				// Some bug-hunting
-				if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
-					FREEZE_WITH_ERROR("E352");
-				}
-				currentReadCluster->num_reasons_held_by_sample_recorder--;
-
-				deluge::cluster::remove_reason(*currentReadCluster, "E024");
-
-				if (nextReadCluster) {
-					// Some bug-hunting
-					if (!nextReadCluster->num_reasons_held_by_sample_recorder) {
-						FREEZE_WITH_ERROR("E353");
-					}
-					nextReadCluster->num_reasons_held_by_sample_recorder--;
-
-					deluge::cluster::remove_reason(*nextReadCluster, "E025");
-				}
-				return Error::SD_CARD;
-			}
-
-			// Ok, move on and start thinking about the next Cluster now
-			currentWriteClusterIndex++;
-
-			// Get the new / next Cluster, but don't insist on actually reading from the card, cos we're gonna
-			// overwrite it with new data anyway
-			currentWriteCluster = sample->stream().get_cluster(currentWriteClusterIndex,
-			                                                   CLUSTER_DONT_LOAD); // Remember, this adds a "reason"
-
-			// That could only fail if no RAM, but juuuust in case...
-			if (!currentWriteCluster) {
-				goto writeFailed;
-			}
-
-			// Bug hunting - newly gotten Cluster
-			currentWriteCluster->num_reasons_held_by_sample_recorder++;
-
-			// Ok, and those extra bytes that we grabbed from the end of the previous Cluster - paste them into the
-			// beginning of the new current Cluster
-			if (writeOvershot) {
-				memcpy(currentWriteCluster->payload().data(), extraBytes, writeOvershot);
-			}
-
-			// And get ready to write to the new current Cluster - from the next sample, which might not be
-			// perfectly aligned to the Cluster start
-			writePos = reinterpret_cast<char*>(currentWriteCluster->payload().data() + writeOvershot);
-		}
-
-		// If we're in the final read-Cluster and reached the end, then all that's left to do is flush out what we
-		// have left to write (max 1 cluster), and get out.
-		if (currentReadClusterIndex == numClustersBeforeAction - 1
-		    && readPos >= reinterpret_cast<char*>(currentReadCluster->payload().data() + bytesFinalCluster)) {
-			break;
-		}
-
-		// Advance read-head. We read one Cluster ahead, so we can access its "extra bytes"
-		if (readPos >= reinterpret_cast<char*>(currentReadCluster->payload().data() + Cluster::size)) {
-
-			D_PRINTLN("read advance");
-
-			int32_t overshot = readPos - reinterpret_cast<char*>(currentReadCluster->payload().data() + Cluster::size);
-
-			// Some bug-hunting
-			if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
-				FREEZE_WITH_ERROR("E354");
-			}
-			currentReadCluster->num_reasons_held_by_sample_recorder--;
-
-			deluge::cluster::remove_reason(*currentReadCluster, "E020");
-			currentReadClusterIndex++;
-			currentReadCluster = nextReadCluster;
-
-			// If there are further read Clusters...
-			if (currentReadClusterIndex < numClustersBeforeAction - 1) {
-				nextReadCluster = sample->stream().get_cluster(
-				    currentReadClusterIndex + 1, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-
-				// If that failed, remove other reasons and get out
-				if (!nextReadCluster) {
-
-					// Some bug-hunting
-					if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
-						FREEZE_WITH_ERROR("E355");
-					}
-					currentReadCluster->num_reasons_held_by_sample_recorder--;
-
-					deluge::cluster::remove_reason(*currentReadCluster, "E021");
-
-					// Some bug-hunting
-					if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
-						FREEZE_WITH_ERROR("E356");
-					}
-					currentWriteCluster->num_reasons_held_by_sample_recorder--;
-
-					deluge::cluster::remove_reason(*currentWriteCluster, "E022");
-					currentWriteCluster = nullptr;
-					return Error::SD_CARD;
-				}
-
-				// Bug hunting - newly gotten Cluster
-				nextReadCluster->num_reasons_held_by_sample_recorder++;
-			}
-			else { // Not sure these are strictly necessary...
-				nextReadCluster = nullptr;
-			}
-
-			readPos = reinterpret_cast<char*>(currentReadCluster->payload().data() + overshot);
-		}
-	}
-
-	// We got to the end, so wrap everything up
-
-	// Some bug-hunting
-	if (!currentReadCluster->num_reasons_held_by_sample_recorder) {
-		FREEZE_WITH_ERROR("E357");
-	}
-	currentReadCluster->num_reasons_held_by_sample_recorder--;
-
-	deluge::cluster::remove_reason(*currentReadCluster, "E018");
-	// We know that finishedAlteringFile must be NULL
-
-	currentWriteCluster->loaded = true;
-
-	uint32_t bytesToWriteFinalCluster = writePos - reinterpret_cast<char*>(currentWriteCluster->payload().data());
-
-	if (bytesToWriteFinalCluster) { // If there is in fact anything to flush out to the file / card...
-
-		// And from this final Cluster, give the Cluster *before that* the extra bytes from its start
-		setExtraBytesOnPreviousCluster(currentWriteCluster, currentWriteClusterIndex);
-
-		uint32_t numSectorsToWrite = ((bytesToWriteFinalCluster - 1) >> 9) + 1;
-		if (numSectorsToWrite > (Cluster::size >> 9)) {
-			FREEZE_WITH_ERROR("E239");
-		}
-
-		uint32_t sdAddress = sample->stream().sd_address_at(currentWriteClusterIndex);
-
-		// Do a last-ditch check that the SD address doesn't look invalid
-		if (sdAddress == 0) {
-			FREEZE_WITH_ERROR("E268");
-		}
-		if ((sdAddress - fileSystem.database) & (fileSystem.csize - 1)) {
-			FREEZE_WITH_ERROR("E276");
-		}
-
-		DRESULT result = disk_write(0, (BYTE*)currentWriteCluster->payload().data(), sdAddress, numSectorsToWrite);
-
-		// Some bug-hunting
-		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
-			FREEZE_WITH_ERROR("E358");
-		}
-		currentWriteCluster->num_reasons_held_by_sample_recorder--;
-
-		deluge::cluster::remove_reason(*currentWriteCluster, "E019");
-		currentWriteCluster = nullptr;
-
-		// If writing disk failed, above, we've now removed that "reason", so we can get out
-		if (result) {
+		auto readResult = file->read_at_via(readCursor, std::span<std::byte>(inputScratch.data(), inputBytesThisBatch));
+		if (!readResult || *readResult != inputBytesThisBatch) {
 			return Error::SD_CARD;
 		}
 
-		if (action != MonitoringAction::NONE || capturedTooMuch) {
+		for (uint32_t i = 0; i < batchFrames; i++) {
+			const std::byte* in = inputScratch.data() + static_cast<size_t>(i) * inputFrameBytes;
 
-			deluge_file_invalidate_cache();
-			auto reopenedStream = deluge::io::Stream::open(sample->filePath, DELUGE_STREAM_WRITE_APPEND);
-			if (!reopenedStream) {
-				return Error::SD_CARD;
+			int32_t value = read24AsShiftedInt32(in);
+			if (action == MonitoringAction::SUBTRACT_RIGHT_CHANNEL) {
+				int32_t right = read24AsShiftedInt32(in + 3);
+				value = (value >> 1) - (right >> 1);
 			}
-			this->file = std::move(reopenedStream.value());
+			// REMOVE_RIGHT_CHANNEL reads only the left channel above and discards the right (in + 3)
+			// entirely; NONE never has a right channel to begin with (mono input).
 
-			Error error = truncateFileDownToSize(dataLengthAfterAction + sample->audioDataStartPosBytes);
-			if (error != Error::NONE) {
-				return error;
-			}
+			int32_t processed = value << lshiftAmount;
+			writeShiftedInt32As24(processed, outputScratch.data() + static_cast<size_t>(i) * 3);
+		}
 
-			auto closeResult = this->file->close();
-			this->file.reset();
-			if (!closeResult) {
-				return Error::SD_CARD;
-			}
+		auto writeResult =
+		    file->write_at(writeCursor, std::span<const std::byte>(outputScratch.data(), outputBytesThisBatch));
+		if (!writeResult || *writeResult != outputBytesThisBatch) {
+			return Error::SD_CARD;
+		}
+
+		readCursor += inputBytesThisBatch;
+		writeCursor += outputBytesThisBatch;
+		framesDone += batchFrames;
+	}
+
+	if (action != MonitoringAction::NONE || capturedTooMuch) {
+
+		// `this->file` has been open -- receiving every write_at call above -- for the whole
+		// alteration, opened at the top of this function, so there's nothing to reopen here.
+
+		Error error = truncateFileDownToSize(dataLengthAfterAction + sample->audioDataStartPosBytes);
+		if (error != Error::NONE) {
+			return error;
+		}
+
+		auto closeResult = this->file->close();
+		this->file.reset();
+		if (!closeResult) {
+			return Error::SD_CARD;
 		}
 	}
-	else { // Or if there was nothing further to write (very rare)...
 
-		// Some bug-hunting
-		if (!currentWriteCluster->num_reasons_held_by_sample_recorder) {
-			FREEZE_WITH_ERROR("E359");
+	// The write context (opened at the top of this function) is closed exactly once. The
+	// truncate branch above already closed it (and reset `this->file`) whenever it ran; if it didn't
+	// run -- no truncation was needed -- close it here.
+	if (this->file) {
+		auto closeResult = this->file->close();
+		this->file.reset();
+		if (!closeResult) {
+			return Error::SD_CARD;
 		}
-		currentWriteCluster->num_reasons_held_by_sample_recorder--;
-
-		deluge::cluster::remove_reason(*currentWriteCluster, "E238");
-		currentWriteCluster = nullptr;
 	}
 
 	return Error::NONE;
@@ -1638,8 +1459,12 @@ Error SampleRecorder::truncateFileDownToSize(uint32_t newFileSize) {
 
 	uint64_t numClustersAfterAction = ((newFileSize - 1) >> Cluster::size_magnitude) + 1;
 
-	if (numClustersAfterAction < sample->stream().num_clusters()) {
-		sample->stream().erase_from(numClustersAfterAction);
+	// Guard on the PHYSICAL cache size, not num_clusters(): resizeOverviewCache() shrinks the actual
+	// overviewCache_ storage, so the "am I really shrinking?" test must observe overviewCacheSize().
+	// num_clusters() is derived and doesn't track the cache's physical size, so comparing against it
+	// would mis-gate this shrink (matching the finalize-grow guard in the same file).
+	if (numClustersAfterAction < sample->overviewCacheSize()) {
+		sample->resizeOverviewCache(numClustersAfterAction);
 	}
 
 	auto truncateResult = file->truncate(newFileSize);

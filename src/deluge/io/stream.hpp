@@ -18,7 +18,10 @@ public:
 	Stream& operator=(Stream&& other) noexcept {
 		if (this != &other) {
 			if (handle_) {
-				deluge_stream_close(handle_);
+				// Route through close() (not deluge_stream_close directly) so the efatfs/C-FatFS
+				// backend selector lives in exactly one place -- see stream.cpp's close(). Calling
+				// deluge_stream_close directly on an efatfs-boxed handle would be a backend mismatch.
+				(void)close();
 			}
 			handle_ = other.handle_;
 			other.handle_ = nullptr;
@@ -27,13 +30,24 @@ public:
 	}
 	~Stream() {
 		if (handle_) {
-			deluge_stream_close(handle_);
+			(void)close();
 		}
 	}
 
 	[[nodiscard]] static std::expected<Stream, Status> open(std::string_view path, DelugeStreamMode mode);
-	std::expected<std::span<std::byte>, Status> read_at(uint32_t byte_offset, std::span<std::byte> buffer);
 	std::expected<uint32_t, Status> write_at(uint32_t byte_offset, std::span<const std::byte> buffer);
+	/// @brief Read up to @p dst.size() bytes at absolute @p byte_offset back through this stream's
+	///        OWN open write context, bounded by its live (not yet flushed to disk) size.
+	///
+	/// Used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open write
+	/// context) and `finalizeRecordedFile()`'s header patch-back. Both backends implement it:
+	/// `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on C-FatFS. EOF-honest --
+	/// the returned count may be short of @p dst.size().
+	/// @param byte_offset Absolute byte offset into the stream to read from.
+	/// @param dst          Buffer to read into; up to its full size may be filled.
+	/// @return The number of bytes actually read (may be less than dst.size() at EOF), or a Status
+	///         error.
+	std::expected<uint32_t, Status> read_at_via(uint32_t byte_offset, std::span<std::byte> dst);
 	std::expected<void, Status> truncate(uint32_t new_size);
 	std::expected<uint32_t, Status> size();
 	std::expected<uint32_t, Status> sector_of(uint32_t cluster_index);

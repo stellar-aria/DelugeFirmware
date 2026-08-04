@@ -106,15 +106,11 @@ bool LoadPatternUI::opened() {
 		return false;
 	}
 
-	error = setupForLoadingPattern(); // Sets currentDir.
-	if (error != Error::NONE) {
-		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
-		                                 // the pads, in call to setupForLoadingMidiDeviceDefinition().
-		display->displayError(error);
-		return false;
-	}
-
-	focusRegained();
+	std::string searchFilename = setupForLoadingPattern(); // Sets currentDir.
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = defaultDir});
 
 	return true;
 }
@@ -152,8 +148,11 @@ void LoadPatternUI::currentFileChanged(int32_t movementDirection) {
 	}
 }
 
+// Computes the icon state and currentDir, and returns the filename to search for within it (always
+// empty here). Does NOT perform the listing itself - opened() combines this with defaultDir to
+// dispatch an async Open listing; the post-listing tail lives in onBrowserOpened().
 // If OLED, then you should make sure renderUIsForOLED() gets called after this.
-Error LoadPatternUI::setupForLoadingPattern() {
+std::string LoadPatternUI::setupForLoadingPattern() {
 	enteredText.clear();
 
 	fileIcon = deluge::hid::display::OLED::midiIcon;
@@ -168,16 +167,17 @@ Error LoadPatternUI::setupForLoadingPattern() {
 		searchFilename.append(".XML");
 	}
 
-	Error error = arrivedInNewFolder(0, searchFilename.c_str(), defaultDir.c_str());
-	if (error != Error::NONE) {
-		return error;
-	}
+	return searchFilename;
+}
 
+void LoadPatternUI::onBrowserOpened() {
 	currentLabelLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	drawKeys();
 
-	return Error::NONE;
+	// Runs here so it happens after the listing actually completes, matching the Save* browsers'
+	// convention.
+	focusRegained();
 }
 
 void LoadPatternUI::folderContentsReady(int32_t entryDirection) {
@@ -191,14 +191,9 @@ void LoadPatternUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem->isFolder) {
-
-		Error error = goIntoFolder(currentFileItem->filename.c_str());
-
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
+		goIntoFolder(currentFileItem->filename.c_str());
 	}
 
 	else {

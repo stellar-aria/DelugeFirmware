@@ -25,6 +25,26 @@ embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 log = "0.4"
 rtt-target = { version = "0.6", features = ["log"], optional = true }
+# R2 Task 3: `efatfs_core::DirEntryInfo::name` is a fixed-capacity
+# `heapless::String<256>`, not an `alloc::String` -- this module is compiled
+# both `no_std` (device) and `std` (host_app/fs_differential), and a
+# directory-entry name has a natural FAT LFN bound (255 UTF-16 units) so a
+# fixed-capacity type is a better fit than a heap allocation either way.
+heapless = { version = "0.8", default-features = false }
+
+# SR2d-4 Task 5: the native cluster fill's convert/stitch step (`fill_logic::finish_convert_stitch`)
+# calls this crate's safe wrappers over the app's own convert.cpp/stitch.cpp rather than
+# re-transliterating them. Unconditional (not target/feature-gated), like the deps just above:
+# `fill_logic` compiles on every tier this crate builds (device, host_app, plain host) -- see that
+# module's doc. Its own build.rs is target-aware (device vs host; SR2d-4 Task 5), so this resolves
+# correctly on all three.
+deluge_sample_convert = { path = "sample_convert" }
+
+# C2a: the relocated cluster-fill core. `fill_logic` (Task 1) lands here; deluge-bsp-rust's
+# streaming_loader imports it instead of its own `mod fill_logic`. `native_fill` (Task 3) pulls in
+# the manager-reaching `native_begin`/`native_finish` -- streaming_loader.rs no longer defines those
+# itself; `ProdOps::begin`/`finish` now call straight into this crate.
+deluge_sample_fill = { path = "../../../crates/deluge_sample_fill", features = ["native_fill"] }
 
 # Sibling deluge-sdk BSP + HAL (DelugeFirmware and deluge-sdk cloned side by
 # side). Both are dual-target as of deluge-sdk's feat/deluge-bsp-host: `sd`
@@ -52,16 +72,61 @@ rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 [target.'cfg(target_os = "none")'.dependencies]
 deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
 
-# DelugeFirmware's own Rust crate providing the residency/eviction engine + the
-# GeneralMemoryAllocator backing (TLSF + slab), both as C ABIs the C++ app calls.
-# Linked here (not via the `deluge_rust` umbrella crate, which carries its own
-# #[panic_handler] and would collide with ours) so the archived deluge_app object
-# closure resolves its deluge_resource_* AND deluge_{alloc,slab_*} symbols. This is
-# a distinct allocator from the sibling `deluge-alloc` above: disjoint memory,
-# disjoint consumers (C++ app vs. Rust BSP), no C-symbol overlap. deluge_alloc
-# rides in transitively (deluge_resource depends on it), so it stays out of this
-# bin's extern prelude and doesn't clash with `use deluge_alloc` (the sibling).
+# SP1: the device `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
+# (`fat_block_device.rs`) — same vendored crates `fs_differential`'s host
+# adapter already exercises, wired here onto the real SD driver.
+block-device-driver = { path = "../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../crates/block-device-adapters" }
+aligned = "0.4"
+embedded-fatfs = { path = "../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"] }
+# `bench_fs` (SP1 Task 4): brings `File`'s `embedded_io_async::Read` impl into
+# scope to drive the efatfs read loop. Pinned to the same 0.7.0
+# `embedded-io-async` embedded-fatfs itself depends on (NOT the older 0.6.1
+# `block-device-adapters`/`block-device-driver` use for their own `Read`
+# trait — both versions coexist in the graph; this is the one whose `Read`
+# impl `File` actually has).
+embedded-io-async = "0.7.0"
+# `embedded-fatfs`'s `alloc` feature (above) is the first thing on this
+# no_std target to actually need `extern crate alloc`, which requires a
+# registered `#[global_allocator]` (see main.rs's `FS_ALLOCATOR`) — nothing
+# here used `alloc` before. Renamed via `package =` to `fs_alloc`: this
+# crate's OWN `crates/deluge_alloc` (TLSF heap) would otherwise collide, as
+# an unqualified dependency, with the sibling deluge-sdk `deluge-alloc` crate
+# already above (both normalize to the same `deluge_alloc` identifier).
+fs_alloc = { package = "deluge_alloc", path = "../../../crates/deluge_alloc" }
+
+# DelugeFirmware's residency/eviction engine + GeneralMemoryAllocator backing
+# (TLSF + slab), exposed as C ABIs the archived C++ deluge_app calls. Linked
+# directly (not via the `deluge_rust` umbrella crate, whose #[panic_handler]
+# would collide with ours). A distinct allocator from the sibling `deluge-alloc`
+# above — disjoint memory and consumers, no C-symbol overlap; deluge_alloc rides
+# in transitively via deluge_resource.
 deluge_resource = { path = "../../../crates/deluge_resource" }
+
+# SR2d-5 Task 4: the Rust region-port cursor (`deluge_sample_source_*`/`deluge_sample_region_*`),
+# wrapping `cursor::SampleSource<ManagerResidency>` over the SAME `deluge_resource` handle above --
+# calls it directly, not through a second manager. Its strong `#[no_mangle]` symbols (gated
+# `cfg(any(target_os = "none", feature = "host_app"))`, see abi.rs) are the SOLE definition of the
+# `deluge_sample_source_*`/`deluge_sample_region_*` C ABI on device (the C++ weak fallback
+# sample_source.cpp was deleted in SR3f). It does NOT depend on
+# (or define) any `deluge_streaming_*` symbol -- it only CALLS a couple of those as `unsafe extern "C"`
+# (the open-bridge accessors), which the archived C++ app closure provides -- so this composes without a
+# duplicate-symbol conflict.
+deluge_sample_source = { path = "../../../crates/deluge_sample_source" }
+
+# U1 Task 1: the sample range-reader C ABI (`deluge_sample_reader_*`/`deluge_sample_read`,
+# include/libdeluge/sample_reader.h) -- the non-voice twin of the region-port cursor just above.
+# Depends on the SAME `deluge_resource` handle directly (its `Reader::held_lease` is a typed
+# `deluge_resource::facade::Lease`), not through a second manager. This task lands lifecycle only
+# (open/seek/close); `window`/`advance`/`ok`/`deluge_sample_read` are later tasks, already declared
+# in the header but not yet backed by a strong symbol here.
+deluge_sample_reader = { path = "../../../crates/deluge_sample_reader" }
+
+# U4c Task 2: the streaming-file slot registry C ABI (`deluge_sample_stream_*`,
+# include/libdeluge/sample_stream.h) -- pure build wiring, no consumer yet (a later task flips the
+# C++ facade onto it). Same shape as the reader dep just above: dependency-free feature selector, no
+# weak fallback, the first consumer's undefined ref pulls this archive member in.
+deluge_sample_stream = { path = "../../../crates/deluge_sample_stream" }
 
 # Embassy runtime — versions match deluge-sdk's workspace pins.
 embassy-executor = { version = "0.10.0", features = ["nightly", "platform-cortex-ar", "executor-thread", "executor-interrupt"] }
@@ -82,53 +147,113 @@ embassy-time = { version = "0.5.1", features = ["std"] }
 critical-section = { version = "1", features = ["std"] }
 # Host `main`'s logger (device uses `log` over RTT instead; see the `rtt` feature).
 env_logger = "0.11"
-# Host implementation of the fiber.rs low-level switch (`corosensei::Coroutine`/
+# Host implementation of fiber.rs's low-level switch (`corosensei::Coroutine`/
 # `Yielder`), standing in for the device's ARM `fiber_switch` global_asm. Its
-# `sanitize` feature below was originally chosen with ThreadSanitizer in mind,
-# but M1 Task 5 found it's actually ASan-only (see that feature's comment) —
-# TSan itself needs no fiber annotations for a same-OS-thread coroutine switch
-# (it tracks happens-before per real thread, not per stack), so the M1 Task 5
-# TSan run does not enable this feature. Kept for a future ASan pass.
+# `sanitize` feature (below) is ASan-only — see that feature's comment.
 corosensei = "0.3"
-# The host-built C++ `deluge_app` object closure (see build.rs, `host_app`
-# feature) calls the deluge_resource_* residency C ABI and the
-# deluge_{alloc,slab_*,heap_*} allocator C ABI — the same symbols the device
-# build resolves via the `deluge_resource` dep above. `deluge_resource` and its
-# `deluge_alloc` dependency are `#![cfg_attr(target_os = "none", no_std)]`, so on
-# host they're plain std rlibs (no panic_handler, no dup-panic-handler risk) and
-# link cleanly against std. Optional + gated by `host_app` so a plain host build
-# (M1-M3 harness, no C++ app linked) never pulls it in.
+# The host-built C++ `deluge_app` closure (host_app feature) calls the same
+# deluge_resource_* / deluge_{alloc,slab_*,heap_*} C ABIs the device resolves via
+# the dep above. On host these crates are plain std rlibs (no panic_handler, no
+# dup-handler risk). Optional + gated by `host_app` so a plain host build never
+# pulls it in.
 deluge_resource = { path = "../../../crates/deluge_resource", optional = true }
 
+# SR2d-5 Task 4: host-side sibling of the device dep above. `abi.rs`'s strong symbols are gated
+# `cfg(any(target_os = "none", feature = "host_app"))`, so this crate's OWN `host_app` feature (forwarded
+# below) must be turned on alongside `deluge-bsp-rust`'s -- optional + gated the same way `deluge_resource`
+# just above is, so a plain host build never pulls it in (and never exports its no_mangle symbols; see
+# abi.rs's cfg_attr gate).
+deluge_sample_source = { path = "../../../crates/deluge_sample_source", optional = true }
+
+# U1 Task 1: host-side sibling of the device dep above. Same `host_app`-gated pattern (its own
+# `host_app` feature is forwarded below, widening its `abi.rs` cfg_attr gate) so a plain host build
+# never pulls it in.
+deluge_sample_reader = { path = "../../../crates/deluge_sample_reader", optional = true }
+
+# U4c Task 2: host-side sibling of the device dep above. Same `host_app`-gated pattern (its own
+# `host_app` feature is forwarded below, widening its `abi.rs` cfg_attr gate) so a plain host build
+# never pulls it in.
+deluge_sample_stream = { path = "../../../crates/deluge_sample_stream", optional = true }
+
+# R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack the
+# device path (above) uses, made available on host too — `efatfs_host_shim.rs`
+# (host_app-only) reuses the storage-generic `efatfs_core` unchanged, which
+# needs these. Optional + gated by `host_app` (see its `dep:` list below), same
+# pattern as `deluge_resource` just above, so a plain host build never pulls
+# them in. No `fs_alloc`/`#[global_allocator]` needed on host: unlike the
+# device's `no_std` target, a std host binary already has an implicit default
+# allocator, so `embedded-fatfs`'s `alloc` feature (`extern crate alloc`) just
+# works. Minimal Task-4 dep-visibility change pulled forward by R0b's Task 3 —
+# see .superpowers/sdd/task-3-report.md.
+block-device-driver = { path = "../../../crates/block-device-driver", optional = true }
+block-device-adapters = { path = "../../../crates/block-device-adapters", optional = true }
+aligned = { version = "0.4", optional = true }
+embedded-fatfs = { path = "../../../crates/embedded-fatfs", default-features = false, features = ["lfn", "alloc"], optional = true }
+embedded-io-async = { version = "0.7.0", optional = true }
+
 [features]
-default = ["rtt"]
-## RTT (SEGGER Real-Time Transfer) logging over a debug probe. Selects the
-## rza1l_rtt.x linker script (via build.rs) + registers the log logger.
+default = ["rtt", "async_streaming_loader", "efatfs_streaming"]
+
+## RTT (SEGGER Real-Time Transfer) logging over a debug probe: selects the
+## rza1l_rtt.x linker script (via build.rs) and registers the log logger.
 rtt = ["dep:rtt-target", "rza1l-hal/rtt"]
-## Enable corosensei's sanitizer instrumentation (host fiber switch only). OFF
-## by default: enabling it without actually building under a sanitizer causes
-## linker errors (the instrumentation calls into the sanitizer runtime, which
-## isn't linked in a plain build). NOTE (M1 Task 5): this wires
-## `__sanitizer_start/finish_switch_fiber` + `__asan_unpoison_memory_region` —
-## AddressSanitizer's fiber-switch API. ThreadSanitizer's runtime
-## (`librustc-nightly_rt.tsan.a`) does NOT implement that API (it has its own,
-## unrelated `__tsan_create_fiber`/`__tsan_switch_to_fiber` family instead), so
-## `--features sanitize` fails to link under `-Zsanitizer=thread` with
-## undefined-symbol errors. This feature is therefore only usable under
-## `-Zsanitizer=address`; the M1 Task 5 TSan run builds WITHOUT it (see
-## HOST_HARNESS.md) and TSan neither needs nor benefits from it here — a
-## same-thread corosensei stack switch has no other thread to misattribute
-## happens-before to, unlike ASan's per-stack redzone tracking which does.
+
+## corosensei sanitizer instrumentation for the host fiber switch. ASan-only: it
+## wires AddressSanitizer's `__sanitizer_*_switch_fiber` API, which ThreadSanitizer's
+## runtime doesn't implement, so `-Zsanitizer=thread` fails to link with it on.
+## Off by default (enabling it without a sanitizer build causes linker errors).
 sanitize = ["corosensei/sanitizer"]
-## Off by default. Bindgens the libdeluge C-ABI headers for the HOST ABI
-## (x86-64 + `-fshort-enums`) into the real `mod sys` (replacing the M3
-## `sys_host.rs` stand-ins) and links the host-built C++ `deluge_app` object
-## closure (see build.rs). Lets the host binary reach the C++ app boundary for
-## bring-up/link-checking without a device build. See m4a-spike-report.md.
-## Pulls in the host-side `deluge_resource` dep above (dep:) so the linked
-## object closure's deluge_resource_*/deluge_{alloc,slab_*,heap_*} symbols
-## resolve — see host_link_stubs.rs for the remaining (peripheral) stubs.
-host_app = ["dep:deluge_resource"]
+
+## Link the host-built C++ `deluge_app` object and bindgen the libdeluge headers
+## for the host ABI, so the host binary can reach the C++ app boundary without a
+## device build. Pulls in the host-side `deluge_resource` dep, plus (R0b) the
+## storage stack `efatfs_host_shim`/`efatfs_core` need on host. Off by default.
+host_app = [
+    "dep:deluge_resource",
+    "dep:deluge_sample_source",
+    "deluge_sample_source/host_app",
+    "dep:deluge_sample_reader",
+    "deluge_sample_reader/host_app",
+    "dep:deluge_sample_stream",
+    "deluge_sample_stream/host_app",
+    "dep:block-device-driver",
+    "dep:block-device-adapters",
+    "dep:aligned",
+    "dep:embedded-fatfs",
+    "dep:embedded-io-async",
+]
+
+## Diagnostic: make `deluge_block_read`/`deluge_block_write` debug_assert! the
+## caller is on the storage worker fiber, surfacing card transfers not yet on the
+## single-owner path. Off by default. See include/libdeluge/storage_owner.h.
+storage-owner-audit = []
+
+## SP1 Task 4 (device-only): build + run the on-device `embedded-fatfs`-vs-
+## C-FatFS read-throughput benchmark (`bench_fs.rs`) once at boot, before
+## `deluge_app_init`. NEEDS-HARDWARE — off by default; a normal firmware
+## build never links or runs it.
+bench_fs = []
+
+## SP1a: build the single-owner `embedded-fatfs` mount (`efatfs_fs.rs`) — one
+## `FileSystem` behind an async `Mutex`. Off by default; nothing calls
+## `mount()`/`with_fs()` yet (later SP1a tasks wire the file-handle table,
+## FFI, and the read swap onto this — see .superpowers/sdd/task-2-brief.md).
+efatfs_streaming = []
+
+## Host-harness only: give host SD reads/writes a modeled per-transfer latency so
+## a transfer on the storage-owner fiber genuinely suspends (yields the executor)
+## instead of the host's never-suspend `block_on`. Data is unchanged — only timing
+## is modeled. Off by default (off = byte-identical to no feature).
+sim_latency = []
+
+## Build + spawn the Rust async cluster-fill task (`streaming_loader.rs`), which
+## drains the resource-manager loader queue and awaits the SD read instead of the
+## C++ fiber pump running it inline. The selector/wakeup C-ABI
+## (`deluge_streaming_async_active`/`_signal_fill`) is always compiled so the C++
+## side always has a real symbol; `async_active()`'s return value is the switch
+## (false ⇒ `loader.cpp`'s fiber pump behaves exactly as before). On by default;
+## opt out with --no-default-features.
+async_streaming_loader = []
 
 [build-dependencies]
 # Generate Rust signatures + POD types from the canonical libdeluge C headers so

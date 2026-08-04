@@ -29,7 +29,7 @@
 use core::ffi::c_void;
 use core::future::Future;
 use core::pin::pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -138,6 +138,24 @@ static ON_FIBER: AtomicBool = AtomicBool::new(false);
 /// Is the caller running on the worker fiber? (For the `yield()` implementation.)
 pub fn on_fiber() -> bool {
     ON_FIBER.load(Ordering::Relaxed)
+}
+
+/// Latched `true` the first time [`worker_poll`] runs — i.e. the worker/owner is
+/// live. Monotonic (never reset), so a plain `Relaxed` load/store is fine: this
+/// is a one-way latch, not a synchronization point guarding shared data. Exists
+/// so the `storage-owner-audit` diskio asserts (`sd.rs`) can tell apart the
+/// boot-time FatFS mount — which runs synchronously in `deluge_boot()` *before*
+/// the first `worker_poll()`, with no owner yet to run on — from a genuine
+/// off-owner transfer at runtime, after the owner exists. See `sd.rs`'s asserts
+/// for the full rationale.
+static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Has the worker pump run at least once yet? `false` only during the narrow
+/// pre-owner boot window (the synchronous `deluge_boot()` FatFS mount); `true`
+/// for the remainder of the process's life once `app_task`/`host_app_task`
+/// starts polling `worker_poll()`.
+pub fn worker_started() -> bool {
+    WORKER_STARTED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +365,52 @@ use crate::sys::RunCondition;
 pub type RunCondition = Option<unsafe extern "C" fn() -> bool>;
 
 /// Pending operations (serialized — these are user actions, at most one active).
-type Job = (extern "C" fn(*mut c_void), *mut c_void);
+/// `is_sd` is the sd-routine bit: true ops hold `SD_ROUTINE_HELD` from enqueue
+/// to completion (see `deluge_worker_run_sd_routine`).
+type Job = (extern "C" fn(*mut c_void), *mut c_void, bool);
 const QUEUE_CAP: usize = 4;
-static mut QUEUE: [Option<Job>; QUEUE_CAP] = [None; QUEUE_CAP];
-static mut Q_HEAD: usize = 0;
+
+/// The ring's storage: each occupied slot pairs a `Job` with the sequence
+/// number it was enqueued at (`Q_NEXT_SEQ`, monotonic). A job is written into
+/// whichever slot is free at enqueue time, so the slot index carries no order;
+/// the per-slot sequence gives `dequeue` the enqueue order to pick the oldest
+/// job (plain FIFO — see `dequeue` below). A rotating head/tail ring would
+/// serve this FIFO with less scanning; the free-slot+sequence form is a
+/// leftover from the retired HIGH-priority tier (which needed out-of-order
+/// removal) and could be simplified later.
+static mut QUEUE: [Option<(Job, u32)>; QUEUE_CAP] = [None; QUEUE_CAP];
 static mut Q_COUNT: usize = 0;
+/// Monotonic (wrapping) insertion counter, stamped onto each enqueued slot.
+/// `dequeue` resets this to 0 whenever the ring drains to empty (see there),
+/// which bounds the span of seqs any two *resident* jobs can carry to at most
+/// `QUEUE_CAP` (4) — so a wrong ordering decision at the wrap would require
+/// ~4 billion enqueues within a single stretch where the ring never once goes
+/// empty, which cannot happen (the queue drains far faster than that).
+static mut Q_NEXT_SEQ: u32 = 0;
 
 /// An operation is on the fiber (running or suspended) — distinct from idle.
 static FIBER_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Count of SD-routine-class ops in flight (enqueued but not yet completed).
+/// Incremented synchronously by `deluge_worker_run_sd_routine` at enqueue,
+/// decremented when the op completes (`complete_active_op`). Read by the
+/// scheduler's RESOURCE_SD_ROUTINE gate (scheduler.rs) to hold off tasks that
+/// would free an object an in-flight op is mid-way through (the recorder, freed
+/// by discardRecorder). Synchronous so the hold engages before the enqueuing task
+/// returns — closing the window between enqueue and the pump starting the op.
+/// Currently inert until cooperative yielding is enabled on this path, but
+/// correct-by-construction for when it is.
+static SD_ROUTINE_HELD: AtomicU32 = AtomicU32::new(0);
+
+/// The sd-routine bit of the op currently on the fiber (running or suspended),
+/// so `complete_active_op` knows whether to release a hold. Serialized queue
+/// (one active op) makes this exact.
+static ACTIVE_IS_SD_ROUTINE: AtomicBool = AtomicBool::new(false);
+
+/// True while any SD-routine-class op is in flight (enqueued or running).
+pub fn sd_routine_held() -> bool {
+    SD_ROUTINE_HELD.load(Ordering::Acquire) > 0
+}
 
 /// Wakes the worker pump (`app_task`). Raised when an op is submitted, when a task
 /// runner makes progress while an op is suspended (so its predicate is re-checked),
@@ -387,40 +443,103 @@ fn now_us() -> u64 {
     embassy_time::Instant::now().as_micros()
 }
 
+/// Enqueue an operation on the worker ring, taking the SD-routine hold when
+/// `is_sd` (synchronously, so it engages before the caller returns). Returns
+/// whether it was accepted; a dropped enqueue (queue full) takes no hold.
+fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool) -> bool {
+    // SAFETY: single-threaded; enqueue only (no switch here).
+    let enqueued = unsafe {
+        if Q_COUNT < QUEUE_CAP {
+            let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
+            let mut free: Option<usize> = None;
+            for i in 0..QUEUE_CAP {
+                if queue.add(i).read().is_none() {
+                    free = Some(i);
+                    break;
+                }
+            }
+            let idx = free.expect("Q_COUNT < QUEUE_CAP implies a free slot");
+            let seq = Q_NEXT_SEQ;
+            Q_NEXT_SEQ = Q_NEXT_SEQ.wrapping_add(1);
+            queue.add(idx).write(Some(((f, ctx, is_sd), seq)));
+            Q_COUNT += 1;
+            if is_sd {
+                // Take the hold synchronously, before returning, so a RESOURCE_SD_ROUTINE
+                // task can't slip in between this enqueue and the pump running the op.
+                SD_ROUTINE_HELD.fetch_add(1, Ordering::AcqRel);
+            }
+            true
+        } else {
+            // Queue full — dropped, the op will NOT run. The caller learns via the
+            // false return (e.g. the storage Coalescer clears its single-flight guard
+            // so a later request can retry rather than wedging forever).
+            false
+        }
+    };
+    // Wake the pump so the op starts promptly (it may be idle-asleep).
+    wake();
+    enqueued
+}
+
 /// Submit an operation to run on the worker fiber (C++ dispatch boundary). Runs
 /// serialized after any already-queued operations once the worker is pumped.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) {
-    // SAFETY: single-threaded; enqueue only (no switch here).
-    unsafe {
-        if Q_COUNT < QUEUE_CAP {
-            let tail = (Q_HEAD + Q_COUNT) % QUEUE_CAP;
-            core::ptr::addr_of_mut!(QUEUE)
-                .cast::<Option<Job>>()
-                .add(tail)
-                .write(Some((f, ctx)));
-            Q_COUNT += 1;
-        }
-        // else: queue full (should not happen for user actions) — drop.
-    }
-    // Wake the pump so the op starts promptly (it may be idle-asleep).
-    wake();
+pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
+    enqueue(f, ctx, false)
 }
 
+/// SD-routine-class submission (see include/libdeluge/worker.h). Same enqueue as
+/// `deluge_worker_run`, but takes an SD-routine hold synchronously so it is
+/// visible before this returns, and holds it until the op completes — keeping
+/// RESOURCE_SD_ROUTINE scheduler tasks (discardRecorder) off for the op's whole
+/// in-flight window. On a dropped enqueue (queue full) NO hold is taken.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_worker_run_sd_routine(
+    f: extern "C" fn(*mut c_void),
+    ctx: *mut c_void,
+) -> bool {
+    enqueue(f, ctx, true)
+}
+
+/// C-ABI: is the current context the worker fiber? Backs `Owner::on_owner()`
+/// (see include/libdeluge/worker.h). `deluge_worker_run` (above) runs ops on
+/// this stackful fiber; [`on_fiber`] is true exactly while executing inside
+/// such an op.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_worker_on_worker() -> bool {
+    on_fiber()
+}
+
+/// Dequeue the next op to run: the oldest (lowest-sequence) queued job — plain
+/// FIFO. `QUEUE_CAP` is small (4), so a linear scan per dequeue is cheap and
+/// keeps the ring itself a plain fixed array.
 fn dequeue() -> Option<Job> {
     // SAFETY: single-threaded access to the ring.
     unsafe {
         if Q_COUNT == 0 {
             return None;
         }
-        let head = Q_HEAD;
-        let job = core::ptr::addr_of_mut!(QUEUE)
-            .cast::<Option<Job>>()
-            .add(head)
-            .replace(None);
-        Q_HEAD = (Q_HEAD + 1) % QUEUE_CAP;
+        let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
+        let mut best: Option<(usize, u32)> = None; // (slot index, seq)
+        for i in 0..QUEUE_CAP {
+            if let Some((_job, seq)) = queue.add(i).read() {
+                if best.is_none_or(|(_, best_seq)| seq < best_seq) {
+                    best = Some((i, seq));
+                }
+            }
+        }
+        let (idx, _) = best.expect("Q_COUNT > 0 implies at least one occupied slot");
+        let (job, _seq) = queue
+            .add(idx)
+            .replace(None)
+            .expect("scanned slot was occupied");
         Q_COUNT -= 1;
-        job
+        if Q_COUNT == 0 {
+            // Ring just drained: reset the seq counter so the next enqueue
+            // stretch starts a fresh span (see Q_NEXT_SEQ doc comment).
+            Q_NEXT_SEQ = 0;
+        }
+        Some(job)
     }
 }
 
@@ -432,14 +551,20 @@ fn queue_nonempty() -> bool {
 /// op once its predicate holds / times out. Returns true while work remains.
 /// Called from the embassy `app_task` on a ~1 ms ticker.
 pub fn worker_poll() -> bool {
+    // Latch on first entry: the owner is live from here on (see WORKER_STARTED's
+    // doc comment). Relaxed store is fine — this is a monotonic latch, not a
+    // handoff of other state.
+    WORKER_STARTED.store(true, Ordering::Relaxed);
     if !FIBER_BUSY.load(Ordering::Relaxed) {
-        let Some((f, ctx)) = dequeue() else {
+        let Some((f, ctx, is_sd)) = dequeue() else {
             return false;
         };
+        ACTIVE_IS_SD_ROUTINE.store(is_sd, Ordering::Relaxed);
         FIBER_BUSY.store(true, Ordering::Relaxed);
-        if start(f, ctx) {
+        let completed = start(f, ctx);
+        if completed {
             // Completed without ever yielding.
-            FIBER_BUSY.store(false, Ordering::Relaxed);
+            complete_active_op();
         }
         return FIBER_BUSY.load(Ordering::Relaxed) || queue_nonempty();
     }
@@ -458,11 +583,22 @@ pub fn worker_poll() -> bool {
     let timed_out = deadline != 0 && now_us() >= deadline;
     if met || timed_out {
         unsafe { core::ptr::addr_of_mut!(WAIT_MET).write(met) };
-        if resume() {
-            FIBER_BUSY.store(false, Ordering::Relaxed);
+        let completed = resume();
+        if completed {
+            complete_active_op();
         }
     }
     FIBER_BUSY.load(Ordering::Relaxed) || queue_nonempty()
+}
+
+/// End-of-op cleanup: clear busy and release an SD-routine hold if this op held
+/// one. Called at both completion points in `worker_poll` (ran-to-completion on
+/// first start, and resumed-to-completion after a yield).
+fn complete_active_op() {
+    if ACTIVE_IS_SD_ROUTINE.swap(false, Ordering::AcqRel) {
+        SD_ROUTINE_HELD.fetch_sub(1, Ordering::AcqRel);
+    }
+    FIBER_BUSY.store(false, Ordering::Relaxed);
 }
 
 /// Suspend the current operation until `until` holds (or `timeout_us` elapses).

@@ -48,6 +48,7 @@ protected:
 	void folderContentsReady(int32_t entryDirection) override;
 	void currentFileChanged(int32_t movementDirection) override;
 	void exitAction() override;
+	void onBrowserOpened() override;
 
 private:
 	void drawSongPreview(bool toStore = true);

@@ -204,34 +204,17 @@ Error StorageManager::createJsonFile(char const* filePath, JsonSerializer& write
 	return Error::NONE;
 }
 
+// Existence check routed through the deluge::io::File port (efatfs when active, else C-FatFS via the
+// selector in file.cpp) - opening for read and letting RAII close it is the FS-agnostic way to ask
+// "does this path exist" without reaching for a raw f_stat/f_open.
 bool StorageManager::fileExists(char const* pathName) {
 	Error error = initSD();
 	if (error != Error::NONE) {
 		return false;
 	}
 
-	FRESULT result = f_stat(pathName, &staticFNO);
-	return (result == FR_OK);
-}
-
-// Lets you get the FilePointer for the file.
-bool StorageManager::fileExists(char const* pathName, FilePointer* fp) {
-	FIL fil;
-	Error error = initSD();
-	if (error != Error::NONE) {
-		return false;
-	}
-
-	FRESULT result = f_open(&fil, pathName, FA_READ);
-	if (result != FR_OK) {
-		return false;
-	}
-
-	fp->sclust = fil.obj.sclust;
-	fp->objsize = fil.obj.objsize;
-
-	f_close(&fil);
-	return true;
+	auto opened = deluge::io::File::open(pathName, DELUGE_FILE_READ);
+	return opened.has_value();
 }
 
 // Gets ready to access SD card.

@@ -39,6 +39,9 @@ public:
 	// ui
 	UIType getUIType() override { return UIType::SAVE_PATTERN; }
 
+protected:
+	void onBrowserOpened() override;
+
 private:
 	bool selectedDrumOnly{};
 	std::string defaultDir{};

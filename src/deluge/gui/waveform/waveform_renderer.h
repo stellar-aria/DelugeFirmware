@@ -58,10 +58,15 @@ public:
 	bool findPeaksPerCol(Sample* sample, int64_t xScroll, uint64_t xZoom, WaveformRenderData* data,
 	                     SampleRecorder* recorder = nullptr, int32_t xStart = 0, int32_t xEnd = kDisplayWidth);
 
-	// Background "waveform overview" pre-scan (issue #4460). Investigates one whole cluster's min/max and
-	// caches it in the SampleCluster (int8 + investigatedWholeLength), so the zoomed-out single-row render
-	// path finds it already done and never has to load clusters synchronously while scrolling. Returns true
-	// if the cluster is now investigated (or there was nothing to do); false if its data couldn't be loaded.
+	/// @brief Background "waveform overview" pre-scan: investigate one whole cluster's min/max.
+	///
+	/// Caches the result in the Sample's overview cache entry (int8 + investigated), so the zoomed-out
+	/// single-row render path finds it already done and never has to load clusters synchronously while
+	/// scrolling.
+	/// @param sample       The sample whose cluster to investigate.
+	/// @param clusterIndex Index of the cluster to investigate.
+	/// @return True if the cluster is now investigated (or there was nothing to do); false if its data
+	///         couldn't be loaded.
 	bool investigateWholeCluster(Sample* sample, int32_t clusterIndex);
 
 	// Advances the sample's background overview pre-scan by up to maxClusters previously-uninvestigated

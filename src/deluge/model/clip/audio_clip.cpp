@@ -232,8 +232,11 @@ void AudioClip::finishLinearRecording(ModelStackWithTimelineCounter* modelStack,
 	originalLength = loopLength;
 	sampleHolder.filePath = recorder->sample->filePath;
 	sampleHolder.setAudioFile(recorder->sample, sampleControls.isCurrentlyReversed(), true,
-	                          CLUSTER_DONT_LOAD); // Adds a reason to the first Cluster(s). Must call this after
-	                                              // endSyncedRecording(), which puts some final values in the Sample
+	                          CLUSTER_ENQUEUE); // Enqueues a fetch of the first Cluster(s) - the recorder's private
+	                                            // capture buffers aren't shared residency, so cluster 0 is cold at
+	                                            // finalize and needs an active fetch, not just a reason claim. Must
+	                                            // call this after endSyncedRecording(), which puts some final values
+	                                            // in the Sample
 
 	renderData.xScroll = -1; // Force re-render - though this would surely happen anyway
 
@@ -420,7 +423,18 @@ doUnassignment:
 
 			voiceSample->noteOn(&guide, 0, 1);
 			voiceSample->forAudioClip = true;
-			voiceSample->setupClusersForInitialPlay(&guide, ((Sample*)sampleHolder.audioFile), 0, false, 1);
+			{
+				bool clustersReady =
+				    voiceSample->setupClusersForInitialPlay(&guide, ((Sample*)sampleHolder.audioFile), 0, false, 1);
+				// A false return means NotReady - which includes a present-but-not-yet-loaded cold cluster (e.g. a
+				// just-finalized recording's cluster 0, freshly enqueued but not yet fetched). Arm the late-start
+				// retry so render()'s attemptLateSampleStart waits for it instead of falling through with no valid
+				// region, mirroring how other callers already honour this bool (sample_low_level_reader.cpp,
+				// voice_unison_part_source.cpp).
+				if (!clustersReady) {
+					doingLateStart = true;
+				}
+			}
 
 possiblyResetEnvelopeAndGetOut:
 			if (shouldResetEnvelope) {
@@ -1393,7 +1407,9 @@ bool AudioClip::shiftHorizontally(ModelStackWithTimelineCounter* modelStack, int
 		sampleHolder.startPos = newStartPos;
 		sampleHolder.endPos = newStartPos + length;
 
-		sampleHolder.claimClusterReasons(sampleControls.isCurrentlyReversed(), CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
+		// Clip-shift prefetch must never block the UI on a card read — enqueue and let the loader
+		// fill it. Playback tolerates a not-yet-loaded cluster (same as the realtime path).
+		sampleHolder.claimClusterReasons(sampleControls.isCurrentlyReversed(), CLUSTER_ENQUEUE);
 
 		if (active) {
 			expectEvent();

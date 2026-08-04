@@ -11,17 +11,20 @@
 //! the `deluge_bsp::sd` call sites themselves, since deluge-sdk provides `sd`
 //! with matching signatures on both targets:
 //! - Device: the real SDHI1+DMA driver. SD ops complete on the SDHI/DMA-
-//!   completion IRQ, so `block_on` drives them to completion without needing
-//!   another task to run.
+//!   completion IRQ. The two device transfer sites (`deluge_block_read`/
+//!   `deluge_block_write`) drive the transfer with `block_on_fiber` when
+//!   running on the storage-owner fiber (steady state, post-boot) — this
+//!   suspends only the fiber and lets the executor (and the app tick →
+//!   audio) keep running until the completion IRQ resumes it — or with
+//!   `block_on` when not yet on the fiber (only the boot-time FatFS mount,
+//!   which runs before the owner exists and has nothing else to run
+//!   concurrently with anyway). See the guard at each site and the hazard
+//!   note above `deluge_block_read`.
 //! - Host (`target_os` != `"none"`): a small file-backed disk image (no SDHI
 //!   hardware exists), so the FatFS-shaped C ABI can still be exercised (and
 //!   round-tripped) off-target. `deluge_bsp::sd`'s host `init`/`read_sectors`/
 //!   `write_sectors` never suspend (there's nothing to await), so `block_on`
-//!   is safe here too.
-//!
-//! NOTE: `block_on` stalls the executor (and the app tick → audio) for the
-//! duration of a transfer. Fine for bring-up (loads aren't real-time); audio-
-//! during-storage yielding (storage_wait.h / scheduler) is a later refinement.
+//!   is safe here too, and the host sites always use it (no fiber to yield).
 //!
 //! Per target, the FatFS diskio C-ABI entry points below still need two
 //! `#[unsafe(no_mangle)]` definitions (one `#[cfg(target_os = "none")]`, one
@@ -32,12 +35,28 @@
 //! FatFS `disk_*` entry points are otherwise unused there; they're still given
 //! working host bodies (rather than gated out) since a future host FatFS
 //! exercise will call them.
+//!
+//! This file also hosts `deluge_storage_on_owner`, a query the Embassy diskio
+//! shims use to assert single-owner access; it just forwards to
+//! `crate::fiber::on_fiber()`.
 #![allow(non_upper_case_globals)]
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use deluge_bsp::sd;
 use embassy_futures::block_on;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+
+/// Serializes SDHI peripheral access between the fiber's FatFS transfers and the
+/// streaming task's raw-sector reads: `block_on_fiber` yields to the executor
+/// mid-DMA, so without this both could drive one SDHI controller concurrently.
+static SD_BUS: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
+#[cfg(target_os = "none")]
+use crate::fiber::block_on_fiber;
+#[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+use crate::fiber::block_on_fiber;
 
 #[cfg(target_os = "none")]
 use crate::sys::{
@@ -56,10 +75,11 @@ use crate::sys::{
 // its top-of-file comment), so `crate::sys` simply doesn't exist to import on
 // host, independent of what deluge-sdk exposes. Mirror the C types' shapes
 // directly here instead (same convention as fiber.rs's `RunCondition`):
-// `DelugeStatus` is `i8` (its values run -13..=0, the width clang's
-// `-fshort-enums` would pick for the armv7a app), `DelugeCardEvent` is `u8`
-// (0..=2). Values match include/libdeluge/{types,block_device}.h exactly, so
-// the full card-event edge-tracking algorithm in
+// `DelugeStatus` is `i8` (its values run -13..=0, forcing a signed type; the
+// header pins its underlying type explicitly — `enum DelugeStatus : int8_t`),
+// `DelugeCardEvent` is `u8` (0..=2, pinned explicitly as `enum DelugeCardEvent
+// : uint8_t`). Values match include/libdeluge/{types,block_device}.h exactly,
+// so the full card-event edge-tracking algorithm in
 // `deluge_block_poll_card_event` below runs identically on both targets.
 #[cfg(not(target_os = "none"))]
 type DelugeStatus = i8;
@@ -151,6 +171,95 @@ pub async fn boot_init() {
         sd::is_inserted(),
         sd::is_write_protected(),
     );
+}
+
+/// Thin async wrapper around `deluge_bsp::sd::read_sectors` for the streaming
+/// fill task (`streaming_loader.rs`). Same dual-target shape as the rest of this
+/// file — no `#[cfg]` needed at the call site. Serializes on [`SD_BUS`] against
+/// the fiber's FatFS transfers (`deluge_block_read`/`deluge_block_write` below,
+/// which route through this same function) — the one genuinely-new hardware
+/// contention this async task introduces, since `block_on_fiber` yields to the
+/// executor mid-DMA and could otherwise let both drive the single SDHI
+/// controller concurrently.
+///
+/// In `sim_latency` host builds this dispatches to
+/// [`sim_latency::modeled_read`] instead of the raw (instant)
+/// `sd::read_sectors`, so the streaming task's reads pend on the same modeled
+/// SD latency the fiber's `deluge_block_read` (`sim_latency` variant, below)
+/// already uses — otherwise Lens-1's fill-margin measurement would be
+/// meaningless (task reads completing instantly instead of at the modeled SD
+/// throughput). `modeled_read` does NOT itself touch [`SD_BUS`] (it only
+/// awaits [`sim_latency::delay`] then calls the raw `sd::read_sectors`), so
+/// this stays a single `SD_BUS` acquisition — no nested/double lock. This is
+/// also a distinct code path from the `sim_latency` `deluge_block_read`
+/// below, which has its own bespoke inline lock+`modeled_read` call and does
+/// NOT route through this function — so no double-modeling either.
+pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
+    let _guard = SD_BUS.lock().await;
+    // The common chokepoint for on-fiber block reads regardless of
+    // backend — both the delegating plain-host `deluge_block_read` (below)
+    // and efatfs's `HostSdBlockDevice::read` (efatfs_host_shim.rs) route
+    // through here, so counting once at this call site covers both without
+    // double-counting (the `sim_latency` `deluge_block_read` variant does
+    // its own bespoke transfer and is instrumented separately — see its doc
+    // comment). Host-only, matching `stats`'s own `#[cfg]`.
+    #[cfg(not(target_os = "none"))]
+    stats::note_read(crate::fiber::on_fiber());
+    #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+    {
+        // Mirrors `deluge_block_read`'s identical off-fiber branch (see its doc
+        // comment and `sim_latency::off_fiber_instant`'s): an off-fiber caller
+        // reaching this function is NOT necessarily suspend-safe — unlike
+        // `deluge_block_read`, whose only callers are C FatFS's own diskio
+        // shims, this one is also `HostSdBlockDevice::read`'s backing, reached
+        // (via `efatfs_host_shim::deluge_efatfs_file_open`'s off-fiber branch)
+        // through a NON-yielding `embassy_futures::block_on` when the C++ app
+        // opens an efatfs task-context file before the worker fiber exists
+        // (e.g. during `deluge_app_init`'s early boot). Awaiting
+        // `modeled_read`'s `Timer` there would livelock exactly like the
+        // original boot-time C-FatFS mount did before `off_fiber_instant` was
+        // introduced — nothing can poll `sim_latency::pump` while that
+        // `block_on` never returns (confirmed empirically: 100% CPU virtual-
+        // clock-frozen spin in `embassy_futures::block_on::<task_file_open>`
+        // when standing up the `golden_vt_render` harness with
+        // `efatfs_streaming` + `async_streaming_loader` + `sim_latency` all
+        // on). Skip modeling and go straight to the real (synchronous,
+        // always-ready-on-host) read whenever off-fiber AND the flag is set —
+        // the same conservative "off-fiber transfers don't get modeled
+        // latency" tradeoff `deluge_block_read` already makes, just extended
+        // to this newer call path.
+        if !crate::fiber::on_fiber() && sim_latency::off_fiber_instant() {
+            sd::read_sectors(lba, count, buf).await
+        } else {
+            sim_latency::modeled_read(lba, count, buf).await
+        }
+    }
+    #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
+    {
+        sd::read_sectors(lba, count, buf).await
+    }
+}
+
+/// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
+/// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]),
+/// same on-fiber write instrumentation and off-fiber-instant escape hatch
+/// (see the read sibling's doc comment for both).
+pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
+    let _guard = SD_BUS.lock().await;
+    #[cfg(not(target_os = "none"))]
+    stats::note_write(crate::fiber::on_fiber());
+    #[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+    {
+        if !crate::fiber::on_fiber() && sim_latency::off_fiber_instant() {
+            sd::write_sectors(lba, count, buf).await
+        } else {
+            sim_latency::modeled_write(lba, count, buf).await
+        }
+    }
+    #[cfg(not(all(not(target_os = "none"), feature = "sim_latency")))]
+    {
+        sd::write_sectors(lba, count, buf).await
+    }
 }
 
 /// FatFS DSTATUS bits for the current card state. Device-only (see [`sd`]).
@@ -271,14 +380,32 @@ pub extern "C" fn disk_ioctl(pdrv: u8, cmd: u8, buff: *mut core::ffi::c_void) ->
     }
 }
 
-// NOTE: SD I/O must use `block_on` (which parks the executor for
-// the transfer), NOT a fiber-yielding drive. FatFS is not re-entrant and the app's
-// SD-reentrancy guard (`currentlyAccessingCard`) is only set by the legacy C diskio
-// (src/RZA1/diskio.c), which this BSP does not link — so on this BSP it is always 0.
-// Parking during the transfer is what serializes SD access; yielding mid-transfer
-// (block_on_fiber) let other tasks re-enter FatFS and corrupted it (manifested as
-// "NO MORE PRESETS FOUND" on track create, and would also break song/sample loads).
-// Re-introducing fiber-aware SD requires first serializing all SD access on this BSP.
+/// libdeluge/storage_owner.h — Embassy: the storage owner IS the worker fiber.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_storage_on_owner() -> bool {
+    crate::fiber::on_fiber()
+}
+
+// FatFS is not re-entrant, and the app's SD-reentrancy guard
+// (`currentlyAccessingCard`) is only set by the legacy C diskio
+// (src/RZA1/diskio.c), which this BSP does not link — so on this BSP it is
+// always 0. Yielding mid-transfer unconditionally would let other tasks
+// re-enter FatFS concurrently and corrupt it (manifests as "NO MORE PRESETS
+// FOUND" on track create, and would also break song/sample loads). Safe
+// yielding therefore requires all SD access to be serialized first: the
+// single-owner routing enforced by `deluge_storage_on_owner`/
+// `storage-owner-audit`, plus priority-queue and cooperative-yield
+// dispatch, guarantees every FatFS transfer after the storage owner is up
+// runs on the single worker fiber, one at a time. The device transfer sites
+// below rely on that guarantee: `if on_fiber() { block_on_fiber(fut) } else
+// { block_on(fut) }`. The `on_fiber()` branch (steady state, post-boot)
+// yields the fiber mid-transfer so the executor can run other work while
+// the SDHI/DMA completion IRQ is pending — no re-entrancy, because FatFS
+// calls only ever originate from the one owner fiber, which stays suspended
+// (not re-entered) until its own transfer completes. The `else` branch
+// (only the boot-time FatFS mount, which runs before the worker/owner
+// exists) still parks via `block_on`, since nothing else can run
+// concurrently at that point anyway.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_read(
@@ -287,13 +414,33 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
     }
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    match block_on(sd::read_sectors(sector, count, out)) {
+    let fut = locked_read_sectors(sector, count, out);
+    match if crate::fiber::on_fiber() {
+        block_on_fiber(fut)
+    } else {
+        block_on(fut)
+    } {
         Ok(()) => DELUGE_OK,
         Err(_) => DELUGE_ERR_IO,
     }
@@ -307,6 +454,21 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
     if unit != 0 || !sd::is_ready() {
         return DELUGE_ERR_NODEV;
     }
@@ -316,12 +478,71 @@ pub extern "C" fn deluge_block_write(
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    match block_on(sd::write_sectors(sector, count, data)) {
+    let fut = locked_write_sectors(sector, count, data);
+    match if crate::fiber::on_fiber() {
+        block_on_fiber(fut)
+    } else {
+        block_on(fut)
+    } {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_write err {e:?} (sector={sector} count={count})");
             DELUGE_ERR_IO
         }
+    }
+}
+
+/// Host-only instrumentation (streaming-underrun harness): counts SD block reads/writes
+/// that happen ON THE STORAGE-OWNER FIBER (`fiber::on_fiber()` true at the call site) —
+/// i.e. transfers that genuinely reached the fiber+priority dispatch machinery, as
+/// opposed to the boot-time FatFS mount or any other off-fiber access (which always
+/// runs `block_on`-only and never suspends). This is the evidence the streaming-underrun
+/// harness's scenario driver (`scenario.rs`) asserts on: a real queued cluster read
+/// (the async streaming-fill task) or recorder card-write
+/// (`requestRecorderCardRoutines`, SD-routine) actually DRAINED through
+/// `fiber::worker_poll()`, not just that the dispatch was attempted. Compiled for every
+/// host build (not gated on `host_app`/`sim_latency`) — the counters sit idle (never
+/// read) unless something calls the `on_fiber_*` getters below.
+///
+/// The `note_read`/`note_write` call sites live at [`locked_read_sectors`]/
+/// [`locked_write_sectors`] — the chokepoint both the plain-host `deluge_block_*`
+/// wrappers (which delegate to them) AND efatfs's `HostSdBlockDevice` (which
+/// calls them directly, bypassing the C-ABI `deluge_block_*` entry points
+/// entirely) pass through — plus the `sim_latency` `deluge_block_*` variants,
+/// which do their own bespoke transfer and are instrumented at their own call
+/// site instead (they never reach `locked_*_sectors`). Each on-fiber transfer
+/// is counted at exactly one of those two kinds of site, never both.
+#[cfg(not(target_os = "none"))]
+pub(crate) mod stats {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static ON_FIBER_READS: AtomicU64 = AtomicU64::new(0);
+    static ON_FIBER_WRITES: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn note_read(on_fiber: bool) {
+        if on_fiber {
+            ON_FIBER_READS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn note_write(on_fiber: bool) {
+        if on_fiber {
+            ON_FIBER_WRITES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Total SD block reads observed while `fiber::on_fiber()` was true — any
+    /// backend (C-FatFS's plain/`sim_latency` `deluge_block_read`, or
+    /// efatfs's `HostSdBlockDevice::read` via `locked_read_sectors`).
+    pub fn on_fiber_reads() -> u64 {
+        ON_FIBER_READS.load(Ordering::Relaxed)
+    }
+
+    /// Total SD block writes observed while `fiber::on_fiber()` was true — any
+    /// backend (C-FatFS's plain/`sim_latency` `deluge_block_write`, or
+    /// efatfs's `HostSdBlockDevice::write` via `locked_write_sectors`).
+    pub fn on_fiber_writes() -> u64 {
+        ON_FIBER_WRITES.load(Ordering::Relaxed)
     }
 }
 
@@ -334,7 +555,10 @@ pub extern "C" fn deluge_block_write(
 /// first access, with no async bring-up step required first, and the host
 /// harness's round-trip check (see `main.rs`) exercises this ABI directly
 /// without calling `disk_initialize`/`sd::init()` beforehand.
-#[cfg(not(target_os = "none"))]
+///
+/// `sim_latency`-off only: with that feature on, [`sim_latency`]'s sibling
+/// below (same signature) takes over — see its doc comment.
+#[cfg(all(not(target_os = "none"), not(feature = "sim_latency")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_read(
     unit: u8,
@@ -342,13 +566,31 @@ pub extern "C" fn deluge_block_read(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
+    // `locked_read_sectors` (below) does the on-fiber counting — this
+    // path delegates straight to it, so instrumenting here too would
+    // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `dst` holds `count` sectors.
     let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
-    match block_on(sd::read_sectors(sector, count, out)) {
+    match block_on(locked_read_sectors(sector, count, out)) {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_read(host) err {e:?} (sector={sector} count={count})");
@@ -362,7 +604,10 @@ pub extern "C" fn deluge_block_read(
 /// `sd::is_write_protected()` is still checked — it always reads `false` on
 /// host (a plain file has no write-protect concept), so this is a no-op today,
 /// but it keeps the call site identical to the device path.
-#[cfg(not(target_os = "none"))]
+///
+/// `sim_latency`-off only: with that feature on, [`sim_latency`]'s sibling
+/// below (same signature) takes over — see its doc comment.
+#[cfg(all(not(target_os = "none"), not(feature = "sim_latency")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_write(
     unit: u8,
@@ -370,21 +615,363 @@ pub extern "C" fn deluge_block_write(
     sector: u32,
     count: u32,
 ) -> DelugeStatus {
+    // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
+    // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
+    // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // the boot mount takes the parking `block_on` branch, which cannot corrupt
+    // FatFS since nothing else can run concurrently before the owner is up.
+    // Once the owner IS up (`worker_started()`), every transfer must be on the
+    // fiber — this audits that.
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
     if sd::is_write_protected() {
         return DELUGE_ERR_WRITE_PROTECTED;
     }
+    // `locked_write_sectors` (below) does the on-fiber counting — this
+    // path delegates straight to it, so instrumenting here too would
+    // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;
     // SAFETY: caller guarantees `src` holds `count` sectors.
     let data = unsafe { core::slice::from_raw_parts(src, len) };
-    match block_on(sd::write_sectors(sector, count, data)) {
+    match block_on(locked_write_sectors(sector, count, data)) {
         Ok(()) => DELUGE_OK,
         Err(e) => {
             log::warn!("deluge_block_write(host) err {e:?} (sector={sector} count={count})");
             DELUGE_ERR_IO
         }
+    }
+}
+
+/// Host, `sim_latency` feature: same file-backed data path as the plain host
+/// `deluge_block_read` above, but the transfer future is wrapped by
+/// [`sim_latency::modeled_read`], which pends on a MODELED per-transfer
+/// latency ([`sim_latency::latency_for`]) before completing with the real
+/// file-image data — and, critically, is driven through the SAME
+/// `on_fiber()`-guarded `block_on_fiber`/`block_on` shape the device transfer
+/// sites (above) already use, instead of the plain host path's `block_on`-
+/// only (never-suspends) shape. A read issued on the storage-owner fiber
+/// therefore genuinely SUSPENDS the fiber (yielding to the executor, which
+/// keeps running every other task) for the modeled delay, letting a harness
+/// measure the fill-vs-drain race — see `sim_latency`'s module doc.
+///
+/// Mutually exclusive with the plain host `deluge_block_read` above (disjoint
+/// `#[cfg]`s): with `sim_latency` off, this function does not exist and the
+/// plain sibling compiles unchanged, so normal host/device/golden builds are
+/// byte-identical to before this feature existed.
+#[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_read(
+    unit: u8,
+    dst: *mut u8,
+    sector: u32,
+    count: u32,
+) -> DelugeStatus {
+    // See the plain host `deluge_block_read`'s identical comment above for the
+    // `worker_started()` vs. `on_fiber()` rationale.
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
+    if unit != 0 {
+        return DELUGE_ERR_NODEV;
+    }
+    let on_fiber = crate::fiber::on_fiber();
+    stats::note_read(on_fiber);
+    let len = count as usize * SECTOR_SIZE;
+    // SAFETY: caller guarantees `dst` holds `count` sectors.
+    let out = unsafe { core::slice::from_raw_parts_mut(dst, len) };
+    // SD_BUS is locked inside each transfer future (not via `locked_read_sectors`
+    // — this path calls `sim_latency::modeled_read`, not `sd::read_sectors`, so it
+    // can't reuse that helper). Locked once per branch, at the same single level
+    // as every other entry point — never nested.
+    let result = if on_fiber {
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_read(sector, count, out).await
+        };
+        block_on_fiber(fut)
+    } else if sim_latency::off_fiber_instant() {
+        // See `sim_latency::off_fiber_instant`'s doc comment.
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sd::read_sectors(sector, count, out).await
+        };
+        block_on(fut)
+    } else {
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_read(sector, count, out).await
+        };
+        block_on(fut)
+    };
+    match result {
+        Ok(()) => DELUGE_OK,
+        Err(e) => {
+            log::warn!(
+                "deluge_block_read(host, sim_latency) err {e:?} (sector={sector} count={count})"
+            );
+            DELUGE_ERR_IO
+        }
+    }
+}
+
+/// Host, `sim_latency` feature: write sibling of [`deluge_block_read`]
+/// (above) — see its doc comment for the full rationale.
+#[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_write(
+    unit: u8,
+    src: *const u8,
+    sector: u32,
+    count: u32,
+) -> DelugeStatus {
+    #[cfg(feature = "storage-owner-audit")]
+    debug_assert!(
+        crate::fiber::on_fiber() || !crate::fiber::worker_started(),
+        "FatFS card transfer off the storage owner after the owner started — \
+         single-owner discipline violated at runtime (async-sd staging ladder)"
+    );
+    if unit != 0 {
+        return DELUGE_ERR_NODEV;
+    }
+    if sd::is_write_protected() {
+        return DELUGE_ERR_WRITE_PROTECTED;
+    }
+    let on_fiber = crate::fiber::on_fiber();
+    stats::note_write(on_fiber);
+    let len = count as usize * SECTOR_SIZE;
+    // SAFETY: caller guarantees `src` holds `count` sectors.
+    let data = unsafe { core::slice::from_raw_parts(src, len) };
+    // See the read sibling's identical comment above: SD_BUS locked inline per
+    // branch (this path calls `sim_latency::modeled_write`, not
+    // `sd::write_sectors`, so it can't reuse `locked_write_sectors`).
+    let result = if on_fiber {
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_write(sector, count, data).await
+        };
+        block_on_fiber(fut)
+    } else if sim_latency::off_fiber_instant() {
+        // See `sim_latency::off_fiber_instant`'s doc comment.
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sd::write_sectors(sector, count, data).await
+        };
+        block_on(fut)
+    } else {
+        let fut = async {
+            let _guard = SD_BUS.lock().await;
+            sim_latency::modeled_write(sector, count, data).await
+        };
+        block_on(fut)
+    };
+    match result {
+        Ok(()) => DELUGE_OK,
+        Err(e) => {
+            log::warn!(
+                "deluge_block_write(host, sim_latency) err {e:?} (sector={sector} count={count})"
+            );
+            DELUGE_ERR_IO
+        }
+    }
+}
+
+/// Sim-only (harness) modeled-latency substrate for host SD transfers. Gated
+/// entirely behind the `sim_latency` cargo feature (OFF by default — see
+/// `Cargo.toml`'s doc comment), so a normal host/device/golden build never
+/// compiles any of this in.
+///
+/// ## Why the modeled delay can't just be `Timer::after(...).await`ed inline
+///
+/// The obvious shape — have `deluge_block_read`'s future do
+/// `Timer::after(latency_for(bytes)).await` directly, then call
+/// `sd::read_sectors` — does NOT work when that future is driven by
+/// [`crate::fiber::block_on_fiber`] (the on-fiber branch) or
+/// `embassy_futures::block_on` (the off-fiber branch): both poll the future
+/// with a synthetic `Waker` that is not a genuine embassy-executor TASK waker,
+/// and `embassy-time`'s integrated timer queue (this workspace pins the
+/// `timer-item-size-*`/integrated variant — see `Cargo.toml`'s patch section)
+/// panics on exactly that (`TimerQueueItem::from_embassy_waker`: "Panics if
+/// called with a non-embassy waker"). This is the same constraint already
+/// documented at this file's `boot_init` (`sd::init()`'s Timers can't run
+/// under `block_on`).
+///
+/// So the actual `Timer::after` await happens in [`pump`], a genuine spawned
+/// Embassy task (a real per-task waker — whichever executor/harness spawns
+/// it, on the virtual `MockDriver` clock or the host `std` clock, per
+/// `embassy-time`'s linked driver; this module never touches a clock
+/// directly). [`delay`] hands `pump` a duration over a `Signal` and awaits
+/// completion via a plain [`embassy_sync::waitqueue::AtomicWaker`] — safe to
+/// poll from ANY waker, including `block_on_fiber`'s/`block_on`'s synthetic
+/// ones — so the read/write call sites above can stay on the same
+/// `on_fiber()`-guarded shape the device path already uses.
+///
+/// SD transfers are already single-owner-serialized (this file's module doc
+/// + `deluge_storage_on_owner`), so at most one modeled transfer is ever in
+/// flight — a single request/completion slot suffices; no per-transfer task
+/// spawning or queueing is needed.
+#[cfg(all(not(target_os = "none"), feature = "sim_latency"))]
+pub mod sim_latency {
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::task::{Context, Poll};
+
+    use deluge_bsp::sd;
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::signal::Signal;
+    use embassy_sync::waitqueue::AtomicWaker;
+    use embassy_time::{Duration, Timer};
+
+    use super::SECTOR_SIZE;
+
+    /// Modeled throughput, bytes/sec — the `bytes / throughput` term of the
+    /// latency model. Overridable at runtime (a plain `Relaxed` static, not a
+    /// `const`) so a harness sweep can vary it per run without a rebuild.
+    /// Default: a plausible sustained SD sequential-transfer rate.
+    static THROUGHPUT_BYTES_PER_SEC: AtomicU32 = AtomicU32::new(20_000_000);
+    /// Modeled fixed per-command overhead, microseconds — the command/
+    /// response round-trip latency independent of transfer size. Overridable
+    /// for the same reason as [`THROUGHPUT_BYTES_PER_SEC`].
+    static COMMAND_OVERHEAD_US: AtomicU32 = AtomicU32::new(500);
+
+    /// Override the modeled throughput (bytes/sec; clamped to at least 1 so
+    /// [`latency_for`] never divides by zero).
+    pub fn set_throughput_bytes_per_sec(bytes_per_sec: u32) {
+        THROUGHPUT_BYTES_PER_SEC.store(bytes_per_sec.max(1), Ordering::Relaxed);
+    }
+
+    /// Override the modeled fixed command overhead (microseconds).
+    pub fn set_command_overhead_us(us: u32) {
+        COMMAND_OVERHEAD_US.store(us, Ordering::Relaxed);
+    }
+
+    /// Escape hatch for single-threaded deterministic-clock harnesses: when true,
+    /// a modeled read/write issued OFF the storage-owner fiber
+    /// (`deluge_block_read`/`_write`'s `on_fiber` branch above) skips
+    /// [`delay`]/[`pump`] entirely and goes straight to the real transfer. Off
+    /// (`false`) by default, preserving today's behavior for every existing
+    /// consumer — manual `cargo run --features host_app,sim_latency` testing, and
+    /// any multi-threaded harness, which can instead resolve the same off-fiber
+    /// livelock by running [`pump`] on a separate OS thread.
+    ///
+    /// A single-threaded executor has no second thread available for that
+    /// thread-based fix, and needs this flag instead: `deluge_app_init` calls the
+    /// boot-time FatFS mount SYNCHRONOUSLY, and `embassy_futures::block_on`'s
+    /// tight poll loop never yields back to the executor, so `pump`'s `Timer`
+    /// could never be polled — the mount would livelock waiting on a delay
+    /// nothing can ever complete. The only off-fiber `sim_latency` transfers on
+    /// such a harness are that boot-time mount (before the worker/owner exists,
+    /// so nothing else could usefully run concurrently with it anyway — see
+    /// `deluge_block_read`'s own `worker_started()` doc comment) plus a handful
+    /// of essential-sample reads `deluge_app_init` may issue synchronously during
+    /// the same call — none of which have a real-time deadline the underrun
+    /// counters care about (matches `ScenarioConfig::post_load_sim_latency`'s
+    /// existing "load's own reads don't need modeling" rationale). Set this once
+    /// at startup, before any transfer; ON-fiber reads (the actual streaming
+    /// path, post-boot) are UNAFFECTED and keep modeling latency normally —
+    /// those suspend via [`crate::fiber::block_on_fiber`]'s genuine coroutine
+    /// yield, which the normal quiescence-loop-driven executor handles without
+    /// any special-casing.
+    static OFF_FIBER_INSTANT: AtomicBool = AtomicBool::new(false);
+
+    /// See [`OFF_FIBER_INSTANT`]'s doc comment.
+    pub fn set_off_fiber_instant(instant: bool) {
+        OFF_FIBER_INSTANT.store(instant, Ordering::Relaxed);
+    }
+
+    pub(super) fn off_fiber_instant() -> bool {
+        OFF_FIBER_INSTANT.load(Ordering::Relaxed)
+    }
+
+    /// Modeled latency for a `bytes`-byte transfer: fixed command overhead
+    /// plus `bytes / throughput`. A simple throughput + fixed-overhead model
+    /// (not a hardware-accurate SD timing simulation) — sufficient for a
+    /// harness to observe a fill-vs-drain race, and cheap to reason about.
+    pub fn latency_for(bytes: usize) -> Duration {
+        let throughput_bps = THROUGHPUT_BYTES_PER_SEC.load(Ordering::Relaxed) as u64;
+        let overhead_us = COMMAND_OVERHEAD_US.load(Ordering::Relaxed) as u64;
+        let transfer_us = (bytes as u64 * 1_000_000) / throughput_bps;
+        Duration::from_micros(overhead_us + transfer_us)
+    }
+
+    /// Single-flight request handoff to [`pump`]: the duration for the
+    /// in-flight modeled transfer. A single slot suffices — see the module
+    /// doc's single-owner-serialization note.
+    static REQUEST: Signal<CriticalSectionRawMutex, Duration> = Signal::new();
+    /// Set by [`pump`] once its `Timer` for the current request has elapsed;
+    /// cleared by [`DelayFuture`]'s poll on consumption.
+    static DONE: AtomicBool = AtomicBool::new(false);
+    /// Woken by [`pump`] on completion; registered by [`DelayFuture`]'s poll.
+    /// A plain waitqueue primitive — safe to be woken from, or register a
+    /// waker from, any thread/context, unlike `embassy-time`'s Timer (see the
+    /// module doc).
+    static WAKER: AtomicWaker = AtomicWaker::new();
+
+    /// Background task: the ONLY place in this module that actually awaits
+    /// `embassy_time::Timer` — see the module doc for why. Must be spawned
+    /// once onto whichever Embassy executor the harness brings up (e.g.
+    /// alongside `fiber`'s `worker_pump` task) before any `sim_latency`
+    /// transfer is issued; loops forever, one modeled delay at a time.
+    #[embassy_executor::task]
+    pub async fn pump() {
+        loop {
+            let dur = REQUEST.wait().await;
+            Timer::after(dur).await;
+            DONE.store(true, Ordering::SeqCst);
+            WAKER.wake();
+        }
+    }
+
+    /// A completion future safe to poll from any `Waker` — including
+    /// [`crate::fiber::block_on_fiber`]'s and `embassy_futures::block_on`'s
+    /// synthetic ones (see the module doc). Registers with [`WAKER`] before
+    /// checking [`DONE`] (register-then-check ordering avoids a lost wake if
+    /// [`pump`] completes between the check and the registration).
+    struct DelayFuture;
+    impl Future for DelayFuture {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            WAKER.register(cx.waker());
+            if DONE.swap(false, Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Await the modeled latency for a `bytes`-byte transfer, driven by
+    /// [`pump`].
+    async fn delay(bytes: usize) {
+        REQUEST.signal(latency_for(bytes));
+        DelayFuture.await;
+    }
+
+    /// The modeled-latency wrapper future for a host read: pends on the
+    /// modeled per-transfer delay, then performs the real (synchronous,
+    /// file-backed) read. Only the timing is modeled; the data comes from
+    /// the same `deluge_bsp::sd::read_sectors` the plain host path uses.
+    pub async fn modeled_read(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
+        delay(count as usize * SECTOR_SIZE).await;
+        sd::read_sectors(lba, count, buf).await
+    }
+
+    /// Write sibling of [`modeled_read`].
+    pub async fn modeled_write(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
+        delay(count as usize * SECTOR_SIZE).await;
+        sd::write_sectors(lba, count, buf).await
     }
 }
 

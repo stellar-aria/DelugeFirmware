@@ -20,95 +20,102 @@
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
-#include "model/sample/sample_cluster.h"
+#include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/cluster/cluster.h"
 #include <memory>
 #include <new>
-#include <optional>
 #include <span>
+#include <string>
 #include <utility>
 
-#include "deluge_resource.h"             // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
-#include "storage/audio/stream/stitch.h" // StitchPrevEdge/StitchNextEdge/stitch_boundaries
+#include "deluge_resource.h"         // resource manager: a Sample is an Asset, its SAMPLE clusters the Chunks
+#include "libdeluge/sample_stream.h" // the deluge_sample_stream_* registry C-ABI this facade forwards to
+#include "libdeluge/streaming_fill.h" // DelugeStreamingFillContext + deluge_streaming_set_fill_context (no-slot fallback)
 
 namespace deluge::audio::stream {
 
-// Resource-manager Source callbacks (contract documented in sample_stream.h). `owner` is the Sample*
-// registered by ensure_resource_asset(); being statics, these reach the residency table through that
-// sample's own SampleStream via `sample->stream().table_`.
-
-bool SampleStream::cluster_materialize(void* /*ctx*/, void* owner, uint32_t index, void* dest, size_t /*len*/) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-
-	bool ok = sample->stream().read_cluster_data(*cluster, 0); // uses payload() — payload_ set above
-	if (ok) {
-		sample->stream().table_[index].cluster = cluster;
-	}
-	else {
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-	return ok;
-}
-
-void SampleStream::cluster_construct(void* /*ctx*/, void* owner, uint32_t index, void* dest) {
-	auto* sample = static_cast<Sample*>(owner);
-	auto* cluster = new (dest) StreamedChunk();
-	cluster->payload_ = reinterpret_cast<std::byte*>(dest) + kChunkPayloadOffset; // slot-provenance payload
-	cluster->sample = sample;
-	cluster->cluster_index = index;
-	cluster->resource_slot = deluge_resource_slot_of(GeneralMemoryAllocator::get().resourceManager(), dest);
-	// cluster->loaded stays false — the loader reads it.
-	sample->stream().table_[index].cluster = cluster;
-}
-
-void SampleStream::cluster_evict(void* /*ctx*/, void* owner, uint32_t index) {
-	auto* sample = static_cast<Sample*>(owner);
-	SampleStream& stream = sample->stream();
-	StreamedChunk* cluster = stream.table_[index].cluster;
-	stream.table_[index].cluster = nullptr;
-	if (cluster != nullptr) {
-		// A constructed-but-not-yet-loaded chunk may still be in the loader queue — de-queue it so the
-		// queue can't dangle onto freed memory. (Eviction also resets the slot, but be explicit.)
-		deluge_resource_loader_remove(GeneralMemoryAllocator::get().resourceManager(), cluster->resource_slot);
-		cluster->~StreamedChunk(); // manager frees the slab slot
-	}
-}
-
-uint32_t SampleStream::ensure_resource_asset() {
-	if (resource_asset_id_ != DELUGE_RESOURCE_NO_ASSET) {
-		return resource_asset_id_;
-	}
-	// The manager is the sole SDRAM evictor now, so every Sample (playback or recording) is
-	// manager-owned. A missing manager / full asset table is fatal — no legacy fallback.
-	// Cost reflects rebuild expense: a converted sample (float / wrong-endian) costs a read PLUS a
-	// format re-conversion, so it's kept resident longer than a native one (one plain read).
-	uint32_t clusterCost =
-	    (sample_.rawDataFormat != RawDataFormat::NATIVE) ? DELUGE_RESOURCE_COST_IO_CONVERTED : DELUGE_RESOURCE_COST_IO;
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	resource_asset_id_ = (mgr != nullptr)
-	                         ? deluge_resource_define_asset(mgr, &sample_, cluster_materialize, cluster_evict, nullptr,
-	                                                        clusterCost, DELUGE_RESOURCE_BACKING_SLAB)
-	                         : DELUGE_RESOURCE_NO_ASSET;
-	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
-		FREEZE_WITH_ERROR("RSA1"); // resource asset table exhausted (raise kAssetCap)
-	}
-	// Attach the async-prefetch path so CLUSTER_ENQUEUE can request (construct now, load later).
-	deluge_resource_set_construct(mgr, resource_asset_id_, cluster_construct);
-	// If the sample is already project-relevant (a holder gained it before its first stream), apply the
-	// soft-reference now — numReasonsIncreasedFromZero fired before the asset existed, so it was a no-op.
-	if (sample_.isProjectReferenced()) {
-		deluge_resource_reference(mgr, resource_asset_id_);
-	}
+uint32_t SampleStream::resource_asset_id() const {
 	return resource_asset_id_;
 }
 
+void SampleStream::set_resource_asset_id(uint32_t id) {
+	resource_asset_id_ = id;
+	if (stream_handle_ != 0) {
+		// Write-through mirror onto the registry slot, so its own try_register_fill_context (fired by
+		// this same C-ABI call, Rust-side) can register once a geometry is also present on the slot --
+		// see register_fill_context()'s call sequencing, which always sets the id here BEFORE the
+		// geometry that actually completes the pair.
+		deluge_sample_stream_set_asset_id(stream_handle_, id);
+	}
+}
+
+void SampleStream::register_fill_context() {
+	// Guard first on whether the Asset is defined at all rather than on `stream_handle_`:
+	// open_read_stream() calls this before deluge_streaming_define_asset() ever has on every known
+	// call site (see that function's comment, chunk_residency.cpp), so gating on `stream_handle_`
+	// instead would let that early call push a not-yet-parsed (pre-finalizeAfterLoad) geometry onto a
+	// fresh slot; harmless in principle (registration itself still waits on a real Asset id), but a
+	// needless ordering hazard to reason about. Gating on the Asset instead keeps this a true no-op
+	// until deluge_streaming_define_asset()'s own call.
+	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
+		return;
+	}
+	if (stream_handle_ != 0) {
+		// Re-push the id: covers the "Asset defined while still recording, stream opened only
+		// afterwards" ordering, where set_resource_asset_id()'s own write-through couldn't reach a slot
+		// that didn't exist yet at definition time.
+		deluge_sample_stream_set_asset_id(stream_handle_, resource_asset_id_);
+		DelugeSampleStreamGeometry geo{
+		    .audio_data_start_pos_bytes = sample_.audioDataStartPosBytes,
+		    .audio_data_length_bytes = sample_.audioDataLengthBytes,
+		    .first_cluster_index_with_no_audio_data = sample_.getFirstClusterIndexWithNoAudioData(),
+		    .cluster_size = static_cast<uint32_t>(Cluster::size),
+		    .cluster_size_magnitude = static_cast<uint32_t>(Cluster::size_magnitude),
+		    .raw_data_format = static_cast<uint8_t>(sample_.rawDataFormat),
+		    .byte_depth = static_cast<uint8_t>(sample_.byteDepth),
+		    .num_channels = static_cast<uint8_t>(sample_.numChannels),
+		};
+		deluge_sample_stream_set_geometry(stream_handle_, geo);
+		return;
+	}
+	// No registry slot yet -- a still-recording sample, which has nowhere in the registry to hold
+	// geometry at all (opening one requires a real path). Register directly with the resource
+	// manager instead: `efatfs_handle = 0` makes any premature cluster read fail cleanly rather than
+	// leaving this Asset with no fill-context registered anywhere (which would otherwise let residency
+	// resolve READY with no way to ever produce real bytes).
+	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
+	if (mgr == nullptr) {
+		return;
+	}
+	DelugeStreamingFillContext ctx{
+	    .efatfs_handle = 0,
+	    .audio_data_start_pos_bytes = sample_.audioDataStartPosBytes,
+	    .audio_data_length_bytes = sample_.audioDataLengthBytes,
+	    .first_cluster_index_with_no_audio_data = sample_.getFirstClusterIndexWithNoAudioData(),
+	    .cluster_size = static_cast<uint32_t>(Cluster::size),
+	    .cluster_size_magnitude = static_cast<uint32_t>(Cluster::size_magnitude),
+	    .raw_data_format = static_cast<uint8_t>(sample_.rawDataFormat),
+	    .byte_depth = static_cast<uint8_t>(sample_.byteDepth),
+	    .num_channels = static_cast<uint8_t>(sample_.numChannels),
+	};
+	deluge_streaming_set_fill_context(mgr, resource_asset_id_, ctx);
+}
+
 void SampleStream::release_asset() {
+	if (stream_handle_ != 0) {
+		// Closes the registry slot's efatfs read handle (if any) and releases its resource-manager
+		// asset mirror (kept in sync by set_resource_asset_id()/register_fill_context() above) in one
+		// call. Never ALSO release resource_asset_id_ directly here -- the registry already owns that
+		// release once a slot exists, and releasing twice would double-free the manager's asset slot.
+		deluge_sample_stream_close(stream_handle_);
+		stream_handle_ = 0;
+		resource_asset_id_ = DELUGE_RESOURCE_NO_ASSET;
+		return;
+	}
+	// No registry slot ever existed (a still-recording sample released before finishing, e.g. an
+	// aborted recording) -- release the locally-cached Asset directly. The `!= NO_ASSET` guard makes
+	// this idempotent, so `~SampleStream`'s backstop call after `~Sample`'s explicit one is a no-op.
 	if (resource_asset_id_ != DELUGE_RESOURCE_NO_ASSET) {
 		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 		if (mgr != nullptr) {
@@ -118,288 +125,48 @@ void SampleStream::release_asset() {
 	}
 }
 
-bool SampleStream::open_read_stream(std::string_view path, DelugeStreamMode mode, uint32_t num_clusters) {
-	auto openedStream = deluge::io::Stream::open(path, mode);
-	if (!openedStream) {
-		return false;
+Error SampleStream::open_read_stream(std::string_view path) {
+	// efatfs IS the streaming read path — no C-FatFS fallback. Open a registry slot (which opens
+	// the underlying efatfs file handle itself); a failure to open is a stream-open failure
+	// propagated to the caller (the sample won't load). A still-recording sample has no read handle
+	// at all (see make_read_source()) until this same path reopens one once recording finishes.
+	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
+	bool table_full = false;
+	uint32_t handle = deluge_sample_stream_open(cpath.c_str(), &table_full);
+	if (handle == 0) {
+		return table_full ? Error::TOO_MANY_OPEN_STREAMS : Error::FILE_NOT_FOUND;
 	}
-	read_stream_ = std::move(openedStream.value());
-	for (uint32_t i = 0; i < num_clusters; i++) {
-		uint32_t sector = 0;
-		auto sectorResult = read_stream_->sector_of(i); // best-effort; only meaningful on FatFS-family backends
-		if (sectorResult) {
-			sector = *sectorResult;
-		}
-		table_[i].sdAddress = sector;
-	}
-	return true;
+	stream_handle_ = handle;
+	// Re-register the fill-context now the handle is known: a no-op today on every known call site
+	// (open_read_stream() always runs before deluge_streaming_define_asset()'s first call — see that
+	// function's comment, chunk_residency.cpp — so the handle is already registered there), but keeps
+	// the table correct if a future caller ever opens the stream after the asset was already defined.
+	register_fill_context();
+	return Error::NONE;
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
-	if (read_stream_.has_value()) {
-		return std::make_unique<StreamReadSource>(read_stream_.value(), static_cast<uint8_t>(Cluster::size_magnitude));
-	}
-	return std::make_unique<BlockReadSource>(sample_);
-}
-
-#define REPORT_LOAD_TIME 0
-
-// The cluster data reader (contract documented in sample_stream.h): the pure data work — sector count,
-// read from the read source, conversion, and the inter-cluster boundary fixups. No orchestration (the
-// card-state guards, the loading "reason", and the loading queue stay with the caller).
-bool SampleStream::read_cluster_data(StreamedChunk& cluster, [[maybe_unused]] int32_t min_reasons_after) {
-	Sample* sample = cluster.sample;
-	int32_t clusterIndex = cluster.cluster_index;
-
-	// Failure exits jump here (kept above the local inits so the backward gotos don't cross them).
-	if (false) {
-getOutEarly:
-		return false;
-	}
-
-	int32_t numSectors = Cluster::size >> 9;
-
-	// If this is the last Cluster, and we do know what the audio data length is...
-	if (sample->audioDataLengthBytes && sample->audioDataLengthBytes != 0x8FFFFFFFFFFFFFFF) {
-		uint32_t audioDataEndPosBytes = sample->audioDataLengthBytes + sample->audioDataStartPosBytes;
-		uint32_t startByteThisCluster = clusterIndex << Cluster::size_magnitude;
-		int32_t bytesToRead = audioDataEndPosBytes - startByteThisCluster;
-		if (bytesToRead <= 0) {
-			D_PRINTLN("fail thing"); // Shouldn't really still happen
-			goto getOutEarly;
-		}
-		if (bytesToRead < Cluster::size) {
-			numSectors = ((bytesToRead - 1) >> 9) + 1;
-		}
-		// Otherwise, just leave it at the normal number of sectors
-	}
-
-#if ALPHA_OR_BETA_VERSION
-	if ((uintptr_t)cluster.payload().data() & 0b11) {
-		D_PRINTLN("SD read address misaligned by  %d", (int32_t)((uintptr_t)cluster.payload().data() & 0b11));
-	}
-#endif
-
-	AudioEngine::logAction("read_cluster_data");
-
-#if REPORT_LOAD_TIME
-	uint16_t startTime = MTU2.TCNT_0;
-#endif
-
-#if ALPHA_OR_BETA_VERSION
-	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
-		FREEZE_WITH_ERROR("i039"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	uint32_t bytesRequested = static_cast<uint32_t>(numSectors) * 512u;
-	uint32_t bytesRead = 0;
-	DelugeStatus status;
-	{
-		// Read seam: SampleStream::make_read_source owns source selection (Stream for a loaded
-		// sample, Block for a still-being-written recording). See storage/audio/stream/
-		// sample_stream.h and design §6/§7.
-		auto source = make_read_source();
-		auto readResult = source->read(static_cast<uint32_t>(clusterIndex),
-		                               std::span<std::byte>(cluster.payload().data(), bytesRequested));
-		if (readResult) {
-			bytesRead = readResult.value();
-			status = DELUGE_OK;
-		}
-		else {
-			status = readResult.error();
-		}
-	}
-
-#if REPORT_LOAD_TIME
-	uint16_t endTime = MTU2.TCNT_0;
-	uint16_t duration = endTime - startTime;
-	int32_t uSec = timerCountToUS(duration);
-	if (uSec > 7000) {
-		D_PRINTLN(uSec);
-	}
-#endif
-
-#if ALPHA_OR_BETA_VERSION
-	if (cluster.sample == nullptr) {
-		FREEZE_WITH_ERROR("E208");
-	}
-
-	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
-		FREEZE_WITH_ERROR("i038"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	// If that failed, get out
-	if (status != DELUGE_OK) {
-		goto getOutEarly;
-	}
-
-	cluster.convert_data_if_necessary();
-
-#if ALPHA_OR_BETA_VERSION
-	if (static_cast<int32_t>(deluge::cluster::lease_count(cluster.resource_slot)) < min_reasons_after + 1) {
-		FREEZE_WITH_ERROR("i040"); // It's +1 because we haven't removed this function's "reason" yet.
-	}
-#endif
-
-	// Gather the neighbor edge spans and hand off to the pure stitch core. A neighbor is only
-	// passed when it is both present and loaded.
-	std::optional<deluge::audio::stream::StitchPrevEdge> prev_edge;
-	if (clusterIndex > 0) {
-		StreamedChunk* prevCluster = chunk_at(cluster.cluster_index - 1);
-		if (prevCluster && prevCluster->loaded) {
-			prev_edge = deluge::audio::stream::StitchPrevEdge{
-			    .tail = std::span<std::byte>(prevCluster->payload().data() + (Cluster::size - 4), 11),
-			    .end_boundary_converted = &prevCluster->extra_bytes_at_end_converted,
-			};
-		}
-	}
-	deluge::audio::stream::StitchPrevEdge* prev_ptr = prev_edge ? &*prev_edge : nullptr;
-
-	std::optional<deluge::audio::stream::StitchNextEdge> next_edge;
-	if (clusterIndex < static_cast<int32_t>(num_clusters()) - 1) {
-		StreamedChunk* nextCluster = chunk_at(cluster.cluster_index + 1);
-		if (nextCluster && nextCluster->loaded) {
-			next_edge = deluge::audio::stream::StitchNextEdge{
-			    .head = std::span<std::byte>(nextCluster->payload().data(), 7),
-			    .unconverted_head = std::span<const std::byte, 3>(
-			        reinterpret_cast<const std::byte*>(nextCluster->first_three_bytes_pre_data_conversion), 3),
-			    .start_boundary_converted = &nextCluster->extra_bytes_at_start_converted,
-			};
-		}
-	}
-	deluge::audio::stream::StitchNextEdge* next_ptr = next_edge ? &*next_edge : nullptr;
-
-	std::span<std::byte> self_span = cluster.payload_with_trailing_slack();
-	deluge::audio::stream::stitch_boundaries(
-	    self_span, clusterIndex, sample->rawDataFormat, sample->audioDataStartPosBytes, Cluster::size,
-	    cluster.extra_bytes_at_start_converted, cluster.extra_bytes_at_end_converted, prev_ptr, next_ptr);
-
-	cluster.loaded = true;
-	// Manager-owned readiness: a chunk fetched via `request` (CLUSTER_ENQUEUE prefetch) was reserved in
-	// the Loading state; now its data is read, signal the manager so the async/RT `try_acquire` path
-	// sees it ready. `cluster.loaded` stays the C++ sync-path field; this keeps the manager in sync.
-	{
-		DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-		if (mgr != nullptr) {
-			deluge_resource_mark_ready(mgr, &cluster);
-		}
-	}
-	return true;
-}
-
-// Cluster residency dispatch + table accessors (contract documented in sample_stream.h).
-StreamedChunk* SampleStream::get_cluster(uint32_t index, int32_t load_instruction, uint32_t priority_rating,
-                                         Error* error) {
-
-	if (error != nullptr) {
-		*error = Error::NONE;
-	}
-
-	// Manager-owned residency. The manager is the sole SDRAM evictor: every Sample (playback or
-	// recording) is manager-owned (ensure_resource_asset() FREEZEs if the asset table is exhausted —
-	// no legacy fallback). The hard-lease count lives in the manager's chunk slot (the
-	// construct/materialize callback records the slot handle); add_lease/request take the lease.
-	// non-null `cluster` <=> manager-resident (on_evict nulls it).
-	uint32_t asset = ensure_resource_asset();
-	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
-	bool wasResident = (table_[index].cluster != nullptr);
-
-	if (load_instruction == CLUSTER_DONT_LOAD) {
-		// "Allocate but don't read from the card" — recording / convert write target. Resident ⇒ just
-		// pin (lease); not-resident ⇒ construct an empty cluster (no I/O). Held *dirty* so the manager
-		// never evicts the unflushed data; writeCluster clears dirty once it is on the card, after
-		// which it is reconstructable like any sample cluster.
-		if (wasResident) {
-			deluge_resource_add_lease(mgr, table_[index].cluster);
-		}
-		else {
-			void* p = deluge_resource_request(mgr, asset, index, kSlabBackedSizeIgnored);
-			if (p == nullptr) {
-				if (error != nullptr) {
-					*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
-				}
-				return nullptr;
-			}
-			table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
-		}
-		deluge_resource_mark_dirty(mgr, table_[index].cluster, true);
-		return table_[index].cluster;
-	}
-
-	if (load_instruction == CLUSTER_ENQUEUE) {
-		// Async prefetch: construct + lease now (NO I/O), then schedule the read on the loader
-		// (the existing loadingQueue, pumped off the audio thread) so the audio thread never
-		// blocks on SD. Returns the cluster (loaded==false until the loader reads it).
-		void* p = deluge_resource_request(mgr, asset, index, kSlabBackedSizeIgnored);
-		if (p == nullptr) {
-			if (error != nullptr) {
-				*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::INSUFFICIENT_RAM;
-			}
-			return nullptr;
-		}
-		table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
-		if (!table_[index].cluster->loaded) {
-			deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot, priority_rating);
-		}
-		return table_[index].cluster;
-	}
-
-	// CLUSTER_LOAD_IMMEDIATELY / _OR_ENQUEUE: must have it loaded now → acquire (full
-	// materialize on a miss; this may block on I/O, which is the must-load-now contract).
-	void* p = deluge_resource_acquire(mgr, asset, index, kSlabBackedSizeIgnored);
-	if (p == nullptr) {
-		if (error != nullptr) {
-			*error = sample_.unloadable ? Error::FILE_NOT_FOUND : Error::UNSPECIFIED;
-		}
-		return nullptr;
-	}
-	table_[index].cluster = reinterpret_cast<StreamedChunk*>(p);
-	// Hit on a cluster that was prefetch-constructed but not yet read → read it now.
-	if (!table_[index].cluster->loaded) {
-		bool ok = read_cluster_data(*table_[index].cluster, 0);
-		deluge_resource_loader_remove(mgr, table_[index].cluster->resource_slot); // it no longer needs the loader
-		if (!ok) {
-			if (load_instruction == CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE) {
-				deluge_resource_loader_enqueue(mgr, table_[index].cluster->resource_slot,
-				                               priority_rating); // fall back to async
-			}
-			else {
-				if (error != nullptr) {
-					*error = Error::UNSPECIFIED;
-				}
-				return nullptr; // must-load-now failed; cluster stays resident+leased, caller may retry
-			}
-		}
-	}
-	return table_[index].cluster;
-}
-
-StreamedChunk* SampleStream::chunk_at(uint32_t index) const {
-	return table_[index].cluster;
-}
-
-SampleCluster& SampleStream::entry(uint32_t index) {
-	return table_[index];
-}
-const SampleCluster& SampleStream::entry(uint32_t index) const {
-	return table_[index];
-}
-
-uint32_t SampleStream::sd_address_at(uint32_t index) const {
-	return table_[index].sdAddress;
-}
-
-size_t SampleStream::num_clusters() const {
-	return table_.size();
-}
-void SampleStream::resize(size_t n) {
-	table_.resize(n);
-}
-
-void SampleStream::erase_from(size_t index) {
-	table_.erase(table_.begin() + static_cast<std::ptrdiff_t>(index), table_.end());
+	// An open registry handle = the streaming read path (a normal card-loaded sample). A
+	// still-recording sample (stream_handle_ == 0 -- no handle is opened until recording finishes)
+	// has no reader at all. A caller that could reach a still-recording Sample must guard against it
+	// itself (see WaveformRenderer::investigateWholeCluster()) -- a handle-0 read here just fails
+	// cleanly (deluge_sample_stream_read_at() treats handle 0 as "no such handle").
+	return std::make_unique<SampleStreamReadSource>(stream_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
 }
 
 } // namespace deluge::audio::stream
+
+extern "C" {
+
+// The region-port open() bridge's stream-backing -> resource-asset accessor (declared in
+// libdeluge/streaming_fill.h alongside its sibling deluge_streaming_resource_manager). The real
+// body: SampleStream is always available wherever this TU compiles, so this just forwards to the
+// asset-definition entry point (chunk_residency.cpp). The `__attribute__((weak))` no-op fallback
+// for build configs without a real SampleStream lives in async_fill.cpp, mirroring that file's
+// other weak fallbacks.
+uint32_t deluge_sample_stream_asset_id(void* stream_backing) {
+	auto* stream = reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing);
+	return deluge_streaming_define_asset(&stream->sample());
+}
+
+} // extern "C"

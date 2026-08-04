@@ -61,23 +61,25 @@ bool LoadMidiDeviceDefinitionUI::opened() {
 
 	actionLogger.deleteAllLogs();
 
-	error = setupForLoadingMidiDeviceDefinition(); // Sets currentDir.
-	if (error != Error::NONE) {
-		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
-		                                 // the pads, in call to setupForLoadingMidiDeviceDefinition().
-		display->displayError(error);
-		return false;
-	}
-
-	focusRegained();
+	std::string searchFilename = setupForLoadingMidiDeviceDefinition(); // Sets currentDir.
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing({.action = ListingAction::Open,
+	              .direction = 0,
+	              .filenameToStartAt = searchFilename,
+	              .defaultDir = MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER});
 
 	return true;
 }
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstack-usage="
+// Computes the icon/title state and currentDir, and returns the filename to search for within it.
+// Does NOT perform the listing itself - opened() combines this with
+// MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER to dispatch an async Open listing; the post-listing tail
+// lives in onBrowserOpened().
 // If OLED, then you should make sure renderUIsForOLED() gets called after this.
-Error LoadMidiDeviceDefinitionUI::setupForLoadingMidiDeviceDefinition() {
+std::string LoadMidiDeviceDefinitionUI::setupForLoadingMidiDeviceDefinition() {
 	// reset
 	fileIconPt2 = nullptr;
 	fileIconPt2Width = 0;
@@ -120,18 +122,19 @@ Error LoadMidiDeviceDefinitionUI::setupForLoadingMidiDeviceDefinition() {
 		searchFilename.append(".XML");
 	}
 
-	Error error = arrivedInNewFolder(0, searchFilename.c_str(), MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER);
-	if (error != Error::NONE) {
-		return error;
-	}
+	return searchFilename;
+}
+#pragma GCC diagnostic pop
 
+void LoadMidiDeviceDefinitionUI::onBrowserOpened() {
 	currentLabelLoadError = (fileIndexSelected >= 0) ? Error::NONE : Error::UNSPECIFIED;
 
 	drawKeys();
 
-	return Error::NONE;
+	// Runs here so it happens after the listing actually completes, matching the Save* browsers'
+	// convention.
+	focusRegained();
 }
-#pragma GCC diagnostic pop
 
 void LoadMidiDeviceDefinitionUI::folderContentsReady(int32_t entryDirection) {
 }
@@ -145,14 +148,9 @@ void LoadMidiDeviceDefinitionUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem->isFolder) {
-
-		Error error = goIntoFolder(currentFileItem->filename.c_str());
-
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + close()) once the listing completes.
+		goIntoFolder(currentFileItem->filename.c_str());
 	}
 
 	else {

@@ -19,11 +19,13 @@
 #include "definitions_cxx.hpp"
 #include "deluge/model/sample/sample_low_level_reader.h"
 #include "io/debug/log.h"
+#include "libdeluge/sample_reader.h"
 #include "memory/memory_allocator_interface.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_holder.h"
 #include "model/sample/sample_playback_guide.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
@@ -42,10 +44,6 @@ bool TimeStretcher::init(Sample* sample, VoiceSample* voiceSample, SamplePlaybac
 	AudioEngine::logAction("TimeStretcher::init");
 
 	// D_PRINTLN("TimeStretcher::init");
-
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		clustersForPercLookahead[l] = nullptr;
-	}
 
 	for (int32_t l = 0; l < 2; l++) {
 		percCacheClustersNearby[l] = nullptr;
@@ -176,11 +174,9 @@ void TimeStretcher::beenUnassigned() {
 }
 
 void TimeStretcher::unassignAllReasonsForPercLookahead() {
-	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-		if (clustersForPercLookahead[l]) {
-			deluge::cluster::remove_reason(*clustersForPercLookahead[l], "E130");
-			clustersForPercLookahead[l] = nullptr;
-		}
+	if (percLookahead_ != nullptr) {
+		deluge_sample_reserve_close(percLookahead_);
+		percLookahead_ = nullptr;
 	}
 }
 
@@ -567,7 +563,7 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 			beamBackEdge = waveformStartSample;
 		}
 
-		if (!olderPartReader.clusters[0]) {
+		if (!olderPartReader.hasCurrentRegion()) {
 			D_PRINTLN("No cluster!!!");
 		}
 
@@ -647,6 +643,8 @@ skipPercStuff:
 
 		int32_t readByte[TimeStretch::Crossfade::kNumMovingAverages + 1];
 
+		const uint32_t sourceId = deluge::sample::source_id_for(*sample);
+
 		int32_t samplePos = (uint32_t)(newHeadBytePos - sample->audioDataStartPosBytes) / (uint8_t)bytesPerSample;
 
 		int32_t samplePosMidCrossfade = samplePos + (crossfadeLengthSamplesSource >> 1) * playDirection;
@@ -722,10 +720,12 @@ startSearch:
 					goto searchNextDirection;
 				}
 
-				int32_t whichCluster = readByte[i] >> Cluster::size_magnitude;
-				StreamedChunk* cluster = sample->stream().chunk_at(whichCluster);
-				if (!cluster || !cluster->loaded) {
-					goto skipSearch;
+				const uint64_t frame =
+				    (uint32_t)(readByte[i] - sample->audioDataStartPosBytes) / (uint8_t)bytesPerSample;
+				const DelugeFrameWindow window =
+				    deluge_sample_peek(sourceId, frame, static_cast<int8_t>(searchDirection));
+				if (window.frames == nullptr) {
+					goto skipSearch; // Not resident / not ready.
 				}
 
 				int32_t bytePosWithinCluster = readByte[i] & (Cluster::size - 1);
@@ -741,8 +741,10 @@ startSearch:
 					numSamplesThisRead = (uint32_t)bytesWeMayRead / (uint8_t)bytesPerSample;
 				}
 
-				currentPos[i] = reinterpret_cast<char const*>(
-				    cluster->frame_read_origin(bytePosWithinCluster, static_cast<uint8_t>(byteDepth)));
+				// `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4` aligns for the
+				// `int32`-over-`byteDepth` read below, and the `bytesLeftThisCluster` clamp keeps a
+				// boundary-straddling frame reading within this cluster's own physical slack.
+				currentPos[i] = reinterpret_cast<char const*>(window.frames) + byteDepth - 4;
 			}
 
 			// Alright, read those samples for our currently worked out little bit until we reach a cluster boundary or
@@ -877,7 +879,7 @@ skipSearch:
 	if (bufferFillingMode != BUFFER_FILLING_OFF // If not OFF, it can only be OLDER or NEITHER - it gets changed above
 	    && phaseIncrement != kMaxSampleValue) {
 
-		if (!olderPartReader.clusters[0]) {
+		if (!olderPartReader.hasCurrentRegion()) {
 			D_PRINTLN("aaa");
 		}
 
@@ -910,6 +912,9 @@ skipSearch:
 
 		if (!samplesBehindOnRepitchedWaveform) {
 			// D_PRINTLN("new head reading non-buffered and writing to buffer");
+			// STALE: SampleLowLevelReader::cloneFrom no longer exists (replaced by the copy ctor /
+			// adoptResidencyFrom). This whole TIME_STRETCH_ENABLE_BUFFER block is never compiled and is
+			// pending removal; do not treat this call as live.
 			voiceSample->cloneFrom(&olderPartReader, false);
 			newerHeadReadingFromBuffer = false;
 			olderHeadReadingFromBuffer = true;
@@ -1012,7 +1017,7 @@ bool TimeStretcher::setupNewPlayHead(Sample* sample, VoiceSample* voiceSample, S
 
 	voiceSample->interpolationBufferSizeLastTime = 0;
 	voiceSample->oscPos = additionalOscPos;
-	if (!voiceSample->clusters[0]) {
+	if (!voiceSample->hasCurrentRegion()) {
 		playHeadStillActive[PLAY_HEAD_NEWER] = false;
 		D_PRINTLN("new no longer active");
 	}
@@ -1127,23 +1132,15 @@ void TimeStretcher::rememberPercCacheCluster(ComputedChunk* cluster) {
 // going to need in the next little while, to reserve it and hopefully make sure it's loaded and in memory when we need
 // it.
 void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sourceBytePos, int32_t playDirection) {
-	int32_t clusterIndex = sourceBytePos >> Cluster::size_magnitude;
+	uint32_t sourceId = deluge::sample::source_id_for(*sample);
+	int32_t bytesPerSample = sample->numChannels * sample->byteDepth;
+	uint64_t markerFrame = (sourceBytePos - sample->audioDataStartPosBytes) / bytesPerSample;
 
-	if (!clustersForPercLookahead[0] || clustersForPercLookahead[0]->cluster_index != clusterIndex) {
-		unassignAllReasonsForPercLookahead();
-
-		int32_t nextClusterIndex = clusterIndex;
-		for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
-			if (nextClusterIndex < sample->getFirstClusterIndexWithAudioData()
-			    || nextClusterIndex >= sample->getFirstClusterIndexWithNoAudioData()) {
-				break; // If no more Clusters
-			}
-			clustersForPercLookahead[l] = sample->stream().get_cluster(nextClusterIndex, CLUSTER_ENQUEUE);
-			if (!clustersForPercLookahead[l]) {
-				break;
-			}
-			nextClusterIndex += playDirection;
-		}
+	if (percLookahead_ == nullptr) {
+		percLookahead_ = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
+	}
+	else {
+		deluge_sample_reserve_move(percLookahead_, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
 	}
 }
 

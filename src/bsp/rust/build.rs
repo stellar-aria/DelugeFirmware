@@ -59,6 +59,26 @@ fn main() {
     println!("cargo:rerun-if-changed=linker/memory_rtt.x");
     println!("cargo:rerun-if-changed=linker/sdram_sections.x");
 
+    // No C++ caller of `deluge_sample_stream_*` exists yet — unlike `deluge_app_init` below,
+    // nothing in this crate's own Rust code or the archived C++ closure has an unresolved
+    // reference into `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never
+    // pull its object in at all and its `#[no_mangle]` symbols would be absent from the final ELF
+    // even though the crate compiled clean. Force EACH of the six ABI entry points as a link root
+    // (rustc passes `--gc-sections` by default, which prunes unreached function sections one at a
+    // time even within an already-extracted object — a single `-u` root only keeps the one
+    // function its own call graph reaches, so each symbol needs its own root here). Mirrors
+    // `deluge_app_init`'s own `-u` just below, for the analogous reason on the C++ side.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+
     // ---------------------------------------------------------------------
     // Link the portable C++ application (built by CMake into the `build/` dir).
     // deluge_app is an OBJECT lib (no .a), so archive its objects here, then
@@ -190,23 +210,25 @@ fn run_bindgen(
         .allowlist_type("Deluge.*")
         .allowlist_type("RunCondition")
         .use_core()
-        // CRITICAL: the C++ app is built with `-fshort-enums` (arm-eabi always;
-        // the host_app build-embassy-hostapp tree opts in too), which makes
-        // enums the smallest type that fits —
-        // e.g. DelugeInputEventKind (0..3) is 1 byte, so DelugeInputEvent is
-        // {kind@0, x@1, y@2, value@4}. bindgen runs under the *host* clang, which
-        // sizes enums as 4-byte `int` by default; without this flag every
-        // enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card events, …)
-        // is laid out differently on the two sides and fields read as garbage
-        // across the ABI. Point libclang at the actual target so it computes the
-        // same layout as the app being linked; -fshort-enums alone is ignored
-        // when libclang targets x86_64 without an explicit --target (host
-        // x86_64 mandates 4-byte int enums by default, same as arm w/o the
-        // flag) — with an explicit target the flag applies on both.
+        // NO `-fshort-enums`: it stays out of both bindgen paths (device and host_app)
+        // deliberately, and is IRRELEVANT to enum sizing. Every one of the 11 libdeluge FFI enums
+        // (DelugeInputEventKind, DelugeCardEvent, DelugeStatus, DelugeRegionState, …) pins its
+        // underlying type explicitly in its header (e.g. `enum DelugeInputEventKind : uint8_t`,
+        // `enum DelugeStatus : int8_t`) at its arm-none-eabi-gcc `-fshort-enums` width (1 byte,
+        // all 11). An explicit underlying type is authoritative in both C and C++ — no compiler
+        // flag or ABI default can override it — so bindgen sizes every one of these enums
+        // identically on every target (arm device, x86_64 host_app, host stand-ins) regardless of
+        // `-fshort-enums`.
+        //
+        // Warning: without an explicit underlying type, the arm device (which defaults to short
+        // enums) and an un-flagged bindgen target would silently disagree on enum width,
+        // mislaying out every enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card
+        // events, …) across the FFI boundary. Point libclang at the actual target purely for
+        // pointer width / alignment / calling convention.
         .clang_arg(format!("--target={clang_target}"))
-        .clang_arg("-fshort-enums")
-        // Layouts now match the app being linked; the asserts would run
-        // host-side anyway.
+        // Layouts now match the app being linked on every target (explicit
+        // fixed-width enums everywhere); the asserts would run host-side
+        // anyway.
         .layout_tests(false)
         .generate()
         .expect("bindgen failed on libdeluge headers");
@@ -217,10 +239,13 @@ fn run_bindgen(
     println!("cargo:rerun-if-changed={}", include_dir.display());
 }
 
-/// `host_app` feature: bindgen the host ABI (x86-64 + `-fshort-enums`, matching
-/// build-embassy-hostapp's CMake config) into the real `mod sys`, then archive
-/// the host-built C++ `deluge_app` object closure and emit link directives so
-/// the crate reaches the linker against real provider-symbol references.
+/// `host_app` feature: bindgen the host ABI (x86-64; every libdeluge enum is
+/// pinned to an explicit fixed-width underlying type in its header, so this
+/// matches build-embassy-hostapp's CMake config byte-for-byte regardless of
+/// `-fshort-enums`, which neither build passes) into the real `mod sys`, then
+/// archive the host-built C++ `deluge_app` object closure and emit link
+/// directives so the crate reaches the linker against real provider-symbol
+/// references.
 fn run_host_app(
     repo_root: &std::path::Path,
     manifest_dir: &std::path::Path,
@@ -247,6 +272,19 @@ fn run_host_app(
     // that, gc-sections would strip everything down to just the C++
     // global-constructor subset.
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
+    // Same reasoning as the device path's identical block above — no C++ caller of
+    // `deluge_sample_stream_*` exists yet, so without these roots `--gc-sections` (rustc's default)
+    // would prune every one of its `#[no_mangle]` functions from the final link.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
 
     // CMake-built host tree (`cmake -S sim -B build-embassy-hostapp
     // -DDELUGE_HOST_EMBASSY=... ; ninja -C build-embassy-hostapp deluge_app`).

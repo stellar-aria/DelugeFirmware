@@ -24,13 +24,15 @@
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample.h"
+#include "model/sample/sample_reader_bridge.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/render_wave.h"
-#include "storage/audio/deserializer_byte_source.h"
+#include "storage/audio/file_byte_source.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
 #include "util/fixedpoint.h"
 #include <algorithm>
+#include <cstring>
 #include <new>
 #include <ranges>
 
@@ -46,6 +48,10 @@ struct SetupAllocGuard {
 	WaveTable& waveTable;
 	int32_t*& currentCycleInt32;
 	ne10_fft_cpx_int32_t*& frequencyDomainData;
+	// In-memory sample path only: the reusable file-cluster-aligned block buffer and the frame-reader temp,
+	// freed unconditionally on any exit (they are not needed past the cycle loop). Null on the file path.
+	void* sampleBlockAlloc = nullptr;
+	void* sampleFrameAlloc = nullptr;
 	bool succeeded = false;
 
 	~SetupAllocGuard() {
@@ -54,6 +60,12 @@ struct SetupAllocGuard {
 		}
 		if (currentCycleInt32 != nullptr) {
 			delugeDealloc(currentCycleInt32);
+		}
+		if (sampleBlockAlloc != nullptr) {
+			deluge::memory::dealloc(sampleBlockAlloc);
+		}
+		if (sampleFrameAlloc != nullptr) {
+			deluge::memory::dealloc(sampleFrameAlloc);
 		}
 		if (!succeeded) {
 			waveTable.deleteAllBandsAndData();
@@ -162,14 +174,14 @@ Error WaveTable::setupFromSample(Sample& sample) {
 	return setup(&sample, 0, 0, 0, 0, RawDataFormat::NATIVE, nullptr);
 }
 
-Error WaveTable::setupFromFile(DeserializerByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
+Error WaveTable::setupFromFile(FileByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
                                uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat) {
 	return setup(nullptr, cycleSize, audioDataStartPosBytes, audioDataLengthBytes, byteDepth, rawDataFormat, &source);
 }
 
 Error WaveTable::setup(Sample* sample, int32_t rawFileCycleSize, uint32_t audioDataStartPosBytes,
                        uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat,
-                       DeserializerByteSource* byteSource) {
+                       FileByteSource* byteSource) {
 	AudioEngine::logAction("WaveTable::setup");
 
 	uint32_t originalSampleLengthInSamples;
@@ -380,7 +392,27 @@ tryGettingFFTConfig:
 
 	uint32_t bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 
-	StreamedChunk* cluster = nullptr;
+	// In-memory sample path: a single reusable, file-cluster-aligned block buffer holding the native audio bytes,
+	// refilled per cluster from the streaming frame reader (deluge_sample_read). It carries CACHE_LINE_SIZE of
+	// slack either side — mirroring smDeserializer.fileClusterBuffer — because the band loop below does
+	// misaligned 32-bit reads a few bytes BEFORE the buffer start and just PAST its end. The frame temp holds
+	// whole stride-sized frames (the reader serves whole frames only) before the straddle copy.
+	char* sampleBlockBuffer = nullptr;
+	void* sampleFrameTemp = nullptr;
+	size_t sampleFrameTempBytes = 0;
+	uint32_t sampleSourceId = 0;
+	if (sample) {
+		allocGuard.sampleBlockAlloc = deluge::memory::alloc_sdram(Cluster::size + CACHE_LINE_SIZE * 2);
+		allocGuard.sampleFrameAlloc = deluge::memory::alloc_sdram(Cluster::size + CACHE_LINE_SIZE * 2);
+		if (!allocGuard.sampleBlockAlloc || !allocGuard.sampleFrameAlloc) {
+			return Error::INSUFFICIENT_RAM; // allocGuard frees whichever alloc succeeded + FFT buffers + bands.
+		}
+		sampleBlockBuffer = static_cast<char*>(allocGuard.sampleBlockAlloc) + CACHE_LINE_SIZE;
+		sampleFrameTemp = allocGuard.sampleFrameAlloc;
+		sampleFrameTempBytes = Cluster::size + CACHE_LINE_SIZE * 2;
+		sampleSourceId = deluge::sample::source_id_for(*sample);
+	}
+
 	int32_t clusterIndexCurrentlyLoaded = -1; // Initially, none is loaded yet.
 
 	uint32_t startedBandsYet = 0;
@@ -410,22 +442,50 @@ tryGettingFFTConfig:
 			// If converting an existing Sample from memory into this WaveTable...
 			if (sample) {
 
-				// If we need to load a new Cluster now (which might not be the case if we've just switched into a new
-				// Cycle which starts still within the same Cluster)...
+				// If we need to fill the block buffer for a new Cluster now (which might not be the case if we've
+				// just switched into a new Cycle which starts still within the same Cluster)...
 				if (clusterIndex != clusterIndexCurrentlyLoaded) {
 
-					// First, unload the old Cluster if there was one
-					if (cluster) {
-						deluge::cluster::remove_reason(*cluster, "E385");
-					}
+					// Reproduce the file-cluster-aligned native bytes for `clusterIndex` from the frame reader:
+					// sampleBlockBuffer[o] == native byte at file offset clusterIndex*Cluster::size + o, for the
+					// audio-data bytes that fall in this cluster. The rest is zero-filled defensively so the band
+					// loop's misaligned edge reads never consume an uninitialised byte.
+					const uint64_t clusterFileBase = static_cast<uint64_t>(clusterIndex) << Cluster::size_magnitude;
+					const uint64_t audioStart = audioDataStartPosBytes;
+					const uint64_t audioEnd = audioStart + sample->audioDataLengthBytes;
+					const uint64_t fileLo = std::max<uint64_t>(clusterFileBase, audioStart);
+					const uint64_t fileHi = std::min<uint64_t>(clusterFileBase + Cluster::size, audioEnd);
 
-					cluster = sample->stream().get_cluster(clusterIndex, CLUSTER_LOAD_IMMEDIATELY, 0, &error);
-					if (!cluster) {
-						return error; // allocGuard frees both temp buffers + the bands.
+					memset(sampleBlockBuffer, 0, Cluster::size);
+
+					if (fileHi > fileLo) {
+						const uint32_t stride = byteDepth * numChannels; // frame stride; reader serves whole frames
+						const uint64_t audioLo = fileLo - audioStart; // audio-byte index of first byte in this cluster
+						const uint64_t audioHi = fileHi - audioStart;
+						const uint64_t firstFrame = audioLo / stride;
+						const uint64_t lastFrameExcl = (audioHi + stride - 1) / stride; // ceil to a whole frame
+						const uint32_t numFrames = static_cast<uint32_t>(lastFrameExcl - firstFrame);
+
+						// The first frame may begin a few bytes BEFORE fileLo when the cluster boundary falls
+						// mid-frame; the reader lands whole frames stride-aligned in the temp, and we copy from that
+						// in-frame offset so the straddle is stitched together correctly.
+						const uint32_t framesRead = deluge_sample_read(sampleSourceId, firstFrame, numFrames,
+						                                               sampleFrameTemp, sampleFrameTempBytes);
+						if (framesRead < numFrames) {
+							// A short/zero read left needed audio bytes unfilled (card failure / EOF): fail loudly
+							// (return Error::SD_CARD through allocGuard) rather than silently zero-filling real audio.
+							return Error::SD_CARD; // allocGuard frees the sample buffers + FFT buffers + bands.
+						}
+
+						const uint32_t inFrameOffset = static_cast<uint32_t>(audioLo % stride);
+						const uint32_t copyBytes = static_cast<uint32_t>(audioHi - audioLo);
+						const uint32_t blockOffset = static_cast<uint32_t>(fileLo - clusterFileBase);
+						memcpy(sampleBlockBuffer + blockOffset,
+						       static_cast<const char*>(sampleFrameTemp) + inFrameOffset, copyBytes);
 					}
 
 					clusterIndexCurrentlyLoaded = clusterIndex;
-					sourceBuffer = reinterpret_cast<char const*>(cluster->payload().data());
+					sourceBuffer = sampleBlockBuffer;
 				}
 			}
 
@@ -528,8 +588,9 @@ tryGettingFFTConfig:
 				source += byteDepth;
 			}
 
-			int32_t bytesJustWritten = initialBandWritePos - bandDestinationStartedAt;
-			int32_t samplesJustCopied = bytesJustWritten >> 1;
+			// initialBandWritePos and bandDestinationStartedAt are both int16_t*, so their
+			// native subtraction already yields a sample (element) count.
+			int32_t samplesJustCopied = initialBandWritePos - bandDestinationStartedAt;
 			int32_t sourceBytesJustRead = samplesJustCopied * byteDepth;
 			sourceBytesLeftToCopyThisCycle -= sourceBytesJustRead;
 			byteIndexWithinCluster += sourceBytesJustRead;
@@ -760,12 +821,8 @@ transformBandToTimeDomain:
 
 	D_PRINTLN("initial num bands:  %d", static_cast<int32_t>(bands.size()));
 
-	// Ok, we've now processed all Cycles.
-
-	// There could be a Cluster with a reason we still need to remove.
-	if (cluster != nullptr) {
-		deluge::cluster::remove_reason(*cluster, "E385");
-	}
+	// Ok, we've now processed all Cycles. (The in-memory sample block buffer + frame temp are released by
+	// allocGuard at scope exit; the file path's cluster buffer is owned by the byte source.)
 
 	if (numCycles > 1) {
 		int32_t numCycleTransitions = numCycles - 1;

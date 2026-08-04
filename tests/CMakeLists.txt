@@ -84,10 +84,46 @@ if (UNIX AND NOT APPLE)
     # and the reusable mocks in 32bit_unit_tests/mocks/ are pulled in directly by spec/.)
     add_subdirectory(spec_alloc)
     add_subdirectory(spec_resource)
+
+    # A SEPARATE umbrella build, with the `sim` feature on, exclusively for
+    # spec_sample_reader: `deluge_sample_reader`'s `deluge_sample_reader_*` /
+    # `deluge_sample_read` C-ABI symbols are only emitted (`#[unsafe(no_mangle)]`) under
+    # `target_os = "none"` or the `host_app`/`sim` feature gates (see that crate's abi.rs) --
+    # plain `deluge_rust_rs` above builds with none of those, so it never exports them. Uses
+    # its own `--target-dir` (not the plain `deluge_rust_rs` build's) so the two feature sets
+    # never fight over the same output path.
+    set(RUST_LIB_SIM ${RUST_WS}/target-tests-sim/${RUST_TARGET}/release/libdeluge_rust.a)
+    # Own glob (not layered on RUST_SOURCES -- GLOB_RECURSE patterns are wildcards, not a list of
+    # already-resolved paths to re-glob), mirroring sim/CMakeLists.txt's own SIM_RUST_SOURCES.
+    file(GLOB_RECURSE RUST_SOURCES_SIM CONFIGURE_DEPENDS
+        ${RUST_WS}/deluge_alloc/src/*.rs ${RUST_WS}/deluge_resource/src/*.rs
+        ${RUST_WS}/deluge_sample_reader/src/*.rs ${RUST_WS}/deluge_sample_fill/src/*.rs
+        ${RUST_WS}/deluge_sample_source/src/*.rs ${RUST_WS}/deluge_rust/src/*.rs)
+    add_custom_command(
+        OUTPUT ${RUST_LIB_SIM}
+        COMMAND cargo build -p deluge_rust --release --target ${RUST_TARGET} --features sim
+            --target-dir ${RUST_WS}/target-tests-sim
+        WORKING_DIRECTORY ${RUST_WS}
+        DEPENDS ${RUST_SOURCES_SIM}
+            ${RUST_WS}/Cargo.lock
+            ${RUST_WS}/Cargo.toml ${RUST_WS}/deluge_alloc/Cargo.toml
+            ${RUST_WS}/deluge_resource/Cargo.toml ${RUST_WS}/deluge_rust/Cargo.toml
+            ${RUST_WS}/deluge_sample_reader/Cargo.toml ${RUST_WS}/deluge_sample_fill/Cargo.toml
+            ${RUST_WS}/deluge_sample_source/Cargo.toml
+        COMMENT "Building Rust deluge_rust staticlib with the sim feature (${RUST_TARGET})"
+        VERBATIM)
+    add_custom_target(deluge_rust_rs_sim_build DEPENDS ${RUST_LIB_SIM})
+    add_library(deluge_rust_rs_sim STATIC IMPORTED GLOBAL)
+    set_target_properties(deluge_rust_rs_sim PROPERTIES IMPORTED_LOCATION ${RUST_LIB_SIM})
+    add_dependencies(deluge_rust_rs_sim deluge_rust_rs_sim_build)
+
+    add_subdirectory(spec_sample_reader)
 endif ()
 add_subdirectory(spec)
 add_subdirectory(spec_io)
+add_subdirectory(spec_storage)
 add_subdirectory(spec_audio_stream)
+add_subdirectory(spec_dsp)
 add_subdirectory(spec_sync)
 add_subdirectory(unit)
 

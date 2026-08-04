@@ -1,0 +1,54 @@
+# Throwaway spike (Spike A, feat/streaming-underrun-harness Task 1): does a
+# `MockDriver`-style discrete-event run loop (poll-to-quiescence, jump to next
+# timer deadline, repeat) work against Embassy's host executor?
+#
+# Deliberately a FULLY SEPARATE Cargo package (not an `examples/*.rs` target of
+# ../Cargo.toml's `deluge-bsp-rust`) so it never touches that crate's feature
+# graph. Two reasons this has to be a separate package rather than a feature
+# flag on deluge-bsp-rust:
+#
+# 1. `embassy-time`'s `mock-driver` and `std` features both call
+#    `embassy_time_driver::time_driver_impl!`, which emits `#[no_mangle] fn
+#    _embassy_time_now()`/`_embassy_time_schedule_wake()`. Two drivers in one
+#    binary is a duplicate-symbol link error, so they're mutually exclusive —
+#    but Cargo unifies a dependency's features across every target in ONE
+#    package's Cargo.toml (there is no per-`[[bin]]`/`[[example]]` feature
+#    selection), so `deluge-bsp-rust` (which needs `std` for its real
+#    `[target.'cfg(not(target_os = "none"))'.dependencies]` host build) could
+#    never also carry a `mock-driver` example.
+# 2. See `src/main.rs`'s driver doc comment: this spike ALSO doesn't enable
+#    `embassy-executor`'s `platform-std`/`executor-thread` features (the ones
+#    `deluge-bsp-rust`'s host target uses) — see that file for why.
+#
+# Plain crates.io versions throughout (NOT `deluge-bsp-rust`'s
+# `[patch.crates-io]` stellar-aria/embassy fork) — that fork exists to port
+# `InterruptExecutor` to `platform-cortex-ar` for the on-device GIC-SGI audio
+# executor, which this host-only clock question has nothing to do with, and
+# mixing a forked `embassy-executor` with an unforked `embassy-time-queue-utils`
+# is exactly the intrusive-`TimerQueueItem`-type mismatch the main Cargo.toml's
+# `[patch.crates-io]` comment warns about. Staying all-crates.io here sidesteps
+# that entirely.
+[package]
+name = "spike-mock-clock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "spike_mock_clock"
+path = "src/main.rs"
+
+[dependencies]
+# No `platform-*` feature (see main.rs): keeps `_platform` off, so the crate
+# defines no `__pender` and we must (and do) supply our own.
+embassy-executor = { version = "0.10.0", default-features = false, features = ["nightly"] }
+# No `std`/`mock-driver` feature: keeps embassy-time from registering ITS OWN
+# time driver, so our hand-rolled `PeekableMockDriver` (main.rs) can be the
+# sole one (see the file header for why `embassy_time::MockDriver` itself
+# isn't used as-is).
+embassy-time = { version = "0.5.1", default-features = false }
+embassy-time-driver = { version = "0.2.2", features = ["tick-hz-1_000_000"] }
+embassy-time-queue-utils = "0.3.2"
+# `std` backend: a real critical-section impl on host (global mutex), needed
+# since embassy-executor/embassy-time-driver are compiled no_std here.
+critical-section = { version = "1", features = ["std"] }

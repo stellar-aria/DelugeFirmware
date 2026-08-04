@@ -11,14 +11,18 @@
 //! `DelugeBootInfo`).
 #![allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 
-/// `include/libdeluge/types.h`: `DelugeStatus`. Values span -13..=0, so under
-/// the device's `-fshort-enums` build this is a 1-byte enum.
+/// `include/libdeluge/types.h`: `DelugeStatus`. Values span -13..=0; the
+/// header pins its underlying type explicitly (`enum DelugeStatus : int8_t`),
+/// so this is a 1-byte enum on every target.
 pub type DelugeStatus = i8;
 pub const DelugeStatus_DELUGE_OK: DelugeStatus = 0;
 
 /// `include/libdeluge/control_surface.h`: `DelugeInputEventKind`. PAD=0,
 /// BUTTON=1, ENCODER=2 (unused by control.rs — encoder motion arrives via
-/// `deluge_encoder_take_edges`, not the event queue), NO_PRESSES=3.
+/// `deluge_encoder_take_edges`, not the event queue), NO_PRESSES=3. The
+/// header pins its underlying type explicitly (`enum DelugeInputEventKind :
+/// uint8_t`), so this is a 1-byte enum on every target — device, host_app,
+/// and this host stand-in alike.
 pub type DelugeInputEventKind = u8;
 pub const DelugeInputEventKind_DELUGE_EVENT_PAD: DelugeInputEventKind = 0;
 pub const DelugeInputEventKind_DELUGE_EVENT_BUTTON: DelugeInputEventKind = 1;
@@ -26,15 +30,18 @@ pub const DelugeInputEventKind_DELUGE_EVENT_ENCODER: DelugeInputEventKind = 2;
 pub const DelugeInputEventKind_DELUGE_EVENT_NO_PRESSES: DelugeInputEventKind = 3;
 
 /// `include/libdeluge/control_surface.h`: `DelugeInputEvent`. `#[repr(C)]`
-/// with an explicit 1-byte padding slot before `value` for its natural `i16`
-/// alignment, giving 6 bytes total — matching the C struct exactly.
+/// with no manual padding needed: `value`'s `i16` alignment requires a
+/// 2-byte boundary, leaving one pad byte after `y` — Rust's C-compatible
+/// layout algorithm reproduces the C struct exactly (kind@0 1B, x@1, y@2,
+/// value@4), 6 bytes total (see the ABI guard in `control.rs`, which
+/// asserts this at compile time).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DelugeInputEvent {
     pub kind: DelugeInputEventKind, // offset 0 (1 byte)
     pub x: u8,                      // offset 1
     pub y: u8,                      // offset 2
-    // offset 3: padding (natural i16 alignment)
+    // 1 pad byte at offset 3
     pub value: i16, // offset 4
 } // size: 6 bytes
 

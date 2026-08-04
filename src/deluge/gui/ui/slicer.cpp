@@ -44,6 +44,7 @@
 #include "processing/sound/sound_drum.h"
 #include "storage/flash_storage.h"
 #include "storage/multi_range/multisample_range.h"
+#include "storage/owner.h"
 #include "util/functions.h"
 #include <algorithm>
 #include <cstring>
@@ -334,24 +335,36 @@ ActionResult Slicer::buttonAction(deluge::hid::Button b, bool on, bool inCardRou
 		if (inCardRoutine) {
 			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
 		}
-		if (slicerMode == SLICER_MODE_REGION) {
-			doSlice();
-		}
-		else {
+
+		// Snapshot the commit gesture — plain values only, no pointers into manualSlicePoints[]/
+		// numManualSlice/numClips survive past this point — before dispatch. doSlice() and, for
+		// MANUAL mode, the per-drum paint loop move into one op on the storage owner together
+		// (see SliceCommitTarget/runDoSliceOp); the op runs entirely off this snapshot, never
+		// re-reading these live members, so a concurrent encoder turn or pad press during the
+		// dispatched load can't desync what gets sliced from what gets painted.
+		pendingSliceTarget_.isManual = (slicerMode == SLICER_MODE_MANUAL);
+		pendingSliceTarget_.sliceCount = pendingSliceTarget_.isManual ? numManualSlice : numClips;
+		if (pendingSliceTarget_.isManual) {
+			std::copy(std::begin(manualSlicePoints), std::end(manualSlicePoints),
+			          std::begin(pendingSliceTarget_.manualPoints));
 			getCurrentKit()->firstDrum->killAllVoices(); // stop
-			numClips = numManualSlice;
-			doSlice();
-			Kit* kit = getCurrentKit();
-			for (int32_t i = 0; i < numManualSlice; i++) {
-				Drum* drum = kit->getDrumFromIndex(i);
-				SoundDrum* soundDrum = (SoundDrum*)drum;
-				MultisampleRange* range = (MultisampleRange*)soundDrum->sources[0].getOrCreateFirstRange();
-				Sample* sample = (Sample*)range->sampleHolder.audioFile;
-				range->sampleHolder.startPos = manualSlicePoints[i].startPos;
-				range->sampleHolder.endPos = (i == numManualSlice - 1) ? waveformBasicNavigator.sample->lengthInSamples
-				                                                       : this->manualSlicePoints[i + 1].startPos;
-				range->sampleHolder.transpose = manualSlicePoints[i].transpose;
-			}
+		}
+
+		// Close the gate before dispatch, not inside the op: doSlice() ends by calling
+		// sampleBrowser.exitAndNeverDeleteDrum() -> close(), which pops this Slicer (and the
+		// SampleBrowser beneath it) off the UI navigation stack from inside the dispatched op.
+		// Without this gate, a BACK press reaching the BACK case below during that window would
+		// call close() on `this` from the executor at the same time the op is mutating the same
+		// uiNavigationHierarchy/numUIsOpen globals from the worker — a UI-stack-corruption hazard
+		// (the same shape ClearSong and LoadSongUI::performLoad guard against). A repeat
+		// SELECT_ENC would re-dispatch doSlice() mid-flight (double-slicing the same commit).
+		// currentUIMode != UI_MODE_NONE makes buttonAction() a no-op for both (top-of-function
+		// guard above) until runDoSliceOp() resets it.
+		currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
+		if (!deluge::storage::Owner::run_or_inline(&Slicer::runDoSliceOp, this)) {
+			// Dispatch dropped (owner queue full) — runDoSliceOp will never run, so release the
+			// gate we just closed here, or Slicer would be stuck (no BACK/SELECT_ENC) forever.
+			currentUIMode = UI_MODE_NONE;
 		}
 	}
 
@@ -394,7 +407,44 @@ void Slicer::stopAnyPreviewing() {
 	}
 }
 void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, int32_t on) {
-	if (on) {
+	// Snapshot the request (plain values — no pointers into manualSlicePoints[] or any
+	// other live UI state survive past this call) and coalesce latest-wins onto one
+	// owner op: while one preview (load + audition-note) is running, a newer request
+	// is queued and dispatched on completion, so a burst of pad taps converges on
+	// whichever slice/on-off state the user's finger is actually on, and the op's
+	// "is the sliced sample already resident?" check + the load it may trigger + the
+	// audition note it sends always run together, atomically, on the worker — never
+	// split across a yield the way a bare wrap of just loadFile() would be.
+	PreviewTarget target{
+	    .startPoint = startPoint,
+	    .endPoint = endPoint,
+	    .transpose = transpose,
+	    .on = on,
+	};
+
+	if (previewCoalescer_.request(target)) {
+		if (!deluge::storage::Owner::run(&Slicer::runPreviewOp, this)) {
+			// Owner queue full → the op won't run, so release the guard or the
+			// coalescer would wedge single-flight forever. The next preview() call
+			// re-requests.
+			previewCoalescer_.reset();
+		}
+	}
+}
+
+void Slicer::runPreviewOp(void* self) {
+	auto* s = static_cast<Slicer*>(self);
+	s->previewForTarget(s->previewCoalescer_.current());
+	// If a newer target arrived while this ran, dispatch it (latest-wins).
+	if (auto next = s->previewCoalescer_.complete(); next.has_value()) {
+		if (!deluge::storage::Owner::run(&Slicer::runPreviewOp, self)) {
+			s->previewCoalescer_.reset(); // re-dispatch dropped — release (see preview())
+		}
+	}
+}
+
+void Slicer::previewForTarget(const PreviewTarget& target) {
+	if (target.on) {
 		Kit* kit = getCurrentKit();
 		SoundDrum* drum = (SoundDrum*)kit->firstDrum;
 
@@ -410,10 +460,10 @@ void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, in
 			range->sampleHolder.filePath = waveformBasicNavigator.sample->filePath.c_str();
 			range->sampleHolder.loadFile(false, true, true);
 		}
-		range->sampleHolder.startPos = startPoint;
-		if (endPoint != -1)
-			range->sampleHolder.endPos = endPoint;
-		range->sampleHolder.transpose = transpose;
+		range->sampleHolder.startPos = target.startPoint;
+		if (target.endPoint != -1)
+			range->sampleHolder.endPos = target.endPoint;
+		range->sampleHolder.transpose = target.transpose;
 
 		ParamCollectionSummary* summary = modelStack->paramManager->getPatchedParamSetSummary();
 		ModelStackWithParamId* modelStackWithParamId =
@@ -428,7 +478,7 @@ void Slicer::preview(int64_t startPoint, int64_t endPoint, int32_t transpose, in
 		modelStackWithAutoParam->autoParam->setCurrentValueWithNoReversionOrRecording(
 		    modelStackWithAutoParam, getParamFromUserValue(params::LOCAL_ENV_0_ATTACK, 1));
 	}
-	instrumentClipView.sendAuditionNote(on, 0, 64, 0);
+	instrumentClipView.sendAuditionNote(target.on, 0, 64, 0);
 }
 
 ActionResult Slicer::padAction(int32_t x, int32_t y, int32_t on) {
@@ -517,7 +567,33 @@ ActionResult Slicer::padAction(int32_t x, int32_t y, int32_t on) {
 	return sampleBrowser.padAction(x, y, on);
 }
 
-void Slicer::doSlice() {
+void Slicer::runDoSliceOp(void* self) {
+	auto* s = static_cast<Slicer*>(self);
+	s->commitSlice(s->pendingSliceTarget_);
+}
+
+void Slicer::commitSlice(const SliceCommitTarget& target) {
+	doSlice(target.sliceCount);
+
+	if (target.isManual) {
+		Kit* kit = getCurrentKit();
+		for (int32_t i = 0; i < target.sliceCount; i++) {
+			Drum* drum = kit->getDrumFromIndex(i);
+			SoundDrum* soundDrum = (SoundDrum*)drum;
+			MultisampleRange* range = (MultisampleRange*)soundDrum->sources[0].getOrCreateFirstRange();
+			range->sampleHolder.startPos = target.manualPoints[i].startPos;
+			range->sampleHolder.endPos = (i == target.sliceCount - 1) ? waveformBasicNavigator.sample->lengthInSamples
+			                                                          : target.manualPoints[i + 1].startPos;
+			range->sampleHolder.transpose = target.manualPoints[i].transpose;
+		}
+	}
+
+	// Release the gate buttonAction() closed before dispatch (see its comment) — every doSlice()
+	// exit path, success or its internal load-failure `getOut:` branch, lands here.
+	currentUIMode = UI_MODE_NONE;
+}
+
+void Slicer::doSlice(int32_t sliceCount) {
 
 	AudioEngine::stopAnyPreviewing();
 
@@ -567,14 +643,14 @@ getOut:
 
 		uint32_t lengthInSamples = sample->lengthInSamples;
 
-		uint32_t lengthSamplesPerSlice = lengthInSamples / numClips;
+		uint32_t lengthSamplesPerSlice = lengthInSamples / sliceCount;
 		uint32_t lengthMSPerSlice = lengthSamplesPerSlice * 1000 / sample->sampleRate;
 
 		bool doEnvelopes =
 		    (lengthMSPerSlice >= 90); // Only do fades in and out if we've got at least 100ms to play with
 
 		firstRange->sampleHolder.startPos = 0;
-		uint32_t nextDrumStart = lengthInSamples / numClips;
+		uint32_t nextDrumStart = lengthInSamples / sliceCount;
 		firstRange->sampleHolder.endPos = nextDrumStart;
 
 		firstDrum->sources[0].repeatMode =
@@ -602,7 +678,7 @@ getOut:
 		}
 
 		// Do the rest of the Drums
-		for (int32_t i = 1; i < numClips; i++) {
+		for (int32_t i = 1; i < sliceCount; i++) {
 
 			// Make the Drum and its ParamManager
 			ParamManagerForTimeline paramManager;
@@ -636,7 +712,7 @@ ramError2:
 			newDrum->setupAsSample(&paramManager);
 
 			range->sampleHolder.startPos = nextDrumStart;
-			nextDrumStart = (uint64_t)lengthInSamples * (i + 1) / numClips;
+			nextDrumStart = (uint64_t)lengthInSamples * (i + 1) / sliceCount;
 			range->sampleHolder.endPos = nextDrumStart;
 
 			newDrum->sources[0].repeatMode =
@@ -648,7 +724,7 @@ ramError2:
 			if (doEnvelopes) {
 				paramManager.getPatchedParamSet()->params[params::LOCAL_ENV_0_ATTACK].setCurrentValueBasicForSetup(
 				    getParamFromUserValue(params::LOCAL_ENV_0_ATTACK, 1));
-				if (i != numClips - 1) {
+				if (i != sliceCount - 1) {
 					paramManager.getPatchedParamSet()->params[params::LOCAL_ENV_0_RELEASE].setCurrentValueBasicForSetup(
 					    getParamFromUserValue(params::LOCAL_ENV_0_RELEASE, 1));
 				}

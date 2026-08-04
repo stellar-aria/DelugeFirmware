@@ -132,6 +132,13 @@ public:
 	void setCardRead() { cardReadOnce = true; }
 	void setCardEjected() { cardEjected = true; }
 
+	/// @brief Re-initialise the SD card if it is currently marked ejected, clearing the flag on success.
+	///
+	/// Touches FatFS (initSD), so it runs on the storage owner — the fill dispatched by slowRoutine().
+	/// Re-checks the ejected flag itself, so a coalesced duplicate that arrives after re-init is a safe
+	/// no-op.
+	void reinitEjectedCard();
+
 	std::string alternateAudioFileLoadPath{};
 	AlternateLoadDirStatus alternateLoadDirStatus = AlternateLoadDirStatus::NONE_SET;
 	ThingType thingTypeBeingLoaded = ThingType::NONE;
@@ -160,11 +167,21 @@ private:
 	// form is resident). Returns the new WaveTable (held by no reason), or nullptr with `*error` set if it
 	// can't be a wavetable (stereo, or not wavetable-looking unless insisted) or alloc/setup fails.
 	AudioFile* convertSampleToWaveTable(Sample& foundSample, bool makeWaveTableWorkAtAllCosts, Error* error);
-	// Construct an AudioFile from a resolved file: alloc + adopt the object, build it (Sample: FAT-walk the
-	// cluster table + stream-parse via ClusterByteSource; WaveTable: parse + setup via DeserializerByteSource),
-	// insert into `audioFiles` and finalize. Returns the loaded object (held by no reason — the caller leases
-	// it), or nullptr with `*error` set. The file-resolution that produced `effectiveFilePointer` /
-	// `usingAlternateLocation` is the caller's job.
+	/// @brief Construct an AudioFile from a resolved file: alloc + adopt the object, build it, insert it
+	///        into audioFiles, and finalize.
+	///
+	/// Sample: FAT-walk the cluster table and raw header parse via FileByteSource. WaveTable: parse + setup
+	/// via FileByteSource. The file-resolution that produced @p effectiveFilePointer / @p
+	/// usingAlternateLocation is the caller's job.
+	/// @param filePath                   The file's (nominal/display) path.
+	/// @param usingAlternateLocation     Alternate-load-dir path segment the bytes actually live at, or
+	///                                   empty if resolved at `filePath` directly.
+	/// @param effectiveFilePointer       The resolved on-card file pointer to load from.
+	/// @param type                       Which concrete AudioFile subclass to build.
+	/// @param makeWaveTableWorkAtAllCosts Force wavetable interpretation even without the tag/length hints
+	///                                    that normally identify one.
+	/// @param error                      Set on failure.
+	/// @return The loaded object, held by no reason (the caller leases it), or nullptr with @p error set.
 	AudioFile* buildAudioFileFromCard(const std::string& filePath, const std::string& usingAlternateLocation,
 	                                  FilePointer& effectiveFilePointer, AudioFileType type,
 	                                  bool makeWaveTableWorkAtAllCosts, Error* error);

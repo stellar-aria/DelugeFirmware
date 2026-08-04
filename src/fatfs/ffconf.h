@@ -279,12 +279,13 @@
 
 
 /* #include <somertos.h>	// O/S definitions */
-#define FF_FS_REENTRANT	1 // Phase 2b: enables the volume grant hooks below. The grants are
-								// no-ops today (block_on has no concurrent FatFS entry on any
-								// BSP) -- this installs the primitive for the async-SD follow-on.
+#define FF_FS_REENTRANT	1 // Phase 2b: enables the volume grant hooks below. The grants stay
+								// no-ops permanently, by design -- the async-SD single-storage-owner
+								// architecture (src/deluge/storage/owner.h) routes every FatFS call
+								// through one serialized fiber instead; see ffsystem.c's comment.
 #define FF_FS_TIMEOUT	1000
-#define FF_SYNC_t		int // Dummy handle type: the ff_*_syncobj/grant hooks in ffsystem.c
-								// are no-ops for now, so no real O/S sync object is needed.
+#define FF_SYNC_t		int // Dummy handle type: the ff_*_syncobj/grant hooks in ffsystem.c are
+								// permanent no-ops (see ffsystem.c), so no real O/S sync object is needed.
 /* The option FF_FS_REENTRANT switches the re-entrancy (thread safe) of the FatFs
 /  module itself. Note that regardless of this option, file access to different
 /  volume is always re-entrant and volume control functions, f_mount(), f_mkfs()

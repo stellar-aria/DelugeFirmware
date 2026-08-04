@@ -17,6 +17,7 @@
 
 #include "gui/ui/load/load_song_ui.h"
 #include "definitions_cxx.hpp"
+#include "deluge_resource.h" // deluge_resource_loader_has_lowest
 #include "extern.h"
 #include "gui/colour/colour.h"
 #include "gui/l10n/l10n.h"
@@ -30,7 +31,6 @@
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
-#include "libdeluge/worker.h" // deluge_worker_run — run the load on the worker fiber
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "model/instrument/midi_instrument.h"
@@ -43,9 +43,9 @@
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
+#include "storage/owner.h" // deluge::storage::Owner::run — run the load on the worker fiber
 #include "storage/storage_manager.h"
 #include "util/try.h"
 #include <string.h>
@@ -79,7 +79,6 @@ bool LoadSongUI::opened() {
 
 	Error error = beginSlotSession(false, true);
 	if (error != Error::NONE) {
-gotError:
 		display->displayError(error);
 		// Oh no, we're unable to read a file representing the first song. Get out quick!
 		currentUIMode = UI_MODE_NONE;
@@ -103,11 +102,15 @@ gotError:
 		searchFilename.append(".XML");
 	}
 
-	error = arrivedInNewFolder(0, searchFilename.c_str(), "SONGS");
-	if (error != Error::NONE) {
-		goto gotError;
-	}
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = "SONGS"});
 
+	return true;
+}
+
+void LoadSongUI::onBrowserOpened() {
 	focusRegained();
 
 	PadLEDs::vertical::setupScroll(1, false);
@@ -131,8 +134,6 @@ gotError:
 	if (ALPHA_OR_BETA_VERSION && currentUIMode == UI_MODE_WAITING_FOR_NEXT_FILE_TO_LOAD) {
 		FREEZE_WITH_ERROR("E188");
 	}
-
-	return true;
 }
 
 void LoadSongUI::folderContentsReady(int32_t entryDirection) {
@@ -149,14 +150,9 @@ void LoadSongUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem && currentFileItem->isFolder) {
-
-		Error error = goIntoFolder(currentFileItem->filename.c_str());
-
-		if (error != Error::NONE) {
-			display->displayError(error);
-			close(); // Don't use goBackToSoundEditor() because that would do a left-scroll
-			return;
-		}
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
+		// Browser::onListingFailed() (displayError + exitAction) once the listing completes.
+		goIntoFolder(currentFileItem->filename.c_str());
 	}
 
 	else {
@@ -165,7 +161,7 @@ void LoadSongUI::enterKeyPress() {
 		// the *operation*, not this button handler — otherwise the executor (and PIC
 		// input) freezes and the load hangs. Post-load work goes in the job too, since
 		// this handler returns immediately.
-		deluge_worker_run(
+		deluge::storage::Owner::run(
 		    [](void*) {
 			    loadSongUI.performLoad(); // May fail
 			    if (FlashStorage::defaultStartupSongMode == StartupSongMode::LASTOPENED) {
@@ -193,6 +189,10 @@ void LoadSongUI::displayLoopsRemainingPopup() {
 
 ActionResult LoadSongUI::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	using namespace deluge::hid::button;
+
+	if (listingInProgress_) {
+		return ActionResult::DEALT_WITH;
+	}
 
 	// Load button or select encoder press. Unlike most (all?) other children of Browser, we override this and don't
 	// just call mainButtonAction(), because unlike all the others, we need to action the load immediately on down-press
@@ -295,7 +295,7 @@ void LoadSongUI::doQueueLoadNextSongIfAvailable(int8_t offset) {
 				AudioEngine::logAction("performLoad");
 				// Run the load on the worker fiber (see enterKeyPress); the job owns the
 				// post-load settings write AND the UI-mode reset below, so return now.
-				deluge_worker_run(
+				deluge::storage::Owner::run(
 				    [](void*) {
 					    loadSongUI.performLoad();
 					    if (FlashStorage::defaultStartupSongMode == StartupSongMode::LASTOPENED) {
@@ -475,8 +475,10 @@ gotErrorAfterCreatingSong:
 		preLoadedSong->loadAllSamples(true);
 	}
 
-	// Ensure all AudioFile Clusters needed for new song are loaded
-	yieldWithTimeout([]() { return !(deluge::audio::stream::loader::has_lowest_priority_queued()); }, 5);
+	// Ensure all AudioFile Clusters needed for new song are loaded: wait until the loader queue holds
+	// no lowest-priority (failed-and-requeued) items, i.e. the async fill task has settled.
+	yieldWithTimeout(
+	    []() { return !deluge_resource_loader_has_lowest(GeneralMemoryAllocator::get().resourceManager()); }, 5);
 
 	preLoadedSong->name = enteredText;
 
@@ -525,9 +527,8 @@ gotErrorAfterCreatingSong:
 swapDone:
 	// To override our popup if we did one. (Still necessary?)
 	deluge::hid::display::OLED::displayWorkingAnimation("Loading");
-	// Ok, the swap's been done, the first tick of the new song has been done, and there are potentially loads of
-	// samples wanting some data loaded. So do that immediately
-	deluge::audio::stream::loader::pump(99999);
+	// The swap's been done and the first tick of the new song has been done; any samples wanting data
+	// loaded are drained by the async fill task.
 
 	// Delete the old song
 	AudioEngine::logAction("deleting old song");

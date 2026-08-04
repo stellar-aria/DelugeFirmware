@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "definitions_cxx.hpp"
+#include "libdeluge/sample_reader.h"
 #include "model/sample/sample_playback_guide.h"
 #include "storage/audio/audio_file_holder.h"
 #include "util/c_string.h"
@@ -29,7 +30,6 @@ extern "C" {
 }
 
 class Sample;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 
 class SampleHolder : public AudioFileHolder {
 public:
@@ -38,11 +38,8 @@ public:
 	SampleHolder(SampleHolder&& other) noexcept
 	    : AudioFileHolder(std::move(other)), startPos(other.startPos), endPos(other.endPos),
 	      waveformViewScroll(other.waveformViewScroll), waveformViewZoom(other.waveformViewZoom),
-	      neutralPhaseIncrement(other.neutralPhaseIncrement) {
-		for (size_t i = 0; i < kNumClustersLoadedAhead; i++) {
-			clustersForStart[i] = std::exchange(other.clustersForStart[i], nullptr);
-		}
-	}
+	      neutralPhaseIncrement(other.neutralPhaseIncrement),
+	      clustersForStart_(std::exchange(other.clustersForStart_, nullptr)) {}
 	SampleHolder& operator=(SampleHolder&& other) noexcept {
 		AudioFileHolder::operator=(std::move(other));
 		startPos = other.startPos;
@@ -50,9 +47,7 @@ public:
 		waveformViewScroll = other.waveformViewScroll;
 		waveformViewZoom = other.waveformViewZoom;
 		neutralPhaseIncrement = other.neutralPhaseIncrement;
-		for (size_t i = 0; i < kNumClustersLoadedAhead; i++) {
-			clustersForStart[i] = std::exchange(other.clustersForStart[i], nullptr);
-		}
+		clustersForStart_ = std::exchange(other.clustersForStart_, nullptr);
 		return *this;
 	}
 	~SampleHolder() override;
@@ -75,10 +70,23 @@ public:
 
 	int32_t neutralPhaseIncrement{};
 
-	StreamedChunk* clustersForStart[kNumClustersLoadedAhead]{};
+	/// Passive lookahead reservation anchored at this holder's start marker; pins a small window of
+	/// cluster residency ahead of/behind the start playback position. `nullptr` when not yet opened
+	/// (or after being released). Opened/moved by claimClusterReasonsForMarker(), closed by
+	/// unassignAllClusterReasons().
+	DelugeSampleReservation* clustersForStart_ = nullptr;
 
 protected:
-	void claimClusterReasonsForMarker(StreamedChunk** clusters, uint32_t startPlaybackAtByte, int32_t playDirection,
-	                                  int32_t clusterLoadInstruction);
+	/// @brief Open or re-anchor a passive lookahead reservation at a playback marker.
+	///
+	/// If @p reservation is null, opens a new one; otherwise re-anchors the existing one to the new
+	/// marker position.
+	/// @param reservation          The reservation to open/move, by reference so a fresh open can
+	///                             write the new handle back into the caller's storage.
+	/// @param startPlaybackAtByte  Byte offset of the marker within the sample's audio data.
+	/// @param playDirection        +1 forward, -1 reverse.
+	/// @param clusterLoadInstruction One of the CLUSTER_* load modes, translated to a DelugeLoadMode.
+	void claimClusterReasonsForMarker(DelugeSampleReservation*& reservation, uint32_t startPlaybackAtByte,
+	                                  int32_t playDirection, int32_t clusterLoadInstruction);
 	virtual void sampleBeenSet(bool reversed, bool manuallySelected) {}
 };

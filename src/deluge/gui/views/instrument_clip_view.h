@@ -86,6 +86,14 @@ public:
 	// PAD ACTION pad press / release handling
 
 	ActionResult padAction(int32_t x, int32_t y, int32_t velocity) override;
+	/// @brief Snapshot the "Drum Randomizer" gesture's row-selection criteria and dispatch the
+	///        load (which drum(s) get randomized, if any) onto the storage worker.
+	///
+	/// The real work, including the SD-dependent directory scan/`loadFile()`, runs in
+	/// `commitRandomizeDrums()`.
+	/// @return `DEALT_WITH` once dispatched, or `NOT_DEALT_WITH` if no candidate row is eligible
+	///         (determined synchronously, without SD access — falls through to a regular edit
+	///         pad action, same as when this gesture doesn't apply).
 	ActionResult potentiallyRandomizeDrumSamples();
 	ActionResult potentiallyRandomizeDrumSample(Kit* kit, Drum* drum, char* chosenFilename);
 	ActionResult commandEnterNoteVelocityEditor(int32_t x, int32_t y);
@@ -366,6 +374,49 @@ private:
 	// Set once a held Session button passes the long-press threshold, so short presses never flash macro colours into
 	// the sidebar on their way to Session view.
 	bool sessionMacroSidebarActive{};
+
+	/// @brief Snapshot of the "Drum Randomizer" gesture's row-selection criteria, captured in
+	///        `potentiallyRandomizeDrumSamples()` before the mode gate closes and the op
+	///        dispatches.
+	///
+	/// Which rows get randomized depends on live state (`AFFECT_ENTIRE`,
+	/// `auditionPadIsPressed[]`, `UI_MODE_AUDITIONING`, `kit->selectedDrum`) that a concurrent
+	/// audition-pad *release* — not gated by `currentUIMode`, since `auditionPadActionUIModes`
+	/// passes `velocity == 0` through regardless of mode — could otherwise change mid-op.
+	/// `commitRandomizeDrums()` re-walks the (gate-protected-stable) NoteRow/Drum graph using
+	/// only this frozen criteria, never a live read of those fields.
+	struct RandomizeDrumsTarget {
+		Kit* kit;
+		InstrumentClip* instrumentClip;
+		bool randomizeAll;
+		bool auditioning;
+		uint8_t auditionPadIsPressedSnapshot[kDisplayHeight];
+		Drum* selectedDrumSnapshot;
+	};
+
+	/// @brief The dispatched op for `potentiallyRandomizeDrumSamples()`.
+	///
+	/// Reads only `self->pendingRandomizeTarget_` (the dispatch-time snapshot), never live UI
+	/// members.
+	/// @param self The `InstrumentClipView` this op is running for.
+	static void runRandomizeDrumsOp(void* self);
+	/// @brief The randomize body: for each candidate row in @p target, randomizes the drum's
+	///        sample and shows the resulting popup.
+	///
+	/// The randomize itself is a directory scan + `loadFile()`, run on the storage worker. Resets
+	/// `currentUIMode` to `UI_MODE_NONE` unconditionally on every exit path, releasing the gate
+	/// `potentiallyRandomizeDrumSamples()` closes before dispatch.
+	/// @param target The dispatch-time snapshot of eligible rows to randomize.
+	void commitRandomizeDrums(const RandomizeDrumsTarget& target);
+	/// @brief The fast, SD-free eligibility check factored out of `potentiallyRandomizeDrumSample()`'s
+	///        early guards, so the dispatch site can decide (before any SD access) whether the
+	///        gesture will do anything.
+	/// @param drum Drum to test.
+	/// @return True if `drum` is a SoundDrum with a resident `MultiRange`/`AudioFileHolder` and a
+	///         non-empty `filePath`.
+	static bool drumIsRandomizable(Drum* drum);
+
+	RandomizeDrumsTarget pendingRandomizeTarget_{};
 
 	std::array<RGB, kDisplayHeight> rowColour{};
 	std::array<RGB, kDisplayHeight> rowTailColour{};

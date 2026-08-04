@@ -141,7 +141,7 @@ using VoiceSamplePool = deluge::memory::ObjectPool<VoiceSample, deluge::memory::
 using TimeStretcherPool = deluge::memory::ObjectPool<TimeStretcher, deluge::memory::fast_allocator>;
 void routine();
 void routine_task();
-void routineWithClusterLoading(bool mayProcessUserActionsBetween = false);
+void routineWithClusterLoading();
 void runRoutine();
 
 void init();
@@ -163,6 +163,11 @@ void timeStretcherUnassigned(TimeStretcher* timeStretcher);
 LiveInputBuffer* getOrCreateLiveInputBuffer(OscType inputType, bool mayCreate);
 void slowRoutine();
 void doRecorderCardRoutines();
+/// @brief Owner-mediated, coalesced entry point for doRecorderCardRoutines() — the recorder
+///        card-write drain, routed through the storage owner (SD-routine-class).
+///
+/// Runs inline on legacy/host; coalesced onto the worker fiber on Embassy.
+void requestRecorderCardRoutines();
 
 int32_t getNumSamplesLeftToOutputFromPreviousRender();
 

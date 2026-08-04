@@ -146,6 +146,9 @@ impl Harness {
 }
 
 /// Decode fuzzer bytes into a churn sequence and run it (the cargo-fuzz entry).
+// `chunks_exact(3)` reads fine here and `as_chunks::<3>()` would only reshuffle the
+// loop for an equivalent result in this fuzzer-only helper.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn run_bytes(data: &[u8]) {
     let mut h = Harness::new(256 * 1024, 64);
     let mut it = data.chunks_exact(3);

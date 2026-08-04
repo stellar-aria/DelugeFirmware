@@ -49,8 +49,7 @@ bool SaveInstrumentPresetUI::opened() {
 	outputTypeToLoad = currentInstrument->type;
 
 	bool success = SaveUI::opened();
-	if (!success) { // In this case, an error will have already displayed.
-doReturnFalse:
+	if (!success) {                      // In this case, an error will have already displayed.
 		renderingNeededRegardlessOfUI(); // Because unlike many UIs we've already gone and drawn the QWERTY interface on
 		                                 // the pads.
 		return false;
@@ -64,7 +63,6 @@ doReturnFalse:
 
 	currentDir = currentInstrument->dirPath;
 	if (currentDir.empty()) { // Would this even be able to happen?
-tryDefaultDir:
 		currentDir = defaultDir;
 	}
 
@@ -96,19 +94,11 @@ tryDefaultDir:
 	// not used for midi
 	filePrefix = (outputTypeToLoad == OutputType::SYNTH) ? "SYNT" : "KIT";
 
-	Error error = arrivedInNewFolder(0, enteredText.c_str(), defaultDir);
-	if (error != Error::NONE) {
-gotError:
-		display->displayError(error);
-		goto doReturnFalse;
-	}
-
-	if (outputTypeToLoad == OutputType::SYNTH) {
-		indicator_leds::blinkLed(IndicatorLED::SYNTH);
-	}
-	else {
-		indicator_leds::blinkLed(IndicatorLED::KIT);
-	}
+	// The listing dispatches asynchronously; return optimistically here. onBrowserOpened() runs
+	// the blinkLed tail once the listing succeeds. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()).
+	beginListing(
+	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = enteredText, .defaultDir = defaultDir});
 
 	/*
 	std::string filePath = getCurrentFilePath();
@@ -118,6 +108,15 @@ gotError:
 
 	focusRegained();
 	return true;
+}
+
+void SaveInstrumentPresetUI::onBrowserOpened() {
+	if (outputTypeToLoad == OutputType::SYNTH) {
+		indicator_leds::blinkLed(IndicatorLED::SYNTH);
+	}
+	else {
+		indicator_leds::blinkLed(IndicatorLED::KIT);
+	}
 }
 
 bool SaveInstrumentPresetUI::performSave(bool mayOverwrite) {

@@ -88,6 +88,45 @@ extern "C" fn fiber_submit_task() {
     crate::fiber::deluge_worker_run(fiber_op, core::ptr::null_mut());
 }
 
+// ---------------------------------------------------------------------------
+// SD-routine exclusion gate. Proves the `RESOURCE_SD_ROUTINE` task gate
+// in `scheduler.rs` actually defers a tagged task while an SD-routine op holds
+// `SD_ROUTINE_HELD` — the mechanism that keeps discardRecorder off a mid-flight
+// recorder cardRoutine. Inert-today (run-to-completion), so it must be
+// proven here, not just at the counter's engage/release (owner_host does that).
+// ---------------------------------------------------------------------------
+
+/// An SD-routine op (submitted via `deluge_worker_run_sd_routine`) that parks on
+/// `SD_HOLD_GATE`, holding `SD_ROUTINE_HELD` > 0 for a controlled window.
+static SD_HOLD_OP_STARTED: AtomicBool = AtomicBool::new(false);
+static SD_HOLD_OP_DONE: AtomicBool = AtomicBool::new(false);
+static SD_HOLD_GATE: AtomicBool = AtomicBool::new(false);
+unsafe extern "C" fn sd_hold_predicate() -> bool {
+    SD_HOLD_GATE.load(Ordering::SeqCst)
+}
+extern "C" fn sd_hold_op(_ctx: *mut core::ffi::c_void) {
+    SD_HOLD_OP_STARTED.store(true, Ordering::SeqCst);
+    crate::scheduler::r#yield(Some(sd_hold_predicate));
+    SD_HOLD_OP_DONE.store(true, Ordering::SeqCst);
+}
+
+/// Conditional task (fires when `SD_SUBMIT_GATE` opens) that submits `sd_hold_op`
+/// from the executor thread — the only context allowed to call the worker C ABI.
+static SD_SUBMIT_GATE: AtomicBool = AtomicBool::new(false);
+unsafe extern "C" fn sd_submit_predicate() -> bool {
+    SD_SUBMIT_GATE.load(Ordering::SeqCst)
+}
+extern "C" fn sd_hold_submit_task() {
+    crate::fiber::deluge_worker_run_sd_routine(sd_hold_op, core::ptr::null_mut());
+}
+
+/// A `RESOURCE_SD_ROUTINE`-tagged repeating task. Must NOT tick while an
+/// SD-routine op holds the counter; must resume once it clears.
+static SD_GATED_COUNT: AtomicU32 = AtomicU32::new(0);
+extern "C" fn sd_gated_task() {
+    SD_GATED_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
 // IDs assigned by the registrar task (executor thread), read by the driving
 // thread once `REGISTERED` is set.
 static REPEAT_A_ID: AtomicI8 = AtomicI8::new(-1);
@@ -151,6 +190,31 @@ async fn registrar() {
     assert!(id_cond >= 0, "addConditionalTask(cond_task) failed");
     let id_fiber = crate::scheduler::addOnceTask(fiber_submit_task, 10, 0.0, core::ptr::null(), 0);
     assert!(id_fiber >= 0, "addOnceTask(fiber_submit_task) failed");
+
+    // SD-routine exclusion gate: a RESOURCE_SD_ROUTINE (== 4) repeating task that
+    // must defer while an SD-routine op holds the counter, plus the conditional
+    // submitter that parks that op (fired late, from run(), via SD_SUBMIT_GATE).
+    let id_sd_gated = crate::scheduler::addRepeatingTask(
+        sd_gated_task,
+        10,
+        0.0,
+        0.001,
+        0.01,
+        core::ptr::null(),
+        4,
+    );
+    assert!(id_sd_gated >= 0, "addRepeatingTask(sd_gated_task) failed");
+    let id_sd_submit = crate::scheduler::addConditionalTask(
+        sd_hold_submit_task,
+        10,
+        Some(sd_submit_predicate),
+        core::ptr::null(),
+        0,
+    );
+    assert!(
+        id_sd_submit >= 0,
+        "addConditionalTask(sd_hold_submit_task) failed"
+    );
 
     REPEAT_A_ID.store(id_a, Ordering::SeqCst);
     BLOCKED_ID.store(id_blocked, Ordering::SeqCst);
@@ -270,6 +334,53 @@ pub fn run() {
     wait_until(deadline, "repeat_a to tick again after runTask", || {
         REPEAT_A_COUNT.load(Ordering::SeqCst) > before
     });
+
+    // --- SD-routine exclusion gate: a RESOURCE_SD_ROUTINE task must
+    // defer while an SD-routine op holds SD_ROUTINE_HELD, and resume once it
+    // clears. This exercises the scheduler.rs gate itself — owner_host only covers
+    // the counter's engage/release. The fiber is idle now (fiber_op completed).
+    assert!(
+        !crate::fiber::sd_routine_held(),
+        "sd_routine_held() true before the SD-routine op was submitted"
+    );
+    // Fire the conditional submitter; the executor thread submits sd_hold_op,
+    // which parks on its gate and holds the counter.
+    SD_SUBMIT_GATE.store(true, Ordering::SeqCst);
+    wait_until(
+        deadline,
+        "sd_hold_op to start (parked on the fiber)",
+        || SD_HOLD_OP_STARTED.load(Ordering::SeqCst),
+    );
+    wait_until(
+        deadline,
+        "SD_ROUTINE_HELD engaged while the op is parked",
+        || crate::fiber::sd_routine_held(),
+    );
+    // While the hold is engaged, the RESOURCE_SD_ROUTINE task must NOT tick.
+    std::thread::sleep(Duration::from_millis(30));
+    let sd_snapshot = SD_GATED_COUNT.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        SD_GATED_COUNT.load(Ordering::SeqCst),
+        sd_snapshot,
+        "RESOURCE_SD_ROUTINE task ticked while an SD-routine op held the counter \
+         (scheduler.rs gate did not defer it)"
+    );
+    // Release the op; the hold clears and the gated task must resume.
+    SD_HOLD_GATE.store(true, Ordering::SeqCst);
+    wait_until(deadline, "sd_hold_op to complete", || {
+        SD_HOLD_OP_DONE.load(Ordering::SeqCst)
+    });
+    wait_until(
+        deadline,
+        "SD_ROUTINE_HELD released after completion",
+        || !crate::fiber::sd_routine_held(),
+    );
+    wait_until(
+        deadline,
+        "RESOURCE_SD_ROUTINE task to resume after the hold cleared",
+        || SD_GATED_COUNT.load(Ordering::SeqCst) > sd_snapshot,
+    );
 
     // --- isSDRoutineActive: cheap coverage of the remaining listed C ABI ---
     assert!(

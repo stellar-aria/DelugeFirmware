@@ -66,7 +66,6 @@
 #include "processing/engines/cv_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
-#include "storage/audio/stream/loader.h"
 #include "storage/flash_storage.h"
 #include "storage/smsysex.h"
 #include "storage/storage_manager.h"
@@ -534,8 +533,6 @@ void registerTasks() {
 	addRepeatingTask([]() { playbackHandler.routine(); }, p++, 0.0005, 0.001, 0.002, "playback routine", RESOURCE_NONE);
 	midiEngine.routine_task_id = addRepeatingTask([]() { playbackHandler.midiRoutine(); }, p++, 0.0005, 0.001, 0.002,
 	                                              "midi routine", RESOURCE_SD | RESOURCE_USB);
-	addRepeatingTask([]() { deluge::audio::stream::loader::pump(128, false); }, p++, 0.0001, 0.0001, 0.0002,
-	                 "load clusters", RESOURCE_NONE);
 	// handles sd card recorders
 	// named "slow" but isn't actually, it handles audio recording setup
 	addRepeatingTask(&AudioEngine::slowRoutine, p++, 0.001, 0.005, 0.05, "audio slow", RESOURCE_NONE);
@@ -572,7 +569,7 @@ void registerTasks() {
 	// long term this should probably be made into an idle task
 	addRepeatingTask([]() { uiTimerManager.routine(); }, p++, 0.0001, 0.0007, 0.01, "ui routine", RESOURCE_NONE);
 
-	// addRepeatingTask([]() { AudioEngine::routineWithClusterLoading(true); }, 0, 1 / 44100., 16 / 44100., 32 / 44100.,
+	// addRepeatingTask([]() { AudioEngine::routineWithClusterLoading(); }, 0, 1 / 44100., 16 / 44100., 32 / 44100.,
 	// true); addRepeatingTask(&(AudioEngine::routine), 0, 16 / 44100., 64 / 44100., true);
 }
 // One cooperative slice of the run loop. The libdeluge platform calls this
@@ -586,24 +583,24 @@ extern "C" void deluge_app_tick(void) {
 	deluge_display_service();
 	deluge_control_flush();
 
-	AudioEngine::routineWithClusterLoading(true);
+	AudioEngine::routineWithClusterLoading();
 
 	int32_t count = 0;
 	while (readButtonsAndPads() && count < 16) {
 		if (!(count & 3)) {
-			AudioEngine::routineWithClusterLoading(true);
+			AudioEngine::routineWithClusterLoading();
 		}
 		count++;
 	}
 
 	bool anything = encoders::interpretEncoders();
 	if (anything) {
-		AudioEngine::routineWithClusterLoading(true);
+		AudioEngine::routineWithClusterLoading();
 	}
 
 	doAnyPendingUIRendering();
 
-	AudioEngine::routineWithClusterLoading(true);
+	AudioEngine::routineWithClusterLoading();
 
 	// Only actually needs calling a couple of times per second, but we can't put it in uiTimerManager cos that gets
 	// called in card routine

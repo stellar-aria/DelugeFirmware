@@ -25,14 +25,6 @@
 #include "storage/file_item.h"
 #include "util/containers.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-
-FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory object */
-                                  FILINFO* fno, /* Pointer to file information to return */
-                                  FilePointer* filePointer);
-}
-
 class Instrument;
 class FileItem;
 class Song;
@@ -87,7 +79,6 @@ public:
 	Error getUnusedSlot(OutputType outputType, std::string* newName, char const* thingName);
 	bool opened() override;
 	void cullSomeFileItems();
-	bool checkFP();
 
 	void renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) override;
 
@@ -103,6 +94,15 @@ public:
 
 	static OutputType outputTypeToLoad;
 	static char const* filenameToStartSearchAt;
+
+	/// @brief True while an async listing (beginListing()'s dispatch onto the storage-owner fiber)
+	///        is in flight.
+	///
+	/// A caller that drives beginListing() from outside the normal HID-event flow (e.g. a headless
+	/// harness) needs this to know when it's safe to act on the listing's result
+	/// (getCurrentFileItem() etc) instead of racing it.
+	/// @return True while a listing is in flight; false once it has completed (or none was started).
+	static bool isListingInProgress() { return listingInProgress_; }
 
 	// ui
 	ActionResult exitUI() override {
@@ -125,6 +125,68 @@ protected:
 	virtual void folderContentsReady(int32_t entryDirection) {}
 	virtual void currentFileChanged(int32_t movementDirection) {}
 	void displayText(bool blinkImmediately = false) override;
+
+	// --- async-listing base machinery ---
+	//
+	// One active listing at a time (browser state is already static/shared, e.g. fileItems),
+	// so the pending request + flag are static too.
+	enum class ListingAction { Open, IntoFolder, UpLevel, Reload, ByPath };
+
+	struct ListingRequest {
+		ListingAction action;
+		int32_t direction; ///< arrivedInNewFolder direction (0 open, ±1 nav)
+		// params captured per-action (owned copies — the op reads them on the fiber):
+		std::string filenameToStartAt; ///< Open
+		std::string defaultDir;        ///< Open
+		std::string folderOrPath;      ///< IntoFolder (folder name) / ByPath (full path)
+	};
+	static bool listingInProgress_;
+	static ListingRequest pendingListing_;
+
+	/// @brief Extra context for ListingAction::Reload's two selectEncoderAction call sites.
+	///
+	/// The encoder offset and catalog-search-direction don't fit ListingRequest's generic fields
+	/// (which are shared across every action), so they're captured here alongside pendingListing_.
+	static int32_t pendingReloadCatalogSearchDirection_;
+	static bool pendingReloadSearchFromEnd_;
+
+	/// @brief Dispatch `req`'s listing onto the storage owner.
+	///
+	/// Sets listingInProgress_ and shows the loading indicator; on a dropped dispatch clears the
+	/// flag (retried on the next HID event).
+	/// @param req The listing to run.
+	/// @return True if the listing was actually dispatched (queued or run inline), false if the
+	///         dispatch was dropped (owner queue full) — callers that mutate state before calling
+	///         this that only a completed listing would reconcile must check the return and revert
+	///         on false.
+	bool beginListing(ListingRequest req);
+	/// @brief Owner-op entry point dispatched to run the pending listing.
+	/// @param self The active Browser* the listing was dispatched from.
+	static void runListingTrampoline(void* self);
+	/// @brief Runs on the fiber: dispatches the pending listing action and its completion hooks.
+	void runPendingListing();
+
+	// Completion hooks (run inside the op, on the fiber):
+	virtual void onBrowserOpened() {} ///< Open-only bespoke tail (default empty).
+	/// @brief Default handling for a failed listing: displayError() + close() (not exitAction()).
+	/// @param error The failure reported by the listing.
+	virtual void onListingFailed(Error error);
+
+	// Bodies of the listing actions, run on the fiber inside runPendingListing().
+	Error openListingImpl(int32_t direction, char const* filenameToStartAt, char const* defaultDir);
+	Error goIntoFolderImpl(char const* folderName);
+	Error goUpOneDirectoryLevelImpl();
+	Error setFileByFullPathImpl(char const* fullPath);
+	Error reloadImpl(int32_t direction);
+
+	/// @brief Shared selectEncoderAction tail: applies the fileIndexSelected/scroll update and fires
+	///        currentFileChanged.
+	///
+	/// Runs either synchronously (no reload needed) or from reloadImpl() on the fiber.
+	/// @param newFileIndex The newly selected file index.
+	/// @param offset       The encoder offset that produced this selection.
+	/// @return Error::NONE on success, or the failure from the underlying reload/selection.
+	Error finishSelectEncoderAction(int32_t newFileIndex, int8_t offset);
 	static Slot getSlot(char const* displayName);
 	/// Returns the character just past filePrefix within `name`, or nullptr if `name` does not start with filePrefix.
 	/// Names always carry the prefix; only *rendering* strips it.
@@ -166,7 +228,7 @@ inline void printInstrumentFileList(const char* where) {
 	D_PRINT(where);
 	D_PRINT(" List: \n");
 	for (FileItem const& fileItem : Browser::fileItems) {
-		D_PRINTLN(" - %s (%lu)", fileItem.displayName, fileItem.filePointer.sclust);
+		D_PRINTLN(" - %s", fileItem.displayName);
 	}
 	D_PRINT("\n");
 }

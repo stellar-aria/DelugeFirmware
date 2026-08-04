@@ -20,8 +20,54 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 deluge_alloc = { path = "../deluge_alloc" }
 deluge_resource = { path = "../deluge_resource" }
+# SR3a Task 1: optional -- only pulled into the umbrella build via the `sim` feature below.
+# Provides the Rust region-port cursor (`deluge_sample_source_*`/`deluge_sample_region_*`,
+# SR2d-5); the C-host sim's reader already calls these, and once this crate's strong
+# `#[no_mangle]` defs are linked in they override `sample_source.cpp`'s
+# `__attribute__((weak))` fallback -- mirrors `deluge-bsp-rust`'s own direct dependency on
+# device (src/bsp/rust/Cargo.toml).
+deluge_sample_source = { path = "../deluge_sample_source", optional = true }
+# SIM (C2b): the Rust cluster fill, pulled into the sim's libdeluge_rust.a. native_fill = the
+# manager-reaching fill (native_begin/native_finish); sim_convert = build convert shim-only
+# (deluge_app provides the convert objects). Optional + only pulled via the `sim` feature below.
+deluge_sample_fill = { path = "../deluge_sample_fill", optional = true }
+# SIM (C2b): std-backed critical-section impl for deluge_sample_fill's FILL_CONTEXTS mutex. Sim-only —
+# device links deluge_rust WITHOUT `sim` and gets the real impl from deluge-bsp-rust.
+critical-section = { version = "1", optional = true }
+# SIM (U2 Task 0): the sample range-reader, pulled into the sim's libdeluge_rust.a so its
+# deluge_sample_reader_* / deluge_sample_read strong defs are present for the migrated C++ consumers to
+# link against. No weak C++ fallback exists — force-link (extern crate below) only guarantees the member
+# is retained in the archive. Optional + only via the `sim` feature below.
+deluge_sample_reader = { path = "../deluge_sample_reader", optional = true }
+# SIM (U4c Task 2): the streaming-file slot registry, pulled into the sim's libdeluge_rust.a so its
+# deluge_sample_stream_* strong defs are present for a future migrated C++ consumer to link against.
+# No weak C++ fallback exists — force-link (extern crate below) only guarantees the member is
+# retained in the archive. Optional + only via the `sim` feature below. No consumer yet in this
+# task, so nothing calls these symbols; that is a later task's job.
+deluge_sample_stream = { path = "../deluge_sample_stream", optional = true }
 
 [features]
 # Forward the allocator's AddressSanitizer poisoning (host-sim ASan build only).
 # The sim enables this with `--features deluge_rust/asan` under DELUGE_SIM_SANITIZE.
 asan = ["deluge_alloc/asan"]
+# SR3a Task 1: build the Rust region cursor into the sim's `libdeluge_rust.a` so the C-host
+# sim resolves the SAME strong cursor as device/host_app (SR2d-5), instead of
+# `sample_source.cpp`'s weak C++ fallback. Forwards to `deluge_sample_source`'s own `sim`
+# feature, which is what actually widens `abi.rs`'s cfg gate to emit the `#[no_mangle]`
+# symbols -- pulling in the dependency alone would compile the cursor as dead, unexported
+# code. `sim/CMakeLists.txt` passes `--features deluge_rust/sim` unconditionally for the sim
+# build; off by default, so a plain `cargo build -p deluge_rust` is unaffected, and neither is
+# device/host_app (they link `deluge_sample_source` directly, not through this umbrella).
+sim = [
+    "dep:deluge_sample_source",
+    "deluge_sample_source/sim",
+    "dep:deluge_sample_fill",
+    "deluge_sample_fill/native_fill",
+    "deluge_sample_fill/sim_convert",
+    "dep:critical-section",
+    "critical-section/std",
+    "dep:deluge_sample_reader",
+    "deluge_sample_reader/sim",
+    "dep:deluge_sample_stream",
+    "deluge_sample_stream/sim",
+]

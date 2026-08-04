@@ -21,9 +21,14 @@
 #include "dsp/envelope_follower/absolute_value.h"
 #include "dsp/stereo_sample.h"
 #include "io/stream.hpp"
+#include "memory/fast_allocator.h"
+#include "util/segmented_vector.h"
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <gsl/gsl>
 #include <optional>
+#include <span>
 #include <string>
 
 enum class MonitoringAction {
@@ -44,7 +49,6 @@ enum class RecorderStatus {
 };
 
 class Sample;
-struct StreamedChunk; // file-backed streamed sample-audio chunk (see storage/cluster/cluster.h)
 class AudioClip;
 class Output;
 struct RecorderConfig {
@@ -62,6 +66,20 @@ public:
 	void feedAudio(std::span<StereoSample> input, bool applyGain = false, uint8_t gainToApply = 5);
 	Error cardRoutine();
 	void endSyncedRecording(int32_t buttonLatencyForTempolessRecording);
+	/// @brief Post-capture WAV alteration: downmix/normalize the recorded audio in place on disk.
+	///
+	/// Public (rather than an internal helper finalizeRecordedFile() alone calls) so the host-sim
+	/// byte-exact characterization harness (host_recorder_roundtrip_main.cpp) can drive this
+	/// post-capture file transform directly, with an explicit action/lshiftAmount/geometry, bypassing
+	/// finalizeRecordedFile()'s auto-detection heuristics -- SUBTRACT_RIGHT_CHANNEL in particular needs
+	/// a plugged-in line-input jack the host sim can't simulate.
+	/// @param action                    Channel-combining/removal operation to apply.
+	/// @param lshiftAmount              Normalization left-shift applied to each sample.
+	/// @param idealFileSizeBeforeAction Total file size (bytes) before this alteration.
+	/// @param dataLengthAfterAction     Audio data length (bytes) expected after this alteration.
+	/// @return Error::NONE on success.
+	Error alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
+	                uint64_t dataLengthAfterAction);
 	bool inputLooksDifferential();
 	bool inputHasNoRightChannel();
 	void removeFromOutput() {
@@ -84,12 +102,14 @@ public:
 
 	int32_t firstUnwrittenClusterIndex = 0;
 
-	// Put things in valid state so if we get destructed before any recording, it's all ok
-	int32_t currentRecordClusterIndex = -1;
-
-	// Note! If this is NULL, that means that currentRecordClusterIndex refers to a cluster that never got created (cos
-	// some error or max file size reached)
-	StreamedChunk* currentRecordCluster = nullptr;
+	/// @brief Index of the cluster currently being written to. Starts at -1 so a recorder destructed
+	///        before any recording began is still in a valid state.
+	///
+	/// @note Atomic: the producer (audio) publishes a completed buffer via a release store at
+	///       createNextCluster; the consumer (fiber) reads it acquire as its drain bound -- the index
+	///       into our own private bufferTable_ (see below), not a shared residency table. See
+	///       docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<int32_t> currentRecordClusterIndex = -1;
 
 	uint32_t audioFileNumber{};
 	AudioRecordingFolder folderID;
@@ -102,7 +122,15 @@ public:
 	// This will be the temp file path if there is one.
 	std::string filePathCreated{};
 
-	RecorderStatus status = RecorderStatus::CAPTURING_DATA;
+	/// @brief This recorder's current lifecycle state; see RecorderStatus.
+	///
+	/// @note Atomic: the finishCapturing (audio) -> ABORTED (either thread) transitions are release
+	///       stores; the fiber's cardRoutine() decision reads are acquire loads, so seeing
+	///       FINISHED_CAPTURING_BUT_STILL_WRITING (or ABORTED) also makes visible the producer's final
+	///       currentRecordClusterIndex/payload writes before the fiber takes over as producer in
+	///       finalizeRecordedFile(). See docs/dev/known-concurrency-bugs.md (B3).
+	std::atomic<RecorderStatus> status = RecorderStatus::CAPTURING_DATA;
+	static_assert(std::atomic<RecorderStatus>::is_always_lock_free);
 	AudioInputChannel mode;
 	Output* outputRecordingFrom{}; // for when recording from a specific output
 
@@ -163,19 +191,90 @@ public:
 	std::optional<deluge::io::Stream> file;
 
 private:
-	void setExtraBytesOnPreviousCluster(StreamedChunk* currentCluster, int32_t currentClusterIndex);
 	Error writeCluster(int32_t clusterIndex, size_t numBytes);
-	Error alterFile(MonitoringAction action, int32_t lshiftAmount, uint32_t idealFileSizeBeforeAction,
-
-	                uint64_t dataLengthAfterAction);
 	Error finalizeRecordedFile();
 	Error createNextCluster();
 	Error writeAnyCompletedClusters();
 	void finishCapturing();
-	void updateDataLengthInFirstCluster(StreamedChunk* cluster);
+	void updateDataLengthInHeader(std::span<std::byte> headerBuf);
 	void totalSampleLengthNowKnown(uint32_t totalLength, uint32_t loopEndPointSamples = 0);
 	void detachSample();
 	Error truncateFileDownToSize(uint32_t newFileSize);
 	Error writeOneCompletedCluster();
+
+	/// @brief Minimal fixed-capacity lock-free SPSC ring of recycled buffer pointers.
+	///
+	/// Private to SampleRecorder rather than deluge::util::SpscRing -- that header declares `namespace
+	/// deluge::util`, which collides with this codebase's separate top-level `namespace util`
+	/// (util/misc.h) wherever both become visible in the same translation unit, and sample_recorder.h
+	/// is included far too widely to risk that.
+	/// @note Same release/acquire discipline as deluge::util::SpscRing (see that header's doc for the
+	///       full reasoning): the producer (fiber, recycleBuffer()) release-stores tail_ after writing
+	///       a slot; the consumer (audio thread, allocateBuffer()) acquire-loads tail_ before reading a
+	///       slot and release-stores head_ after freeing it, which the producer acquire-loads to know
+	///       the slot is free again.
+	class RecycleRing {
+	public:
+		static constexpr std::size_t kCapacity = 16; // must be a power of two
+
+		/// @brief Push @p value onto the ring.
+		/// @param value The buffer pointer to recycle.
+		/// @return True on success; false if the ring is full.
+		[[nodiscard]] bool try_push(std::byte* value) {
+			const std::size_t tail = tail_.load(std::memory_order_relaxed);
+			const std::size_t head = head_.load(std::memory_order_acquire);
+			if (tail - head == kCapacity) {
+				return false; // full
+			}
+			slots_[tail & kMask] = value;
+			tail_.store(tail + 1, std::memory_order_release);
+			return true;
+		}
+
+		/// @brief Pop the oldest recycled buffer off the ring.
+		/// @param out Set to the popped buffer pointer on success; left untouched on failure.
+		/// @return True on success; false if the ring is empty.
+		[[nodiscard]] bool try_pop(std::byte*& out) {
+			const std::size_t head = head_.load(std::memory_order_relaxed);
+			const std::size_t tail = tail_.load(std::memory_order_acquire);
+			if (head == tail) {
+				return false; // empty
+			}
+			out = slots_[head & kMask];
+			head_.store(head + 1, std::memory_order_release);
+			return true;
+		}
+
+	private:
+		static constexpr std::size_t kMask = kCapacity - 1;
+		std::array<std::byte*, kCapacity> slots_{};
+		std::atomic<std::size_t> head_{0};
+		std::atomic<std::size_t> tail_{0};
+	};
+
+	/// @brief The recorder's own private capture buffers -- Cluster::size (+ trailing overshoot slack)
+	///        plain allocations, never registered with the shared residency table.
+	///
+	/// Maps a buffer's logical index (the same index space `currentRecordClusterIndex`/
+	/// `firstUnwrittenClusterIndex` already walk) to its physical storage.
+	/// @note Growth (audio-thread-only, single-writer) is pre-`reserve`d up front in setup() so it
+	///       never reallocates the segment-pointer index concurrently with the fiber's `operator[]`
+	///       reads -- same B2 discipline the shared table used to require.
+	deluge::SegmentedVector<std::byte*, 256, deluge::memory::fast_allocator> bufferTable_{};
+
+	/// @brief Recycles a flushed buffer's memory back for reuse: the fiber pushes after a successful
+	///        write_at, the audio thread pops when it needs a fresh buffer.
+	///
+	/// @note Either side of this ring can "miss" without correctness cost -- a full push just frees
+	///       the buffer outright, an empty pop just allocates fresh -- so buffer *reuse* is
+	///       best-effort while buffer *availability* (the audio thread never blocks/drops) is
+	///       unconditional.
+	RecycleRing freeBuffers_{};
+	std::byte* currentRecordBuffer = nullptr; ///< the buffer at bufferTable_[currentRecordClusterIndex]
+
+	[[nodiscard]] std::byte* allocateBuffer();
+	void recycleBuffer(std::byte* buffer);
+	void releaseCaptureBuffers();
+
 	AbsValueFollower envelopeFollower{};
 };

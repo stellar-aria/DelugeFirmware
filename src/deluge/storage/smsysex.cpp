@@ -14,6 +14,7 @@
 #include "memory/general_memory_allocator.h"
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
+#include "storage/owner.h"
 #include "sync/sd_access.h"
 #include "util/containers.h"
 #include "util/pack.h"
@@ -860,12 +861,49 @@ void smSysex::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 	memcpy(de.data, data, len);
 }
 
+// Each SysEx request's file ops run on the storage owner. smSysex is a namespace (no instance
+// state), so the single-flight guard and the op trampoline live at file scope. processFrontSysEx()
+// is the parse+handle+reply+dequeue body; handleNextSysEx() is the per-tick trigger that dispatches
+// it via deluge::storage::Owner::run so the FatFS work runs on the storage owner rather than the
+// task stack.
+namespace smSysex {
+void processFrontSysEx();
+}
+
+namespace {
+/// True while an owner op is processing SysExQ.front(). Prevents a later handleNextSysEx() tick from
+/// dispatching a second op for the same (or next) entry before the first pops it. Set at dispatch,
+/// cleared when the op completes. Synchronous, single executor thread (same contract as the queue).
+bool g_sysex_op_in_flight = false;
+
+/// Owner-op trampoline: process the front SysEx request, then release the single-flight guard.
+void runSysexOp(void*) {
+	smSysex::processFrontSysEx();
+	g_sysex_op_in_flight = false;
+}
+} // namespace
+
 void smSysex::handleNextSysEx() {
 
-	if (SysExQ.empty())
+	if (SysExQ.empty()) {
 		return;
-	if (deluge::sync::sd_busy())
+	}
+	if (g_sysex_op_in_flight) {
+		return; // an op is already processing the front entry; it pops + clears the guard when done
+	}
+	if (deluge::sync::sd_busy()) {
 		return;
+	}
+
+	// Dispatch the front request's parse+handle+reply onto the storage owner. Inline on legacy/host
+	// (one request per tick, exactly as before); on Embassy the FatFS work leaves the task stack.
+	g_sysex_op_in_flight = true;
+	if (!deluge::storage::Owner::run(&runSysexOp, nullptr)) {
+		g_sysex_op_in_flight = false; // owner queue full → the op won't run; retry next tick
+	}
+}
+
+void smSysex::processFrontSysEx() {
 
 	SysExDataEntry& de = SysExQ.front();
 

@@ -196,8 +196,9 @@ void SampleMarkerEditor::writeValue(uint32_t value, MarkerType markerTypeNow) {
 		getCurrentSampleHolder().endPos = value;
 	}
 
-	getCurrentSampleHolder().claimClusterReasons(getCurrentSampleControls()->reversed,
-	                                             CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
+	// Marker prefetch must never block the UI on a card read — enqueue and let the loader fill it.
+	// Playback tolerates a not-yet-loaded cluster (same as the realtime path).
+	getCurrentSampleHolder().claimClusterReasons(getCurrentSampleControls()->reversed, CLUSTER_ENQUEUE);
 
 	if (clipType == ClipType::AUDIO) {
 		if (audioClipActive) {

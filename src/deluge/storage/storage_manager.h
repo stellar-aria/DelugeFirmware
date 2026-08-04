@@ -371,7 +371,6 @@ Error openDelugeFile(char const* path, char const* firstTagName, char const* alt
 Error initSD();
 
 bool fileExists(char const* pathName);
-bool fileExists(char const* pathName, FilePointer* fp);
 /// takes a full path/to/file.text and makes sure the directories exist
 bool buildPathToFile(const char* fileName);
 

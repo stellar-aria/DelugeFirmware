@@ -114,9 +114,9 @@ fn to_fill_geometry(ctx: &FillContext) -> crate::fill_logic::FillGeometry {
 /// in Task 2). Looks up the live singleton resource manager itself (`deluge_streaming_resource_manager`)
 /// rather than taking `mgr` as a parameter: there is exactly one process-wide manager, and this
 /// shape lets `ProdOps::begin` (the async fill task, in `deluge-bsp-rust`'s `streaming_loader.rs`)
-/// and the synchronous C++ fill path (via the strong `deluge_streaming_begin_fill` wrapper below)
-/// call the SAME function with nothing but the chunk pointer. `chunk_backing` must be a queued (or,
-/// from the sync path, otherwise still-leased), resident `StreamedChunk*` -- see the module doc's
+/// and the range reader's synchronous `fill_now` (`deluge_sample_reader`) call the SAME function with
+/// nothing but the chunk pointer. `chunk_backing` must be a queued (or, from the sync path, otherwise
+/// still-leased), resident `StreamedChunk*` -- see the module doc's
 /// "Sync-context safety" note on [`native_finish`] below, which applies identically here (this
 /// function touches strictly less state: no neighbour gather, no convert-state read/write).
 // `chunk_backing`'s validity is a precondition the caller already upholds (a still-leased
@@ -157,8 +157,8 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 /// `fill_once`'s current calling convention.
 ///
 /// Looks up the live singleton resource manager itself, exactly like [`native_begin`] — see that
-/// function's doc for why (both are callable from the async task AND from the synchronous C++ fill
-/// path, via the strong `deluge_streaming_finish_fill` wrapper below).
+/// function's doc for why (both are callable from the async task AND from the range reader's
+/// synchronous `fill_now`, in `deluge_sample_reader`).
 ///
 /// ## Sync-context safety
 ///
@@ -167,8 +167,8 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 /// codebase, not just this async task:
 /// - [`deluge_resource_try_acquire`]/[`deluge_resource_release`]: the manager's own masked
 ///   critical section (`deluge_resource::sync::Masked`) guards every table mutation these make,
-///   the same masking the C++ sync-fiber path's own manager calls (`deluge_resource_request`,
-///   `deluge_resource_release`, etc. — see `sample_stream.cpp`) already go through today. Nothing
+///   the same masking the C++ side's own manager calls (`deluge_resource_request`,
+///   `deluge_resource_release`, etc. — see `sample_stream.cpp`) already go through. Nothing
 ///   about calling them from a synchronous, non-async context is new.
 /// - [`crate::chunk::convert_state`]/[`crate::chunk::set_convert_state`]: plain field reads/writes
 ///   on a `StreamedChunk*` (see `chunk.rs`'s definitions) — no locking at all, by design, exactly
@@ -176,11 +176,11 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 ///   already called before this task. Safe
 ///   because the chunk this function touches (`chunk_backing` itself, and each neighbour just
 ///   after its own successful `try_acquire`) is hard-leased for the duration of this call — the
-///   SAME "leased, so exclusively mine to mutate until I release it" discipline the legacy
-///   sync-fiber `finish_fill` (`async_fill.cpp`) already relies on when it writes these same
-///   fields directly. A synchronous caller on the single thread-mode executor (the C++ sync fill
-///   path never runs on the audio render ISR either — see `streaming_loader`'s module doc) has the
-///   identical exclusivity guarantee this async task has today.
+///   SAME "leased, so exclusively mine to mutate until I release it" discipline the range reader's
+///   synchronous `fill_now` (`deluge_sample_reader`) relies on when it calls this function to write
+///   these same fields directly. A synchronous caller on the single thread-mode executor (that
+///   reader path never runs on the audio render ISR either — see `streaming_loader`'s module doc) has
+///   the identical exclusivity guarantee this async task has today.
 /// - [`deluge_resource_mark_ready`]: also masked inside the manager, same as the acquire/release
 ///   pair above.
 ///

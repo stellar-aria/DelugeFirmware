@@ -18,8 +18,8 @@
 /// libdeluge/stream_io.h — real-time Sample audio streaming (playback read,
 /// recording write).
 ///
-/// Scoped specifically to `Sample` cluster streaming (`ClusterByteSource`,
-/// `SampleStream::read_cluster_data`, `SampleRecorder`) -- not a general
+/// Scoped specifically to `Sample` cluster streaming (`SampleStream`'s read
+/// source for playback, `SampleRecorder` for the write side) -- not a general
 /// file API. `WaveTable`/presets/songs stay on `file_io.h`. See
 /// docs/superpowers/specs/2026-07-15-deluge-stream-boundary-design.md.
 ///

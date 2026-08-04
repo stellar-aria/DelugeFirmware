@@ -265,8 +265,8 @@ pub extern "C" fn deluge_efatfs_read_at(
     if !crate::fiber::on_fiber() || dst.is_null() || out_read.is_null() {
         return false;
     }
-    // SAFETY: `dst` points at `count` writable bytes owned by the C++ caller for the duration of
-    // this synchronous call (the cluster payload buffer in read_cluster_data).
+    // SAFETY: `dst` points at `count` writable bytes owned by the caller for the duration of this
+    // synchronous call (the chunk's cluster payload buffer, from the reader's `fill_now`).
     let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
     if crate::fiber::block_on_fiber(read_at(handle, byte_offset, buf)) {
         // SAFETY: `out_read` is non-null (checked above), a `u32` the caller owns.

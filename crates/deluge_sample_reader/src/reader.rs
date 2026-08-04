@@ -114,11 +114,10 @@ fn locate(frame: u64, geo: &Geometry) -> Option<(u32, u32, u32)> {
 }
 
 /// Run the synchronous cluster fill on `chunk_backing`: resolve where/how much to read
-/// (`native_begin`), read exactly that span in ONE call (mirrors the real synchronous fill path,
-/// `SampleStream::read_cluster_data` -> `EfatfsReadSource::read`, which issues a single
-/// `deluge_efatfs_read_at` over the whole `num_sectors*512`-byte span rather than looping sector by
-/// sector — see `read_source.cpp`), then run the post-read convert/stitch/publish tail
-/// (`native_finish`). This is U1's own composition — C2a (`deluge_sample_fill`) provided the two
+/// (`native_begin`), read exactly that span in ONE call (a single `deluge_efatfs_read_at` over the
+/// whole `num_sectors*512`-byte span, not a sector-by-sector loop), then run the post-read
+/// convert/stitch/publish tail (`native_finish`). This is U1's own composition — C2a
+/// (`deluge_sample_fill`) provided the two
 /// primitives, not the glue between them; `deluge-bsp-rust`'s async fill task composes them the
 /// same way, just with an `.await`ed read in place of this synchronous one.
 ///

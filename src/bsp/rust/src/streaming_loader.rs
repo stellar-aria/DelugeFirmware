@@ -230,8 +230,9 @@ impl core::future::Future for WaitQueueDrained {
 /// `deluge_streaming_drain_queue_blocking` doc for the C-side contract; in brief: unlike
 /// [`deluge_streaming_fill_chunk_blocking`] (which blocks on ONE named chunk), this wakes
 /// `streaming_fill_task` and yield-waits until the loader queue is empty
-/// (`deluge_resource_loader_has_any` false) — matching the C-host between-routines `loader::pump()`
-/// that drains everything the preceding `AudioEngine::routine()` enqueued. On-fiber it yields until
+/// (`deluge_resource_loader_has_any` false) — the same drain-everything-the-preceding-
+/// `AudioEngine::routine()`-enqueued semantics the old C-host between-routines `loader::pump()` once
+/// provided. On-fiber it yields until
 /// drained, bounded by [`BLOCKING_FILL_MAX_CYCLES`]; off-fiber it returns false immediately (no stack
 /// to suspend — renderWait is always on-fiber, so this is only a safety net).
 #[unsafe(no_mangle)]
@@ -287,13 +288,12 @@ pub trait FillOps {
     /// queue is empty (`deluge_resource_loader_next`).
     fn next(&self) -> *mut c_void;
     /// Whether `chunk` has been marked unloadable since it was enqueued
-    /// (`deluge_sample_fill::chunk::unloadable`) — mirrors `pump()`'s safety-net
-    /// skip right after `next()` (`loader.cpp`'s "Safety net" comment): already
-    /// dequeued, so skipping can't loop, and it doesn't count against the fill
-    /// budget.
+    /// (`deluge_sample_fill::chunk::unloadable`) — a safety-net skip right after
+    /// `next()`: already dequeued, so skipping can't loop, and it doesn't count
+    /// against the fill budget.
     fn is_unloadable(&self, chunk: *mut c_void) -> bool;
     /// Resolve `chunk`'s destination buffer + physical sector range
-    /// (`deluge_streaming_begin_fill`). `ok == false` means skip this chunk
+    /// (`deluge_sample_fill::native_begin`). `ok == false` means skip this chunk
     /// entirely (unloadable / geometry error) — no read, no `finish`.
     fn begin(&self, chunk: *mut c_void) -> StreamingFillDescriptor;
     /// Await the read for descriptor `d` into `buf`. Returns whether it
@@ -301,9 +301,8 @@ pub trait FillOps {
     /// handles a bad/zero handle by returning false.
     async fn read(&self, d: &StreamingFillDescriptor, buf: &mut [u8]) -> bool;
     /// Run the post-read convert/stitch/publish tail
-    /// (`deluge_streaming_finish_fill`). Only called after a *successful* read
-    /// — mirrors `reconstruct_one`'s success arm (`loader.cpp`), which likewise
-    /// never reaches its convert/stitch/publish tail on a failed read.
+    /// (`deluge_sample_fill::native_finish`). Only called after a *successful*
+    /// read — the convert/stitch/publish tail never runs on a failed read.
     fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool;
     /// `chunk`'s current hard-lease count (`deluge_resource_slot_of` +
     /// `deluge_resource_lease_count_by_slot`), consulted only after a failed

@@ -99,7 +99,8 @@ __attribute__((weak)) uint32_t deluge_sample_stream_asset_id(void* /*stream_back
 // whether `async_streaming_loader` is enabled (its return value depends on the cargo feature; the
 // symbol's existence does not). Every other BSP/config (legacy/host-cooperative sim, rza1) never
 // links that crate, so these weak definitions are what resolve instead: "no async backing, never
-// signalled" — i.e. today's synchronous-fiber-pump behaviour.
+// signalled" — those retired configs have no streaming-fill drainer at all (the old synchronous
+// fiber pump that once stood in was deleted with `loader.cpp`).
 __attribute__((weak)) bool deluge_streaming_async_active(void) {
 	return false;
 }

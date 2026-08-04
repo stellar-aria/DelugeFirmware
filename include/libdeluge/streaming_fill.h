@@ -82,9 +82,9 @@ uint32_t deluge_streamed_chunk_payload_offset(void);
 /// CMake and linked into whichever BSP, so a Rust cargo feature can't reach a C++ preprocessor
 /// define. True only on the Rust/Embassy BSP with `async_streaming_loader` enabled (the real
 /// implementation lives in `streaming_loader.rs`); every other BSP/config links the
-/// `__attribute__((weak))` fallback in `async_fill.cpp`, which always returns false. When true,
-/// `deluge::audio::stream::loader::pump()`/`request_pump()` no-op — the task drains the (streaming-
-/// only) loader queue instead.
+/// `__attribute__((weak))` fallback in `async_fill.cpp`, which always returns false. When true, the
+/// async task owns and drains the (streaming-only) loader queue itself; there is no C++-side pump
+/// anymore (the old `loader::pump()`/`request_pump()` were deleted with `loader.cpp`).
 /// @return true if the async task owns the loader queue on this build/BSP.
 bool deluge_streaming_async_active(void);
 
@@ -124,8 +124,9 @@ bool deluge_streaming_fill_chunk_blocking(void* chunk_backing);
 /// The offline stem-export drain (`StemExport::renderWait`'s async-BSP branch), reached only when
 /// deluge_streaming_async_active() is true. Unlike deluge_streaming_fill_chunk_blocking, which blocks
 /// on ONE named chunk, this wakes `streaming_fill_task` and yield-waits until the loader queue is
-/// empty — matching the C-host between-routines `loader::pump()` that drains everything the preceding
-/// `AudioEngine::routine()` enqueued. renderWait's offline loop has no other yield point, so this is
+/// empty — the same drain-everything-the-preceding-`AudioEngine::routine()`-enqueued semantics the
+/// old C-host between-routines `loader::pump()` once provided. renderWait's offline loop has no other
+/// yield point, so this is
 /// what lets the single Embassy executor actually run the fill task between audio routines.
 /// - ON the worker fiber (renderWait's context): yields until the queue drains, bounded by a cycle
 ///   cap so a persistently-failing read degrades to a not-fully-drained result instead of wedging.
@@ -134,8 +135,8 @@ bool deluge_streaming_fill_chunk_blocking(void* chunk_backing);
 ///
 /// The real implementation lives in `streaming_loader.rs` (always compiled on the Rust/Embassy BSP);
 /// every other BSP/config links the `__attribute__((weak))` fallback in `async_fill.cpp` (returns
-/// false, never reached on the hot path since those BSPs report deluge_streaming_async_active() false
-/// and take the synchronous `loader::pump()` branch).
+/// false — never reached on the hot path, since those retired configs run no offline stem-export
+/// drain at all).
 /// @return true once the queue is fully drained; false on the off-fiber degrade or a hit cycle cap.
 bool deluge_streaming_drain_queue_blocking(void);
 
@@ -167,8 +168,8 @@ void deluge_efatfs_close(uint32_t handle);
 
 /// @brief Synchronously read @p count bytes at absolute @p byte_offset of the file behind @p handle.
 ///
-/// The sync-path counterpart of the async `ProdOps::read` efatfs branch: the C++ synchronous cluster
-/// loader (`SampleStream::read_cluster_data`) reads through this. The Rust implementation
+/// The sync-path counterpart of the async `ProdOps::read` efatfs branch: the range reader's
+/// synchronous `fill_now` (`deluge_sample_reader`) reads through this. The Rust implementation
 /// (`efatfs_fs.rs` / `efatfs_host_shim.rs`, cargo feature `efatfs_streaming`) bridges to the async
 /// handle table via the worker fiber's `block_on_fiber` — valid only while on the worker fiber.
 /// @param handle     A handle previously returned by deluge_efatfs_open.
@@ -191,14 +192,13 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 /// @return true if the efatfs streaming read path is active on this build/BSP.
 bool deluge_streaming_efatfs_active(void);
 
-/// @brief Per-asset geometry the native Rust fill task will read directly, once it exists.
+/// @brief Per-asset geometry the native Rust fill task reads directly.
 ///
-/// Registered by `deluge_streaming_set_fill_context` at sample-load; today nothing reads it back —
-/// this struct and its setter only ADD the storage, ahead of the task that will consume it (a later
-/// step rewrites `ProdOps::begin`/`finish`, in `streaming_loader.rs`, to resolve a queued chunk's
-/// fill descriptor from this table natively instead of round-tripping through
-/// `deluge_streaming_begin_fill`/`deluge_streaming_finish_fill`). Mirrors the fields
-/// `deluge::audio::stream::begin_fill` (async_fill.cpp) itself reads off `Sample`/`Cluster` today.
+/// Registered by `deluge_streaming_set_fill_context` at sample-load, and read back through
+/// `deluge_sample_fill::fill_context_for(asset)` by `native_begin`/`native_finish`: the fill resolves
+/// a queued chunk's descriptor from this table natively, with no C++ upcall. Carries the same
+/// geometry the old `deluge::audio::stream::begin_fill` used to read off `Sample`/`Cluster` per
+/// chunk, snapshotted once per asset instead.
 typedef struct DelugeStreamingFillContext {
 	uint32_t efatfs_handle;              ///< This sample's open embedded-fatfs read handle (0 = none yet).
 	uint32_t audio_data_start_pos_bytes; ///< Offset from the start of the file to the first audio byte.

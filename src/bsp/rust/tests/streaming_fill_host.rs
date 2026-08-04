@@ -181,8 +181,8 @@ impl FillOps for FakeOps {
             chunk: fc.id,
             read_ok,
         });
-        // Mirrors `deluge_streaming_finish_fill`: returns false exactly when
-        // `read_ok` is false (async_fill.cpp:70-72).
+        // Mirrors `native_finish`'s early-out: returns false exactly when
+        // `read_ok` is false.
         read_ok
     }
 

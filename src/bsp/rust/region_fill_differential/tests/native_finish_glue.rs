@@ -34,7 +34,7 @@
 //! no more `#[path]`-recompiling `deluge-bsp-rust`'s `streaming_loader.rs`/`fill_logic.rs`, no more
 //! `ProdOps`/`FillOps` indirection. Driving `deluge_sample_fill::native_finish(chunk, true)` directly
 //! IS driving the real function — the same one `deluge-bsp-rust`'s `ProdOps::finish` (a one-line call
-//! straight into it) and the strong `deluge_streaming_finish_fill` C-ABI override both call.
+//! straight into it) and the range reader's synchronous `fill_now` (`deluge_sample_reader`) both call.
 //!
 //! `deluge_sample_fill::native`'s `unsafe extern "C"` block (gated `native_fill`) declares 9 symbols
 //! this test must supply. Four (`deluge_resource_chunk_ident`, `_try_acquire`, `_release`,

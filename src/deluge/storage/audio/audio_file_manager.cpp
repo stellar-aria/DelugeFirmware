@@ -793,8 +793,8 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		audioFile->filePath = filePath;
 		audioFile->loadedFromAlternatePath = usingAlternateLocation;
 
-		// Open the stream_io.h boundary once for this Sample's lifetime; SampleStream::read_cluster_data
-		// (called per-cluster during playback) reads through it.
+		// Open the stream_io.h boundary once for this Sample's lifetime; the per-cluster playback reads
+		// (the async streaming-fill task, over this Sample's efatfs handle) go through it.
 		//
 		// `filePath` is only the file's *actual* on-disk location when it wasn't resolved via the
 		// alternate-load-dir mechanism (see resolveFilePointer): when `usingAlternateLocation` is

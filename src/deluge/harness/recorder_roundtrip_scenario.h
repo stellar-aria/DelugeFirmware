@@ -25,9 +25,8 @@
 /// The whole geometry matrix + alterFile characterization + the two SR3b probes, minus the
 /// host-side image formatting and process exit (the caller owns those). Assumes `DELUGE_SD_IMAGE`
 /// is already mounted (boot mounts it). Reads back through `deluge::io::File` (drain-independent)
-/// except the `finalized_multicluster` probe, whose fill drain routes onto
-/// `deluge_streaming_drain_queue_blocking()` under `async_active` (the Embassy path) or
-/// `loader::pump()` otherwise (the C-host path) — see `recorder_readback_probe.cpp`.
+/// except the `finalized_multicluster` probe, whose fill drain routes unconditionally onto
+/// `deluge_streaming_drain_queue_blocking()` (the async fill task) — see `recorder_readback_probe.cpp`.
 ///
 /// @note `DELUGE_HOST`-only, compiled into `deluge_app` (the harness dir is globbed in), so the
 ///       Embassy binary — which links `deluge_app`, not `host_recorder_roundtrip_main.cpp` — can

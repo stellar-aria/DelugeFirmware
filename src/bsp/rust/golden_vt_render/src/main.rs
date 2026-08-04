@@ -7,8 +7,7 @@
 //! image, and exits cleanly. Sample cluster fills drain through the real async
 //! Embassy `streaming_fill_task` during the offline render (the reader/overview
 //! and voice-playback paths route their fills onto that drain under
-//! `async_active`; `loader::pump` no-ops), so a sample-backed fixture renders
-//! real audio, not silence.
+//! `async_active`), so a sample-backed fixture renders real audio, not silence.
 //!
 //! # Why a sibling package, not a `lens1_vt_sim` `[[bin]]`
 //!
@@ -315,14 +314,13 @@ fn stem_export_mode() -> i32 {
 /// — it's threaded through here only so the log lines identify which fixture
 /// this run is against.
 ///
-/// This rung drains NO cluster fills: `async_active` is on for this package
-/// (see `Cargo.toml`'s `default` features), so `loader::pump` no-ops inside
-/// `StemExport::renderWait`'s offline loop and the real async fill drain is a
-/// later rung's job (see the module doc / the plan). A fixture whose render
-/// needs no streamed sample clusters (synth-only) renders correct content
-/// here; a sample-backed fixture renders silence for its sample content —
-/// this task only proves the plumbing (real WAV files, right count/structure,
-/// clean exit), not sample-content correctness.
+/// Cluster fills DO drain here: `async_active` is on for this package (see
+/// `Cargo.toml`'s `default` features), so `StemExport::renderWait`'s offline
+/// loop drains the loader queue through the real async `streaming_fill_task`
+/// (via `deluge_streaming_drain_queue_blocking`). A sample-backed fixture
+/// therefore renders real audio, not silence — this task proves both the
+/// plumbing (real WAV files, right count/structure, clean exit) and, with the
+/// fills drained, sample-content correctness.
 #[embassy_executor::task]
 async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBool) {
     log::info!("golden_vt_render: run_stem_export_scenario: fixture={fixture}, awaiting boot+mount");

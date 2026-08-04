@@ -27,7 +27,8 @@ class Sample;
 /// relocated out of `SampleStream` into their own translation unit. `owner` is always the `Sample*`
 /// registered by `deluge_streaming_define_asset()`; each callback reaches that sample's `SampleStream`
 /// via `sample->stream()` -- residency itself is manager-owned, so this callback only constructs a
-/// chunk's bytes (`loaded` stays false; the background loader reads it via `read_cluster_data()`).
+/// chunk's bytes (`loaded` stays false; the async streaming-fill task then reads the card bytes into
+/// it — `streaming_loader.rs`, over `deluge_sample_fill`'s `native_begin`/`native_finish`).
 /// See sample_stream.h's "Cluster residency" section for the broader contract this implements.
 
 extern "C" {

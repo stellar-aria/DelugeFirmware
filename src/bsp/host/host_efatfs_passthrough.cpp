@@ -502,4 +502,86 @@ void deluge_efatfs_dir_close(uint32_t handle) {
 	s->path.clear();
 }
 
+bool deluge_efatfs_mkdir(const char* path) {
+	if (path == nullptr) {
+		return false;
+	}
+	std::string full = resolve_root_relative(path);
+	if (full.empty()) {
+		return false;
+	}
+	for (size_t i = 1; i <= full.size(); i++) {
+		if (i == full.size() || full[i] == '/') {
+			std::string prefix = full.substr(0, i);
+			if (!prefix.empty() && mkdir(prefix.c_str(), 0777) != 0 && errno != EEXIST) {
+				return false;
+			}
+		}
+	}
+	struct stat st{};
+	return stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool deluge_efatfs_unlink(const char* path) {
+	if (path == nullptr) {
+		return false;
+	}
+	std::string full = resolve_root_relative(path);
+	if (full.empty()) {
+		return false;
+	}
+	if (::unlink(full.c_str()) == 0) {
+		return true;
+	}
+	if (errno == EISDIR || errno == EPERM) {
+		return ::rmdir(full.c_str()) == 0; // empty-dir removal (rmdir fails if non-empty)
+	}
+	return false;
+}
+
+bool deluge_efatfs_rename(const char* old_path, const char* new_path) {
+	if (old_path == nullptr || new_path == nullptr) {
+		return false;
+	}
+	std::string from = resolve_root_relative(old_path);
+	std::string to = resolve_root_relative(new_path);
+	if (from.empty() || to.empty()) {
+		return false;
+	}
+	struct stat st{};
+	if (stat(to.c_str(), &st) == 0) {
+		return false; // efatfs rename fails if the destination exists; POSIX would overwrite
+	}
+	return ::rename(from.c_str(), to.c_str()) == 0;
+}
+
+bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                            uint8_t second) {
+	if (path == nullptr || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+		return false; // range-validate like efatfs (rejects out-of-range before touching the FS)
+	}
+	std::string full = resolve_root_relative(path);
+	if (full.empty()) {
+		return false;
+	}
+	struct stat st{};
+	if (stat(full.c_str(), &st) != 0) {
+		return false; // missing file: fail (efatfs open_file first), NOT a silent no-op
+	}
+	struct tm tmv{};
+	tmv.tm_year = static_cast<int>(year) - 1900;
+	tmv.tm_mon = static_cast<int>(month) - 1;
+	tmv.tm_mday = day;
+	tmv.tm_hour = hour;
+	tmv.tm_min = minute;
+	tmv.tm_sec = (second / 2) * 2; // 2-second DOS resolution (matches the packed round-trip)
+	tmv.tm_isdst = -1;
+	time_t mt = mktime(&tmv);
+	if (mt == static_cast<time_t>(-1)) {
+		return false;
+	}
+	struct timeval times[2] = {{mt, 0}, {mt, 0}};
+	return utimes(full.c_str(), times) == 0;
+}
+
 } // extern "C"

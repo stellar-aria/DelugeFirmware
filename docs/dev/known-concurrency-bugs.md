@@ -38,18 +38,19 @@ Reproduce: `cd src/bsp/rust/preemptive_race_tsan && ./run.sh` (needs a pre-packe
 
 ---
 
-## B4 — rung-5 priority queue: NORMAL-job starvation (no starvation-freedom guarantee) — MEDIUM
+## B4 — rung-5 priority queue: NORMAL-job starvation (no starvation-freedom guarantee) — RESOLVED (2026-08-04)
 
 - **Where:** `src/bsp/rust/src/fiber.rs` `dequeue()` — strict HIGH-before-NORMAL priority (added in the async-SD rung-5 flip).
 - **Symptom (demonstrated deterministically by Lens 1's zero-jitter clock):** `loader::request_pump`'s periodic HIGH-priority dispatch re-arms itself (~100–200 µs) strictly before any fallback, so with no timing jitter a HIGH job is *always* in the ring at every `dequeue`, and strict HIGH-before-NORMAL **starves every NORMAL job forever** — `LoadSongUI::performLoad`'s dispatched job never ran once.
 - **On device:** real-hardware timing jitter opens a gap between `request_pump`'s completion and its re-arm during which a pending NORMAL job wins, so *total* starvation is practically unreachable — **but the policy has no starvation-freedom guarantee.** This is the "fairness edge" flagged in the rung-5 design.
-- **Decision owed:** whether to ship a conservative **priority-aging backstop** in the production `dequeue` (bounded fairness — force a NORMAL pick after N consecutive HIGH picks *while a NORMAL waits*), as a belt-and-suspenders against NORMAL delay under sustained streaming. A Lens-1-only aging knob (`fiber::HIGH_PRIORITY_FAIRNESS_BOUND`, **=0/inert in production**) exists as the pattern. Low-urgency; its own small change.
+- **RESOLVED (2026-08-04, commit 7188cef4c):** the entire HIGH-priority worker-ring tier was deleted — it had been inert since its only producer, `loader::request_pump`, died with `loader.cpp` (nothing set the ring's `is_high` bit). `dequeue()` is now a plain oldest-sequence FIFO with no priority levels, so HIGH-before-NORMAL starvation cannot occur and no aging backstop is needed. The Lens-1 fairness knob (`HIGH_PRIORITY_FAIRNESS_BOUND`) was removed with the tier.
 
 ## B5 — rung-5 priority queue: unsynchronized `Q_COUNT` / ring links — HIGH — **OPEN (new, 2026-07-19)**
 
 - **Race:** `deluge_rust::fiber::enqueue` writes `deluge_rust::fiber::Q_COUNT` (and the two-level priority ring links) on the **audio thread** — via `loader::request_pump` → `Coalescer::request` → `deluge::storage::Owner::run_priority` → `deluge_worker_run_priority` → `fiber::enqueue` (a HIGH-priority loader-fill dispatch issued from the audio render path) — while the **fiber (owner) thread** reads `Q_COUNT` in `deluge_rust::fiber::queue_nonempty` / `dequeue`.
 - **TSan site:** `src/bsp/rust/src/fiber.rs:470` (`enqueue`, write of `Q_COUNT`) vs `fiber.rs:662` (`queue_nonempty`, read). Global `deluge_rust::fiber::Q_COUNT`.
 - **Root cause:** the **rung-5 two-level priority queue** (async-SD staging ladder) has no synchronization on its counters/links between an audio-thread HIGH enqueue and the fiber's queue check — same single-threaded-by-assumption class as B1. **Not introduced by the B2/B3 recorder fix** (which touched none of `fiber.rs` / `owner.cpp` / `loader.cpp`); surfaced here under preemptive audio + sustained streaming. Belongs to the async-SD ladder / preemptive-scheduler work, not the recorder.
+- **UPDATE (2026-08-04, commit 7188cef4c):** the specific audio-thread trigger traced above — `request_pump` → `Owner::run_priority` → `deluge_worker_run_priority` → `enqueue` — was DELETED with the HIGH-priority tier, and the ring lost its two-level (`is_high`) links (`dequeue` is now plain FIFO). But this does NOT confirm the race closed: `Q_COUNT` still has no synchronization, and the recorder/card-init coalescers still reach `enqueue` from a non-fiber context (`requestRecorderCardRoutines`, on the audio routine, → `Owner::run_sd_routine` → `enqueue`, `audio_engine.cpp:1601`). Re-run the preemptive TSan harness to see whether the `Q_COUNT` race still reproduces via that path before marking resolved. The TSan line numbers above (`fiber.rs:470/662`) are now stale.
 
 ## Additional surfaced races — preemptive **streaming/playback** path (pre-existing, nondeterministic, out of scope)
 

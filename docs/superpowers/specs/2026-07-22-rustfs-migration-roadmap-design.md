@@ -142,9 +142,11 @@ mechanism); contiguous preallocation + power-loss safety (own rungs).
 
 ### R4 — SP-delete: delete C FatFS, retire the fiber
 > Reframed by the region boundary (see the banner at the top): the streaming C-ABI it once had to handle
-> is gone (Rust-internal behind the region port), so R4 is now **pure task-context** deletion. Depends on
-> R3.5 (`2026-07-23-r3.5-host-passthrough-design.md`) and reshaped by
+> is gone (Rust-internal behind the region port), so R4 is now **pure task-context** deletion. Reshaped by
 > `2026-07-23-r4-delete-cfatfs-design.md`.
+> **Re-scoped 2026-08-04:** after U4b retired the C-host streaming targets and stood up a partial POSIX
+> passthrough, **R3.5 is folded into R4 as Phase 0** (no longer a standalone rung). Base is now the merge of
+> `feat/region-port-sr1`; R4 runs **after** that merge (Kate's sequencing). See R4 §0.
 - Once nothing calls `ff.c`: delete chan-fs, retire the worker fiber, move task-context storage onto the
   plain blocking worker context.
 - **Gate:** `fs_differential` (now efatfs-only, regression net) + Lens 2 + **P1 hardware-proven**.

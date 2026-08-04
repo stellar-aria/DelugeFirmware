@@ -139,6 +139,31 @@ std::string resolve_root_relative(const char* path) {
 	return std::string(root) + "/" + rel;
 }
 
+struct DirSlot {
+	DIR* dir = nullptr;
+	std::string path; // resolved dir path, for stat-ing each entry
+};
+std::array<DirSlot, kMaxAuxHandles> g_dirs{};
+
+DirSlot* dir_slot(uint32_t handle) {
+	if (handle == 0 || handle > kMaxAuxHandles) {
+		return nullptr;
+	}
+	DirSlot& s = g_dirs[handle - 1];
+	return s.dir != nullptr ? &s : nullptr;
+}
+
+// Pack a broken-down local time into FAT (dos_date << 16) | dos_time, matching efatfs pack_fat_datetime.
+// Note the 2-second resolution (sec / 2).
+uint32_t pack_fat_datetime(const struct tm& t) {
+	uint32_t year = static_cast<uint32_t>(t.tm_year + 1900);
+	uint32_t dos_date = (year >= 1980 ? ((year - 1980) << 9) : 0) | (static_cast<uint32_t>(t.tm_mon + 1) << 5)
+	                    | static_cast<uint32_t>(t.tm_mday);
+	uint32_t dos_time = (static_cast<uint32_t>(t.tm_hour) << 11) | (static_cast<uint32_t>(t.tm_min) << 5)
+	                    | (static_cast<uint32_t>(t.tm_sec) / 2);
+	return (dos_date << 16) | dos_time;
+}
+
 } // namespace
 
 extern "C" {
@@ -393,6 +418,88 @@ void deluge_efatfs_file_close(uint32_t handle) {
 	}
 	close(s->fd);
 	s->fd = -1;
+}
+
+bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
+	if (out_handle == nullptr) {
+		return false;
+	}
+	// Empty/null path opens the volume root (DELUGE_SD_ROOT) directly.
+	std::string full;
+	if (path == nullptr || path[0] == '\0') {
+		const char* root = getenv("DELUGE_SD_ROOT");
+		full = (root != nullptr) ? root : std::string{};
+	}
+	else {
+		full = resolve_root_relative(path);
+	}
+	if (full.empty()) {
+		return false;
+	}
+	DIR* d = opendir(full.c_str());
+	if (d == nullptr) {
+		return false;
+	}
+	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {
+		if (g_dirs[i].dir == nullptr) {
+			g_dirs[i].dir = d;
+			g_dirs[i].path = full;
+			*out_handle = i + 1;
+			return true;
+		}
+	}
+	closedir(d);
+	return false;
+}
+
+bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
+                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, bool* out_has_entry) {
+	DirSlot* s = dir_slot(handle);
+	if (s == nullptr || out_name == nullptr || out_is_dir == nullptr || out_size == nullptr || out_modified == nullptr
+	    || out_attrs == nullptr || out_has_entry == nullptr) {
+		return false;
+	}
+	while (dirent* e = readdir(s->dir)) {
+		if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
+			continue; // efatfs/FAT never surface . or ..
+		}
+		size_t namelen = std::strlen(e->d_name);
+		if (namelen >= out_name_cap) {
+			continue; // skip (never truncate) a name that wouldn't fit + its NUL
+		}
+		std::string entry_path = s->path + "/" + e->d_name;
+		struct stat st{};
+		if (stat(entry_path.c_str(), &st) != 0) {
+			continue; // unreadable entry: skip
+		}
+		bool is_dir = S_ISDIR(st.st_mode);
+		std::memcpy(out_name, e->d_name, namelen);
+		out_name[namelen] = '\0';
+		*out_is_dir = is_dir;
+		*out_size = is_dir ? 0u : static_cast<uint32_t>(st.st_size); // 0 for dirs
+		struct tm tmv{};
+		localtime_r(&st.st_mtime, &tmv);
+		*out_modified = pack_fat_datetime(tmv);
+		uint8_t attrs = is_dir ? 0x10 /*DIR*/ : 0x20 /*ARC*/;
+		if ((st.st_mode & S_IWUSR) == 0) {
+			attrs |= 0x01; // RDO
+		}
+		*out_attrs = attrs;
+		*out_has_entry = true;
+		return true;
+	}
+	*out_has_entry = false; // end of directory: success, not an error
+	return true;
+}
+
+void deluge_efatfs_dir_close(uint32_t handle) {
+	DirSlot* s = dir_slot(handle);
+	if (s == nullptr) {
+		return;
+	}
+	closedir(s->dir);
+	s->dir = nullptr;
+	s->path.clear();
 }
 
 } // extern "C"

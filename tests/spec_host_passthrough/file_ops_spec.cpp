@@ -97,6 +97,23 @@ describe file_ops("passthrough task-context files", $ {
 		deluge_efatfs_file_close(h);
 		expect(deluge_efatfs_file_open("SUB/DEEP/E.TXT", DELUGE_FILE_WRITE_CREATE_NEW, &h)).to_equal(false);
 	});
+
+	it("write reports failure on a hard I/O error instead of swallowing it", _ {
+		fresh_root();
+		uint32_t h = 0;
+		deluge_efatfs_file_open("F.TXT", DELUGE_FILE_WRITE_CREATE, &h);
+		uint32_t wrote = 0;
+		deluge_efatfs_file_write(h, "12345", 5, &wrote);
+		deluge_efatfs_file_close(h);
+
+		// Reopen READ-ONLY: the slot's fd is O_RDONLY, so pwrite() fails with EBADF
+		// (a hard error, not EINTR) -- deluge_efatfs_file_write must report that as failure,
+		// not swallow it and return true with a partial *out_written.
+		expect(deluge_efatfs_file_open("F.TXT", DELUGE_FILE_READ, &h)).to_equal(true);
+		uint32_t wrote2 = 0;
+		expect(deluge_efatfs_file_write(h, "ab", 2, &wrote2)).to_equal(false);
+		deluge_efatfs_file_close(h);
+	});
 });
 
 CPPSPEC_SPEC(file_ops)

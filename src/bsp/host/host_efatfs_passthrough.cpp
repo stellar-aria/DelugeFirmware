@@ -338,7 +338,8 @@ bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, 
 			if (errno == EINTR) {
 				continue;
 			}
-			break;
+			return false; // hard I/O error (e.g. ENOSPC/EIO/EBADF): propagate as failure, matching
+			              // the read paths and the device efatfs's write-error behaviour
 		}
 		if (n == 0) {
 			break;

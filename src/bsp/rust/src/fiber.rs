@@ -366,20 +366,18 @@ pub type RunCondition = Option<unsafe extern "C" fn() -> bool>;
 
 /// Pending operations (serialized — these are user actions, at most one active).
 /// `is_sd` is the sd-routine bit: true ops hold `SD_ROUTINE_HELD` from enqueue
-/// to completion (see `deluge_worker_run_sd_routine`). `is_high` is the
-/// priority bit: true ops dequeue ahead of every `is_high == false` op (see
-/// `deluge_worker_run_priority`). The two bits are orthogonal — either, both,
-/// or neither may be set on a given op.
-type Job = (extern "C" fn(*mut c_void), *mut c_void, bool, bool);
+/// to completion (see `deluge_worker_run_sd_routine`).
+type Job = (extern "C" fn(*mut c_void), *mut c_void, bool);
 const QUEUE_CAP: usize = 4;
 
 /// The ring's storage: each occupied slot pairs a `Job` with the sequence
-/// number it was enqueued at (`Q_NEXT_SEQ`, monotonic). This is deliberately
-/// NOT a rotating head/tail ring — a job is written into whichever slot is
-/// free at enqueue time — because `dequeue` must be able to remove the oldest
-/// *HIGH* job even when it isn't the physically-oldest slot (a plain
-/// head/tail ring can only ever remove the head). The per-slot sequence gives
-/// `dequeue` a total enqueue order to scan over: see `dequeue` below.
+/// number it was enqueued at (`Q_NEXT_SEQ`, monotonic). A job is written into
+/// whichever slot is free at enqueue time, so the slot index carries no order;
+/// the per-slot sequence gives `dequeue` the enqueue order to pick the oldest
+/// job (plain FIFO — see `dequeue` below). A rotating head/tail ring would
+/// serve this FIFO with less scanning; the free-slot+sequence form is a
+/// leftover from the retired HIGH-priority tier (which needed out-of-order
+/// removal) and could be simplified later.
 static mut QUEUE: [Option<(Job, u32)>; QUEUE_CAP] = [None; QUEUE_CAP];
 static mut Q_COUNT: usize = 0;
 /// Monotonic (wrapping) insertion counter, stamped onto each enqueued slot.
@@ -447,11 +445,7 @@ fn now_us() -> u64 {
 /// Enqueue an operation on the worker ring, taking the SD-routine hold when
 /// `is_sd` (synchronously, so it engages before the caller returns). Returns
 /// whether it was accepted; a dropped enqueue (queue full) takes no hold.
-/// `is_high` is stamped onto the slot for `dequeue` to prioritize (see there)
-/// — it does not affect acceptance/capacity, which is identical for both
-/// priority levels (a single shared `QUEUE_CAP`, unchanged from before HIGH
-/// existed).
-fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool, is_high: bool) -> bool {
+fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool) -> bool {
     // SAFETY: single-threaded; enqueue only (no switch here).
     let enqueued = unsafe {
         if Q_COUNT < QUEUE_CAP {
@@ -466,7 +460,7 @@ fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool, is_high
             let idx = free.expect("Q_COUNT < QUEUE_CAP implies a free slot");
             let seq = Q_NEXT_SEQ;
             Q_NEXT_SEQ = Q_NEXT_SEQ.wrapping_add(1);
-            queue.add(idx).write(Some(((f, ctx, is_sd, is_high), seq)));
+            queue.add(idx).write(Some(((f, ctx, is_sd), seq)));
             Q_COUNT += 1;
             if is_sd {
                 // Take the hold synchronously, before returning, so a RESOURCE_SD_ROUTINE
@@ -490,7 +484,7 @@ fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool, is_high
 /// serialized after any already-queued operations once the worker is pumped.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_worker_run(f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> bool {
-    enqueue(f, ctx, false, false)
+    enqueue(f, ctx, false)
 }
 
 /// SD-routine-class submission (see include/libdeluge/worker.h). Same enqueue as
@@ -503,28 +497,7 @@ pub extern "C" fn deluge_worker_run_sd_routine(
     f: extern "C" fn(*mut c_void),
     ctx: *mut c_void,
 ) -> bool {
-    enqueue(f, ctx, true, false)
-}
-
-/// HIGH-priority submission (see include/libdeluge/worker.h): dequeues ahead
-/// of every already-queued or later-queued `deluge_worker_run`/
-/// `deluge_worker_run_sd_routine` (NORMAL) op, FIFO among other HIGH ops —
-/// see `dequeue` below. For audio-streaming reads, which must not queue
-/// behind UI/recorder work on the shared worker ring. Does NOT take an
-/// SD-routine hold (`is_sd = false`): priority and the SD-routine hold are
-/// orthogonal bits.
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_worker_run_priority(
-    f: extern "C" fn(*mut c_void),
-    ctx: *mut c_void,
-) -> bool {
-    enqueue(f, ctx, false, true)
-}
-
-/// C-ABI wrapper for [`higher_priority_waiting`] (see include/libdeluge/worker.h).
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_worker_higher_priority_waiting() -> bool {
-    higher_priority_waiting()
+    enqueue(f, ctx, true)
 }
 
 /// C-ABI: is the current context the worker fiber? Backs `Owner::on_owner()`
@@ -536,55 +509,9 @@ pub extern "C" fn deluge_worker_on_worker() -> bool {
     on_fiber()
 }
 
-/// Lens-1-only (deterministic virtual-time streaming-underrun harness) starvation guard
-/// for [`dequeue`]'s HIGH-before-NORMAL policy.
-/// 0 (the default) preserves today's UNBOUNDED policy exactly for every
-/// other consumer (device, Lens 2, manual host_app runs) — see [`dequeue`]'s
-/// use of this below.
-///
-/// **Why this exists**: on a real clock (device or Lens 2's wall-clock host),
-/// `loader::request_pump`'s periodic HIGH-priority dispatch
-/// (`deluge.cpp`'s `addRepeatingTask(..., 0.0001, 0.0001, ...)`, single-flight
-/// via `Coalescer::in_flight_`) and this executor's own wake-driven poll loop
-/// both ride real timer hardware/OS scheduling, which has enough jitter that a
-/// NORMAL job (song load, a browser listing, …) sitting behind a HIGH job
-/// almost always gets a turn once the HIGH ring is transiently empty. Lens 1's
-/// virtual clock has **zero** jitter: `request_pump`'s task re-arms itself
-/// (~100-200us later) strictly before the `worker_poll` loop's 8ms fallback
-/// timer could ever fire, and `enqueue`'s unconditional `wake()` call means
-/// `WORKER_WAKE` fires the INSTANT that re-armed job lands — so with no
-/// wall-clock noise to break the tie, a HIGH job is *always* sitting in the
-/// ring by the time `dequeue` is next called, and `dequeue`'s strict
-/// HIGH-before-NORMAL rule starves every NORMAL job (song load, in
-/// particular) forever.
-///
-/// This is priority AGING, a standard fix for exactly this class of
-/// starvation: once `dequeue` has picked HIGH this many times in a row WHILE
-/// a NORMAL job was also waiting, the next pick is forced to NORMAL instead
-/// (then the HIGH streak resets). It does not change relative ordering WITHIN
-/// a priority level, and only ever fires when both levels are simultaneously
-/// non-empty — the actual audio-streaming urgency this priority scheme exists
-/// for (a HIGH job queued alone, nothing NORMAL waiting) is completely
-/// unaffected. Lens 1 sets a small bound (e.g. 8) once at startup, before
-/// `deluge_app_init`; nothing else ever calls this, so the static stays 0
-/// (disabled) everywhere else.
-static HIGH_PRIORITY_FAIRNESS_BOUND: AtomicU32 = AtomicU32::new(0);
-/// Consecutive HIGH-priority dequeues since the last NORMAL one (or boot).
-/// Only consulted/updated when [`HIGH_PRIORITY_FAIRNESS_BOUND`] is nonzero.
-static CONSECUTIVE_HIGH_DEQUEUES: AtomicU32 = AtomicU32::new(0);
-
-/// See [`HIGH_PRIORITY_FAIRNESS_BOUND`]'s doc comment.
-pub fn set_high_priority_fairness_bound(bound: u32) {
-    HIGH_PRIORITY_FAIRNESS_BOUND.store(bound, Ordering::Relaxed);
-}
-
-/// Dequeue the next op to run: the oldest (lowest-sequence) HIGH-priority job
-/// if any is queued, else the oldest NORMAL job — i.e. HIGH strictly before
-/// NORMAL, FIFO within each level — UNLESS [`HIGH_PRIORITY_FAIRNESS_BOUND`] is
-/// set and has been hit (see its doc comment; a no-op when unset, which is
-/// every consumer except Lens 1). `QUEUE_CAP` is small (4), so a linear scan
-/// per dequeue is cheap and keeps the ring itself a plain fixed array (no
-/// separate sub-rings to keep in sync).
+/// Dequeue the next op to run: the oldest (lowest-sequence) queued job — plain
+/// FIFO. `QUEUE_CAP` is small (4), so a linear scan per dequeue is cheap and
+/// keeps the ring itself a plain fixed array.
 fn dequeue() -> Option<Job> {
     // SAFETY: single-threaded access to the ring.
     unsafe {
@@ -592,41 +519,15 @@ fn dequeue() -> Option<Job> {
             return None;
         }
         let queue = core::ptr::addr_of_mut!(QUEUE).cast::<Option<(Job, u32)>>();
-        let mut best: Option<(usize, u32, bool)> = None; // (slot index, seq, is_high)
-        let mut best_normal: Option<(usize, u32)> = None; // oldest NORMAL candidate, for aging
+        let mut best: Option<(usize, u32)> = None; // (slot index, seq)
         for i in 0..QUEUE_CAP {
-            if let Some((job, seq)) = queue.add(i).read() {
-                let (_, _, _, is_high) = job;
-                let take = match best {
-                    None => true,
-                    // A HIGH candidate beats any NORMAL one outright; within
-                    // the same level, the smaller (older) sequence wins.
-                    Some((_, best_seq, best_high)) => {
-                        (is_high && !best_high) || (is_high == best_high && seq < best_seq)
-                    }
-                };
-                if take {
-                    best = Some((i, seq, is_high));
-                }
-                if !is_high && best_normal.is_none_or(|(_, s)| seq < s) {
-                    best_normal = Some((i, seq));
+            if let Some((_job, seq)) = queue.add(i).read() {
+                if best.is_none_or(|(_, best_seq)| seq < best_seq) {
+                    best = Some((i, seq));
                 }
             }
         }
-        let mut chosen = best.expect("Q_COUNT > 0 implies at least one occupied slot");
-        let bound = HIGH_PRIORITY_FAIRNESS_BOUND.load(Ordering::Relaxed);
-        if bound > 0 && chosen.2 {
-            // Chose HIGH — only relevant to aging if a NORMAL job is ALSO waiting.
-            if let Some((n_idx, n_seq)) = best_normal {
-                if CONSECUTIVE_HIGH_DEQUEUES.fetch_add(1, Ordering::Relaxed) + 1 >= bound {
-                    chosen = (n_idx, n_seq, false); // force the aged-out NORMAL job instead
-                }
-            }
-        }
-        if !chosen.2 {
-            CONSECUTIVE_HIGH_DEQUEUES.store(0, Ordering::Relaxed);
-        }
-        let (idx, _, _dq_is_high) = chosen;
+        let (idx, _) = best.expect("Q_COUNT > 0 implies at least one occupied slot");
         let (job, _seq) = queue
             .add(idx)
             .replace(None)
@@ -639,32 +540,6 @@ fn dequeue() -> Option<Job> {
         }
         Some(job)
     }
-}
-
-/// Is a HIGH-priority job currently resident in the ring (queued, not yet
-/// dequeued)? Read by a running caller that processes several independent
-/// units per dispatch — e.g. `audio_engine::doRecorderCardRoutines`, which
-/// walks every live `SampleRecorder` and drives one `cardRoutine()` each
-/// (each recorder's own per-dispatch write is already bounded to a single
-/// cluster) — to decide whether to stop after the current unit rather than
-/// continue to the next, so `dequeue`'s HIGH-before-NORMAL ordering (above)
-/// actually bounds a queued HIGH op's wait to one more unit instead of it
-/// sitting behind the whole multi-unit loop. Same cheap-linear-scan cost
-/// class as `dequeue`, over the same ring state.
-pub fn higher_priority_waiting() -> bool {
-    // SAFETY: single-threaded access to the ring (same contract as enqueue/dequeue).
-    unsafe {
-        let queue = core::ptr::addr_of!(QUEUE).cast::<Option<(Job, u32)>>();
-        for i in 0..QUEUE_CAP {
-            if let Some((job, _seq)) = queue.add(i).read() {
-                let (_, _, _, is_high) = job;
-                if is_high {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 fn queue_nonempty() -> bool {
@@ -680,7 +555,7 @@ pub fn worker_poll() -> bool {
     // handoff of other state.
     WORKER_STARTED.store(true, Ordering::Relaxed);
     if !FIBER_BUSY.load(Ordering::Relaxed) {
-        let Some((f, ctx, is_sd, _is_high)) = dequeue() else {
+        let Some((f, ctx, is_sd)) = dequeue() else {
             return false;
         };
         ACTIVE_IS_SD_ROUTINE.store(is_sd, Ordering::Relaxed);

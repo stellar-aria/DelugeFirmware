@@ -581,11 +581,6 @@ fn main() {
     // directly and the livelock this sidesteps cannot occur.
     #[cfg(feature = "sim_latency")]
     sd::sim_latency::set_off_fiber_instant(true);
-    // Zero-jitter starvation guard (see `fiber.rs`'s `HIGH_PRIORITY_FAIRNESS_BOUND`
-    // doc comment): without this, `loader::request_pump`'s HIGH-priority
-    // re-enqueue could starve NORMAL-priority dispatch forever on this virtual
-    // clock. Same value `../lens1_vt_sim/` uses.
-    fiber::set_high_priority_fairness_bound(8);
 
     // SAFETY: `raw::Executor` needs `&'static`; leaking a Box is the standard
     // pattern for a `fn main` that doesn't itself run forever

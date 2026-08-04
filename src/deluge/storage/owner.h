@@ -48,14 +48,6 @@ struct Owner {
 	/// @return as run(): true if it ran/queued, false if the dispatch was dropped.
 	static bool run_sd_routine(void (*fn)(void*), void* ctx);
 
-	/// Like run(), but the op is HIGH-priority: on Embassy it dequeues ahead of every
-	/// already-queued or later-queued run()/run_sd_routine() (NORMAL) op, FIFO among
-	/// other HIGH ops — for audio-streaming reads, which must not queue behind
-	/// UI/recorder work on the shared worker ring. Inline on legacy/host
-	/// (indistinguishable from run() there, since there's no queue to jump ahead of).
-	/// @return as run(): true if it ran/queued, false if the dispatch was dropped.
-	static bool run_priority(void (*fn)(void*), void* ctx);
-
 	/// True iff the current context is the storage worker (the worker fiber on
 	/// Embassy; always false on cooperative/host, where run() is inline). Use to
 	/// avoid re-dispatching a dual-context op that is already on the worker.
@@ -74,7 +66,7 @@ struct Owner {
 /// a dispatch is still in flight is dropped (the running one covers the demand). The
 /// dispatched `fill` runs on the owner (fire-and-forget on Embassy, inline on legacy/host),
 /// and the `Coalescer` releases itself once `fill` returns. Purpose: a high-frequency caller
-/// (e.g. the streaming loader's ~0.1 ms pump) collapses onto a single owner op instead of
+/// (e.g. the recorder card-write drain) collapses onto a single owner op instead of
 /// flooding the worker fiber's bounded queue.
 ///
 /// @note All calls are expected from the main executor (not cross-thread — the requesters and
@@ -84,10 +76,7 @@ class Coalescer {
 public:
 	/// @param sd_routine when true, `request()` dispatches via `Owner::run_sd_routine`
 	/// (SD-routine-class exclusion); when false (default), via `Owner::run`.
-	/// @param priority when true, `request()` dispatches via `Owner::run_priority`
-	/// (HIGH — jumps the Embassy worker queue ahead of NORMAL ops), taking precedence
-	/// over `sd_routine`; when false (default), the `sd_routine` flag governs as above.
-	explicit Coalescer(bool sd_routine = false, bool priority = false) : sd_routine_(sd_routine), priority_(priority) {}
+	explicit Coalescer(bool sd_routine = false) : sd_routine_(sd_routine) {}
 
 	/// If no dispatch from this `Coalescer` is in flight, run `fill(ctx)` on the owner;
 	/// otherwise coalesce (no-op).
@@ -96,7 +85,6 @@ public:
 private:
 	static void run_and_release(void* self);
 	const bool sd_routine_;
-	const bool priority_;
 	std::atomic<bool> in_flight_{false};
 	void (*fill_)(void*) = nullptr;
 	void* ctx_ = nullptr;

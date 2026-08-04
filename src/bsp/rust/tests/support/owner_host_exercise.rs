@@ -66,11 +66,9 @@ use embassy_sync::waitqueue::AtomicWaker;
 /// A queued submission, handed from a submitter OS thread to [`submit_pump`]
 /// over the channel: the op function plus a `usize`-encoded context (avoids a
 /// raw-pointer field, which would make the tuple `!Send`).
-// (op, thread-id-as-ctx, is_sd_routine, is_high) — is_sd_routine selects
-// deluge_worker_run_sd_routine, is_high selects deluge_worker_run_priority
-// (mutually exclusive in this exercise — submit_pump checks is_high first);
-// neither selects the plain deluge_worker_run.
-type Job = (extern "C" fn(*mut core::ffi::c_void), usize, bool, bool);
+// (op, thread-id-as-ctx, is_sd_routine) — is_sd_routine selects
+// deluge_worker_run_sd_routine; false selects the plain deluge_worker_run.
+type Job = (extern "C" fn(*mut core::ffi::c_void), usize, bool);
 
 const NUM_SUBMITTERS: usize = 4;
 const OPS_PER_SUBMITTER: u32 = 6;
@@ -356,137 +354,6 @@ extern "C" fn backout_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
-// Two-level priority contract (rung 5 task 2): `deluge_worker_run_priority`
-// (HIGH) must dequeue ahead of every `deluge_worker_run`/`_sd_routine`
-// (NORMAL) op already sitting in the ring, and FIFO must hold within each
-// level. Shape: park a NORMAL op on a gate so the fiber is busy (the ring
-// only fills — nothing drains — while it's parked); while parked, enqueue
-// four ops in enqueue order NORMAL-A, HIGH-B, HIGH-C, NORMAL-D; release the
-// park and assert the *run* order is B, C before A, D (HIGH-before-NORMAL)
-// with B before C and A before D (FIFO within each level) — despite A having
-// enqueued before B. Own statics, independent of every other phase.
-// ---------------------------------------------------------------------------
-static PRIO_PARK_STARTED: AtomicBool = AtomicBool::new(false);
-static PRIO_PARK_DONE: AtomicBool = AtomicBool::new(false);
-static PRIO_PARK_GATE: AtomicBool = AtomicBool::new(false);
-unsafe extern "C" fn prio_park_gate_predicate() -> bool {
-    PRIO_PARK_GATE.load(Ordering::SeqCst)
-}
-extern "C" fn prio_park_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_PARK_STARTED.store(true, Ordering::SeqCst);
-    crate::fiber::yield_until(Some(prio_park_gate_predicate), None);
-    PRIO_PARK_DONE.store(true, Ordering::SeqCst);
-}
-
-/// Assigns each of the four priority-phase ops the position it actually ran
-/// in (0-based, via `fetch_add`), so the driving thread can compare run order
-/// after the fact without racing to observe it live.
-static PRIO_RUN_ORDER: AtomicU32 = AtomicU32::new(0);
-static PRIO_A_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static PRIO_B_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static PRIO_C_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static PRIO_D_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static PRIO_DONE_COUNT: AtomicU32 = AtomicU32::new(0);
-
-extern "C" fn prio_a_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_A_ORDER.store(
-        PRIO_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    PRIO_DONE_COUNT.fetch_add(1, Ordering::SeqCst);
-}
-extern "C" fn prio_b_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_B_ORDER.store(
-        PRIO_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    PRIO_DONE_COUNT.fetch_add(1, Ordering::SeqCst);
-}
-extern "C" fn prio_c_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_C_ORDER.store(
-        PRIO_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    PRIO_DONE_COUNT.fetch_add(1, Ordering::SeqCst);
-}
-extern "C" fn prio_d_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_D_ORDER.store(
-        PRIO_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    PRIO_DONE_COUNT.fetch_add(1, Ordering::SeqCst);
-}
-
-// ---------------------------------------------------------------------------
-// Cooperative yield-to-priority (rung 5 task 3, retargeted): a NORMAL op that
-// models audio_engine::doRecorderCardRoutines' multi-recorder drain — loop
-// doing units of "work" (each unit stands in for one recorder's fully-
-// processed cardRoutine() dispatch), each followed by a real suspend point
-// (`yield_until(None, None)`, mirroring a recorder's SD write, which suspends
-// the fiber via `block_on_fiber` while awaiting the transfer) and then a
-// `higher_priority_waiting()` check taken only after the unit is fully done;
-// the first time that's true, return early, short of `YIELD_TOTAL_UNITS`.
-// While it's mid-loop, enqueue a HIGH op and confirm it lands on the ring —
-// the next check should trip. Assert: the NORMAL op returned early (didn't
-// complete all its units), and the HIGH op ran before a NORMAL
-// "continuation" op enqueued right after (mirroring doRecorderCardRoutines
-// re-dispatching the drain on its next cadence, resuming with the recorder
-// it left off on). This exercises the same ring-scan primitive
-// (`higher_priority_waiting`), which is unchanged by the retarget — only the
-// C++ caller of the primitive moved. Own statics, independent of every other
-// phase.
-// ---------------------------------------------------------------------------
-const YIELD_TOTAL_UNITS: u32 = 30;
-static YIELD_OP_STARTED: AtomicBool = AtomicBool::new(false);
-static YIELD_OP_DONE: AtomicBool = AtomicBool::new(false);
-static YIELD_UNITS_DONE: AtomicU32 = AtomicU32::new(0);
-static YIELD_RETURNED_EARLY: AtomicBool = AtomicBool::new(false);
-
-/// Run-order counter for this phase (mirrors `PRIO_RUN_ORDER` above): each
-/// participant stamps the position it actually ran/finished in.
-static YIELD_RUN_ORDER: AtomicU32 = AtomicU32::new(0);
-static YIELD_HIGH_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static YIELD_HIGH_DONE: AtomicBool = AtomicBool::new(false);
-static YIELD_CONTINUATION_ORDER: AtomicU32 = AtomicU32::new(u32::MAX);
-static YIELD_CONTINUATION_DONE: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn yield_op(_ctx: *mut core::ffi::c_void) {
-    YIELD_OP_STARTED.store(true, Ordering::SeqCst);
-    for _ in 0..YIELD_TOTAL_UNITS {
-        // A unit of "work" with a real suspend point — gives the executor (and
-        // therefore submit_pump) a window to land a HIGH enqueue between units,
-        // exactly as a real SD write would while this op is genuinely mid-drain.
-        crate::fiber::yield_until(None, None);
-        YIELD_UNITS_DONE.fetch_add(1, Ordering::SeqCst);
-        if crate::fiber::higher_priority_waiting() {
-            YIELD_RETURNED_EARLY.store(true, Ordering::SeqCst);
-            YIELD_OP_DONE.store(true, Ordering::SeqCst);
-            return;
-        }
-    }
-    // Ran to completion without ever observing a HIGH op queued — the race
-    // below failed to set up; still mark done so the driving thread's wait
-    // doesn't hang (the assertions on YIELD_RETURNED_EARLY will fail instead).
-    YIELD_OP_DONE.store(true, Ordering::SeqCst);
-}
-
-extern "C" fn yield_high_op(_ctx: *mut core::ffi::c_void) {
-    YIELD_HIGH_ORDER.store(
-        YIELD_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    YIELD_HIGH_DONE.store(true, Ordering::SeqCst);
-}
-
-extern "C" fn yield_continuation_op(_ctx: *mut core::ffi::c_void) {
-    YIELD_CONTINUATION_ORDER.store(
-        YIELD_RUN_ORDER.fetch_add(1, Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    YIELD_CONTINUATION_DONE.store(true, Ordering::SeqCst);
-}
-
-// ---------------------------------------------------------------------------
 // `block_on_fiber` contract (rung 5, the flip): the SD device transfer sites
 // (`sd.rs` `deluge_block_read`/`deluge_block_write`) now drive the real SD
 // transfer future through `fiber::block_on_fiber` when on the owner fiber —
@@ -592,13 +459,6 @@ extern "C" fn block_on_fiber_probe_op(_ctx: *mut core::ffi::c_void) {
 /// setup, so there is no real contention.
 static SUBMIT_RX: Mutex<Option<mpsc::Receiver<Job>>> = Mutex::new(None);
 
-/// Total accepted (non-dropped) enqueues across every phase, incremented by
-/// [`submit_pump`] right after a `deluge_worker_run*` call returns `true`. The
-/// priority-ordering phase (below) diffs this counter to know its ops have
-/// actually landed in `fiber.rs`'s ring (not merely sent down the channel)
-/// before it releases the park op that's been holding the fiber.
-static SUBMIT_ACCEPTED: AtomicU32 = AtomicU32::new(0);
-
 /// Pulls submissions off the channel and is the ONLY caller of the real
 /// `deluge_worker_run` — see the module doc for why that must stay confined
 /// to the executor thread. Runs alongside `worker_pump` on the same executor.
@@ -607,24 +467,17 @@ async fn submit_pump() {
     loop {
         let job = SUBMIT_RX.lock().unwrap().as_mut().unwrap().try_recv();
         match job {
-            Ok((f, ctx, is_sd, is_high)) => {
+            Ok((f, ctx, is_sd)) => {
                 // deluge_worker_run* returns bool (dispatch accepted?); the exercise's
-                // single-flight submitters never overflow the queue, so ignore it here
-                // (beyond the SUBMIT_ACCEPTED tally). is_high routes through the
-                // priority entry (checked first — mutually exclusive with is_sd in
-                // this exercise), is_sd through the SD-routine entry (which takes the
+                // single-flight submitters never overflow the queue, so ignore it here.
+                // is_sd routes through the SD-routine entry (which takes the
                 // SD_ROUTINE_HELD hold), else the plain one.
                 let ctx = ctx as *mut core::ffi::c_void;
-                let accepted = if is_high {
-                    crate::fiber::deluge_worker_run_priority(f, ctx)
-                } else if is_sd {
+                let _ = if is_sd {
                     crate::fiber::deluge_worker_run_sd_routine(f, ctx)
                 } else {
                     crate::fiber::deluge_worker_run(f, ctx)
                 };
-                if accepted {
-                    SUBMIT_ACCEPTED.fetch_add(1, Ordering::SeqCst);
-                }
             }
             Err(TryRecvError::Empty) => embassy_time::Timer::after_millis(1).await,
             Err(TryRecvError::Disconnected) => return,
@@ -706,8 +559,7 @@ pub fn run() {
     // --- submit the suspending op first, so the 4 submitter threads (below)
     // genuinely race to enqueue their fast ops *while* it occupies the fiber
     // ---
-    tx.send((special_op, 0, false, false))
-        .expect("send special_op");
+    tx.send((special_op, 0, false)).expect("send special_op");
     wait_until(deadline, "special_op to start", || {
         SPECIAL_STARTED.load(Ordering::SeqCst)
     });
@@ -739,8 +591,7 @@ pub fn run() {
                 .name(format!("owner-submitter-{thread_id}"))
                 .spawn(move || {
                     for i in 0..OPS_PER_SUBMITTER {
-                        tx.send((fast_op, thread_id, false, false))
-                            .expect("send fast_op");
+                        tx.send((fast_op, thread_id, false)).expect("send fast_op");
                         // Throttle to at most one outstanding op per thread —
                         // see the module doc: this keeps at most
                         // NUM_SUBMITTERS (== QUEUE_CAP) jobs live at once, so
@@ -814,7 +665,7 @@ pub fn run() {
     );
     let sd_deadline = Instant::now() + Duration::from_secs(20);
     // Submit the suspending SD-routine op through the executor-thread submitter.
-    tx.send((sd_routine_op, 0, true, false))
+    tx.send((sd_routine_op, 0, true))
         .expect("send sd_routine_op");
     wait_until(sd_deadline, "sd_routine_op to start", || {
         SD_OP_STARTED.load(Ordering::SeqCst)
@@ -866,8 +717,7 @@ pub fn run() {
         "UI state written before render_op ever ran"
     );
     let render_deadline = Instant::now() + Duration::from_secs(20);
-    tx.send((render_op, 0, false, false))
-        .expect("send render_op");
+    tx.send((render_op, 0, false)).expect("send render_op");
     wait_until(render_deadline, "render_op to start", || {
         RENDER_STARTED.load(Ordering::SeqCst)
     });
@@ -909,8 +759,7 @@ pub fn run() {
     // in the same op body — assert the unwind ran on the fiber and the
     // "committed" flag is not left set afterward ---
     let backout_deadline = Instant::now() + Duration::from_secs(20);
-    tx.send((backout_op, 0, false, false))
-        .expect("send backout_op");
+    tx.send((backout_op, 0, false)).expect("send backout_op");
     wait_until(backout_deadline, "backout_op to finish", || {
         BACKOUT_DONE.load(Ordering::SeqCst)
     });
@@ -943,130 +792,6 @@ pub fn run() {
         "browser-open-committed flag left set after a failed+unwound optimistic open"
     );
 
-    // --- two-level priority (rung 5 task 2): park a NORMAL op so the fiber is
-    // busy, enqueue NORMAL-A, HIGH-B, HIGH-C, NORMAL-D (in that order) while
-    // it's parked, then release and assert HIGH ran before NORMAL with FIFO
-    // held within each level ---
-    let prio_deadline = Instant::now() + Duration::from_secs(20);
-    tx.send((prio_park_op, 0, false, false))
-        .expect("send prio_park_op");
-    wait_until(prio_deadline, "prio_park_op to start", || {
-        PRIO_PARK_STARTED.load(Ordering::SeqCst)
-    });
-    // Give worker_poll time to actually park it (return from resume() after
-    // yield_until's switch) rather than racing our own check against it —
-    // mirrors the special_op bookend above.
-    std::thread::sleep(Duration::from_millis(50));
-
-    let accepted_before = SUBMIT_ACCEPTED.load(Ordering::SeqCst);
-    tx.send((prio_a_op, 0, false, false))
-        .expect("send prio-A (normal)");
-    tx.send((prio_b_op, 0, false, true))
-        .expect("send prio-B (high)");
-    tx.send((prio_c_op, 0, false, true))
-        .expect("send prio-C (high)");
-    tx.send((prio_d_op, 0, false, false))
-        .expect("send prio-D (normal)");
-    // Confirm all four are actually enqueued onto fiber.rs's ring (not merely
-    // sent down the channel) before releasing the park — otherwise the gate
-    // could open before D lands, and the enqueue order this test relies on
-    // (A, B, C, D) wouldn't be settled yet.
-    wait_until(
-        prio_deadline,
-        "prio-A/B/C/D to all be accepted onto the ring",
-        || SUBMIT_ACCEPTED.load(Ordering::SeqCst) >= accepted_before + 4,
-    );
-
-    PRIO_PARK_GATE.store(true, Ordering::SeqCst);
-    wait_until(prio_deadline, "prio_park_op to finish", || {
-        PRIO_PARK_DONE.load(Ordering::SeqCst)
-    });
-    wait_until(prio_deadline, "prio-A/B/C/D to all complete", || {
-        PRIO_DONE_COUNT.load(Ordering::SeqCst) >= 4
-    });
-
-    let a = PRIO_A_ORDER.load(Ordering::SeqCst);
-    let b = PRIO_B_ORDER.load(Ordering::SeqCst);
-    let c = PRIO_C_ORDER.load(Ordering::SeqCst);
-    let d = PRIO_D_ORDER.load(Ordering::SeqCst);
-    assert!(
-        b < a && c < a,
-        "HIGH ops (B, C) should both run before NORMAL op A despite A \
-         enqueuing first (a={a}, b={b}, c={c})"
-    );
-    assert!(
-        b < d && c < d,
-        "HIGH ops (B, C) should both run before NORMAL op D (b={b}, c={c}, d={d})"
-    );
-    assert!(
-        b < c,
-        "FIFO within the HIGH level: B enqueued before C, so B must run \
-         first (b={b}, c={c})"
-    );
-    assert!(
-        a < d,
-        "FIFO within the NORMAL level: A enqueued before D, so A must run \
-         first (a={a}, d={d})"
-    );
-
-    // --- cooperative yield-to-priority (rung 5 task 3): submit yield_op, wait
-    // for it to start, then queue a HIGH op and confirm it lands on the ring
-    // while yield_op is still mid-loop. Note: unlike deluge_storage_on_owner
-    // (a single AtomicBool, safe from any thread — see the module doc),
-    // higher_priority_waiting() reads the same unsynchronized `QUEUE` ring
-    // enqueue/dequeue do, so it's only called here from op bodies running on
-    // the fiber (the executor thread), never from this (driving) thread. ---
-    let yield_deadline = Instant::now() + Duration::from_secs(20);
-    tx.send((yield_op, 0, false, false)).expect("send yield_op");
-    wait_until(yield_deadline, "yield_op to start", || {
-        YIELD_OP_STARTED.load(Ordering::SeqCst)
-    });
-
-    let accepted_before = SUBMIT_ACCEPTED.load(Ordering::SeqCst);
-    tx.send((yield_high_op, 0, false, true))
-        .expect("send yield_high_op (high)");
-    wait_until(
-        yield_deadline,
-        "yield_high_op to be accepted onto the ring",
-        || SUBMIT_ACCEPTED.load(Ordering::SeqCst) >= accepted_before + 1,
-    );
-
-    // --- yield_op must observe the queued HIGH op and return early ---
-    wait_until(yield_deadline, "yield_op to return (early)", || {
-        YIELD_OP_DONE.load(Ordering::SeqCst)
-    });
-    assert!(
-        YIELD_RETURNED_EARLY.load(Ordering::SeqCst),
-        "yield_op should have observed higher_priority_waiting() == true and \
-         returned early rather than running to completion"
-    );
-    let units_done = YIELD_UNITS_DONE.load(Ordering::SeqCst);
-    assert!(
-        units_done < YIELD_TOTAL_UNITS,
-        "yield_op should NOT have completed all {YIELD_TOTAL_UNITS} units — \
-         higher_priority_waiting() should have short-circuited it early; \
-         completed {units_done}"
-    );
-
-    // --- re-dispatch a "continuation" NORMAL op, mirroring
-    // doRecorderCardRoutines resuming the drain on its next cadence after an
-    // early return — the already-queued HIGH op must run ahead of it ---
-    tx.send((yield_continuation_op, 0, false, false))
-        .expect("send yield_continuation_op");
-    wait_until(yield_deadline, "yield_high_op to finish", || {
-        YIELD_HIGH_DONE.load(Ordering::SeqCst)
-    });
-    wait_until(yield_deadline, "yield_continuation_op to finish", || {
-        YIELD_CONTINUATION_DONE.load(Ordering::SeqCst)
-    });
-    let high_order = YIELD_HIGH_ORDER.load(Ordering::SeqCst);
-    let cont_order = YIELD_CONTINUATION_ORDER.load(Ordering::SeqCst);
-    assert!(
-        high_order < cont_order,
-        "the HIGH op should have run before the re-dispatched NORMAL \
-         continuation (high_order={high_order}, cont_order={cont_order})"
-    );
-
     // --- block_on_fiber (rung 5, the flip): submit block_on_fiber_op (which
     // drives a hand-built, AtomicWaker-backed BofFuture through the actual
     // fiber::block_on_fiber fn — the same fn sd.rs's device read/write sites
@@ -1077,12 +802,12 @@ pub fn run() {
     // just an unrelated coarse fallback) ---
     let bof_deadline = Instant::now() + Duration::from_secs(20);
     let bof_start = Instant::now();
-    tx.send((block_on_fiber_op, 0, false, false))
+    tx.send((block_on_fiber_op, 0, false))
         .expect("send block_on_fiber_op");
     wait_until(bof_deadline, "block_on_fiber_op to start", || {
         BOF_STARTED.load(Ordering::SeqCst)
     });
-    tx.send((block_on_fiber_probe_op, 0, false, false))
+    tx.send((block_on_fiber_probe_op, 0, false))
         .expect("send block_on_fiber_probe_op");
     wait_until(bof_deadline, "block_on_fiber_op to finish", || {
         BOF_DONE.load(Ordering::SeqCst)

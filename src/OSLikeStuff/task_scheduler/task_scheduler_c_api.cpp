@@ -103,23 +103,6 @@ bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx) {
 	return true;
 }
 
-// HIGH-priority dispatch. On the cooperative BSPs there is no queue to jump ahead of:
-// the op runs inline, identical to deluge_worker_run. Priority only matters once ops
-// can queue behind each other (the Embassy worker fiber); here it's a no-op.
-bool deluge_worker_run_priority(void (*fn)(void*), void* ctx) {
-	fn(ctx);
-	return true;
-}
-
-// HIGH-priority query. On the cooperative BSPs there is no queue — a NORMAL op
-// runs to completion on the caller's stack before anything else can be
-// dispatched — so there is never a reason to step aside; always false, which
-// keeps a multi-unit caller like audio_engine::doRecorderCardRoutines draining
-// every recorder in one dispatch, exactly as before this existed.
-bool deluge_worker_higher_priority_waiting(void) {
-	return false;
-}
-
 // Cooperative/host default: run is inline, so the caller is never "on a separate
 // worker" — always false. The Embassy BSP supplies its own definition (fiber.rs)
 // that reports whether we are on the worker fiber; that wins at link time.

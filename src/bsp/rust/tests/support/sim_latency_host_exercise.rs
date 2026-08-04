@@ -17,41 +17,6 @@
 //! enqueue ring is documented as callable only from the executor thread (see
 //! that file's module doc), so the driving (test) thread hands the op to
 //! [`submit_pump`] over a channel rather than calling it directly.
-//!
-//! ## HIGH-priority dispatch: the `request_pump` shape
-//!
-//! The first block of [`run`] (above) proves suspension via
-//! `deluge_worker_run` (NORMAL). The streaming loader's real host dispatch path
-//! (`deluge::audio::stream::loader::request_pump`, `loader.cpp:158`) is
-//! different in one respect: once off the storage owner
-//! (`deluge_storage_on_owner()` false — always true for a task-runner
-//! calling `request_pump` on host, since nothing but `worker_poll` ever
-//! starts the fiber), it dispatches via `g_loader_coalescer.request(...)` — a
-//! `deluge::storage::Coalescer{sd_routine: false, priority: true}` — which
-//! forwards to `Owner::run_priority`, which is a one-line passthrough to
-//! `deluge_worker_run_priority` (HIGH), not `deluge_worker_run` (NORMAL):
-//!
-//! ```cpp
-//! // storage/owner.cpp
-//! bool Owner::run_priority(void (*fn)(void*), void* ctx) {
-//!     return deluge_worker_run_priority(fn, ctx);
-//! }
-//! // Coalescer::request, priority_ == true:
-//! dispatched = Owner::run_priority(&Coalescer::run_and_release, this);
-//! ```
-//!
-//! Both `Owner::run_priority` and `Coalescer::request`'s `priority_` branch
-//! are trivial passthroughs with no logic of their own beyond the
-//! single-flight in-flight guard (irrelevant to suspension timing) — so
-//! calling [`crate::fiber::deluge_worker_run_priority`] directly, as [`run`]'s
-//! HIGH-priority block does (via [`submit_pump_priority`]/[`priority_read_op`]),
-//! exercises the exact same queue path `request_pump` reaches, without
-//! needing a real queued `StreamedChunk` (which would need the full C++
-//! `deluge_app` linked, out of scope here) or duplicating
-//! `owner_host_exercise.rs`'s existing HIGH-vs-NORMAL ordering coverage
-//! (`deluge_worker_run_priority` dequeuing ahead of NORMAL ops is already
-//! proven there — this block's only new claim is "HIGH dispatch +
-//! `sim_latency` suspension compose correctly").
 #![cfg(all(not(target_os = "none"), feature = "sim_latency"))]
 
 use std::sync::Mutex;
@@ -128,33 +93,6 @@ async fn submit_pump() {
     }
 }
 
-/// HIGH-priority-dispatch sibling of [`SUBMIT_RX`]/[`submit_pump`]: the ONLY
-/// caller of `deluge_worker_run_priority` — the HIGH-priority entry point
-/// `request_pump`'s off-owner dispatch (via `Owner::run_priority`/
-/// `Coalescer`) actually reaches on host. See the module doc's
-/// "HIGH-priority dispatch" section for why exercising this call directly is
-/// a faithful proxy for `request_pump`'s real dispatch shape.
-static SUBMIT_RX_PRIORITY: Mutex<Option<mpsc::Receiver<Job>>> = Mutex::new(None);
-
-#[embassy_executor::task]
-async fn submit_pump_priority() {
-    loop {
-        let job = SUBMIT_RX_PRIORITY
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .try_recv();
-        match job {
-            Ok(f) => {
-                crate::fiber::deluge_worker_run_priority(f, core::ptr::null_mut());
-            }
-            Err(TryRecvError::Empty) => Timer::after_millis(1).await,
-            Err(TryRecvError::Disconnected) => return,
-        }
-    }
-}
-
 static READ_STARTED: AtomicBool = AtomicBool::new(false);
 static READ_DONE: AtomicBool = AtomicBool::new(false);
 static READ_STATUS_OK: AtomicBool = AtomicBool::new(false);
@@ -179,40 +117,6 @@ extern "C" fn read_op(_ctx: *mut core::ffi::c_void) {
     READ_STATUS_OK.store(status == 0, Ordering::SeqCst);
     READ_DATA_OK.store(buf == pattern(), Ordering::SeqCst);
     READ_DONE.store(true, Ordering::SeqCst);
-}
-
-/// Sector for the HIGH-priority-dispatch read — distinct from
-/// [`TEST_SECTOR`] so the two phases' writes/reads can't collide within the
-/// same backing image.
-const TEST_SECTOR_PRIORITY: u32 = 4001;
-
-static PRIO_READ_STARTED: AtomicBool = AtomicBool::new(false);
-static PRIO_READ_DONE: AtomicBool = AtomicBool::new(false);
-static PRIO_READ_STATUS_OK: AtomicBool = AtomicBool::new(false);
-static PRIO_READ_DATA_OK: AtomicBool = AtomicBool::new(false);
-static PRIO_READ_WAS_ON_FIBER: AtomicBool = AtomicBool::new(false);
-
-fn pattern_priority() -> [u8; PATTERN_LEN] {
-    let mut p = [0u8; PATTERN_LEN];
-    for (i, b) in p.iter_mut().enumerate() {
-        *b = (i as u8).wrapping_mul(53).wrapping_add(211);
-    }
-    p
-}
-
-/// HIGH-priority-dispatch sibling of [`read_op`]: same shape (runs on the fiber,
-/// issues the real `deluge_block_read` C-ABI call), but reached via
-/// `deluge_worker_run_priority` (see [`submit_pump_priority`]) instead of
-/// `deluge_worker_run` — the HIGH-priority path `request_pump` actually
-/// dispatches onto.
-extern "C" fn priority_read_op(_ctx: *mut core::ffi::c_void) {
-    PRIO_READ_WAS_ON_FIBER.store(crate::sd::deluge_storage_on_owner(), Ordering::SeqCst);
-    PRIO_READ_STARTED.store(true, Ordering::SeqCst);
-    let mut buf = [0u8; PATTERN_LEN];
-    let status = crate::sd::deluge_block_read(0, buf.as_mut_ptr(), TEST_SECTOR_PRIORITY, 1);
-    PRIO_READ_STATUS_OK.store(status == 0, Ordering::SeqCst);
-    PRIO_READ_DATA_OK.store(buf == pattern_priority(), Ordering::SeqCst);
-    PRIO_READ_DONE.store(true, Ordering::SeqCst);
 }
 
 /// Poll `cond` until true, sleeping in short increments; panics with `what` if
@@ -253,8 +157,6 @@ pub fn run() {
 
     let (tx, rx) = mpsc::channel::<Job>();
     *SUBMIT_RX.lock().unwrap() = Some(rx);
-    let (tx_priority, rx_priority) = mpsc::channel::<Job>();
-    *SUBMIT_RX_PRIORITY.lock().unwrap() = Some(rx_priority);
 
     std::thread::Builder::new()
         .name("deluge-sim-latency-host".into())
@@ -263,7 +165,6 @@ pub fn run() {
             executor.run(|spawner: Spawner| {
                 spawner.spawn(worker_pump().unwrap());
                 spawner.spawn(submit_pump().unwrap());
-                spawner.spawn(submit_pump_priority().unwrap());
                 spawner.spawn(counter_pump().unwrap());
                 // The modeled-latency background task under test (see
                 // `sd.rs`'s `sim_latency::pump` doc comment) — without this,
@@ -360,93 +261,6 @@ pub fn run() {
         read_elapsed < Duration::from_secs(5),
         "on-fiber read took {read_elapsed:?} to resolve a {OVERHEAD_US}us \
          modeled delay — suggests it isn't being driven promptly by its Waker"
-    );
-
-    // --- the same suspend-and-yield proof, but dispatched via
-    // `deluge_worker_run_priority` — the exact primitive `request_pump`'s real
-    // off-owner path (`Coalescer{priority: true}` -> `Owner::run_priority`)
-    // forwards to with no intervening logic (see the module doc's
-    // "HIGH-priority dispatch" section). Proves the HIGH-priority queue path
-    // and `sim_latency` suspension compose correctly, not just NORMAL
-    // dispatch (above). ---
-    let pat2 = pattern_priority();
-    let write_start2 = Instant::now();
-    let status2 = crate::sd::deluge_block_write(0, pat2.as_ptr(), TEST_SECTOR_PRIORITY, 1);
-    let write_elapsed2 = write_start2.elapsed();
-    assert_eq!(
-        status2, 0,
-        "Phase 2: off-fiber deluge_block_write failed: status={status2}"
-    );
-    assert!(
-        write_elapsed2 >= Duration::from_micros(OVERHEAD_US as u64),
-        "Phase 2: off-fiber write returned in {write_elapsed2:?}, faster than \
-         the modeled {OVERHEAD_US}us command overhead"
-    );
-
-    let counter_before2 = COUNTER.load(Ordering::SeqCst);
-    let read_start2 = Instant::now();
-    tx_priority
-        .send(priority_read_op)
-        .expect("send priority_read_op");
-
-    let deadline2 = Instant::now() + Duration::from_secs(20);
-    wait_until(deadline2, "priority_read_op to start", || {
-        PRIO_READ_STARTED.load(Ordering::SeqCst)
-    });
-
-    // Sample partway through the modeled delay: same suspend-and-yield check
-    // as above, this time for the HIGH-priority-dispatched op.
-    std::thread::sleep(Duration::from_millis(u64::from(OVERHEAD_US) / 1000 / 2));
-    assert!(
-        !PRIO_READ_DONE.load(Ordering::SeqCst),
-        "Phase 2: priority_read_op completed suspiciously fast (before half \
-         the modeled delay elapsed) — the modeled latency isn't being honoured \
-         on the HIGH-priority dispatch path"
-    );
-    let counter_mid2 = COUNTER.load(Ordering::SeqCst);
-    assert!(
-        counter_mid2 > counter_before2,
-        "Phase 2: the independent counter task made no progress while \
-         priority_read_op was suspended (counter_before={counter_before2}, \
-         counter_mid={counter_mid2}) — a HIGH-priority-dispatched op did not \
-         actually yield the fiber to the executor"
-    );
-
-    wait_until(deadline2, "priority_read_op to finish", || {
-        PRIO_READ_DONE.load(Ordering::SeqCst)
-    });
-    let read_elapsed2 = read_start2.elapsed();
-
-    let counter_after2 = COUNTER.load(Ordering::SeqCst);
-    assert!(
-        counter_after2 > counter_mid2,
-        "Phase 2: the independent counter task stalled during the back half \
-         of the suspension (counter_mid={counter_mid2}, counter_after={counter_after2})"
-    );
-    assert!(
-        PRIO_READ_WAS_ON_FIBER.load(Ordering::SeqCst),
-        "Phase 2: priority_read_op did not observe deluge_storage_on_owner() \
-         == true — the HIGH-priority dispatch did not actually reach the fiber"
-    );
-    assert!(
-        PRIO_READ_STATUS_OK.load(Ordering::SeqCst),
-        "Phase 2: deluge_block_read returned a non-OK status"
-    );
-    assert!(
-        PRIO_READ_DATA_OK.load(Ordering::SeqCst),
-        "Phase 2: deluge_block_read returned data that did not match the \
-         pattern written earlier"
-    );
-    assert!(
-        read_elapsed2 >= Duration::from_micros(OVERHEAD_US as u64),
-        "Phase 2: HIGH-priority-dispatched read completed in {read_elapsed2:?}, \
-         faster than the modeled {OVERHEAD_US}us command overhead"
-    );
-    assert!(
-        read_elapsed2 < Duration::from_secs(5),
-        "Phase 2: HIGH-priority-dispatched read took {read_elapsed2:?} to \
-         resolve a {OVERHEAD_US}us modeled delay — suggests it isn't being \
-         driven promptly by its Waker"
     );
 
     let _ = std::fs::remove_file(&img);

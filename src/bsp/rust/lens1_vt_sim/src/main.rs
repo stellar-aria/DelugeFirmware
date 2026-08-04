@@ -159,16 +159,6 @@ unsafe extern "C" {
     fn deluge_sim_underrun_unassign_count() -> u64;
 }
 
-// Negative-control-B knobs (`harness/streaming_controls.h`): sim-only, off by
-// default, demote the loader's HIGH-priority dispatch to NORMAL / disable the recorder
-// drain's cooperative yield-to-HIGH check, so a mechanism-on run can be compared against a
-// mechanism-off run at the same modeled latency. See `main`'s
-// `LENS1_FORCE_NORMAL_PRIORITY`/`LENS1_DISABLE_RECORDER_YIELD` handling below.
-unsafe extern "C" {
-    fn deluge_sim_set_force_normal_priority(enabled: bool);
-    fn deluge_sim_set_recorder_yield_disabled(disabled: bool);
-}
-
 /// `AudioEngine::routine_task`'s virtual per-block cadence: exactly one
 /// 128-frame block's worth of real time, in microseconds (128 / 44100 s per
 /// block). This is the default `scheduler::set_audio_period_override_us`
@@ -311,22 +301,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
-    // Negative-control-B knobs (see the `extern "C"` block above's doc comment).
-    // Both default OFF (production/mechanism-on behaviour) — set either to `1` to run the
-    // SAME scenario with that rung-5 mechanism forced off, for an on-vs-off comparison at a
-    // fixed challenging latency.
-    let force_normal_priority = std::env::var("LENS1_FORCE_NORMAL_PRIORITY")
-        .ok()
-        .is_some_and(|s| s == "1");
-    let disable_recorder_yield = std::env::var("LENS1_DISABLE_RECORDER_YIELD")
-        .ok()
-        .is_some_and(|s| s == "1");
-
     log::info!(
         "lens1-vt-sim: fixture={fixture} song={song_path} target_blocks={target_blocks} \
          throughput_bps={throughput_bps} overhead_us={overhead_us} audio_block_us={audio_block_us} \
-         budget_ms={budget_ms} force_normal_priority={force_normal_priority} \
-         disable_recorder_yield={disable_recorder_yield}"
+         budget_ms={budget_ms}"
     );
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same tooling
@@ -345,18 +323,6 @@ fn main() {
     // See this file's module doc: sidesteps the boot-time off-fiber block_on
     // livelock. Set once, before anything spawns.
     sd::sim_latency::set_off_fiber_instant(true);
-    // Zero-jitter starvation guard (see `fiber.rs`'s `HIGH_PRIORITY_FAIRNESS_BOUND`
-    // doc comment): without this, `loader::request_pump`'s HIGH-priority
-    // re-enqueue (~100-200us cadence, no wall-clock jitter to break the tie)
-    // starves song-load's NORMAL-priority dispatch forever on this virtual
-    // clock. 8 is a small, arbitrary bound — large enough that a genuinely
-    // urgent HIGH burst still wins comfortably, small enough that a starved
-    // NORMAL job waits at most ~8 HIGH cycles (under 2ms of virtual time).
-    fiber::set_high_priority_fairness_bound(8);
-    // Negative-control-B knobs: apply before anything spawns (same rule as the two
-    // hooks above) — see the `extern "C"` block's doc comment.
-    unsafe { deluge_sim_set_force_normal_priority(force_normal_priority) };
-    unsafe { deluge_sim_set_recorder_yield_disabled(disable_recorder_yield) };
     // `post_load_sim_latency`'s design applies the modeled latency ONLY after
     // load completes, deliberately sparing the essential-sample preload (load
     // has no real-time deadline). That's also WHY it can never produce a

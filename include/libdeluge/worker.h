@@ -53,34 +53,6 @@ bool deluge_worker_run(void (*fn)(void*), void* ctx);
 ///         full) and will NOT run — on false NOTHING was enqueued and no hold was taken.
 bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
 
-/// Like deluge_worker_run, but the operation is HIGH-priority: it dequeues ahead of
-/// every already-queued or later-queued deluge_worker_run/deluge_worker_run_sd_routine
-/// (NORMAL) op, FIFO among other HIGH ops. For audio-streaming reads, which must not
-/// queue behind UI/recorder work on the shared worker ring. Does NOT take an
-/// SD-routine hold — priority and the SD-routine hold are orthogonal.
-/// Cooperative/host: identical to deluge_worker_run (inline) — legacy/host has no
-/// queue, so priority is a no-op there.
-/// @return as deluge_worker_run: true if it ran/queued, false if dropped (queue full)
-///         and will NOT run — on false NOTHING was enqueued.
-bool deluge_worker_run_priority(void (*fn)(void*), void* ctx);
-
-/// Is a HIGH-priority op currently queued (waiting to run) on the worker? A
-/// long-running caller that processes several independent units per dispatch
-/// (e.g. audio_engine::doRecorderCardRoutines, which walks every live
-/// SampleRecorder and drives one cardRoutine() each — each recorder's own
-/// per-dispatch write is already bounded to a single cluster) can check this
-/// after fully processing one unit and, if true, stop for this dispatch
-/// rather than continuing to the next unit. The next dispatch resumes the
-/// traversal where it left off, so a queued HIGH op (an audio-streaming
-/// read) is bounded to waiting behind at most one more unit instead of the
-/// whole multi-unit loop.
-/// Cooperative/host: always returns false — there is no queue, so there is
-/// never a reason to step aside (inline behaviour is unchanged: the caller
-/// drains fully, exactly as before this existed).
-/// Embassy: true while any deluge_worker_run_priority-submitted op is resident
-/// in the worker ring (queued, not yet dequeued).
-bool deluge_worker_higher_priority_waiting(void);
-
 /// True iff the calling context IS the storage worker (the worker fiber on the
 /// Embassy BSP). Lets a dual-context caller skip re-dispatching when it is
 /// already on the worker — dispatching again would nest a queued op inside the

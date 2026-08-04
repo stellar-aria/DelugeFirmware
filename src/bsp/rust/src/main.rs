@@ -601,19 +601,15 @@ async fn app_task() {
 ///
 /// After init, this runs the SAME worker-fiber pump loop as the device
 /// [`app_task`] (see its doc comment for the full rationale) rather than
-/// parking. The loop is needed here too: `loader::request_pump` (the
-/// streaming loader's ~0.1ms `addRepeatingTask`, registered by
-/// `registerTasks()` above) calls `deluge_storage_on_owner()` (==
-/// `fiber::on_fiber()`) every tick, and off the fiber (always true here,
-/// since nothing ever started it) dispatches onto `Owner::run_priority` →
-/// `deluge_worker_run_priority`, i.e. THIS worker's ring. Without this loop
-/// nothing ever drains that ring: the `Coalescer`'s single-flight guard
-/// latches `in_flight_ = true` on the first dispatch and is never released
-/// (`run_and_release` never runs), so every later `request_pump` tick
-/// silently no-ops — streaming fills would never happen on this harness. This
-/// loop is what lets a real streaming cluster read (once one is queued — see
-/// the `sim_latency`/streaming-underrun harness) genuinely reach the fiber
-/// and, under `sim_latency`, suspend it.
+/// parking. The loop is needed here too: it drives the worker ring, so
+/// owner-dispatched storage work actually runs. Coalesced owner ops (the
+/// recorder card-write drain, card re-init) enqueue onto that ring; without the
+/// loop draining it, a `Coalescer`'s single-flight guard latches
+/// `in_flight_ = true` on its first dispatch and never releases
+/// (`run_and_release` never runs), so every later request silently no-ops. It
+/// is also what lets a real streaming cluster read (once one is queued — see
+/// the `sim_latency`/streaming-underrun harness) genuinely reach the fiber and,
+/// under `sim_latency`, suspend it.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 #[embassy_executor::task]
 async fn host_app_task() {

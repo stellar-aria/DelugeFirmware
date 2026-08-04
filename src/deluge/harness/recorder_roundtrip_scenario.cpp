@@ -482,9 +482,9 @@ extern "C" int32_t deluge_scenario_run_recorder_roundtrip() {
 
 	// SR3b Task 4: probe live read-back of a still-recording sample on THIS target. RecordingReadSource
 	// is gone, so this must NOT resolve READY (state=1) anywhere -- a still-recording Sample has no
-	// valid reader. The failed read gets re-queued at lowest priority rather than failed outright (see
-	// loader.cpp's reconstruct_one()), so the acquire is expected to stay LOADING (state=2), not settle
-	// on UNAVAILABLE.
+	// valid reader. The failed read gets re-queued at lowest priority rather than failed outright (the
+	// async fill task's fill_once, streaming_loader.rs), so the acquire is expected to stay LOADING
+	// (state=2), not settle on UNAVAILABLE.
 	uint8_t state = deluge_harness_recorder_probe(/*numChannels=*/1, /*numFrames=*/50, /*pumpDrainTicks=*/10);
 	printf("recorder live-readback probe: state=%u (1=READY 2=LOADING 3=UNAVAILABLE 0=harness-error)\n", state);
 	deluge_harness_recorder_probe_end();

@@ -219,7 +219,8 @@ mod services;
 mod signals;
 /// The async cluster-fill task (R1) and its selector/wakeup C ABI (R2.1): drains
 /// the resource manager's loader queue on this executor, awaiting the SD read
-/// instead of running it inline in the C++ fiber pump. Compiled on the Embassy
+/// instead of running it inline on the fiber as the old C++ `loader::pump()`
+/// did. Compiled on the Embassy
 /// BSP unconditionally (device, or host under `host_app`) so
 /// `deluge_streaming_async_active`/`deluge_streaming_signal_fill` always link;
 /// the task itself (spawned below) and the rest of the drain machinery stay
@@ -455,9 +456,9 @@ pub extern "C" fn main() -> ! {
         spawner.spawn(usb::midi_tx_task(usb_midi.ep_in).unwrap());
         spawner.spawn(app_task().unwrap());
         // R2.1: the async cluster-fill task, selectable via `async_streaming_loader`.
-        // Owns the streaming loader queue when active (see loader.cpp's
-        // `deluge_streaming_async_active()` gate); inert (never polled beyond its
-        // idle wait) unless the C++ enqueue path signals `FILL_WAKE`.
+        // Owns the streaming loader queue when active (feature `async_streaming_loader`);
+        // inert (never polled beyond its idle wait) unless the C++ enqueue path
+        // signals `FILL_WAKE`.
         #[cfg(feature = "async_streaming_loader")]
         spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
     });

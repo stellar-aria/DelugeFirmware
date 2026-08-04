@@ -114,10 +114,10 @@ pub struct ScenarioResult {
     /// Audio blocks rendered from just before playback started to when the target was
     /// reached (or the timeout gave up) — see `crate::audio_host::drive_count()`.
     pub blocks_rendered: u64,
-    /// On-fiber SD block reads observed over the same window — the loader's real,
-    /// dispatched cluster reads (`crate::sd::stats::on_fiber_reads()`). This is the
-    /// proof of `request_pump`'s REAL dispatch, with a REAL queued cluster (this song's
-    /// samples), drained through `fiber::worker_poll()`.
+    /// On-fiber SD block reads observed over the same window — the async fill task's
+    /// real, dispatched cluster reads (`crate::sd::stats::on_fiber_reads()`). This is the
+    /// proof of the async streaming-fill task's REAL dispatch, with a REAL queued cluster
+    /// (this song's samples), drained through `fiber::worker_poll()`.
     pub cluster_reads: u64,
     /// On-fiber SD block writes observed over the same window — the recorder's real,
     /// dispatched card writes (`crate::sd::stats::on_fiber_writes()`).

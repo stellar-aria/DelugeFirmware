@@ -500,7 +500,7 @@ pub extern "C" fn deluge_block_write(
 /// opposed to the boot-time FatFS mount or any other off-fiber access (which always
 /// runs `block_on`-only and never suspends). This is the evidence the streaming-underrun
 /// harness's scenario driver (`scenario.rs`) asserts on: a real queued cluster read
-/// (`loader::request_pump`, HIGH priority) or recorder card-write
+/// (the async streaming-fill task) or recorder card-write
 /// (`requestRecorderCardRoutines`, SD-routine) actually DRAINED through
 /// `fiber::worker_poll()`, not just that the dispatch was attempted. Compiled for every
 /// host build (not gated on `host_app`/`sim_latency`) — the counters sit idle (never

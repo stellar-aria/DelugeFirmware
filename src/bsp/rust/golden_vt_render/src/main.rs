@@ -166,7 +166,7 @@ mod sd_image;
 mod services;
 /// The async cluster-fill task + its selector/wakeup C ABI. The
 /// selector/wakeup symbols (`deluge_streaming_async_active`/
-/// `deluge_streaming_signal_fill`) are always compiled so `loader.cpp`'s call
+/// `deluge_streaming_signal_fill`) are always compiled so their call
 /// sites link regardless of the `async_streaming_loader` feature (see that
 /// file's module doc); the actual drain machinery +
 /// [`streaming_loader::streaming_fill_task`] stay gated on the feature and are

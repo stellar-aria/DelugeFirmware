@@ -30,9 +30,9 @@
 /// `SampleStream` and calls `deluge_sample_region_acquire_ex(index=0)` — the exact same region-port
 /// entry point `SampleLowLevelReader` uses for real playback (see `sample_low_level_reader.cpp`). The
 /// returned `DelugeRegionState`: with `RecordingReadSource` deleted, `SampleStream::make_read_source()`
-/// always returns an `EfatfsReadSource` over a 0 handle, so the read fails and the loader re-queues it
-/// (`deluge::audio::stream::loader.cpp`'s `reconstruct_one()`) rather than failing outright -- the
-/// acquire is expected to settle on LOADING, uniformly, on every target.
+/// always returns an `EfatfsReadSource` over a 0 handle, so the read fails and the async fill task
+/// re-queues it at lowest priority (`streaming_loader.rs`'s `fill_once`) rather than failing
+/// outright -- the acquire is expected to settle on LOADING, uniformly, on every target.
 ///
 /// `DELUGE_HOST`-only, same reach as `harness/streaming_scenario.h` (compiled into
 /// deluge_host/deluge_render/deluge_loadcheck AND the Rust Embassy `host_app` build, never the ARM

@@ -1,8 +1,8 @@
 //! The Rust async cluster-fill task (R1.1) and its BSP wiring (R2.1): drains the
 //! resource manager's loader queue (`deluge_resource_loader_next`) on the same
 //! thread-mode Embassy executor the fiber pump and the C++ enqueue path run on,
-//! awaiting the actual SD read instead of running it synchronously inside the
-//! C++ `pump()` fiber op.
+//! awaiting the actual SD read instead of running it synchronously inline, as
+//! the old C++ `loader::pump()` fiber op once did.
 //!
 //! ## Two compilation tiers
 //!
@@ -46,8 +46,9 @@
 //! ## Concurrency
 //!
 //! The manager (`DelugeResource*`) is `!Send`/`!Sync` by design — single-executor
-//! only. [`streaming_fill_task`] and the C++ enqueue path (`loader.cpp`) both run
-//! on the one thread-mode Embassy executor the whole app runs on, so the raw
+//! only. [`streaming_fill_task`] and the C++ enqueue path (the CLUSTER_ENQUEUE
+//! sites in `sample_stream.cpp`) both run on the one thread-mode Embassy
+//! executor the whole app runs on, so the raw
 //! pointer never needs to (and must never) cross threads.
 use core::ffi::c_void;
 
@@ -66,8 +67,9 @@ pub static FILL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Whether the async streaming-fill task owns the loader queue on this
 /// build. The return value is the only thing that depends on the cargo
-/// feature — the symbol itself must always exist so `loader.cpp`'s call site
-/// links regardless of which config produced this BSP image.
+/// feature — the symbol itself must always exist so its call site (the Rust
+/// range reader's fill-route gate, `deluge_sample_reader`) links regardless of
+/// which config produced this BSP image.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_streaming_async_active() -> bool {
     cfg!(feature = "async_streaming_loader")
@@ -267,8 +269,8 @@ pub extern "C" fn deluge_streaming_drain_queue_blocking() -> bool {
 // this file can still reach it as `streaming_loader::StreamingFillDescriptor`.
 pub use deluge_sample_fill::StreamingFillDescriptor;
 
-/// `kLowestLoaderPriority` (`loader.cpp`) — re-enqueue value for a cluster whose
-/// read just failed while still wanted, so it sinks behind everything else
+/// `kLowestLoaderPriority` (formerly in the now-deleted `loader.cpp`) — re-enqueue
+/// value for a cluster whose read just failed while still wanted, so it sinks behind everything else
 /// instead of being popped again immediately.
 #[cfg(feature = "async_streaming_loader")]
 const LOWEST_PRIORITY: u32 = 0xFFFF_FFFF;
@@ -314,22 +316,23 @@ pub trait FillOps {
 }
 
 /// Drain the loader queue: for each queued cluster, resolve → await the read →
-/// convert/stitch/mark-ready. Mirrors `loader.cpp`'s `pump()`/`reconstruct_one`
-/// exactly, just with the read awaited instead of run inline:
-/// - the post-`next()` unloadable safety-net skip (`loader.cpp`'s "Safety net"
-///   comment) — drop, keep draining, don't count it;
+/// convert/stitch/mark-ready. Reproduces the drain logic the now-deleted
+/// `loader.cpp` `pump()`/`reconstruct_one` used to run, just with the read
+/// awaited instead of run inline:
+/// - the post-`next()` unloadable safety-net skip (the old `pump()`'s "Safety
+///   net" step) — drop, keep draining, don't count it;
 /// - the post-`begin()` `!ok` skip (unloadable / geometry error) — drop, keep
 ///   draining;
 /// - on a **successful** read: run the convert/stitch/publish `finish` tail,
-///   then keep draining (`reconstruct_one`'s `true` arm);
+///   then keep draining (`reconstruct_one`'s success arm);
 /// - on a **failed** read: `finish` is never called (it's the success-only
-///   tail — see `reconstruct_one`, which never reaches its convert/stitch/
+///   tail — as in `reconstruct_one`, which never reached its convert/stitch/
 ///   publish body on a failed read either). Instead check the lease count: if
 ///   it dropped to 0 while loading, the chunk is already unwanted — drop it
 ///   and keep draining (`reconstruct_one`'s `lease_count(...) == 0` arm).
 ///   Otherwise a caller still wants it — re-enqueue at lowest priority and
 ///   stop, else we'd keep re-popping the same cluster until the card is back
-///   (`reconstruct_one`'s `false` arm / `loader.cpp:122-127`).
+///   (`reconstruct_one`'s failed-read-still-wanted arm).
 #[cfg(feature = "async_streaming_loader")]
 pub async fn fill_once<O: FillOps>(ops: &O) {
     loop {

@@ -250,9 +250,9 @@ fn fill_once_happy_path_drains_one_cluster() {
 /// Read failure while still leased: `read` returns false → `finish` is NOT
 /// called (it's the success-only convert/stitch/publish tail) → the lease
 /// count is checked and found still > 0 → the cluster is re-enqueued at
-/// `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop stops immediately (mirrors
-/// `reconstruct_one`'s `false` arm / `pump()`'s behaviour at
-/// `loader.cpp:123-126`) — no second `next()` call in the same `fill_once`.
+/// `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop stops immediately (the
+/// failed-read-still-wanted behaviour the now-deleted `loader.cpp`
+/// `reconstruct_one` used) — no second `next()` call in the same `fill_once`.
 #[test]
 fn fill_once_read_failure_reenqueues_lowest_and_stops() {
     let mut chunk = one_chunk(0, true);
@@ -282,9 +282,9 @@ fn fill_once_read_failure_reenqueues_lowest_and_stops() {
 /// Read failure while UNLEASED: `read` returns false, and by the time it's
 /// checked the cluster has already dropped to 0 leases (already unwanted) →
 /// no `finish`, no `enqueue_lowest` — the cluster is just dropped and the loop
-/// keeps draining the next queued cluster (mirrors `reconstruct_one`'s
-/// `lease_count(...) == 0` arm / `pump()` continuing to drain rather than
-/// stopping). Both queued clusters are unleased-and-failing here so the whole
+/// keeps draining the next queued cluster (the `lease_count(...) == 0`,
+/// keep-draining behaviour the now-deleted `loader.cpp` `reconstruct_one`/`pump()`
+/// used rather than stopping). Both queued clusters are unleased-and-failing here so the whole
 /// queue drains to empty rather than stopping after the first — the
 /// "continues" half of the behaviour, complementing the single-chunk case in
 /// `fill_once_read_failure_reenqueues_lowest_and_stops`.
@@ -417,8 +417,8 @@ fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
 
 /// A chunk marked unloadable (`is_unloadable` reports true) is skipped right
 /// after `next()` — no `begin`, no `read`, no `finish` — while a following
-/// loadable chunk still drains normally (mirrors `pump()`'s "Safety net" skip
-/// at `loader.cpp`, just before `reconstruct_one` would otherwise run).
+/// loadable chunk still drains normally (the "Safety net" skip the now-deleted
+/// `loader.cpp` `pump()` ran just before `reconstruct_one`).
 #[test]
 fn fill_once_skips_unloadable_chunk() {
     let mut unloadable = one_chunk(0, true);

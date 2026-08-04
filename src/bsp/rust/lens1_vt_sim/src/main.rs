@@ -140,7 +140,7 @@ mod services;
 /// R3.2b: mirrors `../../src/main.rs`'s `mod streaming_loader` — the R1/R2.1
 /// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
 /// symbols (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
-/// are always compiled so `loader.cpp`'s call sites link regardless of the
+/// are always compiled so their call sites link regardless of the
 /// `async_streaming_loader` feature (see that file's module doc); the actual
 /// drain machinery + [`streaming_loader::streaming_fill_task`] stay gated on
 /// the feature and are only spawned (below, in `main`) when it's enabled.

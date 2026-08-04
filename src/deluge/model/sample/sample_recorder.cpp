@@ -65,7 +65,7 @@ SampleRecorder::~SampleRecorder() {
 // is being deleted IMPORTANT!!!! You have to set sample to NULL after calling this, if not destructing
 void SampleRecorder::detachSample() {
 
-	// SR3b: our capture buffers are privately owned (never registered with the shared residency
+	// Our capture buffers are privately owned (never registered with the shared residency
 	// table), so there are no "reasons"/leases to drop here -- just free whatever we still hold:
 	// any undrained buffers (an abort mid-recording) plus anything sitting in the recycle ring.
 	releaseCaptureBuffers();
@@ -73,7 +73,7 @@ void SampleRecorder::detachSample() {
 	sample->removeReason("E400");
 }
 
-// SR3b: frees every capture buffer we still own -- undrained bufferTable_ entries (firstUnwrittenClusterIndex
+// Frees every capture buffer we still own -- undrained bufferTable_ entries (firstUnwrittenClusterIndex
 // through the last assigned index, which covers a live currentRecordBuffer too, since it's always the
 // last entry assigned) plus anything sitting in the recycle ring. Called from detachSample(), which by
 // its own contract only ever runs once the fiber is done touching this recorder (status has reached
@@ -92,7 +92,7 @@ void SampleRecorder::releaseCaptureBuffers() {
 	}
 }
 
-// SR3b: [audio thread] Get a capture buffer -- a recycled one if the fiber's returned any, otherwise
+// [audio thread] Get a capture buffer -- a recycled one if the fiber's returned any, otherwise
 // grow by allocating fresh. Either way this never blocks and never fails silently by dropping audio;
 // the only failure mode is genuine RAM exhaustion (nullptr), same as the shared-table allocation this
 // replaces. Sized Cluster::size plus a few trailing bytes of overshoot slack -- a sample frame can
@@ -105,7 +105,7 @@ std::byte* SampleRecorder::allocateBuffer() {
 	return static_cast<std::byte*>(deluge::memory::alloc_external(Cluster::size + kTrailingSlackBytes, 16));
 }
 
-// SR3b: [fiber] Return a flushed buffer's memory for reuse. Best-effort -- if the recycle ring is
+// [fiber] Return a flushed buffer's memory for reuse. Best-effort -- if the recycle ring is
 // full (the audio thread has fallen far behind draining it, unlikely given its small capacity here
 // only bounds *reuse*, not availability), just free the buffer outright; the audio thread will
 // allocate fresh next time it needs one. Either way, no audio data is at risk: this only runs after
@@ -122,10 +122,10 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
                             Output* outputRecordingFrom_, RecorderConfig config) {
 
 	outputRecordingFrom = outputRecordingFrom_;
-	// SR3b: no longer gates any shared-cluster "reason" bookkeeping (the recorder no longer touches
-	// the shared residency table at all) -- kept/stored for a later task to hook into the watermark-
-	// based read-bound wiring (a still-recording AudioClip's live-loop monitor wants its first few
-	// buffers to stay quickly available).
+	// The recorder no longer touches the shared residency table at all, so this no longer gates any
+	// shared-cluster "reason" bookkeeping -- kept/stored for future watermark-based read-bound wiring
+	// (a still-recording AudioClip's live-loop monitor wants its first few buffers to stay quickly
+	// available).
 	keepingReasonsForFirstClusters = newKeepingReasons;
 	recordingExtraMargins = shouldRecordExtraMargins;
 	folderID = newFolderID;
@@ -138,11 +138,11 @@ Error SampleRecorder::setup(int32_t newNumChannels, AudioInputChannel newMode, b
 
 	sample = new (sample_memory) Sample;
 
-	// SR3b: reserve OUR OWN buffer table's segment-pointer index to the max recording size up front
+	// Reserve our own buffer table's segment-pointer index to the max recording size up front
 	// (single-threaded, before any concurrent audio-thread growth in createNextCluster), so that
-	// growth never reallocates the index under the fiber's concurrent operator[] reads. B2: the
+	// growth never reallocates the index under the fiber's concurrent operator[] reads (B2: the
 	// SegmentedVector keeps element addresses stable, but its pointer index must be pre-reserved
-	// to stay stable under concurrent growth. maxClusters is derived from the runtime cluster size,
+	// to stay stable under concurrent growth). maxClusters is derived from the runtime cluster size,
 	// so this imposes no recording-length limit beyond the existing MAX_FILE_SIZE cap.
 	bufferTable_.reserve(1 << (MAX_FILE_SIZE_MAGNITUDE - Cluster::size_magnitude));
 
@@ -714,8 +714,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 			// writeCluster() (above) is what recycles this buffer -- if we didn't call it, recycle
 			// directly so this buffer's memory isn't leaked.
 			recycleBuffer(currentRecordBuffer);
-			// SR3b Task 3 (Minor fix): same drained-slot nulling writeCluster() does -- see its
-			// comment. currentRecordClusterIndex still refers to this now-recycled buffer's slot here.
+			// Same drained-slot nulling writeCluster() does -- see its comment.
+			// currentRecordClusterIndex still refers to this now-recycled buffer's slot here.
 			bufferTable_[currentRecordClusterIndex.load(std::memory_order_relaxed)] = nullptr;
 		}
 
@@ -808,7 +808,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 		    sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile);
 
-		// SR3b: the buffer that held the header (bufferTable_[0]) may have already been recycled --
+		// The buffer that held the header (bufferTable_[0]) may have already been recycled --
 		// it was flushed to disk before we ever reach here (the pending-cluster flush above always
 		// runs first), so its physical memory could be reused for a later index by now. Read the
 		// header sector BACK from our own still-open write context instead (positional read_at_via
@@ -816,7 +816,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// (and so re-writes) only as many bytes as actually exist on disk, never padding past the
 		// real file extent.
 		//
-		// R3 Task 6: this goes out through the still-open persistent write context via Stream::write_at
+		// This goes out through the still-open persistent write context via Stream::write_at
 		// -- write_at needs an open handle, so this must happen BEFORE file->close() below.
 		if (headerNeedsPatch) {
 			audioDataLengthBytesAsWrittenToFile = sample->audioDataLengthBytes;
@@ -903,7 +903,7 @@ void SampleRecorder::updateDataLengthInHeader(std::span<std::byte> headerBuf) {
 
 extern int32_t pendingGlobalMIDICommandNumClustersWritten;
 
-// SR3b: called by the fiber (writeOneCompletedCluster()/finalizeRecordedFile()) for a buffer whose
+// Called by the fiber (writeOneCompletedCluster()/finalizeRecordedFile()) for a buffer whose
 // index is already < currentRecordClusterIndex (or the final partial one), so bufferTable_[clusterIndex]
 // is stable -- the audio thread never rewrites an already-assigned slot, only appends new ones (see
 // bufferTable_'s doc). Flushes it to disk, advances the committed-length watermark, then recycles the
@@ -918,7 +918,7 @@ Error SampleRecorder::writeCluster(int32_t clusterIndex, size_t numBytes) {
 	}
 
 	recycleBuffer(buffer);
-	// SR3b Task 3 (Minor fix): null the table slot now that its buffer has been recycled -- this
+	// Null the table slot now that its buffer has been recycled -- this
 	// index is drained (< firstUnwrittenClusterIndex once the caller advances it) and must never be
 	// read again, but leaving a dangling pointer here would let a stale/reused buffer linger at a
 	// drained index. Nulling it here keeps bufferTable_ free of dangling drained-buffer pointers;
@@ -1284,9 +1284,7 @@ bool SampleRecorder::inputHasNoRightChannel() {
 namespace {
 /// @brief Reconstruct the int32 value `alterFile()`'s per-frame transform operates on from a
 ///        stored 24-bit little-endian sample: bytes [0,1,2] of @p src become bits [8,31] of the
-///        result, with bits [0,7] always 0. Bit-identical to the pre-rewrite pointer trick
-///        (`*(int32_t*)(readPos-1) & 0xFFFFFF00`), which read the same 3 stored bytes into the SAME
-///        bit positions via an intentionally-misaligned 4-byte read plus a low-byte mask.
+///        result, with bits [0,7] always 0.
 int32_t read24AsShiftedInt32(const std::byte* src) {
 	uint32_t b0 = static_cast<uint32_t>(src[0]);
 	uint32_t b1 = static_cast<uint32_t>(src[1]);
@@ -1310,15 +1308,13 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 
 	D_PRINTLN("altering file");
 
-	// R3 Task 6: this function's SD writes go through a persistent write context -- opened here, at
+	// This function's SD writes go through a persistent write context -- opened here, at
 	// the top, and held open for the WHOLE alteration. Every write below reuses it via
 	// Stream::write_at, and it's closed exactly once: either by the end-of-alteration truncate
 	// block, or, if that branch doesn't run (no truncation was needed), right before this function
-	// returns. (Tasks 3-5 gated this behind an `efatfsActive` runtime check, with a C-FatFS fallback
-	// that addressed the card directly by sdAddress; retired along with sdAddress -- the recorder is
-	// efatfs-only now.)
+	// returns. The recorder is efatfs-only.
 	//
-	// SR3 rewrite: this whole function is now a positional file->file transform over two independent
+	// This whole function is a positional file->file transform over two independent
 	// byte cursors on the SAME open stream -- an input read cursor and an output write cursor, both
 	// starting at `audioDataStartPosBytes`. Output is never longer than input (mono output frames are
 	// <= the mono/stereo input frames they're derived from), so in-place positional writes never
@@ -1442,7 +1438,7 @@ Error SampleRecorder::alterFile(MonitoringAction action, int32_t lshiftAmount, u
 		}
 	}
 
-	// R3 Task 6: the write context (opened at the top of this function) is closed exactly once. The
+	// The write context (opened at the top of this function) is closed exactly once. The
 	// truncate branch above already closed it (and reset `this->file`) whenever it ran; if it didn't
 	// run -- no truncation was needed -- close it here.
 	if (this->file) {

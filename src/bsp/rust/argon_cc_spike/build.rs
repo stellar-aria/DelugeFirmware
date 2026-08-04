@@ -1,7 +1,7 @@
-//! SPIKE (SR2b) — THROWAWAY de-risk build script, superseded by SR2d.
+//! SPIKE — THROWAWAY de-risk build script, superseded by later work.
 //!
 //! Compiles the app's `convert.cpp` + `stitch.cpp` (+ their `audio_format_helpers.cpp` dep + a thin
-//! `extern "C"` shim) two ways, to answer SR2b's question: can a Rust `cc::Build` compile these
+//! `extern "C"` shim) two ways, to answer this spike's question: can a Rust `cc::Build` compile these
 //! argon-SIMD translation units at C++26 for BOTH targets?
 //!
 //!   1. x86 host, via `cc::Build` + SIMDe — LINKED into this crate so a `#[test]` FFI round-trip can

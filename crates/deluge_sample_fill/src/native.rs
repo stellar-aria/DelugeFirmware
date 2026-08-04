@@ -1,16 +1,13 @@
-//! The manager-reaching cluster-fill core (C2a Task 3). Moved verbatim from
-//! `deluge-bsp-rust`'s `streaming_loader.rs::prod` module (SR2d-4 Tasks 2-5) into this shared crate,
-//! so the Rust BSP's async fill task (`ProdOps::begin`/`finish`) links the `native_begin`/
-//! `native_finish` implementation here. (The strong `deluge_streaming_begin_fill`/`_finish_fill`
-//! C-ABI overrides that also lived here — the bridge for the C++ synchronous fill path — were
-//! removed when `SampleStream::read_cluster_data` was deleted.) Gated behind the `native_fill`
+//! The manager-reaching cluster-fill core, shared by the Rust BSP's async fill task
+//! (`ProdOps::begin`/`finish`, which links the `native_begin`/`native_finish` implementation here)
+//! and the range reader's synchronous fill path. Gated behind the `native_fill`
 //! feature (default-off): every `unsafe extern "C" { … }` symbol below is a resource-manager
 //! accessor this crate itself does not define, so this module only compiles where a final link —
 //! device, `host_app`, or a test harness supplying the real symbols (`region_fill_differential`) —
 //! will actually resolve them (see this crate's `Cargo.toml` `[features]` doc). The `StreamedChunk`
 //! field accessors this module also uses (`payload`/`set_loaded`/`convert_state`/
 //! `set_convert_state`) are `pub fn`s this crate DOES define, in [`crate::chunk`] — called directly,
-//! no C-ABI hop (U4d).
+//! no C-ABI hop.
 use core::ffi::c_void;
 
 use crate::{DelugeChunkConvertState, FillContext, StreamingFillDescriptor, fill_context_for};
@@ -110,8 +107,8 @@ fn to_fill_geometry(ctx: &FillContext) -> crate::fill_logic::FillGeometry {
 }
 
 /// Resolve `chunk_backing`'s destination buffer + physical sector range
-/// (`deluge_streaming_begin_fill`'s native replacement — SR2d-4 Task 5, factored into a free fn
-/// in Task 2). Looks up the live singleton resource manager itself (`deluge_streaming_resource_manager`)
+/// (`deluge_streaming_begin_fill`'s native replacement, factored into a free function).
+/// Looks up the live singleton resource manager itself (`deluge_streaming_resource_manager`)
 /// rather than taking `mgr` as a parameter: there is exactly one process-wide manager, and this
 /// shape lets `ProdOps::begin` (the async fill task, in `deluge-bsp-rust`'s `streaming_loader.rs`)
 /// and the range reader's synchronous `fill_now` (`deluge_sample_reader`) call the SAME function with
@@ -120,11 +117,10 @@ fn to_fill_geometry(ctx: &FillContext) -> crate::fill_logic::FillGeometry {
 /// "Sync-context safety" note on [`native_finish`] below, which applies identically here (this
 /// function touches strictly less state: no neighbour gather, no convert-state read/write).
 // `chunk_backing`'s validity is a precondition the caller already upholds (a still-leased
-// `StreamedChunk*` from either the loader queue or the sync C++ fill path -- see the doc above),
-// mirroring the same trust the pre-relocation private `fn` already placed in its callers; this
-// function's own `pub` signature is fixed by this crate's C-ABI-facing shape (SR2d-4 Task 5), not
-// newly introduced here, so its raw-pointer dereference (via the `unsafe extern "C"` calls below)
-// is silenced rather than changed to `unsafe fn`.
+// `StreamedChunk*` from either the loader queue or the sync C++ fill path -- see the doc above).
+// This function's `pub` signature is fixed by this crate's C-ABI-facing shape, so its raw-pointer
+// dereference (via the `unsafe extern "C"` calls below) is silenced rather than changed to
+// `unsafe fn`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
     // SAFETY: returns the one process-wide GeneralMemoryAllocator resource manager; a stable
@@ -151,8 +147,8 @@ pub fn native_begin(chunk_backing: *mut c_void) -> StreamingFillDescriptor {
 }
 
 /// Run the post-read convert/stitch/publish tail for `chunk_backing`
-/// (`deluge_streaming_finish_fill`'s native replacement — SR2d-4 Task 5, factored into a free fn
-/// and moved onto the `StreamedChunk` convert-state accessors in Task 2). `read_ok` mirrors
+/// (`deluge_streaming_finish_fill`'s native replacement, factored into a free function
+/// operating on the `StreamedChunk` convert-state accessors). `read_ok` mirrors
 /// `finish_fill`'s own early-out contract (see the body below); only called with `true` from
 /// `fill_once`'s current calling convention.
 ///

@@ -34,7 +34,7 @@
 #include <string>
 #include <vector>
 
-// SR3b regression-gate probes (see harness/recorder_readback_probe.h). Their fill drain runs on the
+// Regression-gate probes (see harness/recorder_readback_probe.h). Their fill drain runs on the
 // async fill task via deluge_streaming_drain_queue_blocking() (the probes run on the worker fiber).
 extern "C" {
 uint8_t deluge_harness_recorder_probe(uint8_t numChannels, uint32_t numFrames, uint32_t pumpDrainTicks);
@@ -480,7 +480,7 @@ extern "C" int32_t deluge_scenario_run_recorder_roundtrip() {
 
 	printf("%d/%d cases passed\n", g_cases - g_failures, g_cases);
 
-	// SR3b Task 4: probe live read-back of a still-recording sample on THIS target. RecordingReadSource
+	// Probe live read-back of a still-recording sample on THIS target. RecordingReadSource
 	// is gone, so this must NOT resolve READY (state=1) anywhere -- a still-recording Sample has no
 	// valid reader. The failed read gets re-queued at lowest priority rather than failed outright (the
 	// async fill task's fill_once, streaming_loader.rs), so the acquire is expected to stay LOADING
@@ -493,9 +493,9 @@ extern "C" int32_t deluge_scenario_run_recorder_roundtrip() {
 		g_failures++;
 	}
 
-	// SR3b Task 3 regression gate: a real, FINALIZED (COMPLETE) multi-cluster mono recording --
+	// Regression gate: a real, FINALIZED (COMPLETE) multi-cluster mono recording --
 	// finalizeRecordedFile()'s no-alteration else-branch, the only branch AudioClip recording ever
-	// takes -- must leave the residency table sized to the real cluster count, and region index 1+
+	// takes -- must leave the overview cache sized to the real cluster count, and region index 1+
 	// must resolve READY with correct bytes through the same port real playback uses.
 	g_cases++;
 	uint32_t regressionFrames = framesForBytes(44, 3, 3 * clusterSize) + 400;

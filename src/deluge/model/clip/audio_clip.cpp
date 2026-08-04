@@ -429,8 +429,8 @@ doUnassignment:
 				// A false return means NotReady - which includes a present-but-not-yet-loaded cold cluster (e.g. a
 				// just-finalized recording's cluster 0, freshly enqueued but not yet fetched). Arm the late-start
 				// retry so render()'s attemptLateSampleStart waits for it instead of falling through with no valid
-				// region, mirroring how other callers already honour this bool (sample_low_level_reader.cpp:515,
-				// voice_unison_part_source.cpp:59).
+				// region, mirroring how other callers already honour this bool (sample_low_level_reader.cpp,
+				// voice_unison_part_source.cpp).
 				if (!clustersReady) {
 					doingLateStart = true;
 				}
@@ -1407,8 +1407,8 @@ bool AudioClip::shiftHorizontally(ModelStackWithTimelineCounter* modelStack, int
 		sampleHolder.startPos = newStartPos;
 		sampleHolder.endPos = newStartPos + length;
 
-		// B6: clip-shift prefetch must never block the UI on a card read — enqueue and let the
-		// loader fill it. Playback tolerates a not-yet-loaded cluster (same as the realtime path).
+		// Clip-shift prefetch must never block the UI on a card read — enqueue and let the loader
+		// fill it. Playback tolerates a not-yet-loaded cluster (same as the realtime path).
 		sampleHolder.claimClusterReasons(sampleControls.isCurrentlyReversed(), CLUSTER_ENQUEUE);
 
 		if (active) {

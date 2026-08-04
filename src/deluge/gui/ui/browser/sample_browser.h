@@ -76,32 +76,46 @@ protected:
 private:
 	void displayCurrentFilename();
 
-	/// A snapshot of the file to preview, captured at trigger time so the dispatched op
-	/// loads the file the user pointed at even if the selection moves on before it runs
-	/// (fast cursor-scroll under async dispatch).
+	/// @brief Snapshot of the file to preview, captured at trigger time.
+	///
+	/// Lets the dispatched op load the file the user pointed at even if the selection moves on
+	/// before it runs (fast cursor-scroll under async dispatch).
 	struct PreviewTarget {
 		std::string path;
 		int32_t movementDirection;
 	};
 
-	/// Trigger: snapshot the current file and dispatch its preview load+render onto the
-	/// storage owner (coalesced latest-wins). Folder/no-file just clears the preview.
+	/// @brief Snapshot the current file and dispatch its preview load+render onto the storage
+	///        owner (coalesced latest-wins).
+	///
+	/// A folder or empty selection just clears the preview.
+	/// @param movementDirection Scroll direction driving the preview's teardown/entry animation.
 	void previewIfPossible(int32_t movementDirection = 1);
-	/// The dispatched op: load + render the coalescer's current target, then re-dispatch
-	/// if a newer target arrived while it ran. Runs on the storage owner (inline on
-	/// legacy/host). `self` is the SampleBrowser.
+	/// @brief The dispatched op: load and render the coalescer's current target, then re-dispatch
+	///        if a newer target arrived while it ran.
+	///
+	/// Runs on the storage owner (inline on legacy/host).
+	/// @param self The SampleBrowser instance.
 	static void runPreviewOp(void* self);
-	/// Load the target sample and render its waveform (the body previously inline in
-	/// previewIfPossible); clears the preview display if nothing loaded.
+	/// @brief Load @p target's sample and render its waveform.
+	///
+	/// Clears the preview display if nothing loaded.
+	/// @param target The file to preview, snapshotted by previewIfPossible().
 	void renderPreviewForTarget(const PreviewTarget& target);
-	/// Tear down any on-screen sample preview (shared by the no-file path and a failed load).
+	/// @brief Tear down any on-screen sample preview.
+	///
+	/// Shared by the no-file path and a failed load.
+	/// @param movementDirection Scroll direction driving the teardown animation.
 	void clearPreviewDisplay(int32_t movementDirection);
 
 	deluge::storage::LatestWins<PreviewTarget> previewCoalescer_{};
 
-	/// The dispatched op for the direct pad-tap load (enterKeyPress): runs claimCurrentFile()
-	/// with its default args on the storage owner. Result discarded (as it always was inline) —
-	/// claimCurrentFile() already handles its own loading-animation/close-on-success internally.
+	/// @brief The dispatched op for the direct pad-tap load (enterKeyPress).
+	///
+	/// Runs claimCurrentFile() with its default args on the storage owner. The result is
+	/// discarded (as it always was inline) — claimCurrentFile() already handles its own
+	/// loading-animation/close-on-success internally. Its unnamed `void*` parameter is the
+	/// storage-owner op signature; unused here.
 	static void runClaimCurrentFileOp(void*);
 
 	void audioFileIsNowSet();

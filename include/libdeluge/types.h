@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-/// Result/status code returned by fallible boundary calls.
+/// @brief Result/status code returned by fallible boundary calls.
 typedef enum DelugeStatus : int8_t {
 	DELUGE_OK = 0,
 	DELUGE_ERR = -1,         ///< unspecified failure

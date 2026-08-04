@@ -1,7 +1,7 @@
-//! The seam between the cursor's residency POLICY (promotion / LOADING-retain /
-//! READY-fuse / prefetch — reimplemented in `cursor.rs`) and HOW a chunk becomes
-//! resident. The production provider is `ManagerResidency` (facade-backed); the
-//! SR2c differential supplies a Scenario-driven provider as the gate's second
+//! The seam between the cursor's residency policy (promotion / LOADING-retain /
+//! READY-fuse / prefetch, implemented in `cursor.rs`) and how a chunk actually
+//! becomes resident. `ManagerResidency` is the production provider (facade-backed);
+//! a Scenario-driven provider implements this trait as a test-only alternate
 //! backend. The cursor is generic over this trait (monomorphized — no vtable on
 //! the acquire hot path).
 

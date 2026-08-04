@@ -34,7 +34,7 @@ extern "C" {
 /// Opaque MIDI port id, 0 .. deluge_midi_port_count()-1.
 typedef uint8_t DelugeMidiPort;
 
-/// Kind of MIDI transport behind a port.
+/// @brief Kind of MIDI transport behind a port.
 typedef enum DelugeMidiPortKind : uint8_t {
 	DELUGE_MIDI_DIN = 0,
 	DELUGE_MIDI_USB_DEVICE = 1,
@@ -129,8 +129,9 @@ bool deluge_midi_usb_is_host(void);
 /// Meaningless in host mode. [task]
 bool deluge_midi_usb_peripheral_connected(void);
 
-/// A USB-host enumeration event observed since the last poll. USB host is the
-/// MIDI-device transport on this board, so these surface through the MIDI
+/// @brief A USB-host enumeration event observed since the last poll.
+///
+/// USB host is the MIDI-device transport on this board, so these surface through the MIDI
 /// boundary.
 typedef enum DelugeUsbHostEvent : uint8_t {
 	DELUGE_USB_HOST_NONE = 0,

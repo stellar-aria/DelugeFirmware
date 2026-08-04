@@ -104,7 +104,7 @@ mod board;
 mod control;
 #[path = "../../src/display.rs"]
 mod display;
-/// R0b: storage-generic core of the efatfs read path — see
+/// Storage-generic core of the efatfs read path — see
 /// `../../src/main.rs`'s `mod efatfs_core` doc. Gated on `host_app` (always on
 /// for this package) to mirror that file's cfg exactly, even though this
 /// package's own `#[cfg(feature = "efatfs_streaming")]` is what actually
@@ -112,7 +112,7 @@ mod display;
 #[cfg(feature = "host_app")]
 #[path = "../../src/efatfs_core.rs"]
 mod efatfs_core;
-/// R0b: host counterpart of the device `efatfs_fs.rs` — see
+/// Host counterpart of the device `efatfs_fs.rs` — see
 /// `../../src/main.rs`'s `mod efatfs_host_shim` doc.
 #[cfg(feature = "host_app")]
 #[path = "../../src/efatfs_host_shim.rs"]
@@ -137,7 +137,7 @@ mod sd;
 mod sd_image;
 #[path = "../../src/services.rs"]
 mod services;
-/// R3.2b: mirrors `../../src/main.rs`'s `mod streaming_loader` — the R1/R2.1
+/// Mirrors `../../src/main.rs`'s `mod streaming_loader` — the
 /// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
 /// symbols (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
 /// are always compiled so their call sites link regardless of the
@@ -180,7 +180,7 @@ async fn boot_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
-    // R0b: mirrors `deluge-bsp-rust`'s `host_app_task` efatfs mount (see its
+    // Mirrors `deluge-bsp-rust`'s `host_app_task` efatfs mount (see its
     // comment). `main`'s `sd::sim_latency::set_off_fiber_instant(true)` (above,
     // set once before anything is spawned) already covers this mount exactly
     // like it covers the C-FatFS mount inside `deluge_app_init` below: this
@@ -380,7 +380,7 @@ fn main() {
     spawner.spawn(display::oled_render().unwrap());
     spawner.spawn(sd::sim_latency::pump().unwrap());
     spawner.spawn(boot_task().unwrap());
-    // R3.2b: the async cluster-fill task, on the SAME executor `boot_task`'s
+    // The async cluster-fill task, on the SAME executor `boot_task`'s
     // worker-fiber pump loop and the C++ enqueue path run on (this binary has
     // only the one executor — see the module doc's "Executor + clock").
     // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the

@@ -49,7 +49,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
 /// Serializes SDHI peripheral access between the fiber's FatFS transfers and the
-/// R1 streaming task's raw-sector reads: `block_on_fiber` yields to the executor
+/// streaming task's raw-sector reads: `block_on_fiber` yields to the executor
 /// mid-DMA, so without this both could drive one SDHI controller concurrently.
 static SD_BUS: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
@@ -173,7 +173,7 @@ pub async fn boot_init() {
     );
 }
 
-/// Thin async wrapper around `deluge_bsp::sd::read_sectors` for the R1 streaming
+/// Thin async wrapper around `deluge_bsp::sd::read_sectors` for the streaming
 /// fill task (`streaming_loader.rs`). Same dual-target shape as the rest of this
 /// file — no `#[cfg]` needed at the call site. Serializes on [`SD_BUS`] against
 /// the fiber's FatFS transfers (`deluge_block_read`/`deluge_block_write` below,
@@ -182,7 +182,7 @@ pub async fn boot_init() {
 /// executor mid-DMA and could otherwise let both drive the single SDHI
 /// controller concurrently.
 ///
-/// R3.2b: in `sim_latency` host builds this dispatches to
+/// In `sim_latency` host builds this dispatches to
 /// [`sim_latency::modeled_read`] instead of the raw (instant)
 /// `sd::read_sectors`, so the streaming task's reads pend on the same modeled
 /// SD latency the fiber's `deluge_block_read` (`sim_latency` variant, below)
@@ -196,7 +196,7 @@ pub async fn boot_init() {
 /// NOT route through this function — so no double-modeling either.
 pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
-    // R3: the common chokepoint for on-fiber block reads regardless of
+    // The common chokepoint for on-fiber block reads regardless of
     // backend — both the delegating plain-host `deluge_block_read` (below)
     // and efatfs's `HostSdBlockDevice::read` (efatfs_host_shim.rs) route
     // through here, so counting once at this call site covers both without
@@ -242,7 +242,7 @@ pub async fn locked_read_sectors(lba: u32, count: u32, buf: &mut [u8]) -> Result
 
 /// Write sibling of [`locked_read_sectors`] — same [`SD_BUS`] serialization,
 /// same `sim_latency`-dispatch shape (routes to [`sim_latency::modeled_write`]),
-/// same R3 on-fiber write instrumentation and off-fiber-instant escape hatch
+/// same on-fiber write instrumentation and off-fiber-instant escape hatch
 /// (see the read sibling's doc comment for both).
 pub async fn locked_write_sectors(lba: u32, count: u32, buf: &[u8]) -> Result<(), sd::SdError> {
     let _guard = SD_BUS.lock().await;
@@ -386,28 +386,26 @@ pub extern "C" fn deluge_storage_on_owner() -> bool {
     crate::fiber::on_fiber()
 }
 
-// HISTORY: a prior attempt drove SD I/O with a fiber-yielding
-// `block_on_fiber` unconditionally. FatFS is not re-entrant, and the app's
-// SD-reentrancy guard (`currentlyAccessingCard`) is only set by the legacy C
-// diskio (src/RZA1/diskio.c), which this BSP does not link — so on this BSP
-// it is always 0. Yielding mid-transfer let other tasks re-enter FatFS
-// concurrently and corrupted it (manifested as "NO MORE PRESETS FOUND" on
-// track create, and would also break song/sample loads).
-//
-// That precondition — serialize all SD access first — is now MET: the
-// async-sd staging ladder (single-owner routing enforced by
-// `deluge_storage_on_owner`/`storage-owner-audit`, plus the priority-queue
-// and cooperative-yield rungs) guarantees every FatFS transfer after the
-// storage owner is up runs on the single worker fiber, one at a time. The
-// device transfer sites below now flip on that guarantee: `if on_fiber() {
-// block_on_fiber(fut) } else { block_on(fut) }`. The `on_fiber()` branch
-// (steady state, post-boot) yields the fiber mid-transfer so the executor
-// can run other work while the SDHI/DMA completion IRQ is pending — no
-// re-entrancy, because FatFS calls only ever originate from the one owner
-// fiber, which stays suspended (not re-entered) until its own transfer
-// completes. The `else` branch (only the boot-time FatFS mount, which runs
-// before the worker/owner exists) still parks via `block_on`, since nothing
-// else can run concurrently at that point anyway.
+// FatFS is not re-entrant, and the app's SD-reentrancy guard
+// (`currentlyAccessingCard`) is only set by the legacy C diskio
+// (src/RZA1/diskio.c), which this BSP does not link — so on this BSP it is
+// always 0. Yielding mid-transfer unconditionally would let other tasks
+// re-enter FatFS concurrently and corrupt it (manifests as "NO MORE PRESETS
+// FOUND" on track create, and would also break song/sample loads). Safe
+// yielding therefore requires all SD access to be serialized first: the
+// single-owner routing enforced by `deluge_storage_on_owner`/
+// `storage-owner-audit`, plus priority-queue and cooperative-yield
+// dispatch, guarantees every FatFS transfer after the storage owner is up
+// runs on the single worker fiber, one at a time. The device transfer sites
+// below rely on that guarantee: `if on_fiber() { block_on_fiber(fut) } else
+// { block_on(fut) }`. The `on_fiber()` branch (steady state, post-boot)
+// yields the fiber mid-transfer so the executor can run other work while
+// the SDHI/DMA completion IRQ is pending — no re-entrancy, because FatFS
+// calls only ever originate from the one owner fiber, which stays suspended
+// (not re-entered) until its own transfer completes. The `else` branch
+// (only the boot-time FatFS mount, which runs before the worker/owner
+// exists) still parks via `block_on`, since nothing else can run
+// concurrently at that point anyway.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_read(
@@ -419,8 +417,8 @@ pub extern "C" fn deluge_block_read(
     // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
     // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
     // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
-    // fiber to be on yet. That's expected and safe in isolation: the rung-5
-    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
     // the boot mount takes the parking `block_on` branch, which cannot corrupt
     // FatFS since nothing else can run concurrently before the owner is up.
     // Once the owner IS up (`worker_started()`), every transfer must be on the
@@ -459,8 +457,8 @@ pub extern "C" fn deluge_block_write(
     // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
     // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
     // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
-    // fiber to be on yet. That's expected and safe in isolation: the rung-5
-    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
     // the boot mount takes the parking `block_on` branch, which cannot corrupt
     // FatFS since nothing else can run concurrently before the owner is up.
     // Once the owner IS up (`worker_started()`), every transfer must be on the
@@ -506,7 +504,7 @@ pub extern "C" fn deluge_block_write(
 /// host build (not gated on `host_app`/`sim_latency`) — the counters sit idle (never
 /// read) unless something calls the `on_fiber_*` getters below.
 ///
-/// R3: the `note_read`/`note_write` call sites live at [`locked_read_sectors`]/
+/// The `note_read`/`note_write` call sites live at [`locked_read_sectors`]/
 /// [`locked_write_sectors`] — the chokepoint both the plain-host `deluge_block_*`
 /// wrappers (which delegate to them) AND efatfs's `HostSdBlockDevice` (which
 /// calls them directly, bypassing the C-ABI `deluge_block_*` entry points
@@ -571,8 +569,8 @@ pub extern "C" fn deluge_block_read(
     // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
     // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
     // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
-    // fiber to be on yet. That's expected and safe in isolation: the rung-5
-    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
     // the boot mount takes the parking `block_on` branch, which cannot corrupt
     // FatFS since nothing else can run concurrently before the owner is up.
     // Once the owner IS up (`worker_started()`), every transfer must be on the
@@ -586,7 +584,7 @@ pub extern "C" fn deluge_block_read(
     if unit != 0 {
         return DELUGE_ERR_NODEV;
     }
-    // R3: `locked_read_sectors` (below) does the on-fiber counting now — this
+    // `locked_read_sectors` (below) does the on-fiber counting — this
     // path delegates straight to it, so instrumenting here too would
     // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;
@@ -620,8 +618,8 @@ pub extern "C" fn deluge_block_write(
     // Gated on `worker_started()`, not `on_fiber()` alone: the boot-time FatFS
     // mount (`StorageManager::initSD()` -> `f_mount` -> this fn) runs
     // synchronously in `deluge_boot()` BEFORE the worker/owner exists — no
-    // fiber to be on yet. That's expected and safe in isolation: the rung-5
-    // flip's guard is `if on_fiber() { block_on_fiber } else { block_on }`, so
+    // fiber to be on yet. That's expected and safe in isolation: the guard
+    // is `if on_fiber() { block_on_fiber } else { block_on }`, so
     // the boot mount takes the parking `block_on` branch, which cannot corrupt
     // FatFS since nothing else can run concurrently before the owner is up.
     // Once the owner IS up (`worker_started()`), every transfer must be on the
@@ -638,7 +636,7 @@ pub extern "C" fn deluge_block_write(
     if sd::is_write_protected() {
         return DELUGE_ERR_WRITE_PROTECTED;
     }
-    // R3: `locked_write_sectors` (below) does the on-fiber counting now — this
+    // `locked_write_sectors` (below) does the on-fiber counting — this
     // path delegates straight to it, so instrumenting here too would
     // double-count. See `locked_read_sectors`'s doc comment.
     let len = count as usize * SECTOR_SIZE;

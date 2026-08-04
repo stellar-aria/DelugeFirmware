@@ -1,4 +1,4 @@
-//! SR2d-5's payload-offset gate: drives the Rust region-port cursor
+//! A payload-offset gate: drives the Rust region-port cursor
 //! (`deluge_sample_source::cursor::SampleSource<ManagerResidency>`) over a REAL
 //! `deluge_resource` manager whose chunk backing is a REAL streamed chunk — not
 //! the Vec-backed fake `region_differential`'s own `RustBackend`/`HarnessResidency`
@@ -7,16 +7,14 @@
 //! construction. That made `ManagerPin::payload()`'s pre-fix bug — returning the
 //! raw manager backing pointer (the chunk HEADER) instead of routing through
 //! `deluge_sample_fill::chunk::payload` (`backing + payload_offset`, the real
-//! PAYLOAD) — invisible to every existing gate. Fixed in commit `b40ae65c6`;
-//! this test proves the fix against the geometry that actually exercises it.
+//! PAYLOAD) — invisible to every existing gate. This test proves the fix
+//! against the geometry that actually exercises it.
 //!
 //! ## How the real streamed-chunk backing is built
 //!
-//! U4d relocated the streamed chunk's storage (construct + all seven field
-//! accessors) into `deluge_sample_fill::chunk` (Rust) — this gate used to reuse
-//! `region_fill_differential`'s cc-compiled C++ shim (`cpp/native_finish_shim.cpp`,
-//! since deleted) for this; now it drives the real Rust construct/accessors
-//! directly, no C++ at all. [`construct_streamed_chunk`] (a thin signature-matching
+//! The streamed chunk's storage (construct + all seven field accessors) lives
+//! in `deluge_sample_fill::chunk` (Rust); this gate drives the real Rust
+//! construct/accessors directly, no C++ at all. [`construct_streamed_chunk`] (a thin signature-matching
 //! wrapper — see its own doc) placement-constructs a real `StreamedChunk` at a
 //! `deluge_resource` asset's slab-slot base, with its payload pointer set to
 //! `base + payload_offset` (`ChunkHarness::new`, mirroring
@@ -40,11 +38,11 @@
 //! `ManagerResidency::new(handle, asset, cluster_size, num_clusters)` +
 //! `SampleSource::new(residency, geo)` — the SAME construction `rust_backend.rs`'s
 //! `RustBackend::open` and `manager_residency.rs`'s/`cursor.rs`'s own unit tests
-//! use, NOT the `deluge_sample_source_open` C-ABI bridge (`abi.rs`, SR2d-5 Task 1).
+//! use, NOT the `deluge_sample_source_open` C-ABI bridge (`abi.rs`).
 //! Both `ManagerResidency` and `SampleSource` are already `pub` — no visibility
 //! change was needed. The bridge would additionally require test doubles for
-//! `deluge_streaming_resource_manager`/`deluge_sample_stream_asset_id` (Task 1's
-//! own `open()` seam) and the allocation-free source pool's slot-claim machinery,
+//! `deluge_streaming_resource_manager`/`deluge_sample_stream_asset_id` (the
+//! `open()` seam) and the allocation-free source pool's slot-claim machinery,
 //! none of which this gate's payload-offset question needs — the direct API is
 //! the minimal composition that drives the real cursor over a real chunk without
 //! dragging in that extra layer.
@@ -55,8 +53,8 @@
 //! (`manager_residency.rs`) to `self.lease.chunk().as_ptr() as *const u8` (the
 //! pre-fix body) makes `cursor_resolves_real_streamed_chunk_payload_offset_correctly`
 //! fail immediately — the captured bytes are the `StreamedChunk` header, not
-//! `make_ramp`. See the Task 2 report for the exact failure text. Restored
-//! immediately after (`git diff` on that file empty again) — no bug is committed.
+//! `make_ramp`. Restored immediately after (`git diff` on that file empty
+//! again) — no bug is committed.
 use core::ffi::c_void;
 use std::ptr;
 use std::sync::Mutex;
@@ -231,7 +229,7 @@ impl ChunkHarness {
         unsafe {
             deluge_resource_set_construct(handle, asset, Some(construct_streamed_chunk));
         }
-        // The Rust-owned streamed-chunk payload offset (U4d) — the real,
+        // The Rust-owned streamed-chunk payload offset — the real,
         // compiler-computed value reported over its own C-ABI, not hand-derived.
         let payload_offset =
             deluge_sample_fill::chunk::deluge_streamed_chunk_payload_offset() as usize;

@@ -51,14 +51,13 @@ void SampleStream::set_resource_asset_id(uint32_t id) {
 }
 
 void SampleStream::register_fill_context() {
-	// Guard first on whether the Asset is defined at all (exactly like pre-U4c) rather than on
-	// `stream_handle_`: open_read_stream() calls this before deluge_streaming_define_asset() ever has
-	// on every known call site (see that function's comment, chunk_residency.cpp), so gating on
-	// `stream_handle_` instead would let that early call push a not-yet-parsed (pre-finalizeAfterLoad)
-	// geometry onto a fresh slot; harmless in principle (registration itself still waits on a real
-	// Asset id), but needless and a needless ordering hazard to reason about. Gating on the Asset
-	// instead keeps this a true no-op until deluge_streaming_define_asset()'s own call, matching
-	// pre-U4c timing exactly.
+	// Guard first on whether the Asset is defined at all rather than on `stream_handle_`:
+	// open_read_stream() calls this before deluge_streaming_define_asset() ever has on every known
+	// call site (see that function's comment, chunk_residency.cpp), so gating on `stream_handle_`
+	// instead would let that early call push a not-yet-parsed (pre-finalizeAfterLoad) geometry onto a
+	// fresh slot; harmless in principle (registration itself still waits on a real Asset id), but a
+	// needless ordering hazard to reason about. Gating on the Asset instead keeps this a true no-op
+	// until deluge_streaming_define_asset()'s own call.
 	if (resource_asset_id_ == DELUGE_RESOURCE_NO_ASSET) {
 		return;
 	}
@@ -82,9 +81,9 @@ void SampleStream::register_fill_context() {
 	}
 	// No registry slot yet -- a still-recording sample, which has nowhere in the registry to hold
 	// geometry at all (opening one requires a real path). Register directly with the resource
-	// manager instead, exactly as pre-U4c: `efatfs_handle = 0` makes any premature cluster read fail
-	// cleanly rather than leaving this Asset with no fill-context registered anywhere (which would
-	// otherwise let residency resolve READY with no way to ever produce real bytes).
+	// manager instead: `efatfs_handle = 0` makes any premature cluster read fail cleanly rather than
+	// leaving this Asset with no fill-context registered anywhere (which would otherwise let residency
+	// resolve READY with no way to ever produce real bytes).
 	DelugeResource* mgr = GeneralMemoryAllocator::get().resourceManager();
 	if (mgr == nullptr) {
 		return;
@@ -127,11 +126,10 @@ void SampleStream::release_asset() {
 }
 
 Error SampleStream::open_read_stream(std::string_view path) {
-	// R1: efatfs IS the streaming read path — no C-FatFS fallback. Open a registry slot (which opens
+	// efatfs IS the streaming read path — no C-FatFS fallback. Open a registry slot (which opens
 	// the underlying efatfs file handle itself); a failure to open is a stream-open failure
-	// propagated to the caller (the sample won't load). The old deluge::io::Stream (read_stream_) +
-	// its sdAddress sector seeding are gone. A still-recording sample has no read handle at all (see
-	// make_read_source()) until this same path reopens one once recording finishes.
+	// propagated to the caller (the sample won't load). A still-recording sample has no read handle
+	// at all (see make_read_source()) until this same path reopens one once recording finishes.
 	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
 	bool table_full = false;
 	uint32_t handle = deluge_sample_stream_open(cpath.c_str(), &table_full);
@@ -139,24 +137,20 @@ Error SampleStream::open_read_stream(std::string_view path) {
 		return table_full ? Error::TOO_MANY_OPEN_STREAMS : Error::FILE_NOT_FOUND;
 	}
 	stream_handle_ = handle;
-	// Re-register the fill-context now the handle is known (SR2d-4 Task 1): a no-op today on every
-	// known call site (open_read_stream() always runs before deluge_streaming_define_asset()'s first
-	// call — see that function's comment, chunk_residency.cpp — so the handle is already registered
-	// there), but keeps the table correct if a future caller ever opens the stream after the asset was
-	// already defined.
+	// Re-register the fill-context now the handle is known: a no-op today on every known call site
+	// (open_read_stream() always runs before deluge_streaming_define_asset()'s first call — see that
+	// function's comment, chunk_residency.cpp — so the handle is already registered there), but keeps
+	// the table correct if a future caller ever opens the stream after the asset was already defined.
 	register_fill_context();
 	return Error::NONE;
 }
 
 std::unique_ptr<ReadSource> SampleStream::make_read_source() {
-	// R1: an open registry handle = the streaming read path (a normal card-loaded sample). A
+	// An open registry handle = the streaming read path (a normal card-loaded sample). A
 	// still-recording sample (stream_handle_ == 0 -- no handle is opened until recording finishes)
-	// has no reader at all: SR3b deleted RecordingReadSource, the former recorder-write-context
-	// read-back, as a dead end on the real device (the async Rust loader reads via a raw efatfs
-	// handle and never routed through this C++ abstraction anyway). A caller that could reach a
-	// still-recording Sample must guard against it itself (see
-	// WaveformRenderer::investigateWholeCluster()) -- a handle-0 read here just fails cleanly
-	// (deluge_sample_stream_read_at() treats handle 0 as "no such handle").
+	// has no reader at all. A caller that could reach a still-recording Sample must guard against it
+	// itself (see WaveformRenderer::investigateWholeCluster()) -- a handle-0 read here just fails
+	// cleanly (deluge_sample_stream_read_at() treats handle 0 as "no such handle").
 	return std::make_unique<SampleStreamReadSource>(stream_handle_, static_cast<uint8_t>(Cluster::size_magnitude));
 }
 
@@ -164,12 +158,12 @@ std::unique_ptr<ReadSource> SampleStream::make_read_source() {
 
 extern "C" {
 
-// The region-port open() bridge's stream-backing -> resource-asset accessor (SR2d-5 Task 1;
-// declared in libdeluge/streaming_fill.h alongside its sibling deluge_streaming_resource_manager).
-// The real body: SampleStream is always available wherever this TU compiles, so this just forwards
-// to the relocated asset-definition entry point (chunk_residency.cpp). The `__attribute__((weak))`
-// no-op fallback for build configs without a real SampleStream lives in async_fill.cpp, mirroring
-// that file's other weak fallbacks.
+// The region-port open() bridge's stream-backing -> resource-asset accessor (declared in
+// libdeluge/streaming_fill.h alongside its sibling deluge_streaming_resource_manager). The real
+// body: SampleStream is always available wherever this TU compiles, so this just forwards to the
+// asset-definition entry point (chunk_residency.cpp). The `__attribute__((weak))` no-op fallback
+// for build configs without a real SampleStream lives in async_fill.cpp, mirroring that file's
+// other weak fallbacks.
 uint32_t deluge_sample_stream_asset_id(void* stream_backing) {
 	auto* stream = reinterpret_cast<deluge::audio::stream::SampleStream*>(stream_backing);
 	return deluge_streaming_define_asset(&stream->sample());

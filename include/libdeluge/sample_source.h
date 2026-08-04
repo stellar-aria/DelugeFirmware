@@ -23,10 +23,12 @@
 extern "C" {
 #endif
 
-/// Per-reader streaming cursor over one sample's residency. Opaque; owned by the backend.
+/// @brief Per-reader streaming cursor over one sample's residency.
+///
+/// Opaque; owned by the backend.
 typedef struct DelugeSampleSource DelugeSampleSource;
 
-/// Immutable per-sample audio geometry, parsed once at load (above the port).
+/// @brief Immutable per-sample audio geometry, parsed once at load (above the port).
 typedef struct DelugeSampleGeometry {
 	uint32_t audio_data_start_bytes;  ///< byte offset of audio data within the file
 	uint64_t audio_data_length_bytes; ///< length of the audio data, bytes
@@ -36,21 +38,23 @@ typedef struct DelugeSampleGeometry {
 	uint8_t raw_data_format; ///< RawDataFormat, opaque to the port
 } DelugeSampleGeometry;
 
-/// Residency outcome of a region query. Distinguishes the two outcomes the plain boolean
-/// `deluge_sample_region_acquire` collapses into `false`: "not loaded YET" (worth waiting for) and
-/// "could not be reserved at all" (nothing is coming — give up).
+/// @brief Residency outcome of a region query.
+///
+/// Distinguishes the two outcomes the plain boolean `deluge_sample_region_acquire` collapses into
+/// `false`: "not loaded YET" (worth waiting for) and "could not be reserved at all" (nothing is
+/// coming — give up).
 ///
 /// Each state carries a LEASE POLICY, which is part of the contract, not an implementation detail.
 /// Numbered from 1 (not 0) so `if (state)` cannot be misread as a boolean — always compare against
 /// a named constant.
 ///
-/// Fixed underlying type (`: uint8_t`, C23 + C++11): this enum crosses the FFI BY VALUE
-/// (`deluge_sample_region_acquire_ex`'s return), so its width must be pinned explicitly rather than
-/// left to "whatever the C++ build's default `int` enum happens to be" — the Rust side
-/// (`DelugeRegionState` in `crates/deluge_sample_source/src/abi.rs`) is `#[repr(u8)]` to match. Every
-/// OTHER libdeluge enum stays a plain (unfixed, `int`-sized) C enum and relies on bindgen no longer
-/// passing `-fshort-enums` (see `src/bsp/rust/build.rs`) to agree with the C++ side's default int
-/// width instead.
+/// @note Fixed underlying type (`: uint8_t`, C23 + C++11): this enum crosses the FFI BY VALUE
+///       (`deluge_sample_region_acquire_ex`'s return), so its width must be pinned explicitly
+///       rather than left to "whatever the C++ build's default `int` enum happens to be" — the
+///       Rust side (`DelugeRegionState` in `crates/deluge_sample_source/src/abi.rs`) is
+///       `#[repr(u8)]` to match. Every OTHER libdeluge enum stays a plain (unfixed, `int`-sized) C
+///       enum and relies on bindgen no longer passing `-fshort-enums` (see
+///       `src/bsp/rust/build.rs`) to agree with the C++ side's default int width instead.
 typedef enum DelugeRegionState : uint8_t {
 	/// Resident AND loaded. `out` is filled and the source holds the pin backing it; the caller may
 	/// read `payload_base` until it releases the lease, closes, or acquires a different region.
@@ -67,7 +71,7 @@ typedef enum DelugeRegionState : uint8_t {
 	DELUGE_REGION_UNAVAILABLE,
 } DelugeRegionState;
 
-/// One acquired, pinned, borrowed region of resident sample data.
+/// @brief One acquired, pinned, borrowed region of resident sample data.
 typedef struct DelugeSampleRegion {
 	void* payload_base;      ///< StreamedChunk payload().data() for the resident cluster (pinned)
 	uint32_t region_index;   ///< cluster index this region corresponds to
@@ -75,38 +79,63 @@ typedef struct DelugeSampleRegion {
 	uint64_t lease;          ///< opaque pin token; retain/release the independent pin with it
 } DelugeSampleRegion;
 
-/// Open a per-reader cursor. `stream_backing` identifies the sample's residency (currently a
-/// `deluge::audio::stream::SampleStream*`; an opaque source id once the backend moves to Rust).
+/// @brief Open a per-reader cursor over one sample's residency.
+///
+/// @param stream_backing Identifies the sample's residency (currently a
+///                        `deluge::audio::stream::SampleStream*`; an opaque source id once the
+///                        backend moves to Rust).
+/// @param geometry        The sample's immutable audio geometry.
+/// @return A new cursor, or `nullptr` on failure (e.g. a null @p stream_backing or no
+///         resource manager yet).
 DelugeSampleSource* deluge_sample_source_open(void* stream_backing, DelugeSampleGeometry geometry);
 
-/// Make the region containing cluster `index` resident-or-scheduled, pin it, and report which.
+/// @brief Make the region containing cluster @p index resident-or-scheduled, pin it, and report
+///        which.
+///
 /// Non-blocking (CLUSTER_ENQUEUE semantics), allocation-free. On DELUGE_REGION_READY the next
-/// cluster in `direction` is also prefetched; `direction` is +1 (forward) or -1 (reverse).
+/// cluster in @p direction is also prefetched.
 ///
-/// `out` is filled only on DELUGE_REGION_READY, and only then does the source release the region it
-/// previously handed out (so the caller need not release before re-acquiring). The other two states
-/// leave the standing current region alone — a deferring caller keeps reading what it already has.
-/// See DelugeRegionState for each state's lease policy; in particular DELUGE_REGION_LOADING keeps
-/// the region leased so the fill continues across the caller's defer/retry cycle.
+/// @p out is filled only on DELUGE_REGION_READY, and only then does the source release the region
+/// it previously handed out (so the caller need not release before re-acquiring). The other two
+/// states leave the standing current region alone — a deferring caller keeps reading what it
+/// already has. See DelugeRegionState for each state's lease policy; in particular
+/// DELUGE_REGION_LOADING keeps the region leased so the fill continues across the caller's
+/// defer/retry cycle.
 ///
-/// If `index` is exactly the standing prefetched neighbour, that lease is PROMOTED into this call's
-/// result rather than re-fetched — which, on a LOADING outcome, empties the prefetch slot and moves
-/// the reservation to `pending` (see deluge_sample_region_state: querying `index` afterwards still
-/// finds it, now via `pending` instead of `prefetch`, so the query stays truthful).
+/// If @p index is exactly the standing prefetched neighbour, that lease is PROMOTED into this
+/// call's result rather than re-fetched — which, on a LOADING outcome, empties the prefetch slot
+/// and moves the reservation to `pending` (see deluge_sample_region_state: querying @p index
+/// afterwards still finds it, now via `pending` instead of `prefetch`, so the query stays
+/// truthful).
+/// @param src       The cursor to acquire on.
+/// @param index     Cluster index to make resident.
+/// @param direction Prefetch direction on a READY outcome: +1 (forward) or -1 (reverse).
+/// @param priority  Loader priority; used only when the fill is enqueued.
+/// @param out       Filled with the resident region only on DELUGE_REGION_READY.
+/// @return The residency outcome; see DelugeRegionState.
 DelugeRegionState deluge_sample_region_acquire_ex(DelugeSampleSource* src, uint32_t index, int8_t direction,
                                                   uint32_t priority, DelugeSampleRegion* out);
 
-/// Boolean form of deluge_sample_region_acquire_ex: true == DELUGE_REGION_READY. Callers that
-/// cannot act on the LOADING/UNAVAILABLE distinction (both are simply "NotReady") use this.
+/// @brief Boolean form of deluge_sample_region_acquire_ex: true == DELUGE_REGION_READY.
+///
+/// Callers that cannot act on the LOADING/UNAVAILABLE distinction (both are simply "NotReady")
+/// use this.
+/// @param src       The cursor to acquire on.
+/// @param index     Cluster index to make resident.
+/// @param direction Prefetch direction on a READY outcome: +1 (forward) or -1 (reverse).
+/// @param priority  Loader priority; used only when the fill is enqueued.
+/// @param out       Filled with the resident region only when the region is ready.
+/// @return true if @p out was filled (DELUGE_REGION_READY); false otherwise.
 bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_t direction, uint32_t priority,
                                   DelugeSampleRegion* out);
 
-/// Residency of `index` as tracked by this cursor RIGHT NOW, WITHOUT acquiring anything (no lease
-/// taken, no fetch scheduled, no state changed). This consults every reservation the cursor is
-/// currently holding -- `current`, the standing `prefetch`, and any retained `pending` LOADING
-/// reservation from a previous acquire_ex call -- and reports on whichever of them is tracking
-/// `index`, by matching that reservation's OWN cluster index (never by assuming `index` is "the
-/// neighbour" or "the last call's subject").
+/// @brief Residency of @p index as tracked by this cursor RIGHT NOW, WITHOUT acquiring anything.
+///
+/// No lease taken, no fetch scheduled, no state changed. This consults every reservation the
+/// cursor is currently holding -- `current`, the standing `prefetch`, and any retained `pending`
+/// LOADING reservation from a previous acquire_ex call -- and reports on whichever of them is
+/// tracking @p index, by matching that reservation's OWN cluster index (never by assuming
+/// @p index is "the neighbour" or "the last call's subject").
 ///
 /// Because the match is by index, this cannot conflate two different clusters the way an unindexed
 /// query would: after an acquire_ex(0) READY followed by an acquire_ex(5) LOADING (index 5 jumped
@@ -114,29 +143,38 @@ bool deluge_sample_region_acquire(DelugeSampleSource* src, uint32_t index, int8_
 /// neighbour (index 6, tracked by `prefetch` if in range, else UNAVAILABLE) — it does not fall back
 /// to reporting index 5's LOADING state just because index 5 is what the cursor most recently
 /// resolved.
-///
-/// Returns:
-///   * DELUGE_REGION_READY   -- `index` is tracked by this cursor and its data has landed.
-///   * DELUGE_REGION_LOADING -- `index` is tracked by this cursor (as `pending` or `prefetch`) but
-///                              has not landed yet; a fill is in flight for it.
-///   * DELUGE_REGION_UNAVAILABLE -- this cursor has NOTHING in flight or resident for `index` right
-///                              now (it isn't `current`, `pending`, or `prefetch`). This means only
-///                              "ask me again after a different acquire_ex call, if you want to know
-///                              about this index" — it is NOT a claim that `index` can never load;
-///                              a fresh acquire_ex(index, ...) may still succeed. `src == nullptr`
-///                              also reports UNAVAILABLE.
+/// @param src   The cursor to query; `nullptr` reports DELUGE_REGION_UNAVAILABLE.
+/// @param index Cluster index to query.
+/// @return DELUGE_REGION_READY if @p index is tracked by this cursor and its data has landed;
+///         DELUGE_REGION_LOADING if @p index is tracked (as `pending` or `prefetch`) but has not
+///         landed yet, with a fill in flight; DELUGE_REGION_UNAVAILABLE if this cursor has
+///         nothing in flight or resident for @p index right now (it isn't `current`, `pending`,
+///         or `prefetch`). UNAVAILABLE means only "ask me again after a different acquire_ex
+///         call" — it is not a claim that @p index can never load; a fresh acquire_ex(index, ...)
+///         may still succeed.
 DelugeRegionState deluge_sample_region_state(const DelugeSampleSource* src, uint32_t index);
 
-/// Take/drop an INDEPENDENT pin on the region's chunk, keyed on the opaque `lease` token alone (no
-/// cursor). Separate from the cursor's current/prefetch/pending pins (those are managed by acquire/close).
-/// `lease == 0` is a no-op in both directions. The token comes from a READY `DelugeSampleRegion::lease`.
-/// PAIRING: `release` only a token you personally `retain`ed. Bare-releasing a token the cursor still
-/// holds as current/prefetch/pending would drop the cursor's own pin early, exposing that chunk to
-/// eviction while the cursor still believes it is pinned.
+/// @brief Take an INDEPENDENT pin on the region's chunk, keyed on the opaque @p lease token alone
+///        (no cursor involved).
+///
+/// Separate from the cursor's current/prefetch/pending pins (those are managed by acquire/close).
+/// @p lease == 0 is a no-op. The token comes from a READY `DelugeSampleRegion::lease`.
+/// @param lease Pin token from a READY `DelugeSampleRegion::lease`, or 0 for a no-op.
 void deluge_sample_region_retain(uint64_t lease);
+
+/// @brief Drop an INDEPENDENT pin previously taken with deluge_sample_region_retain, keyed on the
+///        opaque @p lease token alone (no cursor involved).
+///
+/// @p lease == 0 is a no-op.
+/// @warning PAIRING: release only a token you personally retained. Bare-releasing a token the
+///          cursor still holds as current/prefetch/pending would drop the cursor's own pin early,
+///          exposing that chunk to eviction while the cursor still believes it is pinned.
+/// @param lease Pin token previously passed to deluge_sample_region_retain, or 0 for a no-op.
 void deluge_sample_region_release(uint64_t lease);
 
-/// Close the cursor, releasing any leases it still holds (current + prefetch).
+/// @brief Close the cursor, releasing any leases it still holds (current + prefetch).
+///
+/// @param src The cursor to close.
 void deluge_sample_source_close(DelugeSampleSource* src);
 
 #ifdef __cplusplus

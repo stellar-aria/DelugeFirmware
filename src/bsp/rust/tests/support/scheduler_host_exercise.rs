@@ -89,10 +89,10 @@ extern "C" fn fiber_submit_task() {
 }
 
 // ---------------------------------------------------------------------------
-// SD-routine exclusion gate (rung 3). Proves the `RESOURCE_SD_ROUTINE` task gate
+// SD-routine exclusion gate. Proves the `RESOURCE_SD_ROUTINE` task gate
 // in `scheduler.rs` actually defers a tagged task while an SD-routine op holds
 // `SD_ROUTINE_HELD` — the mechanism that keeps discardRecorder off a mid-flight
-// recorder cardRoutine at rung 5. Inert-today (run-to-completion), so it must be
+// recorder cardRoutine. Inert-today (run-to-completion), so it must be
 // proven here, not just at the counter's engage/release (owner_host does that).
 // ---------------------------------------------------------------------------
 
@@ -335,7 +335,7 @@ pub fn run() {
         REPEAT_A_COUNT.load(Ordering::SeqCst) > before
     });
 
-    // --- SD-routine exclusion gate (rung 3): a RESOURCE_SD_ROUTINE task must
+    // --- SD-routine exclusion gate: a RESOURCE_SD_ROUTINE task must
     // defer while an SD-routine op holds SD_ROUTINE_HELD, and resume once it
     // clears. This exercises the scheduler.rs gate itself — owner_host only covers
     // the counter's engage/release. The fiber is idle now (fiber_op completed).

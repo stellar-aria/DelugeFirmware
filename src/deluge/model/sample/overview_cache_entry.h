@@ -27,7 +27,12 @@
 /// `<cstdint>`, so it stays includable from lightweight contexts (e.g. host unit tests) that can't
 /// pull in `sample.h`'s full transitive closure.
 struct OverviewCacheEntry {
+	/// Running minimum peak found so far; starts at the maximum representable int8_t so any real
+	/// sample immediately lowers it.
 	int8_t min = 127;
+	/// Running maximum peak found so far; starts at the minimum representable int8_t so any real
+	/// sample immediately raises it.
 	int8_t max = -128;
+	/// Whether the whole-cluster scan for min/max has completed.
 	bool investigated = false;
 };

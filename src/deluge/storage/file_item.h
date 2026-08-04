@@ -29,8 +29,11 @@ public:
 	[[nodiscard]] std::string getFilenameWithExtension() const;
 	[[nodiscard]] std::string getFilenameWithoutExtension() const;
 
-	char const* displayName{}; // Usually points to filename.c_str(), but for "numeric" files, will cut off the prefix,
-	                           // e.g. "SONG". And I think this always includes the file extension...
+	/// @brief Text shown to the user for this entry.
+	///
+	/// Usually points to filename.c_str(), but for "numeric" files cuts off the prefix (e.g. "SONG").
+	/// Always includes the file extension.
+	char const* displayName{};
 
 	std::string filename{}; // May or may not include file extension. (Or actually I think it always does now...)
 	Instrument* instrument = nullptr;

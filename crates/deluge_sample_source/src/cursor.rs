@@ -835,14 +835,13 @@ mod tests {
         assert_distinct(&src); // prefetches(3)=Loading
     }
 
-    /// SR3f: ports `sample_source_spec.cpp`'s "8b: a scheduled-but-unloaded region
+    /// Ports `sample_source_spec.cpp`'s "8b: a scheduled-but-unloaded region
     /// is LOADING and its lease is RETAINED across the call" -- specifically its
     /// tail ("when the fill lands, the same retry becomes READY and the retained
     /// lease folds into the current pin -- exactly one lease, no duplicate from
     /// the retries"). `acquire_loading_retains_pending_and_leaves_current` never
-    /// marks the index ready, so this landing fold was previously exercised only
-    /// by the (now-deleted) C++ mirror and its differential harness -- this test
-    /// is now its sole coverage.
+    /// marks the index ready, so this landing fold is exercised only here -- this
+    /// test is its sole coverage.
     #[test]
     fn loading_retry_that_lands_ready_folds_into_a_single_lease() {
         let (src, h, asset) = new_source(4);
@@ -879,7 +878,7 @@ mod tests {
         );
     }
 
-    /// SR3f: ports `sample_source_spec.cpp`'s "8b: a pending LOADING region that
+    /// Ports `sample_source_spec.cpp`'s "8b: a pending LOADING region that
     /// becomes unreservable is dropped, not stranded" -- exercises the
     /// `Get::Unavailable` arm's `release_pending()` with a REAL outstanding
     /// pending lease already in hand, unlike the zero-baseline
@@ -914,7 +913,7 @@ mod tests {
         assert_eq!(total_leases(h), 0);
     }
 
-    /// SR3f: ports `sample_source_spec.cpp`'s "8b Task 1: a LOADING acquire that
+    /// Ports `sample_source_spec.cpp`'s "8b: a LOADING acquire that
     /// consumes the standing prefetch still reports a truthful state for that
     /// same index (the in-flight `pending` reservation, not UNAVAILABLE)".
     /// `take_promoted`'s "falls through to the Loading arm, which moves it to
@@ -981,10 +980,8 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// Restores what the retired `region_differential` crate's randomized
-    /// lease-balance cross-check covered (fuzzed forward-walks / jumps / state
-    /// queries against a leak/double-free oracle) minus its C++ oracle half, which
-    /// no longer exists: a deterministic random walk of cursor operations over
+    /// A randomized lease-balance cross-check (fuzzed forward-walks / jumps / state
+    /// queries): a deterministic random walk of cursor operations over
     /// MANY seeds, asserting the cursor's own lease bookkeeping is self-consistent
     /// throughout and net-zero on close, never panicking, double-freeing, or
     /// running any slot out of the manager's tracked range.

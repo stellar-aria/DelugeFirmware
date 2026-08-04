@@ -16,8 +16,8 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 /// Drives the real, vendored C FatFS (via the FFI bridge in `fatfs_c.rs`)
 /// against a FAT32 card image built by `fixtures/mk_fixture.sh`, and checks
 /// it reads back the known fixture file byte-for-byte. This is the harness's
-/// oracle side coming online: the same read, on the same image, will later
-/// be driven through `embedded-fatfs` (Task 4) and diffed against this one.
+/// oracle side: the same read, on the same image, is also driven through
+/// `embedded-fatfs` and diffed against this one.
 #[test]
 fn cfatfs_reads_known_file_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -41,7 +41,7 @@ fn efatfs_reads_known_file_fat32() {
     assert_eq!(fs.read_file("/SAMPLES/hello.txt"), b"DELUGE-SP0\n");
 }
 
-/// SP1a Task 3 host analog: proves the `embedded-fatfs` detach/reattach
+/// Host analog: proves the `embedded-fatfs` detach/reattach
 /// (`File::close` → [`FileContext`](embedded_fatfs::FileContext) →
 /// `File::new_from_context`) round-trip the device handle table
 /// (`src/efatfs_fs.rs`) relies on reads back correct bytes — including when
@@ -50,7 +50,8 @@ fn efatfs_reads_known_file_fat32() {
 ///
 /// DIVERGENCE: host is single-threaded `block_on`, so this validates the
 /// embedded-fatfs API round-trip + interleave correctness ONLY, NOT the device
-/// `static`/embassy-`Mutex` serialization — that is the on-device Task 8 gate.
+/// `static`/embassy-`Mutex` serialization — that still needs on-device
+/// verification.
 #[test]
 fn efatfs_context_roundtrip_and_interleave_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -128,7 +129,7 @@ fn read_diff_fat16() {
     run_read_diff("SP0_FAT16");
 }
 
-/// The write-path corpus (Task 6): mkdir, a multi-cluster LFN-named write,
+/// The write-path corpus: mkdir, a multi-cluster LFN-named write,
 /// an extend that grows the same file further, a short-name write, a
 /// rename, and a delete of a pre-existing fixture file. Exercises create,
 /// extend-across-cluster-boundary, LFN entry creation, rename, and delete
@@ -249,7 +250,7 @@ fn mb_per_sec(bytes: usize, secs: f64) -> f64 {
     (bytes as f64 / (1024.0 * 1024.0)) / secs.max(1e-9)
 }
 
-/// Host throughput PROXY (Task 7). **NOT a real SD-throughput measurement --
+/// Host throughput PROXY. **NOT a real SD-throughput measurement --
 /// read this caveat before citing these numbers anywhere.**
 ///
 /// This times both backends doing a contiguous multi-MB write followed by a
@@ -330,19 +331,18 @@ fn throughput_proxy_fat32() {
     );
 }
 
-/// REGRESSION PROOF for BUG-B (Task 6B): Task 6's vendoring survey flagged,
-/// and this probe originally demonstrated, that embedded-fatfs's
-/// `Dir::create_dir` wrote the ROOT's own first cluster into a new
-/// directory's `..` entry when that directory is created directly under the
-/// FAT32 root, instead of the FAT convention (which both the FAT spec and C
-/// FatFS follow) of writing 0 there to mean "parent is the root". Task 6B
-/// ported upstream rust-fatfs's `c4bb769` fix into
-/// `crates/embedded-fatfs/src/dir.rs`'s `create_dir` (an `is_root_dir()`
-/// distinction on `DirRawStream`/`File`), so this now asserts EQUALITY: both
-/// backends must write 0. This divergence is invisible to `write_diff_fat32`
-/// above because both `FsOps::read_dir` implementations filter `.`/`..` out
-/// (see `raw_fat32` module doc) -- so this probe reads the raw on-disk `..`
-/// entry directly, bypassing both backends' directory-listing APIs.
+/// Regression test: embedded-fatfs's `Dir::create_dir` used to write the
+/// ROOT's own first cluster into a new directory's `..` entry when that
+/// directory is created directly under the FAT32 root, instead of the FAT
+/// convention (which both the FAT spec and C FatFS follow) of writing 0
+/// there to mean "parent is the root". The fix ports upstream rust-fatfs's
+/// `c4bb769` into `crates/embedded-fatfs/src/dir.rs`'s `create_dir` (an
+/// `is_root_dir()` distinction on `DirRawStream`/`File`), so this now
+/// asserts EQUALITY: both backends must write 0. This divergence is
+/// invisible to `write_diff_fat32` above because both `FsOps::read_dir`
+/// implementations filter `.`/`..` out (see `raw_fat32` module doc) -- so
+/// this probe reads the raw on-disk `..` entry directly, bypassing both
+/// backends' directory-listing APIs.
 #[test]
 fn fat32_dotdot_cluster_probe() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -374,8 +374,8 @@ fn fat32_dotdot_cluster_probe() {
     // actual first-cluster number.
     assert_eq!(c_dotdot_cluster, 0, "C FatFS should write 0 into '..' under root");
 
-    // BUG-B, fixed (Task 6B): embedded-fatfs must now agree -- 0, not the
-    // root's own actual first cluster.
+    // embedded-fatfs must now agree -- 0, not the root's own actual first
+    // cluster.
     assert_eq!(
         e_dotdot_cluster, 0,
         "embedded-fatfs should write 0 into '..' under root, matching C FatFS (BUG-B, Task 6B)"

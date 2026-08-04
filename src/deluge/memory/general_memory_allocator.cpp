@@ -75,7 +75,7 @@ bool GeneralMemoryAllocator::ensureClusterSystem() {
 	// Slot geometry (cluster.h): [chunk header][front guard][Cluster::size payload][trailing guard].
 	// The uniform slab slot must fit BOTH chunk roles: the C++ ComputedChunk (its payload sits at
 	// kChunkPayloadOffset) and the Rust-owned streamed chunk (its own payload offset, reported across
-	// the C-ABI, U4d). Each role stores its own payload pointer at construction, so their offsets may
+	// the C-ABI). Each role stores its own payload pointer at construction, so their offsets may
 	// differ; the slot just fits the larger of the two front regions (payload_ = base + offset never
 	// then reaches past base + slot for either role).
 	size_t chunkOffset = std::max<size_t>(kChunkPayloadOffset, deluge_streamed_chunk_payload_offset());

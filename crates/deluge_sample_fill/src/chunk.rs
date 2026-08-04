@@ -1,9 +1,9 @@
-//! The streamed sample-audio cluster's per-cluster state, relocated from the C++ `StreamedChunk`
-//! POD (U4d). A plain Rust struct (NOT repr(C) — nothing C++ reads it anymore; only its size feeds
+//! The streamed sample-audio cluster's per-cluster state, backing the C++ `StreamedChunk`
+//! type. A plain Rust struct (NOT repr(C) — nothing C++ reads it anymore; only its size feeds
 //! the slab slot geometry). Drop-free: all fields are POD, so the manager still frees the slab slot
 //! directly (no destructor to run), preserving the trivially-destructible chunk contract.
 //!
-//! Field set (U4d Task 1 audit): the C++ `StreamedChunk` also carries `sample`/`resource_slot`,
+//! Field set: the C++ `StreamedChunk` also carries `sample`/`resource_slot`,
 //! but both are write-only in the live tree — their only C++ readers
 //! (`StreamedChunk::convert_data_if_necessary`/`resource_lease_asset_id`/
 //! `deluge::cluster::remove_reason(StreamedChunk&, ...)`, all in `cluster.cpp`) have zero call
@@ -76,21 +76,20 @@ pub extern "C" fn deluge_streamed_chunk_payload_offset() -> u32 {
     RUST_CHUNK_PAYLOAD_OFFSET as u32
 }
 
-// ── Chunk construct + field accessors (U4d) ─────────────────────────────────
+// ── Chunk construct + field accessors ─────────────────────────────────
 // The streamed chunk's storage lives entirely in Rust: the resource manager placement-constructs it
 // through `deluge_streaming_chunk_construct` (the sole remaining C-ABI export below, registered from
 // `chunk_residency.cpp`), and every other caller — the native fill task, the C++ region cursor's Rust
 // callers, the differential harnesses — reaches its fields only through the plain `pub fn` accessors
 // below (`payload`/`set_loaded`/`loaded`/`unloadable`/`set_unloadable`/`convert_state`/
-// `set_convert_state`). Those accessors crossed the C-ABI as `#[no_mangle]` wrappers through U4d Rung
-// 2; Task 8 deleted the wrappers once every caller had migrated to calling the `pub fn`s directly by
-// path (`deluge_sample_fill::chunk::*`) — there is no longer a C++ caller for any of them.
+// `set_convert_state`). There is no longer a C++ caller for any of them; all access goes through
+// these accessors directly by path (`deluge_sample_fill::chunk::*`).
 
 /// C-ABI construct callback the resource manager invokes for a streamed SAMPLE chunk (registered from
 /// `chunk_residency.cpp` via `deluge_resource_set_construct`). Matches the manager's
 /// `DelugeResourceConstructFn` signature `(ctx, owner, index, dest)`. `ctx`/`owner` are unused: the
 /// relocated chunk carries neither a context nor its owning `Sample*` — both were write-only in the
-/// former C++ POD and dropped in the U4d field audit (see this module's header).
+/// former C++ POD and dropped from the field set (see this module's header).
 ///
 /// # Safety
 /// `dest` is a manager-owned writable slab slot of at least `RUST_CHUNK_PAYLOAD_OFFSET + Cluster::size

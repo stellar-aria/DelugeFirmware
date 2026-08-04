@@ -1,15 +1,15 @@
-//! deluge_sample_reader — the sample range-reader C-ABI (`include/libdeluge/sample_reader.h`, U1).
+//! deluge_sample_reader — the sample range-reader C-ABI (`include/libdeluge/sample_reader.h`).
 //!
 //! A zero-copy streaming reader-handle plus a stateless copy convenience over a sample's source
 //! residency, for non-voice consumers that read raw-PCM frame RANGES instead of reaching
 //! `StreamedChunk` internals the way they do today — the non-voice twin of the voice region port
 //! (`deluge_sample_source`'s `DelugeSampleSource`/`DelugeSampleRegion`). Coexists with the existing
-//! facade (`peek`/`prefetch`/`load_now`/`request`/`dequeue`); no consumer migrates in U1 (that is
-//! U2) — see the design doc this crate's Cargo.toml references.
+//! facade (`peek`/`prefetch`/`load_now`/`request`/`dequeue`); no consumer migrates yet — see the
+//! design doc this crate's Cargo.toml references.
 //!
-//! Task 1 landed the lifecycle trio (`open`/`seek`/`close`); Task 3 filled in the read core —
-//! `window`/`advance`/`ok`, plus `open`'s own Rust-side geometry resolution. Task 4 (this landing)
-//! adds the stateless `deluge_sample_read` copy, composed entirely from that same handle (`open` ->
+//! The lifecycle trio (`open`/`seek`/`close`) and the read core (`window`/`advance`/`ok`, plus
+//! `open`'s own Rust-side geometry resolution) share one handle with the stateless
+//! `deluge_sample_read` copy, which composes entirely from that same handle (`open` ->
 //! `window`/`advance` -> drop) — no second frame-mapping/fill implementation.
 #![no_std]
 
@@ -25,7 +25,7 @@ pub mod reservation;
 // `#[cfg(test)]`-gated and crate-private), but that module isn't visible to downstream crates — so
 // this crate's own test binary, which links `deluge_resource` as a plain (non-test) rlib, must
 // provide the same three symbols itself or every test that drops a `Lease` (which goes through
-// `Masked`) fails to link. Copied verbatim from `deluge_sample_source::lib`'s own
+// `Masked`) fails to link. Mirrors `deluge_sample_source::lib`'s own
 // `host_critical_section_stubs` — the identical problem, the identical fix.
 #[cfg(test)]
 mod host_critical_section_stubs {
@@ -75,16 +75,16 @@ mod host_critical_section_stubs {
     }
 }
 
-// `reader.rs`'s `fill_now`/`window()` (Task 3) reach the synchronous card read through an
+// `reader.rs`'s `fill_now`/`window()` reach the synchronous card read through an
 // `unsafe extern "C"` declaration — a real C++ symbol in production (`efatfs_fs.rs`), which this
 // crate's own `cargo test` binary does not link. Mirrors `host_critical_section_stubs` above: ONE
 // crate-level `#[cfg(test)]` module providing every stub `#[unsafe(no_mangle)]` definition this
 // crate's test binary needs (never duplicated per-test-module — a `#[no_mangle]` symbol may only
 // be defined once in a linked binary), used by both `reader::tests` and `abi::tests`.
 //
-// Does NOT stub the chunk field accessors any more (U4d): `deluge_sample_fill::chunk::payload`/
+// Does NOT stub the chunk field accessors: `deluge_sample_fill::chunk::payload`/
 // `set_loaded`/`loaded`/`unloadable`/`set_unloadable`/`convert_state`/`set_convert_state` are plain
-// `pub fn`s (Task 8 deleted their `#[no_mangle]` C-ABI wrappers), unconditionally compiled into
+// `pub fn`s with no `#[no_mangle]` C-ABI wrapper, unconditionally compiled into
 // every binary that links that crate (this crate always does — see its own `Cargo.toml`) — there is
 // no C-ABI symbol left to shadow, so a test just calls them directly by path instead of stubbing.
 // `reader.rs`'s own tests instead construct genuine `StreamedChunk` backings (via
@@ -155,9 +155,9 @@ pub(crate) mod host_streaming_stubs {
     }
 
     // `deluge_sample_fill::chunk::payload`/`set_loaded`/`loaded`/`unloadable`/`set_unloadable`/
-    // `convert_state`/`set_convert_state` are deliberately NOT stubbed here (U4d) — see the module
+    // `convert_state`/`set_convert_state` are deliberately NOT stubbed here — see the module
     // doc for why: they are plain `pub fn`s on `deluge_sample_fill::chunk` (no `#[no_mangle]` C-ABI
-    // wrapper left since Task 8), so there is nothing to shadow. Tests that need them go through the
+    // wrapper), so there is nothing to shadow. Tests that need them go through the
     // real accessors directly over a genuinely constructed `StreamedChunk` backing.
 
     /// No-op stand-in for the real async-fill wake signal (`streaming_fill.h`'s
@@ -185,8 +185,7 @@ pub(crate) mod host_streaming_stubs {
 
     /// Synthetic card read: deterministic content keyed on the ABSOLUTE file byte offset
     /// (`dst[i] = (byte_offset + i) as u8`), so a test can compute a cluster's expected
-    /// post-fill bytes independently of this stub — the "synthetic sample with known converted
-    /// cluster bytes" the Task 3 brief calls for. `set_force_read_failure(true)` makes EVERY
+    /// post-fill bytes independently of this stub. `set_force_read_failure(true)` makes EVERY
     /// call fail closed (returns `false`, `dst`/`out_read` untouched); `set_fail_at_byte_offset`
     /// fails only the ONE cluster whose `byte_offset` matches, for isolating a single neighbour's
     /// failure. Both checks run before touching `count`/`dst`, so they apply even to a

@@ -32,7 +32,7 @@ class SampleCache;
 /// @brief Shared FAT-geometry configuration for the cluster payload types.
 ///
 /// Not itself instantiated as a payload — ComputedChunk (below) is the real C++ chunk struct (the
-/// streamed SAMPLE role's chunk now lives in Rust, `deluge_sample_fill::chunk`, U4d). Cluster carries
+/// streamed SAMPLE role's chunk lives in Rust, `deluge_sample_fill::chunk`). Cluster carries
 /// the session-wide cluster size and the Type enum the computed kinds reference.
 ///
 /// @note A chunk's backing comes from the resource manager's uniform cluster slab; the manager owns
@@ -76,7 +76,7 @@ inline constexpr size_t kTrailingSlackBytes = 7; ///< The stitch `Cluster::size 
 ///
 /// deluge_resource_request/acquire take a `size` argument that BACKING_SLAB assets ignore — the
 /// slab always hands back its fixed slot_size (computed once in general_memory_allocator.cpp),
-/// never the caller's value. Every StreamedChunk/ComputedChunk asset is slab-backed, so call sites
+/// never the caller's value. Every streamed-chunk/ComputedChunk asset is slab-backed, so call sites
 /// requesting one pass this rather than a `sizeof(chunk) + Cluster::size` figure that reads as
 /// load-bearing but isn't.
 inline constexpr size_t kSlabBackedSizeIgnored = 0;
@@ -89,8 +89,8 @@ inline constexpr size_t kSlabBackedSizeIgnored = 0;
 ///
 /// @warning Only construct via placement `new` into a slab slot (asset callbacks).
 ///
-/// @note The streamed SAMPLE role's per-cluster state was relocated to Rust
-///       (`deluge_sample_fill::chunk::StreamedChunk`, U4d); this is the last C++ chunk struct.
+/// @note The streamed SAMPLE role's per-cluster state lives in Rust
+///       (`deluge_sample_fill::chunk::StreamedChunk`); this is the last C++ chunk struct.
 struct ComputedChunk final {
 	Cluster::Type type; ///< One of SAMPLE_CACHE / PERC_CACHE_FORWARDS / PERC_CACHE_REVERSED.
 	uint32_t cluster_index = 0;
@@ -153,8 +153,8 @@ struct ComputedChunk final {
 /// at kChunkPayloadOffset from the slot base, and the ComputedChunk construct callbacks set
 /// `payload_ = dest + kChunkPayloadOffset` (whole-slot provenance).
 ///
-/// @note This is ComputedChunk-only now: the streamed SAMPLE role's chunk lives in Rust
-///       (`deluge_sample_fill::chunk`, U4d) and reports its OWN payload offset over the C-ABI
+/// @note This is ComputedChunk-only: the streamed SAMPLE role's chunk lives in Rust
+///       (`deluge_sample_fill::chunk`) and reports its OWN payload offset over the C-ABI
 ///       (`deluge_streamed_chunk_payload_offset()`); the shared slab slot takes the max of the two so
 ///       it fits either role — see general_memory_allocator.cpp.
 /// @note kChunkPayloadOffset is the header size plus one cache line, so the front guard

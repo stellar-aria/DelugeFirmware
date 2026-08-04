@@ -19,8 +19,8 @@
 /// `libdeluge/streaming_fill.h` efatfs-read symbols (`deluge_efatfs_open` / `_close` / `_read_at`),
 /// overriding the `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time.
 ///
-/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) has been efatfs-only
-/// since R1 — there is no C-FatFS fallback for the streaming read. The host-sim `deluge_render`/
+/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) is efatfs-only — there is
+/// no C-FatFS fallback for the streaming read. The host-sim `deluge_render`/
 /// `deluge_loadcheck` link no Rust efatfs provider (that only exists on the Rust/Embassy BSP), so
 /// without this file every streamed sample fails to open and the golden renders are silent. This
 /// gives the host sim a real streaming-read backend over plain POSIX file I/O against the
@@ -29,9 +29,9 @@
 ///
 /// Design: a small fixed handle table (handle -> open fd), no heap churn per read. `read_at`
 /// mirrors `efatfs_core::fill`'s (src/bsp/rust/src/efatfs_core.rs) over-EOF behaviour exactly: a
-/// read that runs past the end of the file is zero-padded rather than failed (this is the R1 "C2"
-/// short-final-cluster fix) and reports `*out_read == count` on success regardless of how many
-/// bytes actually came off disk.
+/// read that runs past the end of the file is zero-padded rather than failed (the short-final-cluster
+/// fix) and reports `*out_read == count` on success regardless of how many bytes actually came off
+/// disk.
 
 #include "libdeluge/streaming_fill.h"
 
@@ -168,8 +168,8 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 		ssize_t n = pread(fd, buf + filled, count - filled, static_cast<off_t>(byte_offset) + filled);
 		if (n == 0) {
 			// EOF before dst is full: zero-pad the rest and report success, mirroring
-			// efatfs_core::fill's over-EOF behaviour (R1 "C2" short-final-cluster fix) exactly,
-			// including reporting *out_read == count (the full requested length) on success.
+			// efatfs_core::fill's over-EOF behaviour exactly, including reporting *out_read == count
+			// (the full requested length) on success.
 			std::memset(buf + filled, 0, count - filled);
 			*out_read = count;
 			return true;

@@ -7,12 +7,11 @@
 //! lookahead pins already give the timestretch/loop-point paths, generalized behind this crate's
 //! own C-ABI handle.
 //!
-//! Task 1 implemented `open`/`close`/`covered_indices` and the coverage + lease accounting behind
-//! them. This landing (Task 2) adds [`Reservation::reanchor`] — sliding the window as playback
-//! advances, guarded against per-render-tick lease churn when the marker drifts within its current
-//! head cluster. This landing (Task 3) adds synchronous load-now materialization for
-//! [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`] — see [`load_cluster`]'s own doc for the per-mode
-//! recipe.
+//! `open`/`close`/`covered_indices` provide the coverage + lease accounting.
+//! [`Reservation::reanchor`] slides the window as playback advances, guarded against
+//! per-render-tick lease churn when the marker drifts within its current head cluster.
+//! Synchronous load-now materialization for [`LoadMode::Now`]/[`LoadMode::NowOrEnqueue`] is
+//! provided too — see [`load_cluster`]'s own doc for the per-mode recipe.
 
 use alloc::boxed::Box;
 use core::ffi::c_void;
@@ -49,11 +48,11 @@ unsafe extern "C" {
     /// The SAME extern declaration `reader.rs` makes of its own copy — a foreign-fn prototype may be
     /// declared more than once across a crate's modules without conflict (unlike a `#[no_mangle]`
     /// definition, which may only exist once); duplicated here rather than exposed from `reader.rs`
-    /// so this task's file list stays exactly what the brief specifies (`reader.rs` untouched).
+    /// so this module stays independent of `reader.rs`'s own internals.
     fn deluge_streaming_resource_manager() -> *mut c_void;
     /// The synchronous card read (`include/libdeluge/streaming_fill.h`) — see [`fill_now`]. The
     /// SAME extern declaration `reader::fill_now` makes of its own copy; duplicated here for the
-    /// same "keep `reader.rs` untouched" reason as `deluge_streaming_resource_manager` above.
+    /// same independence reason as `deluge_streaming_resource_manager` above.
     fn deluge_efatfs_read_at(
         handle: u32,
         byte_offset: u32,
@@ -61,17 +60,17 @@ unsafe extern "C" {
         count: u32,
         out_read: *mut u32,
     ) -> bool;
-    /// Wake the async loader (`include/libdeluge/streaming_fill.h:188`) after enqueueing a chunk
+    /// Wake the async loader (`include/libdeluge/streaming_fill.h`) after enqueueing a chunk
     /// via `Resource::loader_enqueue` — see [`enqueue_unfilled`]'s own doc for the recipe this
-    /// mirrors (the `CLUSTER_ENQUEUE` block formerly in `sample_residency.cpp`, since deleted).
+    /// mirrors (the C++ `CLUSTER_ENQUEUE` path).
     fn deluge_streaming_signal_fill();
 }
 
 /// Run the synchronous cluster fill on `chunk_backing` — the SAME recipe `reader::fill_now`
 /// implements (resolve via `native_begin`, read exactly that span in one call, then run the
 /// post-read convert/stitch/publish tail via `native_finish`); duplicated here rather than exposed
-/// from `reader.rs` so this task's file list stays exactly what the brief specifies (`reader.rs`
-/// untouched) — see that function's own doc for the full rationale. Returns `native_finish`'s own
+/// from `reader.rs` so this module stays independent of `reader.rs`'s own internals — see that
+/// function's own doc for the full rationale. Returns `native_finish`'s own
 /// result: `false` on a geometry-resolution failure, a failed/short read, or a failed
 /// convert/stitch/publish; `true` once the chunk is converted, stitched, and published ready.
 fn fill_now(chunk_backing: *mut c_void) -> bool {
@@ -353,7 +352,7 @@ fn walk_and_lease(
 }
 
 /// Schedule `chunk` onto the async loader if it isn't already ready — the exact two-call recipe the
-/// `CLUSTER_ENQUEUE` block formerly in `sample_residency.cpp` (since deleted) ran after its own
+/// C++ `CLUSTER_ENQUEUE` path runs after its own
 /// `deluge_resource_request` (`Resource::request`'s C++ twin): `deluge_resource_loader_enqueue(mgr,
 /// cluster->resource_slot, priority_rating)` (here, `Resource::loader_enqueue`) then
 /// `deluge_streaming_signal_fill()` to wake the loader task. `priority_rating` for this
@@ -814,7 +813,7 @@ mod tests {
     }
 
     /// `LoadMode::Now` runs a real synchronous fill (see [`load_cluster`]'s own doc) where
-    /// `LoadMode::Enqueue` only reserves — the load-mode distinction this task lands. Real
+    /// `LoadMode::Enqueue` only reserves. Real
     /// end-to-end proof, not vacuous: `is_ready_at` reads the manager's own readiness flag,
     /// flipped only by `Resource::mark_ready` after a genuine `fill_now` call runs the real
     /// `deluge_sample_fill::{native_begin, native_finish}` pair against this crate's own

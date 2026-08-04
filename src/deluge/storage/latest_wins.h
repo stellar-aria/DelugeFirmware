@@ -35,9 +35,11 @@ namespace deluge::storage {
 template <typename T>
 class LatestWins {
 public:
-	/// Record a desired target. Returns true if the caller should dispatch now
-	/// (nothing was in flight); false if an op is already running — it will pick up
-	/// this target on completion.
+	/// @brief Record a desired target.
+	///
+	/// @param target The desired target.
+	/// @return true if the caller should dispatch now (nothing was in flight); false if an op is
+	///         already running — it will pick up this target on completion.
 	bool request(const T& target) {
 		if (in_flight_) {
 			queued_ = target;
@@ -49,9 +51,10 @@ public:
 		return true;
 	}
 
-	/// Signal that the in-flight op finished. Returns the next target to dispatch if
-	/// the desired target changed while running (latest-wins re-dispatch), or nullopt
-	/// if nothing is pending (goes idle).
+	/// @brief Signal that the in-flight op finished.
+	///
+	/// @return The next target to dispatch if the desired target changed while running
+	///         (latest-wins re-dispatch), or nullopt if nothing is pending (goes idle).
 	std::optional<T> complete() {
 		if (queued_.has_value()) {
 			current_ = *queued_;
@@ -62,11 +65,12 @@ public:
 		return std::nullopt;
 	}
 
-	/// Force back to idle, discarding any queued target. For when a dispatch the caller
-	/// believed it had issued never actually ran (e.g. the owner queue was full, so the
-	/// op that would have called `complete()` will never fire) — without this the
-	/// single-flight guard would wedge forever. The dropped target is simply lost; the
-	/// next `request()` supersedes it.
+	/// @brief Force back to idle, discarding any queued target.
+	///
+	/// For when a dispatch the caller believed it had issued never actually ran (e.g. the owner
+	/// queue was full, so the op that would have called complete() will never fire) — without this
+	/// the single-flight guard would wedge forever. The dropped target is simply lost; the next
+	/// request() supersedes it.
 	void reset() {
 		in_flight_ = false;
 		queued_.reset();

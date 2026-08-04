@@ -17,13 +17,9 @@ namespace deluge::audio::stream {
 ///
 /// A ReadSource pulls one FAT-cluster-sized block of a sample's on-card bytes into a caller buffer.
 /// SampleStreamReadSource (via the `deluge_sample_stream` registry handle) is what
-/// SampleStream::make_read_source() actually returns since U4c. EfatfsReadSource (direct embedded-
-/// fatfs handle reads) remains for callers that hold a raw efatfs handle outside the registry. SR3b
-/// deleted the other one, RecordingReadSource (recorder read-back of a mid-write file via the
-/// recorder's own open efatfs write context, R3) -- a dead end on the real device (the async Rust
-/// loader reads via a raw efatfs handle and never routed through this abstraction anyway), exercised
-/// only by the C-host sim / diagnostic harnesses. The reconstruction core reads through this and
-/// stays pure.
+/// SampleStream::make_read_source() actually returns. EfatfsReadSource (direct embedded-fatfs handle
+/// reads) remains for callers that hold a raw efatfs handle outside the registry. The reconstruction
+/// core reads through this and stays pure.
 class ReadSource {
 public:
 	virtual ~ReadSource() = default;
@@ -36,10 +32,12 @@ public:
 	virtual std::expected<uint32_t, DelugeStatus> read(uint32_t cluster_index, std::span<std::byte> dst) = 0;
 };
 
-/// @brief Streaming read path (R1): reads via the embedded-fatfs handle at a cluster-aligned byte
-///        offset (deluge_efatfs_read_at). Selected when the sample has an open efatfs handle.
+/// @brief Reads via the embedded-fatfs handle at a cluster-aligned byte offset
+///        (deluge_efatfs_read_at). Selected when the sample has an open efatfs handle.
 class EfatfsReadSource final : public ReadSource {
 public:
+	/// @param handle                 The open embedded-fatfs read handle.
+	/// @param cluster_size_magnitude log2(cluster size) -- cluster size expressed as a shift amount.
 	EfatfsReadSource(uint32_t handle, uint8_t cluster_size_magnitude)
 	    : handle_{handle}, cluster_size_magnitude_{cluster_size_magnitude} {}
 
@@ -51,11 +49,12 @@ private:
 	uint8_t cluster_size_magnitude_;
 };
 
-/// @brief Streaming read path via the `deluge_sample_stream` registry (U4c): reads via a stream
-///        registry handle at a cluster-aligned byte offset (deluge_sample_stream_read_at). Selected
-///        by SampleStream::make_read_source(), the facade's forwarding read source.
+/// @brief Reads via a `deluge_sample_stream` registry handle at a cluster-aligned byte offset
+///        (deluge_sample_stream_read_at). Returned by SampleStream::make_read_source().
 class SampleStreamReadSource final : public ReadSource {
 public:
+	/// @param stream_handle          The `deluge_sample_stream` registry handle.
+	/// @param cluster_size_magnitude log2(cluster size) -- cluster size expressed as a shift amount.
 	SampleStreamReadSource(uint32_t stream_handle, uint8_t cluster_size_magnitude)
 	    : stream_handle_{stream_handle}, cluster_size_magnitude_{cluster_size_magnitude} {}
 
@@ -67,9 +66,9 @@ private:
 	uint8_t cluster_size_magnitude_;
 };
 
-// The stream-vs-recording ReadSource selection lives on deluge::audio::stream::SampleStream
+// The ReadSource is constructed by deluge::audio::stream::SampleStream
 // (SampleStream::make_read_source(), storage/audio/stream/sample_stream.h) -- it owns the Sample's
-// read-stream handle, so it's the only place that can make the selection without a caller branching on
-// Sample internals.
+// read-stream handle, so it's the only place that can build one without a caller branching on Sample
+// internals.
 
 } // namespace deluge::audio::stream

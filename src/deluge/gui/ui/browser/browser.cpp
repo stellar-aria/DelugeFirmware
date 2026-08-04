@@ -140,17 +140,13 @@ void Browser::runPendingListing() {
 
 void Browser::onListingFailed(Error error) {
 	display->displayError(error);
-	// close(), not exitAction(): matches the six removed inline failure tails exactly. exitAction() is
-	// virtual and some subclasses override it with side effects those tails never triggered (e.g.
-	// LoadSongUI::exitAction() shows a different popup and may not close; LoadInstrumentPresetUI's calls
-	// revertToInitialPreset()).
+	// close(), not exitAction(): exitAction() is virtual and some subclasses override it with side
+	// effects a plain listing failure shouldn't trigger (e.g. LoadSongUI::exitAction() shows a
+	// different popup and may not close; LoadInstrumentPresetUI's calls revertToInitialPreset()).
 	close();
-	// The removed inline failure tails (pre-async-listing) all paired their displayError() with a
-	// full force-redraw - e.g. LoadSongUI/LoadInstrumentPresetUI/LoadPatternUI/LoadMidiDeviceDefinitionUI's
-	// opened() and the Save* browsers' opened() called renderingNeededRegardlessOfUI() around the same
-	// error path, because by the time a listing can fail we've usually already drawn the QWERTY pads.
-	// close() alone doesn't force that redraw, so without this a listing failure could leave stale pads
-	// on screen until something else triggers a render.
+	// By the time a listing can fail we've usually already drawn the QWERTY pads, and close() alone
+	// doesn't force a redraw over them - without this, a listing failure could leave stale pads on
+	// screen until something else triggers a render.
 	renderingNeededRegardlessOfUI();
 }
 
@@ -569,9 +565,8 @@ tryReadingItems:
 }
 
 // Body of ListingAction::Open, run on the fiber inside runPendingListing(). arrivedInNewFolder()
-// is the full synchronous listing body (readFileItemsFromFolderAndMemory + fileIndexSelected
-// search + folderContentsReady() + render) — the same thing opened() used to call inline, so this
-// makes the async Open path faithful to the old behaviour.
+// is the full synchronous listing body: readFileItemsFromFolderAndMemory + fileIndexSelected
+// search + folderContentsReady() + render.
 Error Browser::openListingImpl(int32_t direction, char const* filenameToStartAt, char const* defaultDir) {
 	return arrivedInNewFolder(direction, filenameToStartAt, defaultDir);
 }
@@ -972,7 +967,7 @@ Error Browser::reloadImpl(int32_t direction) {
 			emptyFileItems();
 			// TODO - need to close UI or something?
 			// Reload failure stays silent (no popup, no exit) - swallow it here rather than letting it
-			// propagate to runPendingListing()/onListingFailed(), matching the original inline behaviour.
+			// propagate to runPendingListing()/onListingFailed().
 			return Error::NONE;
 		}
 
@@ -988,7 +983,7 @@ Error Browser::reloadImpl(int32_t direction) {
 			emptyFileItems();
 			// TODO - need to close UI or something?
 			// Reload failure stays silent (no popup, no exit) - swallow it here rather than letting it
-			// propagate to runPendingListing()/onListingFailed(), matching the original inline behaviour.
+			// propagate to runPendingListing()/onListingFailed().
 			return Error::NONE;
 		}
 
@@ -1000,7 +995,7 @@ Error Browser::reloadImpl(int32_t direction) {
 	if (error != Error::NONE) {
 		// Matches the synchronous no-reload path (selectEncoderAction()): displayError only, browser stays
 		// open. Swallow here rather than propagating to runPendingListing()/onListingFailed(), which would
-		// wrongly close() the browser on a tail error - reload failures never closed the browser pre-migration.
+		// wrongly close() the browser on a tail error - reload failures never close the browser.
 		display->displayError(error);
 	}
 	return Error::NONE;
@@ -1026,7 +1021,7 @@ bool Browser::predictExtendedText() {
 
 	// Captured by value (not the FileItem*, which readFileItemsFromFolderAndMemory()/doNewRead below can
 	// invalidate by reallocating fileItems) so we can tell after the search whether we landed on a
-	// different file - filename is the file's identity now that FileItem no longer carries a FilePointer.
+	// different file - filename is a FileItem's identity.
 	FileItem* oldFileItem = getCurrentFileItem();
 	std::string oldFilename;
 	if (oldFileItem) {
@@ -1467,8 +1462,8 @@ ActionResult Browser::backButtonAction() {
 	}
 	// goUpOneDirectoryLevel() checks for the root-of-tree case synchronously (see its comment) and returns
 	// NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP without dispatching, so pressing Back at the root is handled
-	// right here exactly as before migration. Any other failure is discovered on the fiber and routed
-	// through onListingFailed (displayError + close()).
+	// right here, synchronously. Any other failure is discovered on the fiber and routed through
+	// onListingFailed (displayError + close()).
 	Error error = goUpOneDirectoryLevel();
 	if (error != Error::NONE) {
 		exitAction();
@@ -1535,10 +1530,10 @@ Error Browser::goIntoFolderImpl(char const* folderName) {
 }
 
 Error Browser::goUpOneDirectoryLevel() {
-	// The "already at root" case is checked synchronously here, not on the fiber: the original inline
-	// behaviour returned NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP with no popup and no UI transition, and
-	// backButtonAction() depends on getting that back synchronously so it can handle the root case
-	// exactly as before. Only dispatch the (SD-touching) listing when there IS a level to ascend.
+	// The "already at root" case is checked synchronously here, not on the fiber: it returns
+	// NO_FURTHER_DIRECTORY_LEVELS_TO_GO_UP with no popup and no UI transition, and backButtonAction()
+	// depends on getting that back synchronously so it can handle the root case inline. Only dispatch
+	// the (SD-touching) listing when there IS a level to ascend.
 	char const* currentDirChars = currentDir.c_str();
 	char const* slashAddress = strrchr(currentDirChars, '/');
 	if (!slashAddress || slashAddress == currentDirChars) {
@@ -1574,12 +1569,11 @@ Error Browser::goUpOneDirectoryLevelImpl() {
 	return error;
 }
 
-// Returns the SYNCHRONOUS mkdir outcome, not the (now async) listing that follows it on success.
+// Returns the SYNCHRONOUS mkdir outcome, not the async listing that follows it on success.
 // acceptCurrentOption() (save_song_or_instrument.cpp) branches on this return to decide whether to
 // close the context menu: mkdir failure must still be reported synchronously so the menu stays open
-// with the error, exactly as before goIntoFolder() started dispatching its listing. A listing failure
-// after a successful mkdir is an inherent, acceptable async delta - it's routed through
-// onListingFailed() instead, after the menu has already closed on the (correct) mkdir success.
+// with the error. A listing failure after a successful mkdir is routed through onListingFailed()
+// instead, after the menu has already closed on the (correct) mkdir success.
 Error Browser::createFolder() {
 	displayText();
 

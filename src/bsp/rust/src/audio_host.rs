@@ -152,9 +152,9 @@ fn render_mode() -> bool {
 ///   `sim_latency` that read needs a `Timer` fired by a separate task
 ///   (`sim_latency::pump`) to ever resolve, and the off-fiber branch is a
 ///   non-yielding `embassy_futures::block_on` that can never let that task get
-///   polled: a full-process livelock (discovered running this task's own
-///   validation — a real offline `StemExport` run against a sample-backed
-///   song hung at 100% CPU inside exactly this call chain). Skipping this
+///   polled: a full-process livelock (a real offline `StemExport` run
+///   against a sample-backed song hung at 100% CPU inside exactly this call
+///   chain). Skipping this
 ///   specific case is safe: the render this call would have produced is
 ///   discarded anyway (a null sink), and the harness doesn't need the
 ///   priority-0 task ticking between fiber-driven operations the way

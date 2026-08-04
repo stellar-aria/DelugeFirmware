@@ -1,8 +1,7 @@
 //! The reader's pure state: [`Reader`], a small frame-cursor over one sample's source residency.
-//! Task 1 (SR-U1) landed lifecycle-only — `open`/`seek`, plus ordinary `Drop` for close (see
-//! `abi.rs`). Task 3 fills in the read core: `open` now resolves real geometry (Step 0), and
-//! `window`/`advance` do the actual streaming reads — must-load-now acquire, a composed
-//! synchronous fill on a miss, and a self-pinning single held lease.
+//! `open`/`seek` handle lifecycle, with ordinary `Drop` for close (see `abi.rs`). `open` resolves
+//! real geometry, and `window`/`advance` do the actual streaming reads — must-load-now acquire, a
+//! composed synchronous fill on a miss, and a self-pinning single held lease.
 
 use core::ffi::c_void;
 
@@ -50,10 +49,10 @@ pub struct Geometry {
 /// deliberately avoids.
 pub(crate) const UNKNOWN_LENGTH_SENTINEL: u64 = 0x8FFF_FFFF_FFFF_FFFF;
 
-/// Valid payload bytes for cluster `index` of `geo`'s audio-data byte-stream — mirrored verbatim
-/// from `deluge_sample_source::geometry::resident_bytes_for` (itself reimplemented natively from
-/// `sample_source.cpp:149-168`), NOT imported: this crate deliberately stays independent of
-/// `deluge_sample_source` (see this crate's Cargo.toml doc), so the short-last-cluster arithmetic
+/// Valid payload bytes for cluster `index` of `geo`'s audio-data byte-stream — mirrors
+/// `deluge_sample_source::geometry::resident_bytes_for`, NOT imported: this crate deliberately
+/// stays independent of `deluge_sample_source` (see this crate's Cargo.toml doc), so the
+/// short-last-cluster arithmetic
 /// is re-derived here rather than shared. Full cluster size for a full cluster, the remainder for a
 /// short last cluster, `0` for a cluster wholly past the end, and full cluster under the
 /// unknown-length sentinel / zero length (still-recording samples, or a geometry not yet finalized).
@@ -116,10 +115,9 @@ fn locate(frame: u64, geo: &Geometry) -> Option<(u32, u32, u32)> {
 /// Run the synchronous cluster fill on `chunk_backing`: resolve where/how much to read
 /// (`native_begin`), read exactly that span in ONE call (a single `deluge_efatfs_read_at` over the
 /// whole `num_sectors*512`-byte span, not a sector-by-sector loop), then run the post-read
-/// convert/stitch/publish tail (`native_finish`). This is U1's own composition — C2a
-/// (`deluge_sample_fill`) provided the two
-/// primitives, not the glue between them; `deluge-bsp-rust`'s async fill task composes them the
-/// same way, just with an `.await`ed read in place of this synchronous one.
+/// convert/stitch/publish tail (`native_finish`). `deluge_sample_fill` provides the two
+/// primitives; this crate composes the glue between them. `deluge-bsp-rust`'s async fill task
+/// composes them the same way, just with an `.await`ed read in place of this synchronous one.
 ///
 /// Returns `native_finish`'s own result — `false` on a geometry-resolution failure (`!d.ok`), a
 /// failed/short read, or a failed convert/stitch/publish; `true` once the chunk is converted,
@@ -194,8 +192,8 @@ pub struct Reader {
     /// `deluge_streaming_resource_manager` extern above).
     manager: *mut c_void,
     // `pub(crate)`, not private: `abi.rs`'s own tests reach through the opaque pointer to attach a
-    // real lease directly, since Task 1 landed before `window()` existed to populate this field
-    // through the public API. Never exposed outside this crate.
+    // real lease directly, since some tests need to populate this field outside the public API.
+    // Never exposed outside this crate.
     pub(crate) held_lease: Option<Lease>,
     /// The cluster index `held_lease` is pinned to, if any — `window()`'s self-pin bookkeeping:
     /// `advance()` drops the held lease exactly when the cursor's new position leaves this index.
@@ -212,7 +210,7 @@ impl Reader {
     /// steering eviction pressure (see [`ReadHint`]). Pure state construction plus one table
     /// lookup: no I/O, no lease taken yet.
     ///
-    /// # Geometry resolution (Task 3 Step 0)
+    /// # Geometry resolution
     /// The header's `open()` signature takes only `source_id` — deliberately, per the design doc:
     /// geometry is resolved RUST-SIDE from the asset, not passed by the caller. This looks up
     /// `asset`'s per-asset fill-context (`deluge_sample_fill::fill_context_for`, the SAME table
@@ -243,7 +241,7 @@ impl Reader {
         }
     }
 
-    /// Random-access reposition (for the both-directions hop search, a later task): release any
+    /// Random-access reposition (for the both-directions hop search): release any
     /// held pin — a later `window()` call re-pins at the new position — and move the cursor to
     /// `frame`. Like `open()` without re-allocating a reader.
     pub fn seek(&mut self, frame: u64) {
@@ -279,8 +277,8 @@ impl Reader {
 
     /// `deluge_resource_acquire`'s must-load-now shape, composed from the facade's own primitives
     /// (the facade has no single blocking "acquire, materializing via a caller-supplied
-    /// synchronous fill" call — see this crate's Task 3 report for why `Manager::acquire`'s real
-    /// C-ABI counterpart isn't reused instead): a cache hit (`acquire_leased`) returns immediately;
+    /// synchronous fill" call, so `Manager::acquire`'s real C-ABI counterpart isn't reused instead):
+    /// a cache hit (`acquire_leased`) returns immediately;
     /// a miss `request`s a fresh reservation (construct-only, mirroring the async prefetch path's
     /// OWN asset registration) and then runs the fill SYNCHRONOUSLY in-line rather than handing it
     /// to the async loader, so this call never returns until the cluster is genuinely resident —
@@ -295,8 +293,8 @@ impl Reader {
     /// parameter today — eviction rank is purely a function of the ASSET's registered cost, size,
     /// and recency (`deluge_resource::value::evict_rank`), and `loader_enqueue`'s own `priority`
     /// only orders the async fill queue, which this synchronous path never uses. So `hint` is
-    /// stored on `Reader` (from Task 1) and forwarded through the public API, but has no manager
-    /// lever to act on yet — an honest, derived-not-invented gap, not silently dropped.
+    /// stored on `Reader` and forwarded through the public API, but has no manager lever to act
+    /// on yet — an honest, derived-not-invented gap, not silently dropped.
     fn acquire_and_fill(&self, cluster_index: u32) -> Option<Lease> {
         if self.manager.is_null() {
             // No manager yet (e.g. boot ordering) -- nothing to acquire through. Mirrors
@@ -590,8 +588,9 @@ impl Reader {
     /// The stateless copy-out convenience (`deluge_sample_read`, header doc): copy up to
     /// `num_frames` native-format frames of `asset`, starting at `start_frame`, into `dest`.
     /// Internally an `open` -> `window`/`advance` loop -> drop (ordinary `Drop`, the same "close"
-    /// Task 1's lifecycle tests exercise at the `Box`/`Drop` level — see `abi::deluge_sample_reader_close`'s
-    /// own doc) -- ONE residency path, not a second implementation. Always forward (`direction ==
+    /// this crate's lifecycle tests exercise at the `Box`/`Drop` level — see
+    /// `abi::deluge_sample_reader_close`'s own doc) -- ONE residency path, not a second
+    /// implementation. Always forward (`direction ==
     /// 1`) with [`ReadHint::Cached`], matching the header's own "equivalent to driving the handle
     /// API by hand with `DELUGE_READ_CACHED`" contract.
     ///
@@ -768,13 +767,13 @@ pub fn invalidate(source_id: u32) {
     if ctx.cluster_size == 0 || ctx.cluster_size_magnitude >= 64 {
         return; // Malformed geometry -- mirrors resolve_geometry's own guard.
     }
-    // C++ `Sample::num_clusters()` (sample.cpp:221-222) branches on `isLengthKnown()`:
-    // `geometricClusterCount()` for a known length, `liveRecorderClusterCount()` (tracked by the
-    // recorder itself, not this fill context) while still recording. `audio_data_length_bytes ==
-    // UNKNOWN_LENGTH_SENTINEL` is exactly that "still recording" case (same sentinel `resident_bytes_for`
-    // and `advance` already guard on above); `== 0` is the same "no known length yet" shape. Neither
-    // has a finite geometric bound available here, and the live recorder-side count is out of this
-    // rung's scope -- so both bail out as a no-op rather than feeding an astronomical `total_bytes`
+    // C++ `Sample::num_clusters()` branches on `isLengthKnown()`: `geometricClusterCount()` for a
+    // known length, `liveRecorderClusterCount()` (tracked by the recorder itself, not this fill
+    // context) while still recording. `audio_data_length_bytes == UNKNOWN_LENGTH_SENTINEL` is
+    // exactly that "still recording" case (same sentinel `resident_bytes_for` and `advance` already
+    // guard on above); `== 0` is the same "no known length yet" shape. Neither has a finite
+    // geometric bound available here, and the live recorder-side count is out of scope for this
+    // module -- so both bail out as a no-op rather than feeding an astronomical `total_bytes`
     // into the geometric formula below (which `.min(u32::MAX)` would otherwise clamp to ~4.3 billion,
     // turning the peek-loop below into an effective hang).
     if ctx.audio_data_length_bytes == 0 || ctx.audio_data_length_bytes == UNKNOWN_LENGTH_SENTINEL {
@@ -842,7 +841,7 @@ mod tests {
     }
 
     /// A `FillContext` compatible with `CHUNK_SIZE` (4096 = 2^12) — just enough for `Reader::open`
-    /// (Step 0) to resolve real geometry (`ok() == true`); these lifecycle tests never call
+    /// to resolve real geometry (`ok() == true`); these lifecycle tests never call
     /// `window()`, so the exact values beyond `cluster_size`/`cluster_size_magnitude` don't matter.
     fn lifecycle_fill_context() -> FillContext {
         FillContext {
@@ -860,8 +859,8 @@ mod tests {
 
     /// Build a manager over a fresh test heap (leaking its backing arena) with one requestable
     /// asset attached, mirroring `deluge_sample_source`'s own test harness. Also registers the
-    /// asset's fill-context (Step 0's own requirement: `Reader::open` now resolves geometry from
-    /// this table) and routes this thread's `deluge_streaming_resource_manager()` stub to `handle`
+    /// asset's fill-context (`Reader::open` resolves geometry from this table) and routes this
+    /// thread's `deluge_streaming_resource_manager()` stub to `handle`
     /// — every caller must hold [`TEST_LOCK`] for its whole run, since both the fill-context table
     /// and the stub's active-manager cell are shared, process-wide state (see their own docs).
     fn test_manager_and_asset() -> (*mut DelugeResource, u32) {
@@ -915,7 +914,7 @@ mod tests {
         );
     }
 
-    /// Task 1's central lifecycle assertion: `seek` both updates `current_frame` AND drops
+    /// The central lifecycle assertion: `seek` both updates `current_frame` AND drops
     /// whatever lease the reader is holding — proven with a REAL manager lease (not a stand-in),
     /// attached directly to `held_lease` (this `mod` is a child of `reader`'s own module),
     /// mirroring how `window()` itself populates it.
@@ -958,9 +957,9 @@ mod tests {
         assert_eq!(reader.current_frame(), 7);
     }
 
-    /// Close (a later task's C-ABI wrapper just drops the owning `Box<Reader>` — see `abi.rs`)
-    /// releases any held lease without leaking, proven here at the `Box`/`Drop` level Task 1
-    /// actually implements: a boxed reader (mirroring what `deluge_sample_reader_open` hands out)
+    /// Close (the C-ABI wrapper just drops the owning `Box<Reader>` — see `abi.rs`)
+    /// releases any held lease without leaking, proven here at the `Box`/`Drop` level: a boxed
+    /// reader (mirroring what `deluge_sample_reader_open` hands out)
     /// is non-null, and dropping it (mirroring `deluge_sample_reader_close`) returns the manager's
     /// lease count to its pre-open baseline.
     #[test]
@@ -1015,7 +1014,7 @@ mod tests {
         assert_eq!(resident_bytes_for(0, &z), 16);
     }
 
-    // ── Task 3: window/advance over a real synthetic fill (the read core + self-pin) ───────────
+    // ── window/advance over a real synthetic fill (the read core + self-pin) ───────────
     //
     // A synthetic sample: cluster_size=512 bytes, byte_depth=2/num_channels=1 (stride=2, so a
     // 512-byte cluster holds exactly 256 frames), RawDataFormat::Native (0) so
@@ -1027,12 +1026,12 @@ mod tests {
     // module's `harness` mints is a genuine `StreamedChunk`, placement-constructed by the same
     // `deluge_sample_fill::chunk::deluge_streaming_chunk_construct` callback production registers
     // (`chunk_residency.cpp`), not a seeded `payload == backing` stand-in (`RUST_CHUNK_PAYLOAD_OFFSET`
-    // is a real nonzero front guard) — per the SR2d-4 lesson this task's brief calls out. This is
+    // is a real nonzero front guard). This is
     // also load-bearing for soundness, not just fidelity: `native_finish` (`native.rs`) reaches a
     // chunk's fields via `crate::chunk::payload`/`convert_state`/`set_convert_state`/`set_loaded`
-    // directly (in-crate calls, not the C-ABI wrappers this crate's own `host_streaming_stubs` used
-    // to shadow) — those reborrow the backing as `&`/`&mut StreamedChunk`, which is only valid over
-    // a backing this module actually constructed as one.
+    // directly (in-crate calls, not C-ABI wrappers) — those reborrow the backing as
+    // `&`/`&mut StreamedChunk`, which is only valid over a backing this module actually
+    // constructed as one.
     mod window_tests {
         use super::*;
         use crate::host_streaming_stubs::{set_fail_at_byte_offset, set_force_read_failure};
@@ -1613,7 +1612,7 @@ mod tests {
             );
         }
 
-        // ── Task 4: `Reader::read`, the stateless copy-out over the SAME handle ─────────────────
+        // ── `Reader::read`, the stateless copy-out over the SAME handle ─────────────────
         //
         // Nested inside `window_tests` (rather than a sibling module) purely to reuse its harness
         // (`harness`/`geo`/`CLUSTER_SIZE`/`expected_cluster_bytes`) directly via `use super::*` --

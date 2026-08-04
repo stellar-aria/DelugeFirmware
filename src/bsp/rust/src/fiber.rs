@@ -398,7 +398,8 @@ static FIBER_BUSY: AtomicBool = AtomicBool::new(false);
 /// would free an object an in-flight op is mid-way through (the recorder, freed
 /// by discardRecorder). Synchronous so the hold engages before the enqueuing task
 /// returns — closing the window between enqueue and the pump starting the op.
-/// Inert until the yield flip (rung 5), but correct-by-construction for it.
+/// Currently inert until cooperative yielding is enabled on this path, but
+/// correct-by-construction for when it is.
 static SD_ROUTINE_HELD: AtomicU32 = AtomicU32::new(0);
 
 /// The sd-routine bit of the op currently on the fiber (running or suspended),

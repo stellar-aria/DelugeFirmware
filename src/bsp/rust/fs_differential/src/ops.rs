@@ -1,10 +1,8 @@
 //! Filesystem-op result types shared across the C-FatFS and embedded-fatfs
 //! backends.
 //!
-//! `Entry` is owned by Task 5 (the directory-listing differential surface);
-//! it was forward-declared ahead of this task because Task 3's
-//! `fatfs_c::CFatFs::read_dir` already needed a concrete return type. This
-//! task adds `FsOps`, the common interface `diff::compare_read` walks both
+//! `Entry` is the directory-listing entry type both backends' `read_dir`
+//! return. `FsOps` is the common interface `diff::compare_read` walks both
 //! backends through.
 use crate::efatfs::EFatFs;
 use crate::fatfs_c::CFatFs;
@@ -42,7 +40,7 @@ impl FsOps for EFatFs {
     }
 }
 
-/// A single write-path operation the differential (Task 6) replays
+/// A single write-path operation the differential replays
 /// identically on both backends, each against its own copy of the same
 /// starting image (see `diff::replay_and_compare`). Covers the write-path
 /// primitives the Deluge's own file I/O actually exercises: create a

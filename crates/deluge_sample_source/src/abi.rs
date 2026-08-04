@@ -5,14 +5,14 @@
 //! `claim_source_slot`/`release_source_slot`) natively.
 //!
 //! The link-time weak/strong selector that makes these symbols win over the
-//! C++ backing is the `cfg_attr` gate on each `#[no_mangle]` below (device +
-//! host_app: SR2d-5 Task 4; the C-host sim: SR3a Task 1, via this crate's own
+//! C++ backing is the `cfg_attr` gate on each `#[no_mangle]` below (device and
+//! host_app build it directly; the C-host sim links it via this crate's own
 //! `sim` feature, forwarded from `deluge_rust`'s umbrella build -- see
 //! `crates/deluge_rust/Cargo.toml` and `sim/CMakeLists.txt`).
 //!
 //! # `open()`'s `stream_backing`
 //! The reader passes its opaque `deluge::audio::stream::SampleStream*`
-//! unchanged (SR2d-5 Task 1) -- the same pointer the C++ backing
+//! unchanged -- the same pointer the C++ backing
 //! (`sample_source.cpp`) already casts to `SampleStream*`. This module
 //! bridges it to the `{manager handle, asset id}` pair `ManagerResidency`
 //! needs via two C-ABI calls: `deluge_streaming_resource_manager()` (the
@@ -30,13 +30,13 @@
 //! token -- no source, no manager handle -- matching the header exactly. That
 //! works in the C++ backing because a lease there IS a raw `StreamedChunk*`,
 //! self-sufficient with no external table lookup. `ManagerResidency`'s token
-//! is `{slot<<32 | gen}` (Task 1), meaningful only relative to the specific
+//! is `{slot<<32 | gen}`, meaningful only relative to the specific
 //! `*mut DelugeResource` that minted it, so a lease-only call needs SOME way
 //! to recover that handle. Production runs exactly one boot-singleton
 //! `deluge_resource` manager (the same contract `ManagerResidency::new`
 //! documents), so this module caches the most-recently-`open()`-ed handle in
 //! [`ACTIVE_MANAGER`] and routes standalone retain/release through it --
-//! correct for this rung's single-manager reality, and it preserves the
+//! correct for the current single-manager reality, and it preserves the
 //! header's exact signature (no added parameter). Flagged here for whoever
 //! revisits a hypothetical multi-manager future.
 
@@ -831,13 +831,13 @@ mod tests {
         unsafe { deluge_sample_source_close(src) };
     }
 
-    /// SR3f: ports `sample_source_spec.cpp`'s "8b: acquire_ex's READY path is the
+    /// Ports `sample_source_spec.cpp`'s "8b: acquire_ex's READY path is the
     /// boolean acquire's true, unchanged" (plus the boolean-specific half of
     /// "acquire on a not-yet-loaded cluster returns false and leaves `out`
     /// untouched"). [`deluge_sample_region_acquire`] -- the boolean C-ABI
-    /// wrapper -- was previously exercised only by the (now-deleted) C++ mirror:
+    /// wrapper -- is exercised only here:
     /// every other test in this module calls `deluge_sample_region_acquire_ex`
-    /// directly, so this test is now the boolean wrapper's sole coverage.
+    /// directly, so this test is the boolean wrapper's sole coverage.
     #[test]
     fn boolean_acquire_matches_ready_and_is_false_with_out_untouched_otherwise() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

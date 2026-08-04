@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# Lens 1 (streaming-underrun harness) margin sweep + negative controls. Formalizes
-# what was originally run by hand: a repeatable,
+# Lens 1 (streaming-underrun harness) margin sweep + negative controls: a repeatable,
 # deterministic sweep of `lens1-vt-sim` over modeled SD latency (the `sim_latency`
 # throughput/overhead lever — see `../src/sd.rs`'s `latency_for`), reporting the underrun
 # curve and the THRESHOLD throughput at which underruns first appear (the "margin": "keeps
@@ -11,7 +10,7 @@
 #   Control A (detection): past the threshold, underrun_unassign > 0; at the fast/default
 #     latency, == 0 — proof the harness's instrumentation actually fires.
 #
-# (Control B — mechanism efficacy of the rung-5 HIGH-priority dispatch / recorder-drain yield —
+# (Control B — mechanism efficacy of the HIGH-priority dispatch / recorder-drain yield —
 # was retired with that worker-ring tier; the sim knobs it toggled no longer exist.)
 #
 # Every run is a single deterministic virtual-time simulation (no wall-clock, no RNG) —
@@ -71,8 +70,8 @@ field() { # field <LENS1_RESULT line> <name>
 
 # --- Margin sweep --------------------------------------------------------------------
 # Geometric-ish descent from a fast/default-plausible throughput down to the extreme low
-# end characterized by hand, denser in the 300k-2M band where the curve was expected (from
-# a coarser hand-run table) to cross from 0 to positive, to pin the threshold tightly.
+# end, denser in the 300k-2M band where the curve is expected to cross from 0 to positive,
+# to pin the threshold tightly.
 MARGIN_THROUGHPUTS=(2000000 1500000 1000000 800000 600000 500000 400000 300000 200000 150000 100000 50000 20000 10000 5000)
 
 run_margin_sweep() {

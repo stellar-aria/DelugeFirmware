@@ -38,6 +38,8 @@ typedef struct DelugeColour {
 	uint8_t b;
 } DelugeColour;
 
+/// @brief Kind of decoded input event reported by the control surface; selects which fields of
+///        DelugeInputEvent are meaningful.
 typedef enum DelugeInputEventKind : uint8_t {
 	DELUGE_EVENT_PAD = 0,        ///< main grid pad
 	DELUGE_EVENT_BUTTON = 1,     ///< matrix button

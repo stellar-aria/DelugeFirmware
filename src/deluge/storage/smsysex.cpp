@@ -861,11 +861,11 @@ void smSysex::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 	memcpy(de.data, data, len);
 }
 
-// --- Rung-4a: run each SysEx request's file ops on the storage owner --------------------------
-// smSysex is a namespace (no instance state), so the single-flight guard and the op trampoline live
-// at file scope. processFrontSysEx() is the parse+handle+reply+dequeue body; handleNextSysEx() is
-// the per-tick trigger that dispatches it via deluge::storage::Owner::run so the FatFS work runs on
-// the storage owner rather than the task stack.
+// Each SysEx request's file ops run on the storage owner. smSysex is a namespace (no instance
+// state), so the single-flight guard and the op trampoline live at file scope. processFrontSysEx()
+// is the parse+handle+reply+dequeue body; handleNextSysEx() is the per-tick trigger that dispatches
+// it via deluge::storage::Owner::run so the FatFS work runs on the storage owner rather than the
+// task stack.
 namespace smSysex {
 void processFrontSysEx();
 }

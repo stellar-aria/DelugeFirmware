@@ -1,8 +1,7 @@
-//! The Rust async cluster-fill task (R1.1) and its BSP wiring (R2.1): drains the
-//! resource manager's loader queue (`deluge_resource_loader_next`) on the same
+//! The Rust async cluster-fill task and its BSP wiring: drains the resource
+//! manager's loader queue (`deluge_resource_loader_next`) on the same
 //! thread-mode Embassy executor the fiber pump and the C++ enqueue path run on,
-//! awaiting the actual SD read instead of running it synchronously inline, as
-//! the old C++ `loader::pump()` fiber op once did.
+//! awaiting the actual SD read instead of running it synchronously inline.
 //!
 //! ## Two compilation tiers
 //!
@@ -40,8 +39,8 @@
 //! host unit test
 //! (`tests/streaming_fill_host.rs`) wires it to an in-memory fake queue instead.
 //! This is the whole reason [`fill_once`] is independently testable — the real
-//! end-to-end fill (real manager, real chunks) is validated later, in R1.2 (TSan)
-//! and R3.2 (full scenario).
+//! end-to-end fill (real manager, real chunks) is validated separately, via a
+//! ThreadSanitizer check and a full scenario harness.
 //!
 //! ## Concurrency
 //!
@@ -62,7 +61,7 @@ use embassy_sync::signal::Signal;
 /// just a harmless flag set.
 pub static FILL_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-// ── Always-compiled C ABI: selector + wakeup (R2.1) ─────────────────────────
+// ── Always-compiled C ABI: selector + wakeup ─────────────────────────────────
 // See `include/libdeluge/streaming_fill.h`'s doc comments for the C-side contract.
 
 /// Whether the async streaming-fill task owns the loader queue on this
@@ -232,9 +231,8 @@ impl core::future::Future for WaitQueueDrained {
 /// `deluge_streaming_drain_queue_blocking` doc for the C-side contract; in brief: unlike
 /// [`deluge_streaming_fill_chunk_blocking`] (which blocks on ONE named chunk), this wakes
 /// `streaming_fill_task` and yield-waits until the loader queue is empty
-/// (`deluge_resource_loader_has_any` false) — the same drain-everything-the-preceding-
-/// `AudioEngine::routine()`-enqueued semantics the old C-host between-routines `loader::pump()` once
-/// provided. On-fiber it yields until
+/// (`deluge_resource_loader_has_any` false) — draining everything the preceding
+/// `AudioEngine::routine()` enqueued. On-fiber it yields until
 /// drained, bounded by [`BLOCKING_FILL_MAX_CYCLES`]; off-fiber it returns false immediately (no stack
 /// to suspend — renderWait is always on-fiber, so this is only a safety net).
 #[unsafe(no_mangle)]
@@ -258,20 +256,19 @@ pub extern "C" fn deluge_streaming_drain_queue_blocking() -> bool {
     }
 }
 
-// ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────
+// ── Always-compiled C ABI: per-asset fill-context table ─────────────────────
 // Registered by C++ at sample-load (`deluge_streaming_define_asset()`/`SampleStream::open_read_stream()`,
 // see `chunk_residency.cpp`/`sample_stream.cpp`); read by `deluge_sample_fill::native_begin`/
-// `native_finish` (C2a Task 3 moved that lookup, and `FillContext`/`fill_context_for` themselves,
-// into the crate alongside them). See `include/libdeluge/streaming_fill.h`'s doc for the C-side
+// `native_finish`. See `include/libdeluge/streaming_fill.h`'s doc for the C-side
 // contract. `StreamingFillDescriptor` (used by [`FillOps`]'s own signatures below) and
-// `DelugeChunkConvertState` also live in the shared `deluge_sample_fill` crate (C2a Task 2);
+// `DelugeChunkConvertState` also live in the shared `deluge_sample_fill` crate;
 // `pub use` (not a plain `use`) so `tests/streaming_fill_host.rs`'s `#[path]`-recompiled copy of
 // this file can still reach it as `streaming_loader::StreamingFillDescriptor`.
 pub use deluge_sample_fill::StreamingFillDescriptor;
 
-/// `kLowestLoaderPriority` (formerly in the now-deleted `loader.cpp`) — re-enqueue
-/// value for a cluster whose read just failed while still wanted, so it sinks behind everything else
-/// instead of being popped again immediately.
+/// `kLowestLoaderPriority` — re-enqueue value for a cluster whose read just
+/// failed while still wanted, so it sinks behind everything else instead of
+/// being popped again immediately.
 #[cfg(feature = "async_streaming_loader")]
 const LOWEST_PRIORITY: u32 = 0xFFFF_FFFF;
 
@@ -316,23 +313,18 @@ pub trait FillOps {
 }
 
 /// Drain the loader queue: for each queued cluster, resolve → await the read →
-/// convert/stitch/mark-ready. Reproduces the drain logic the now-deleted
-/// `loader.cpp` `pump()`/`reconstruct_one` used to run, just with the read
-/// awaited instead of run inline:
-/// - the post-`next()` unloadable safety-net skip (the old `pump()`'s "Safety
-///   net" step) — drop, keep draining, don't count it;
+/// convert/stitch/mark-ready:
+/// - the post-`next()` unloadable safety-net skip — drop, keep draining,
+///   don't count it;
 /// - the post-`begin()` `!ok` skip (unloadable / geometry error) — drop, keep
 ///   draining;
 /// - on a **successful** read: run the convert/stitch/publish `finish` tail,
-///   then keep draining (`reconstruct_one`'s success arm);
-/// - on a **failed** read: `finish` is never called (it's the success-only
-///   tail — as in `reconstruct_one`, which never reached its convert/stitch/
-///   publish body on a failed read either). Instead check the lease count: if
-///   it dropped to 0 while loading, the chunk is already unwanted — drop it
-///   and keep draining (`reconstruct_one`'s `lease_count(...) == 0` arm).
-///   Otherwise a caller still wants it — re-enqueue at lowest priority and
-///   stop, else we'd keep re-popping the same cluster until the card is back
-///   (`reconstruct_one`'s failed-read-still-wanted arm).
+///   then keep draining;
+/// - on a **failed** read: `finish` is never called (it's a success-only
+///   tail). Instead check the lease count: if it dropped to 0 while loading,
+///   the chunk is already unwanted — drop it and keep draining. Otherwise a
+///   caller still wants it — re-enqueue at lowest priority and stop, else
+///   we'd keep re-popping the same cluster until the card is back.
 #[cfg(feature = "async_streaming_loader")]
 pub async fn fill_once<O: FillOps>(ops: &O) {
     loop {
@@ -425,11 +417,10 @@ mod prod {
             // singleton pointer.
             let mgr = unsafe { deluge_streaming_resource_manager() };
 
-            // No startup capacity guard here (SR2d-4 Task 2 retired it along with the earlier
-            // per-chunk convert-state sidecar it protected): convert-state now lives directly on
+            // No startup capacity guard here: convert-state lives directly on
             // each `StreamedChunk` via `deluge_sample_fill::chunk::convert_state`/
             // `set_convert_state`, which has no separate capacity to overflow (it's a plain field
-            // access on a chunk the caller already holds), so there is nothing left to guard.
+            // access on a chunk the caller already holds), so there is nothing to guard.
             Self { mgr }
         }
     }
@@ -498,7 +489,7 @@ pub use prod::ProdOps;
 
 /// The fill task: wakes on [`FILL_WAKE`], drains the loader queue via the real
 /// [`ProdOps`], then goes back to sleep. Spawned in `main.rs` (device `main` +
-/// host `host_app`) under `async_streaming_loader` (R2.1); the C++ enqueue path
+/// host `host_app`) under `async_streaming_loader`; the C++ enqueue path
 /// (`sample_stream.cpp`) wakes it via `deluge_streaming_signal_fill`.
 #[cfg(all(
     feature = "async_streaming_loader",

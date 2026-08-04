@@ -671,12 +671,12 @@ doLoading:
 			percCacheNow = percCacheMemory[reversed];
 		}
 
-		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff. The passive
-		// peek is genuinely zero-lease, matching that original intent exactly.
+		// Don't call getCluster() - that would add a reason, and potentially do loading and stuff. This
+		// peek is genuinely zero-lease.
 		const uint64_t frame = (uint32_t)(sourceBytePos - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
 		const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
 		if (window.frames == nullptr) {
-			goto getOut; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
+			goto getOut; // Not resident / not ready.
 		}
 
 		int32_t bytePosWithinCluster = sourceBytePos & (Cluster::size - 1);
@@ -697,8 +697,7 @@ doLoading:
 
 		// Alright, load those samples. `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4`
 		// aligns for the `int32`-over-`byteDepth` read below, and the `bytesLeftThisSourceCluster` clamp keeps a
-		// boundary-straddling frame reading this cluster's own physical slack — byte-identical to
-		// `frame_read_origin(bytePosWithinCluster, byteDepth)`.
+		// boundary-straddling frame reading this cluster's own physical slack.
 		char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepth - 4;
 
 		do {
@@ -904,7 +903,7 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 			const uint64_t frame = (uint32_t)(readByte - audioDataStartPosBytes) / (uint8_t)bytesPerSample;
 			const DelugeFrameWindow window = deluge_sample_peek(sourceId, frame, static_cast<int8_t>(playDirection));
 			if (window.frames == nullptr) {
-				return false; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
+				return false; // Not resident / not ready.
 			}
 
 			int32_t bytePosWithinCluster = readByte & (Cluster::size - 1);
@@ -921,7 +920,7 @@ bool Sample::getAveragesForCrossfade(int32_t* totals, int32_t startBytePos, int3
 			// Alright, read those samples. `window.frames` points AT this frame's own bytes; the
 			// `+ byteDepthNow - 4` aligns for the `int32`-over-`byteDepth` read below (its high 16
 			// bits are the sample), and the `bytesLeftThisCluster` clamp keeps a boundary-straddling
-			// frame reading this cluster's own physical slack — byte-identical to `frame_read_origin`.
+			// frame reading this cluster's own physical slack.
 			char* currentPos = reinterpret_cast<char*>(const_cast<void*>(window.frames)) + byteDepthNow - 4;
 			char* endPos = currentPos + numSamplesThisRead * bytesPerSample * playDirection;
 

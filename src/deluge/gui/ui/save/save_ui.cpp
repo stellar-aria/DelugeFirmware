@@ -72,7 +72,7 @@ void SaveUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem && currentFileItem->isFolder) {
-		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
 		// Browser::onListingFailed() (displayError + close()) once the listing completes.
 		goIntoFolder(currentFileItem->filename.c_str());
 	}

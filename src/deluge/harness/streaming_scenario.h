@@ -81,10 +81,12 @@ bool deluge_scenario_song_listing_in_progress();
 void deluge_scenario_start_song_load(const char* full_path);
 
 /// @brief Whether the dispatch started by deluge_scenario_start_song_load() has run.
+/// @return True once the dispatched call has run.
 bool deluge_scenario_song_load_begin_done();
 
 /// @brief Once deluge_scenario_song_load_begin_done() is true, the result
 ///        deluge_scenario_begin_song_load() itself returned.
+/// @return The result deluge_scenario_begin_song_load() would have returned.
 bool deluge_scenario_song_load_begin_ok();
 
 /// @brief Commit the load: dispatch `LoadSongUI::performLoad()` onto the storage-owner
@@ -188,10 +190,12 @@ void deluge_scenario_start_recorder_roundtrip();
 
 /// @brief Whether the round-trip dispatched by deluge_scenario_start_recorder_roundtrip() has
 ///        finished (its worker-fiber closure returned).
+/// @return True once the dispatched closure has returned.
 bool deluge_scenario_recorder_roundtrip_done();
 
 /// @brief Once deluge_scenario_recorder_roundtrip_done() is true, the oracle's failure count
 ///        (0 = all cases passed). -1 until the dispatched closure has set it.
+/// @return The oracle's failure count, or -1 if not yet available.
 int32_t deluge_scenario_recorder_roundtrip_failures();
 
 } // extern "C"

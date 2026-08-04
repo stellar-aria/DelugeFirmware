@@ -39,8 +39,8 @@ const BOOT_FW_RECEIVED: u16 = 0x100;
 // = 6 bytes (the i16 `value` needs 2-byte alignment, leaving one pad byte
 // after `y`). bindgen must match; if this ever regresses to a wider enum the
 // app reads x/y/value from the wrong offsets (silently, as garbage) — this
-// was a real, hard-to-find bug (see DelugeRegionState's history in
-// sample_source.h). Fail the build instead.
+// class of bug is real and hard to find (see the enum-width note on
+// DelugeRegionState in sample_source.h). Fail the build instead.
 const _: () = {
     assert!(
         core::mem::size_of::<DelugeInputEvent>() == 6,

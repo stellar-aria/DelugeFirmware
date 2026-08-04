@@ -1,6 +1,6 @@
 //! Mounts the vendored `embedded-fatfs` (`crates/embedded-fatfs/`) over the
 //! SAME shared `DISK` image `ram_disk.rs` gives the C FatFS FFI bridge
-//! (`fatfs_c.rs`), and reads through it -- the Rust half of the SP0
+//! (`fatfs_c.rs`), and reads through it -- the Rust half of this
 //! differential's read path.
 //!
 //! Confirmed async API, from the vendored source (not the crates.io docs,
@@ -28,7 +28,7 @@
 //!       (dir_entry.rs:617,712,637; `file_name`/`len` need the `alloc` feature,
 //!       already on in this crate's `Cargo.toml`).
 //!
-//! Write path (Task 6), same vendored source:
+//! Write path, same vendored source:
 //!   `Dir::create_file(&self, path: &str) -> Result<File<'a,IO,TP,OCC>, Error<IO::Error>>`
 //!       -- async; opens if it already exists, creates (empty) otherwise.   (dir.rs:339)
 //!   `File::truncate(&mut self) -> Result<(), Error<IO::Error>>`
@@ -47,14 +47,13 @@
 //! (fs.rs:343), so the storage below needs only those three trait impls -- no
 //! bespoke `IntoStorage`.
 //!
-//! SP1 Task 2 re-points that storage from the byte-granular `MemIo` shortcut
-//! SP0 used onto the real device bridge: `block_dev::FileBlockDevice`
+//! That storage is the real device bridge: `block_dev::FileBlockDevice`
 //! (`block_device_driver::BlockDevice<512>` over the shared `DISK`) wrapped
 //! in `block_device_adapters::BufStream`, which supplies the
 //! `embedded_io_async::{Read,Write,Seek}` `embedded-fatfs` needs. This is
 //! the exact adapter stack (plus `#68`/`#62`, vendored in
-//! `crates/block-device-adapters`) SP1 drives on-device, so the whole SP0
-//! differential corpus now validates it on host too.
+//! `crates/block-device-adapters`) driven on-device, so the whole
+//! differential corpus validates it on host too.
 
 use crate::block_dev::FileBlockDevice;
 use crate::ops::Entry;
@@ -81,7 +80,7 @@ impl EFatFs {
     }
 
     /// The raw mounted `FileSystem`, for tests that drive the shared
-    /// `efatfs_core` handle-table logic (SP1a Task 7a) directly over it.
+    /// `efatfs_core` handle-table logic directly over it.
     pub fn raw(&self) -> &FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter> {
         &self.fs
     }
@@ -104,7 +103,7 @@ impl EFatFs {
         })
     }
 
-    /// SP1a Task 3 host analog: open `path`, then DETACH it to an opaque
+    /// Host analog: open `path`, then DETACH it to an opaque
     /// [`FileContext`] via `File::close()` — the exact handoff the device
     /// handle table (`efatfs_fs.rs`) stores per open sample. The context is
     /// opaque here (its fields are `pub(crate)`); the caller stores/clones the
@@ -140,7 +139,7 @@ impl EFatFs {
         })
     }
 
-    /// R2 Task 1/2 host analog of `efatfs_core::create_context`: `Dir::create_file`
+    /// Host analog of `efatfs_core::create_context`: `Dir::create_file`
     /// (open-or-create) then `File::truncate` — WRITE_CREATE semantics
     /// (`exclusive == false`, starts empty even if `path` already existed) —
     /// or, with `exclusive == true`, WRITE_CREATE_NEW (fails if `path`
@@ -197,7 +196,7 @@ impl EFatFs {
         })
     }
 
-    /// R3 Task 1 host analog of `efatfs_core::write_context_noflush`:
+    /// Host analog of `efatfs_core::write_context_noflush`:
     /// reattach, seek to absolute `offset`, loop `Write::write` over `src`,
     /// then `File::detach()` instead of `close()` — the in-memory size
     /// advances but the on-disk directory entry is NOT flushed. Pairs with
@@ -221,7 +220,7 @@ impl EFatFs {
         })
     }
 
-    /// R3 Task 1 host analog of `efatfs_core::read_at_via_context`:
+    /// Host analog of `efatfs_core::read_at_via_context`:
     /// reattach, seek to absolute `offset`, read bounded by the context's
     /// IN-MEMORY size (so this sees data from a prior
     /// [`write_at_via_context_noflush`](Self::write_at_via_context_noflush)
@@ -245,7 +244,7 @@ impl EFatFs {
         })
     }
 
-    /// R3 Task 1 host analog of `efatfs_core::flush_context`: reattach `ctx`
+    /// Host analog of `efatfs_core::flush_context`: reattach `ctx`
     /// and `File::close()` it, flushing the accumulated in-memory size/mtime
     /// edit (from one or more prior
     /// [`write_at_via_context_noflush`](Self::write_at_via_context_noflush)
@@ -345,7 +344,7 @@ impl EFatFs {
         })
     }
 
-    /// R2 Task 3 test helper: `read_dir` collapsed to the differential's
+    /// Test helper: `read_dir` collapsed to the differential's
     /// comparison shape (`(name, is_dir, size)`), for the enumeration-set
     /// equivalence test against [`CFatFs::readdir_all`](crate::fatfs_c::CFatFs::readdir_all).
     pub fn readdir_all(&self, path: &str) -> Vec<(String, bool, u32)> {
@@ -400,7 +399,7 @@ impl EFatFs {
         });
     }
 
-    /// R2 Task 2 host analog of `efatfs_core::unlink` — same operation as
+    /// Host analog of `efatfs_core::unlink` — same operation as
     /// [`delete`](Self::delete), `&self` to match the path-op suite's
     /// (mkdir/create_context/rename/unlink) signatures.
     pub fn unlink(&self, path: &str) {
@@ -412,15 +411,13 @@ impl EFatFs {
     /// Rename/move `from` to `to`, both absolute paths.
     ///
     /// Drives the crate's `Dir::rename` directly, with no parent-resolution
-    /// workaround: Task 6's write differential found that `Dir::rename`
-    /// silently dropped a multi-component `dst_path`'s leading directory
+    /// workaround needed: the vendored crate fixes a bug where `Dir::rename`
+    /// would silently drop a multi-component `dst_path`'s leading directory
     /// components (`dir.rs:559` passed the raw, untraversed `dst_dir`
     /// parameter to `rename_internal` instead of the traversed destination
-    /// parent it had just computed); Task 6B fixed that in the vendored
-    /// crate (see `crates/embedded-fatfs/VENDOR.md`'s "Applied local
-    /// fixes"), so a plain `root.rename(from, &root, to)` with a
-    /// multi-component `to` now lands in the right directory and this
-    /// harness no longer needs to route around it.
+    /// parent it had just computed; see `crates/embedded-fatfs/VENDOR.md`'s
+    /// "Applied local fixes"), so a plain `root.rename(from, &root, to)`
+    /// with a multi-component `to` lands in the right directory.
     ///
     /// `&self`, not `&mut self` — see [`mkdir`](Self::mkdir)'s doc comment.
     pub fn rename(&self, from: &str, to: &str) {
@@ -432,7 +429,7 @@ impl EFatFs {
         });
     }
 
-    /// R2 Task 2 host analog of `efatfs_core::set_time`: `timestamp` is the
+    /// Host analog of `efatfs_core::set_time`: `timestamp` is the
     /// same packed FAT date/time (`(dos_date << 16) | dos_time`, matching
     /// C-FatFS's `get_fattime()`/`FILINFO::fdate,ftime` convention) `efatfs_core::set_time`
     /// documents. Panics on any FS error or out-of-range date/time

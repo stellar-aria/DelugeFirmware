@@ -1,6 +1,6 @@
-//! The shared cluster-fill core (C2a). See Cargo.toml's header for the crate's role.
-//! Task 1 lands `fill_logic`; the fill-context table (Task 2) is added below; the
-//! `native_fill`-gated sync fill core (Task 3) is `mod native` at the bottom of this file.
+//! The shared cluster-fill core. See Cargo.toml's header for the crate's role.
+//! `fill_logic` provides the pure geometry math; the fill-context table is defined below; the
+//! `native_fill`-gated sync fill core is `mod native` at the bottom of this file.
 #![no_std]
 
 use core::cell::RefCell;
@@ -12,11 +12,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 pub mod chunk;
 pub mod fill_logic;
 
-// ── Always-compiled C ABI: per-asset fill-context table (SR2d-4 Task 1) ─────
+// ── Always-compiled C ABI: per-asset fill-context table ─────
 // Registered by C++ at sample-load (`deluge_streaming_define_asset()`/`SampleStream::open_read_stream()`,
 // see `chunk_residency.cpp`/`sample_stream.cpp`);
-// read by the native fill task via [`fill_context_for`] (`prod::ProdOps::begin`/`finish`, SR2d-4
-// Task 5). See `include/libdeluge/streaming_fill.h`'s doc for the C-side contract.
+// read by the native fill task via [`fill_context_for`] (`prod::ProdOps::begin`/`finish`).
+// See `include/libdeluge/streaming_fill.h`'s doc for the C-side contract.
 
 /// Fixed capacity for the per-asset fill-context table, keyed by asset id. Mirrors `kAssetCap`
 /// (`general_memory_allocator.cpp`) — the resource manager's asset-table capacity — so every asset
@@ -52,11 +52,11 @@ pub struct FillContext {
     pub cluster_size_magnitude: u32,
     pub raw_data_format: u8,
     /// Bytes per channel-sample (e.g. 2 for 16-bit, 3 for 24-bit). Not read by the fill
-    /// (`to_fill_geometry` drops it) — carried here so the reader (Task 3) can resolve frame
+    /// (`to_fill_geometry` drops it) — carried here so the reader can resolve frame
     /// stride Rust-side, by asset.
     pub byte_depth: u8,
     /// Channel count (1 = mono, 2 = stereo). Not read by the fill (`to_fill_geometry` drops
-    /// it) — carried here so the reader (Task 3) can resolve frame stride Rust-side, by asset.
+    /// it) — carried here so the reader can resolve frame stride Rust-side, by asset.
     pub num_channels: u8,
 }
 
@@ -142,7 +142,7 @@ pub extern "C" fn deluge_streaming_set_fill_context(
 
 /// Look up `asset`'s registered fill-context, or `None` if it was never registered (or `asset` is out
 /// of range). Read side of [`deluge_streaming_set_fill_context`]; wired into
-/// `streaming_loader::prod::ProdOps::begin`/`finish` (SR2d-4 Task 5, its real, non-test caller), and
+/// `streaming_loader::prod::ProdOps::begin`/`finish` (its real, non-test caller), and
 /// exercised directly by this crate's own `tests/fill_context_host.rs`.
 pub fn fill_context_for(asset: u32) -> Option<FillContext> {
     if asset as usize >= FILL_CONTEXT_CAP {
@@ -164,7 +164,7 @@ pub struct StreamingFillDescriptor {
     pub byte_offset: u32,
 }
 
-/// FFI layout guard (M4), mirroring the `static_assert`s in `async_fill.cpp` — see that file's
+/// FFI layout guard, mirroring the `static_assert`s in `async_fill.cpp` — see that file's
 /// comment for the byte-offset derivation. `core::mem::offset_of!` + `size_of` are both `const`,
 /// so this is a compile-time check with no runtime cost; a field-order/type drift on either side
 /// fails the build instead of silently corrupting the read across the boundary. After `ok` (1 byte
@@ -186,7 +186,7 @@ const _: () = {
 /// chunk's payload (a neighbour's boundary stitch needs the byte pattern spanning the cluster
 /// boundary before this chunk's own in-place conversion overwrote it); `start_converted`/
 /// `end_converted` are idempotency guards so a boundary is never re-stitched once it's already been
-/// handled from the other side. A plain in-crate type (U4d Task 8): it no longer crosses the C-ABI
+/// handled from the other side. A plain in-crate type: it no longer crosses the C-ABI
 /// — [`crate::chunk::convert_state`]/[`crate::chunk::set_convert_state`] read/write it directly
 /// against the Rust-owned `StreamedChunk`, and `native_finish` (`native.rs`) is its only other
 /// consumer — so it carries no `#[repr(C)]`/layout guard.
@@ -197,9 +197,8 @@ pub struct DelugeChunkConvertState {
     pub end_converted: bool,
 }
 
-// ── native_fill-gated sync fill core (C2a Task 3) ───────────────────────────
-// Moved verbatim from `deluge-bsp-rust`'s `streaming_loader.rs::prod` module (SR2d-4 Tasks 2-5) --
-// see `native`'s own module doc for what/why. Default-off (see this crate's Cargo.toml
+// ── native_fill-gated sync fill core ───────────────────────────
+// See `native`'s own module doc for what/why. Default-off (see this crate's Cargo.toml
 // `[features]` doc); `deluge-bsp-rust` and `region_fill_differential` both turn it on.
 #[cfg(feature = "native_fill")]
 mod native;

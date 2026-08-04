@@ -1007,7 +1007,7 @@ impl Manager {
     /// (e.g. a `Sample` unloads). Leased chunks are freed too — at owner teardown there
     /// should be none, but we must not leak the backing or the slot.
     fn release_asset(&self, asset: u32) {
-        // NOTE (B1, design §4): release_asset is OWNER-TEARDOWN, not steady-state RT, and is
+        // NOTE (design §4): release_asset is OWNER-TEARDOWN, not steady-state RT, and is
         // deliberately left UNGUARDED for now — the same masked pattern applies if wanted.
         let ai = asset as usize;
         if ai >= self.assets.len() || !self.assets[ai].get().in_use {
@@ -1372,8 +1372,8 @@ pub unsafe extern "C" fn deluge_resource_slot_of(handle: *mut DelugeResource, pt
 /// `*out_index` — `true` on a hit, `false` (leaving the out-params untouched) if `ptr` isn't resident
 /// or either pointer is null. C-ABI mirror of `slot_of` just above (same `find_by_ptr` lookup), out-
 /// param shaped like `deluge_resource_stats` (a Rust `(u32, u32)` has no direct C-ABI return shape).
-/// Exposes the facade's `Resource::chunk_ident` (`facade.rs`) — added for the native fill task
-/// (SR2d-4 Task 5, `streaming_loader.rs`), which recovers a loader-queue chunk's `(asset, index)` to
+/// Exposes the facade's `Resource::chunk_ident` (`facade.rs`) — used by the native fill task
+/// (`streaming_loader.rs`), which recovers a loader-queue chunk's `(asset, index)` to
 /// look up its per-asset fill-context (`fill_context_for`).
 #[no_mangle]
 pub unsafe extern "C" fn deluge_resource_chunk_ident(

@@ -107,9 +107,8 @@ bool LoadPatternUI::opened() {
 	}
 
 	std::string searchFilename = setupForLoadingPattern(); // Sets currentDir.
-	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
-	// happens async: dispatch it and return optimistically. Failure goes through the base
-	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
 	beginListing(
 	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = defaultDir});
 
@@ -150,9 +149,8 @@ void LoadPatternUI::currentFileChanged(int32_t movementDirection) {
 }
 
 // Computes the icon state and currentDir, and returns the filename to search for within it (always
-// empty here - preserved as-is, not a migration concern). Does NOT perform the listing itself (that
-// used to be fused in here) - opened() combines this with defaultDir to dispatch an async Open
-// listing; the post-listing tail moved to onBrowserOpened().
+// empty here). Does NOT perform the listing itself - opened() combines this with defaultDir to
+// dispatch an async Open listing; the post-listing tail lives in onBrowserOpened().
 // If OLED, then you should make sure renderUIsForOLED() gets called after this.
 std::string LoadPatternUI::setupForLoadingPattern() {
 	enteredText.clear();
@@ -177,9 +175,8 @@ void LoadPatternUI::onBrowserOpened() {
 
 	drawKeys();
 
-	// focusRegained() used to run synchronously right after dispatching the listing (see opened());
-	// move it here so it runs after the listing actually completes, matching the Save* browsers'
-	// convention (rung-5 prerequisite #2).
+	// Runs here so it happens after the listing actually completes, matching the Save* browsers'
+	// convention.
 	focusRegained();
 }
 
@@ -194,7 +191,7 @@ void LoadPatternUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem->isFolder) {
-		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
 		// Browser::onListingFailed() (displayError + close()) once the listing completes.
 		goIntoFolder(currentFileItem->filename.c_str());
 	}

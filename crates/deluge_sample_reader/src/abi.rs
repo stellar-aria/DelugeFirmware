@@ -1,9 +1,8 @@
 //! The `deluge_sample_reader_*`/`deluge_sample_read` C ABI
-//! (`include/libdeluge/sample_reader.h`). Task 1 (SR-U1) implemented the lifecycle trio —
-//! `open`/`seek`/`close` — by heap-boxing a [`crate::reader::Reader`]; Task 3 added `window`/
-//! `advance`/`ok`, the read core. Task 4 adds `deluge_sample_read`, the stateless copy-out
-//! convenience — a thin shim over [`crate::reader::Reader::read`], which composes `open` ->
-//! `window`/`advance` -> drop itself, so there is still only ONE residency path.
+//! (`include/libdeluge/sample_reader.h`). The lifecycle trio — `open`/`seek`/`close` — heap-boxes
+//! a [`crate::reader::Reader`]; `window`/`advance`/`ok` are the read core. `deluge_sample_read` is
+//! the stateless copy-out convenience — a thin shim over [`crate::reader::Reader::read`], which
+//! composes `open` -> `window`/`advance` -> drop itself, so there is still only ONE residency path.
 //!
 //! Unlike `deluge_sample_source`'s `DelugeSampleSource` (a fixed, allocation-free static pool,
 //! because that port's `open()`/`close()` can fire on the audio render ISR at note-start/-end),
@@ -27,9 +26,9 @@ pub struct DelugeSampleReader {
 
 /// Open a reader over `source_id`'s sample residency, positioned at `start_frame` and reading in
 /// `direction`. See the header doc (`deluge_sample_reader_open`) and [`Reader::open`] for the full
-/// contract, including `source_id`'s identity and `geometry`'s known Task-1 gap.
+/// contract, including how `source_id`'s identity resolves geometry.
 ///
-/// Never returns null in this task: heap allocation only aborts (no `#[panic_handler]` unwind path
+/// Never returns null: heap allocation only aborts (no `#[panic_handler]` unwind path
 /// on this dependency graph — see the crate's lib.rs doc), so there is no OOM-null case to report,
 /// unlike `deluge_sample_source_open`'s fixed pool, which can legitimately exhaust.
 #[cfg_attr(
@@ -257,10 +256,10 @@ mod tests {
     /// the asset (see `deluge_resource`'s own `request_constructs_without_loading_then_leases`
     /// test — a construct-less asset refuses `request`), and `invalidate`'s own tests read the
     /// resulting chunk's `unloadable` flag back through the real
-    /// `deluge_sample_fill::chunk::unloadable` accessor (U4d) — which requires a genuinely
+    /// `deluge_sample_fill::chunk::unloadable` accessor — which requires a genuinely
     /// constructed backing to reborrow soundly (mirrors `reader::tests::window_tests`'s own
     /// `real_chunk_construct`; see `lib.rs`'s `host_streaming_stubs` module doc for why this
-    /// crate no longer stubs the C-ABI construct/accessors themselves).
+    /// crate uses real C-ABI construct/accessors rather than stubs).
     ///
     /// # Safety
     /// `dest` must be a writable slot of at least `deluge_sample_fill::chunk::RUST_CHUNK_PAYLOAD_OFFSET`
@@ -284,7 +283,7 @@ mod tests {
     }
 
     /// A `FillContext` compatible with `CHUNK_SIZE` (4096 = 2^12) — just enough for
-    /// `deluge_sample_reader_open` (Step 0's `Reader::open`) to resolve real geometry; this
+    /// `deluge_sample_reader_open` (`Reader::open`) to resolve real geometry; this
     /// module's tests exercise the raw C-ABI lifecycle surface, never `window()`, so the exact
     /// values beyond `cluster_size`/`cluster_size_magnitude` don't matter.
     fn abi_fill_context() -> FillContext {
@@ -356,9 +355,8 @@ mod tests {
         (handle, asset)
     }
 
-    /// The harness every test in this module but `invalidate`'s own used before this fn existed —
-    /// now a thin wrapper over [`manager_and_asset_with_context`] with the shared single-cluster
-    /// [`abi_fill_context`].
+    /// The harness every test in this module but `invalidate`'s own uses — a thin wrapper over
+    /// [`manager_and_asset_with_context`] with the shared single-cluster [`abi_fill_context`].
     fn test_manager_and_asset() -> (*mut DelugeResource, u32) {
         manager_and_asset_with_context(abi_fill_context())
     }

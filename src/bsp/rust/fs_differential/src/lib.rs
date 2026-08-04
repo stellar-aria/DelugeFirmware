@@ -1,4 +1,4 @@
-//! SP0 differential harness: C FatFS vs embedded-fatfs over one RAM image.
+//! Differential harness: C FatFS vs embedded-fatfs over one RAM image.
 pub mod ops;
 pub mod ram_disk;
 pub mod fatfs_c;

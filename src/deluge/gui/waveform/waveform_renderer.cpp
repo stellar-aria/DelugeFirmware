@@ -580,9 +580,9 @@ bool WaveformRenderer::investigateWholeCluster(Sample* sample, int32_t clusterIn
 		return true; // Already cached (perhaps by a previous render)
 	}
 
-	// Don't investigate a cluster of a Sample a SampleRecorder still has open. Post-decouple, the
-	// recorder writes into private capture buffers and never opens a real efatfs read handle on this
-	// Sample (SampleStream::efatfs_handle() stays 0 for its whole life as a recording target -- see
+	// Don't investigate a cluster of a Sample a SampleRecorder still has open. A recording target's
+	// SampleRecorder writes into private capture buffers and never opens a real efatfs read handle on
+	// its Sample (SampleStream::efatfs_handle() stays 0 for its whole life as a recording target -- see
 	// SampleStream::open_read_stream()/make_read_source()), so ANY get_cluster() load attempt here --
 	// not just the actively-being-written cluster -- would simply fail. (The background scan does
 	// reach a recording-in-progress Sample: SampleRecorder::setup() registers it in

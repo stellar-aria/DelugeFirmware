@@ -1,4 +1,4 @@
-//! SR2d-4 Task 6 host end-to-end: drives the full read -> convert -> stitch -> publish pipeline over a
+//! Host end-to-end: drives the full read -> convert -> stitch -> publish pipeline over a
 //! REAL `deluge_resource` manager (pure Rust, no C++), reading a SYNTHETIC "file" (an in-memory byte
 //! buffer) instead of `efatfs_host_shim::read_at` — see below for why, and what's covered elsewhere
 //! instead.
@@ -14,11 +14,11 @@
 //! only host test (normally built with neither feature) fails to link with 20+ undefined symbols
 //! (`deluge_control_enable_oled`, `deluge_board_init_early`, `openUSBHost`,
 //! `deluge_board_unlock_data_cache`, ...) — exactly the "cc-compiling a large C++ closure" case the
-//! brief calls out as the trigger to fall back to a host adapter instead. (Before U4d, `ProdOps`'s
-//! two `StreamedChunk` accessors — `deluge_streaming_chunk_payload`/`_set_loaded` — were ALSO
-//! C++-defined, `async_fill.cpp`, a second reason `ProdOps`/`fill_once` were out of reach here; U4d
-//! relocated the streamed chunk's storage into `deluge_sample_fill::chunk`, Rust, so that reason no
-//! longer applies — the `host_app` closure above remains the one still standing.)
+//! brief calls out as the trigger to fall back to a host adapter instead. (`ProdOps`'s two
+//! `StreamedChunk` accessors — `deluge_streaming_chunk_payload`/`_set_loaded` — used to be a second
+//! reason `ProdOps`/`fill_once` were out of reach here, back when they were C++-defined in
+//! `async_fill.cpp`; the streamed chunk's storage now lives in `deluge_sample_fill::chunk` (Rust), so
+//! that reason no longer applies — the `host_app` closure above remains the one still standing.)
 //!
 //! So this test takes the "host adapter" path the brief explicitly sanctions, extended one step
 //! further: it also stands in a plain in-memory buffer for the SD-backed file `efatfs_host_shim::
@@ -33,10 +33,10 @@
 //! dedicated host coverage (`tests/streaming_fill_context_host.rs`).
 //!
 //! Everything else here is real: a genuine `deluge_resource` manager (built over a real heap via its
-//! C-ABI), and the real `fill_logic::begin`/`finish_convert_stitch` (SR2d-4 Tasks 4-5). Convert-state
+//! C-ABI), and the real `fill_logic::begin`/`finish_convert_stitch`. Convert-state
 //! itself is plain local `fill_logic::ConvertState` values rather than the chunk's own real store
-//! (SR2d-4 Task 2 moved the live store onto the streamed chunk's convert-state accessors — real Rust
-//! since U4d, but this test still keeps its own plain local values, since driving the real store
+//! (the live store now lives on the streamed chunk's convert-state accessors, in Rust,
+//! but this test still keeps its own plain local values, since driving the real store
 //! would mean pulling in `ProdOps`/`fill_once` from `deluge-bsp-rust`, out of reach here for the
 //! `host_app`-closure reason above; `tests/native_finish_glue.rs` is the gate that drives the real
 //! store instead — see its own module doc). A never-`finish`ed chunk's state is simply zeroed

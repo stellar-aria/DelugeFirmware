@@ -21,9 +21,8 @@
 /// `native_begin`/`native_finish`) resolves each queued chunk's read geometry into a
 /// `StreamingFillDescriptor`, performs the read, then converts/stitches/publishes. This header
 /// carries the shared FFI types (the descriptor) plus the resource-manager/asset and
-/// signal/readiness entry points that cross the C++/Rust boundary. (The old synchronous C-ABI
-/// split — `deluge_streaming_begin_fill`/`_finish_fill` — was retired with
-/// `SampleStream::read_cluster_data`; the async task calls `native_begin`/`native_finish` directly.)
+/// signal/readiness entry points that cross the C++/Rust boundary. The async task calls
+/// `native_begin`/`native_finish` directly.
 #pragma once
 #include "libdeluge/types.h" // DelugeStatus
 #include <stdbool.h>
@@ -38,7 +37,7 @@ typedef struct StreamingFillDescriptor {
 	uint8_t* dest;        ///< cluster payload base; write exactly num_sectors*512 bytes here
 	uint32_t num_sectors; ///< sectors to read (accounts for a short final cluster) — the read LENGTH
 	bool ok;              ///< false => skip the read (unloadable / geometry error); do not call finish
-	uint32_t handle;      ///< efatfs file handle for this stream (streaming read is efatfs-only in R1)
+	uint32_t handle;      ///< efatfs file handle for this stream (streaming read is efatfs-only)
 	uint32_t byte_offset; ///< absolute byte offset of this cluster within the file (efatfs read position)
 } StreamingFillDescriptor;
 
@@ -53,7 +52,7 @@ DelugeResource* deluge_streaming_resource_manager(void);
 
 /// @brief The resource-manager Asset id backing @p stream_backing, defining it first if needed.
 ///
-/// The region-port `open()` bridge (SR2d-5 Task 1): the reader passes its
+/// The region-port `open()` bridge: the reader passes its
 /// `deluge::audio::stream::SampleStream*` as `deluge_sample_source_open`'s opaque `stream_backing`,
 /// and the Rust cursor resolves it to `{deluge_streaming_resource_manager(), this accessor's
 /// return}` before building its own residency provider — the same `{manager handle, asset id}`
@@ -70,7 +69,7 @@ DelugeResource* deluge_streaming_resource_manager(void);
 /// @return The Asset id, or DELUGE_RESOURCE_NO_ASSET on the weak fallback.
 uint32_t deluge_sample_stream_asset_id(void* stream_backing);
 
-/// @brief The byte offset a streamed chunk's payload sits at within its slab slot (U4d). The C++
+/// @brief The byte offset a streamed chunk's payload sits at within its slab slot. The C++
 ///        slab setup sizes the shared cluster slot as max(this, ComputedChunk's kChunkPayloadOffset)
 ///        + Cluster::size + trailing guard. Rust-owned (deluge_sample_fill).
 uint32_t deluge_streamed_chunk_payload_offset(void);

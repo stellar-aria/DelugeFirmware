@@ -17,12 +17,11 @@
 
 #pragma once
 
-/// @brief Host-only C-ABI for the SampleRecorder byte-exact round-trip oracle, extracted
-///        from `host_recorder_roundtrip_main.cpp`'s driver so it can run BOTH on the C-host
-///        `deluge_recorder_roundtrip` binary AND on the Rust/Embassy host BSP (golden_vt_render's
-///        `GOLDEN_SCENARIO=recorder_roundtrip` mode).
+/// @brief Host-only C-ABI for the SampleRecorder byte-exact round-trip oracle, shared so it can run
+///        BOTH on the C-host `deluge_recorder_roundtrip` binary AND on the Rust/Embassy host BSP
+///        (golden_vt_render's `GOLDEN_SCENARIO=recorder_roundtrip` mode).
 ///
-/// The whole geometry matrix + alterFile characterization + the two SR3b probes, minus the
+/// The whole geometry matrix + alterFile characterization + the two readback probes, minus the
 /// host-side image formatting and process exit (the caller owns those). Assumes `DELUGE_SD_IMAGE`
 /// is already mounted (boot mounts it). Reads back through `deluge::io::File` (drain-independent)
 /// except the `finalized_multicluster` probe, whose fill drain routes unconditionally onto

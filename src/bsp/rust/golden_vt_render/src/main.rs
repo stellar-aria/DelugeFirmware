@@ -303,7 +303,7 @@ fn stem_export_mode() -> i32 {
     }
 }
 
-/// This rung's scenario: waits for [`boot_task`] to finish booting + mounting,
+/// The render scenario: waits for [`boot_task`] to finish booting + mounting,
 /// dispatches a real offline `StemExport` run onto the storage-owner worker
 /// fiber (`deluge_scenario_start_stem_export`), polls the driver to quiescence
 /// until it completes (`deluge_scenario_stem_export_done`), copies the produced

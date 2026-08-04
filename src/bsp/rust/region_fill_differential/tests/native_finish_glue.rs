@@ -1,5 +1,4 @@
-//! SR2d-4 Task 6's cross-path/single-store regression: the ONE test the whole-branch review said
-//! was missing (`progress.md`'s "GATE-GAP LEARNING") — every OTHER host gate exercises either
+//! Cross-path/single-store regression: every OTHER host gate exercises either
 //! `fill_logic::finish_convert_stitch` in isolation (over hand-built plain buffers — `differential.rs`,
 //! `tests/fill_logic_host.rs`) or `streaming_loader::fill_once`/`FillOps` against a fully FAKE
 //! `FillOps` (`tests/streaming_fill_host.rs`, in `deluge-bsp-rust`), or `ProdOps::begin`/`finish`'s
@@ -7,11 +6,10 @@
 //! (`tests/host_end_to_end.rs`, this crate). None of them drive
 //! `deluge_sample_fill::native_finish` itself — its `try_acquire` → payload-accessor →
 //! convert-state-accessor → stitch → write-back chain — over the REAL streamed-chunk accessors.
-//! That gap is exactly where SR2d-4's Task 2 review found TWO real, silent-corruption Criticals (see
-//! `.superpowers/sdd/progress.md`'s "SR2d-4-UNIFY execution"):
+//! That gap is exactly where review found TWO real, silent-corruption bugs:
 //!
-//!  1. **The convert-state double-store**: before this arc's unification (commits c8be0f8ae..66e584de2),
-//!     the synchronous C++ fill path (`read_cluster_data` → `finish_fill`) wrote convert-state directly
+//!  1. **The convert-state double-store**: before unification, the synchronous C++ fill path
+//!     (`read_cluster_data` → `finish_fill`) wrote convert-state directly
 //!     onto the chunk, while the async Rust fill task wrote a SEPARATE Rust-side sidecar table — two
 //!     disjoint stores. A boundary stitch between a sync-loaded cluster and an async-prefetched
 //!     neighbour read the EMPTY store, corrupting the boundary silently on every affected note.
@@ -20,15 +18,14 @@
 //!     unification actually holds by driving what were the "two paths" (two separate `finish` calls,
 //!     mirroring a sync-loaded neighbour and an async-loaded self) through the SAME real store and
 //!     confirming the second call reads the first's write-back, not a zeroed default.
-//!  2. **Backing-vs-payload** (commit 9585be616): `native_finish` built each neighbour's payload slice
+//!  2. **Backing-vs-payload**: `native_finish` built each neighbour's payload slice
 //!     directly from the raw `try_acquire` pointer (the chunk's BACKING) instead of
 //!     `deluge_streaming_chunk_payload(p)` (`backing + kChunkPayloadOffset`, the chunk's PAYLOAD) — the
 //!     neighbour stitch read/wrote the neighbour's header bytes instead of its samples.
 //!
 //! ## How this test drives the REAL glue
 //!
-//! `native_finish`/`native_begin` (SR2d-4 Tasks 2-5) moved out of `deluge-bsp-rust`'s
-//! `streaming_loader.rs::prod` module into the shared `deluge_sample_fill` crate (C2a Task 3), `pub`
+//! `native_finish`/`native_begin` live in the shared `deluge_sample_fill` crate, `pub`
 //! and behind that crate's `native_fill` feature (this crate's `Cargo.toml` turns it on as a
 //! dev-dependency). So this test calls `deluge_sample_fill::native_begin`/`native_finish` directly —
 //! no more `#[path]`-recompiling `deluge-bsp-rust`'s `streaming_loader.rs`/`fill_logic.rs`, no more
@@ -39,16 +36,13 @@
 //! `deluge_sample_fill::native`'s `unsafe extern "C"` block (gated `native_fill`) declares 9 symbols
 //! this test must supply. Four (`deluge_resource_chunk_ident`, `_try_acquire`, `_release`,
 //! `_mark_ready`) are real `#[no_mangle]` Rust symbols from the `deluge_resource` crate (already a
-//! dev-dependency) — genuinely real, no test double. **U4d relocated the streamed chunk's storage
-//! (construct + the seven field accessors) out of C++ entirely, into this same `deluge_sample_fill`
-//! crate** (`chunk.rs`) — so the four remaining accessors (`chunk::payload`/`set_loaded`/
-//! `convert_state`/`set_convert_state`, plain `pub fn`s since U4d Task 8 deleted their `#[no_mangle]`
-//! C-ABI wrappers) are now ALSO real, no-test-double calls, satisfied by `deluge_sample_fill`'s own
-//! object code (this crate already depends on it). Before U4d this file `cc`-compiled a small C++ slice
-//! (`cpp/native_finish_shim.cpp`) that re-stated those four accessor bodies verbatim over a real,
-//! placement-new'd C++ `StreamedChunk` — that struct (and the shim) no longer exist; U4d Task 3
-//! retired both, since redefining the same four symbols here now would be a link-time duplicate
-//! against `deluge_sample_fill`'s own copies, not a meaningful test double.
+//! dev-dependency) — genuinely real, no test double. The streamed chunk's storage
+//! (construct + the seven field accessors) lives entirely in this same `deluge_sample_fill`
+//! crate (`chunk.rs`) — so the four remaining accessors (`chunk::payload`/`set_loaded`/
+//! `convert_state`/`set_convert_state`, plain `pub fn`s with no `#[no_mangle]` C-ABI wrappers) are
+//! now ALSO real, no-test-double calls, satisfied by `deluge_sample_fill`'s own
+//! object code (this crate already depends on it) — redefining the same four symbols here would be a
+//! link-time duplicate against `deluge_sample_fill`'s own copies, not a meaningful test double.
 //!
 //! The ONE symbol this test still has to provide by hand is `deluge_streaming_resource_manager`
 //! (below) — NOT part of either Critical's bug surface (both bugs were in `native_finish`'s own
@@ -80,8 +74,7 @@
 //! ## Teeth: this test was verified (by hand, outside the committed suite) to FAIL on both Criticals
 //!
 //! Both original bugs were reintroduced locally against this exact test (one at a time, `git
-//! checkout`-restored immediately after) and the failure output captured — see the Task 6 report for
-//! the exact diffs and failure text. The mechanism each perturbation breaks:
+//! checkout`-restored immediately after) and confirmed to fail. The mechanism each perturbation breaks:
 //! - **Backing-vs-payload**: [`CLUSTER_SIZE`] is chosen so `CLUSTER_SIZE + 7` lands STRICTLY between
 //!   `size_of::<StreamedChunk>()` and the payload offset (see [`geometry_and_layout_invariants_hold`]) —
 //!   a neighbour-payload read/write from the raw backing pointer instead of the payload accessor would
@@ -244,7 +237,7 @@ impl ChunkHarness {
         unsafe {
             deluge_resource_set_construct(handle, asset, Some(construct_streamed_chunk));
         }
-        // Pure queries, no preconditions: the payload offset is Rust-owned (U4d) and reported over
+        // Pure queries, no preconditions: the payload offset is Rust-owned and reported over
         // its own C-ABI; the header size is this crate's own reflection of the (pub) Rust struct's
         // real, compiler-computed size — not a hand-derived guess.
         let payload_offset =

@@ -1,12 +1,11 @@
-//! SR2d-4 Task 6 fill-differential — the rung's gate: drives the SAME raw cluster bytes + geometry +
+//! Fill-differential: drives the SAME raw cluster bytes + geometry +
 //! neighbour states through (A) the C++ reference (`region_fill_differential::cpp_ref`, a from-scratch
 //! replica of `finish_fill`'s orchestration straight over `convert.h`/`stitch.h`) and (B) the Rust
-//! `fill_logic::finish_convert_stitch` (SR2d-4 Task 5), and asserts byte-identical converted+stitched
+//! `fill_logic::finish_convert_stitch`, and asserts byte-identical converted+stitched
 //! output — the self payload, both neighbours' mutated boundary bytes, and all four boundary flags.
 //!
-//! `fill_logic` now lives in the shared `deluge_sample_fill` crate (C2a Task 1 relocated it out of
-//! `deluge-bsp-rust`'s `src/fill_logic.rs`), so this test depends on the crate directly rather than
-//! pulling the old file in via `#[path]`. `fill_logic` has no CS/extern dependencies of its own (pure
+//! `fill_logic` lives in the shared `deluge_sample_fill` crate, so this test depends on the crate
+//! directly rather than pulling the file in via `#[path]`. `fill_logic` has no CS/extern dependencies of its own (pure
 //! buffer arithmetic plus calls into `deluge_sample_convert`, which has none either), so unlike
 //! `region_differential`/`tests/host_end_to_end.rs` this file needs no critical-section stubs.
 //!

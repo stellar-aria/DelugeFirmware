@@ -36,29 +36,38 @@
 extern "C" {
 #endif
 
-/// Queue `fn(ctx)` to run on the cooperative worker. Operations are serialized.
-/// `fn` may `yield()` at any call depth; the launching caller returns at once.
+/// @brief Queue @p fn(@p ctx) to run on the cooperative worker.
+///
+/// Operations are serialized. @p fn may yield() (scheduler_api.h) at any call depth; the
+/// launching caller returns at once.
+/// @param fn  The operation to run, invoked as fn(ctx).
+/// @param ctx Opaque context passed through to @p fn.
 /// @return true if the operation ran (cooperative/inline) or was queued (Embassy
 ///         worker); false if it was dropped because the worker queue was full and
 ///         will NOT run — a coalescing caller must treat false as "not dispatched".
 bool deluge_worker_run(void (*fn)(void*), void* ctx);
 
-/// Like deluge_worker_run, but the operation is an SD-routine-class op: for its
-/// whole in-flight window (enqueue → completion) the worker holds off
-/// RESOURCE_SD_ROUTINE scheduler tasks, so a task that frees an object the op is
-/// mid-way through (e.g. the recorder, freed by discardRecorder) cannot run
-/// concurrently with it. Cooperative/host: identical to deluge_worker_run (inline).
-/// Embassy: increments an SD-routine hold at enqueue, released at completion.
-/// @return as deluge_worker_run: true if it ran/queued, false if dropped (queue
+/// @brief Like deluge_worker_run, but the operation is an SD-routine-class op.
+///
+/// For its whole in-flight window (enqueue → completion) the worker holds off
+/// RESOURCE_SD_ROUTINE scheduler tasks, so a task that frees an object the op is mid-way through
+/// (e.g. the recorder, freed by discardRecorder) cannot run concurrently with it. Cooperative/host:
+/// identical to deluge_worker_run (inline). Embassy: increments an SD-routine hold at enqueue,
+/// released at completion.
+/// @param fn  The operation to run, invoked as fn(ctx).
+/// @param ctx Opaque context passed through to @p fn.
+/// @return As deluge_worker_run: true if it ran/queued, false if dropped (queue
 ///         full) and will NOT run — on false NOTHING was enqueued and no hold was taken.
 bool deluge_worker_run_sd_routine(void (*fn)(void*), void* ctx);
 
-/// True iff the calling context IS the storage worker (the worker fiber on the
-/// Embassy BSP). Lets a dual-context caller skip re-dispatching when it is
-/// already on the worker — dispatching again would nest a queued op inside the
-/// running one (Embassy) and reorder or deadlock. Cooperative/host: always
-/// false, because `deluge_worker_run` runs inline there, so nesting is harmless
-/// and no caller needs to branch on this.
+/// @brief Whether the calling context IS the storage worker (the worker fiber on the Embassy BSP).
+///
+/// Lets a dual-context caller skip re-dispatching when it is already on the worker —
+/// dispatching again would nest a queued op inside the running one (Embassy) and reorder or
+/// deadlock. Cooperative/host: always false, because `deluge_worker_run` runs inline there, so
+/// nesting is harmless and no caller needs to branch on this.
+/// @return true if the calling context is already the storage worker; false otherwise (always
+///         false on the cooperative/host build).
 bool deluge_worker_on_worker(void);
 
 #ifdef __cplusplus

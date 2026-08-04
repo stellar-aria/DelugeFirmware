@@ -2,7 +2,7 @@
 //! FatFS backends (via `ops::FsOps`) and asserts they agree byte-for-byte on
 //! file contents and entry-for-entry on directory listings.
 //!
-//! `replay_and_compare` (Task 6) extends this to the write path.
+//! `replay_and_compare` extends this to the write path.
 use crate::efatfs::EFatFs;
 use crate::fatfs_c::CFatFs;
 use crate::ops::{Entry, FsOps, FsOpsMut, Op};

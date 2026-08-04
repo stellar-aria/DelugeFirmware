@@ -4,7 +4,7 @@
 // pinned by tests/spec_audio_stream/{convert,stitch,convert_cluster}_spec.cpp; src/lib.rs's #[test]s
 // round-trip the cc-built objects against the same assertions.
 //
-// Two shim subtleties, both inherited from the SR2b spike:
+// Two shim subtleties:
 //   * convert_cluster_data is TEMPLATED on `Yield` — concretized here behind extern "C" with a counting
 //     callable (a null counter = the no-op case the fill path uses).
 //   * StitchNextEdge holds a fixed-extent std::span<const std::byte, 3>, which is NOT default-

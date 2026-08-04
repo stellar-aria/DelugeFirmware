@@ -45,6 +45,7 @@ extern "C" {
 /// An open stream. Opaque; owned by the BSP implementation.
 typedef struct DelugeStream DelugeStream;
 
+/// @brief Mode for deluge_stream_open: what the stream is opened for.
 typedef enum DelugeStreamMode : uint8_t {
 	DELUGE_STREAM_READ,             ///< open an existing file (sector_of()-only; no read_at)
 	DELUGE_STREAM_WRITE_CREATE,     ///< create the file, truncating if it exists
@@ -56,21 +57,38 @@ typedef enum DelugeStreamMode : uint8_t {
 /// `deluge_stream_close`. [task]
 DelugeStatus deluge_stream_open(const char* path, DelugeStreamMode mode, DelugeStream** out);
 
-/// Write `count` bytes at `byte_offset`. `byte_offset` may be at the stream's current end-of-file
-/// (an append, extending it) or anywhere below it (an in-place rewrite); past the end is
-/// `DELUGE_ERR_PARAM`, since that would leave a hole. `count` must not exceed one cluster
-/// (`DELUGE_ERR_PARAM` otherwise) -- write_at writes at most one cluster per call, same limit as
-/// `read_at`. `*out_written` is the number of bytes actually written. [task]
+/// @brief Write @p count bytes at @p byte_offset into the stream.
+///
+/// @p byte_offset may be at the stream's current end-of-file (an append, extending it) or anywhere
+/// below it (an in-place rewrite); past the end is DELUGE_ERR_PARAM, since that would leave a hole.
+/// @p count must not exceed one cluster (DELUGE_ERR_PARAM otherwise) -- write_at writes at most one
+/// cluster per call, same limit as read_at.
+/// @param stream      The open stream.
+/// @param byte_offset Absolute byte offset to write at (see above for the append/rewrite rule).
+/// @param src         Source buffer of @p count bytes.
+/// @param count       Number of bytes to write; must not exceed one cluster.
+/// @param out_written Receives the number of bytes actually written.
+/// @return DELUGE_OK on success, or an error status.
 DelugeStatus deluge_stream_write_at(DelugeStream* stream, uint32_t byte_offset, const void* src, uint32_t count,
                                     uint32_t* out_written);
 
-/// Read up to `count` bytes at absolute `byte_offset` into `dst`, bounded by the stream's LIVE size
-/// -- including bytes written earlier through this same still-open handle, whose size the on-disk
-/// directory entry has not caught up with yet. EOF-honest: `*out_read` is the TRUE count read
-/// (`<= count`, 0 at or past EOF), never zero-padded. The C-FatFS counterpart of
-/// `deluge_efatfs_stream_read_at_via`; `SampleRecorder`'s mid-write read-back of an evicted cluster
+/// @brief Read up to @p count bytes at absolute @p byte_offset into @p dst.
+///
+/// Bounded by the stream's LIVE size -- including bytes written earlier through this same
+/// still-open handle, whose size the on-disk directory entry has not caught up with yet.
+/// EOF-honest: @p out_read is the TRUE count read (<= count, 0 at or past EOF), never
+/// zero-padded. This is NOT the streaming read path (that goes through embedded-fatfs,
+/// deluge_efatfs_read_at) -- it is only the read-BACK of a stream this boundary is itself
+/// writing; plus the cold-path sector_of identity check. The C-FatFS counterpart of
+/// deluge_efatfs_stream_read_at_via; SampleRecorder's mid-write read-back of an evicted cluster
 /// of the file it is still recording (see storage/audio/stream/read_source.h's
-/// `RecordingReadSource`) is its only caller. [task]
+/// RecordingReadSource) is its only caller.
+/// @param stream      The open stream.
+/// @param byte_offset Absolute byte offset to read from.
+/// @param dst         Destination buffer; up to @p count bytes are written.
+/// @param count       Maximum number of bytes to read.
+/// @param out_read    Receives the true number of bytes read (<= count, 0 at/past EOF).
+/// @return DELUGE_OK on success, or an error status.
 DelugeStatus deluge_stream_read_at(DelugeStream* stream, uint32_t byte_offset, void* dst, uint32_t count,
                                    uint32_t* out_read);
 
@@ -84,24 +102,28 @@ DelugeStatus deluge_stream_size(DelugeStream* stream, uint32_t* out_size);
 /// regardless of the returned status. [task]
 DelugeStatus deluge_stream_close(DelugeStream* stream);
 
-/// Best-effort: the physical sector address backing cluster `cluster_index` (0-based).
-/// In `DELUGE_STREAM_READ` mode, walks the FAT chain from the file's start cluster on
-/// demand (no cached layout table is kept). In a write mode, only the most recently
-/// `write_at`-completed cluster (returns `DELUGE_ERR_PARAM` for any other index -- this
-/// boundary never keeps a full write-side layout table). Only meaningful for
-/// sector-addressed backends (FatFS-family); a backend without sector geometry (e.g. a
-/// future Linux/POSIX implementation) returns `DELUGE_ERR_UNSUPPORTED`. R3 Task 6: its
-/// only remaining caller is `AudioFileManager`'s cold-path "did the card's file change"
-/// identity re-validation on the read side (`SampleRecorder`'s write-side `sdAddress`
-/// bookkeeping this used to also serve is retired) -- the real-time read path goes
-/// through embedded-fatfs (`deluge_efatfs_read_at`), not this boundary. Present-but-dead
-/// on the C++ side whenever efatfs is the active backend (`deluge::io::Stream::sector_of`
-/// doesn't call this in that case -- see its doc); kept for R4 to remove alongside the
-/// rest of the C-FatFS `deluge_stream_*` write backing. [task]
+/// @brief Best-effort: the physical sector address backing cluster @p cluster_index (0-based).
+///
+/// In DELUGE_STREAM_READ mode, walks the FAT chain from the file's start cluster on demand (no
+/// cached layout table is kept). In a write mode, only the most recently write_at-completed
+/// cluster (returns DELUGE_ERR_PARAM for any other index -- this boundary never keeps a full
+/// write-side layout table). Only meaningful for sector-addressed backends (FatFS-family); a
+/// backend without sector geometry (e.g. a future Linux/POSIX implementation) returns
+/// DELUGE_ERR_UNSUPPORTED. Its only remaining caller is AudioFileManager's cold-path "did the
+/// card's file change" identity re-validation on the read side -- the real-time read path goes
+/// through embedded-fatfs (deluge_efatfs_read_at), not this boundary. Present-but-dead on the
+/// C++ side whenever efatfs is the active backend (deluge::io::Stream::sector_of doesn't call
+/// this in that case -- see its doc); kept until the rest of the C-FatFS deluge_stream_* write
+/// backing is removed.
+/// @param stream        The open stream.
+/// @param cluster_index Cluster index (0-based) to resolve.
+/// @param out_sector    Receives the physical sector address on success.
+/// @return DELUGE_OK on success, DELUGE_ERR_PARAM for an unresolvable write-mode index, or
+///         DELUGE_ERR_UNSUPPORTED on a backend without sector geometry.
 DelugeStatus deluge_stream_sector_of(DelugeStream* stream, uint32_t cluster_index, uint32_t* out_sector);
 
-/// R3 Task 2 -- the embedded-fatfs (Rust `efatfs_streaming`) persistent stream-write C-ABI.
-/// `deluge::io::Stream` (stream.cpp, Task 3) routes recorder writes through these instead of the
+/// The embedded-fatfs (Rust `efatfs_streaming`) persistent stream-write C-ABI.
+/// `deluge::io::Stream` (stream.cpp) routes recorder writes through these instead of the
 /// `deluge_stream_*` functions above whenever `deluge_streaming_efatfs_active()` (declared in
 /// streaming_fill.h) is true; every non-efatfs BSP/config links the `__attribute__((weak))`
 /// fallback in `async_fill.cpp` (always false/no-op), so these symbols always link regardless of
@@ -114,8 +136,8 @@ DelugeStatus deluge_stream_sector_of(DelugeStream* stream, uint32_t cluster_inde
 /// `deluge_stream_*` handles above (which round-trip through FatFS on every op), this table keeps
 /// the file's in-memory size/mtime edit resident between writes and only persists it to the
 /// on-disk directory entry on `deluge_efatfs_stream_flush`/`_close` (see `write_context_noflush`'s
-/// doc). Every handle-taking function's handle is an opaque `u32` (the caller, Task 3, boxes it
-/// into a `DelugeStream*`, mirroring the R1 streaming handle).
+/// doc). Every handle-taking function's handle is an opaque `u32` (the caller boxes it into a
+/// `DelugeStream*`, mirroring the streaming-read handle in sample_stream.h).
 ///
 /// Unlike `deluge_stream_*`, these are `bool` (not `DelugeStatus`): the Rust side has no notion of
 /// `DelugeStatus`'s finer-grained error codes, only success/failure. `stream.cpp` maps `false` to

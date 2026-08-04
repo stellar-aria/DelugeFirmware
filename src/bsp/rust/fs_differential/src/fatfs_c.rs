@@ -1,6 +1,5 @@
 //! Safe wrapper over the vendored C FatFS (compiled by `build.rs`): read
-//! path (Task 3/5) plus write path (Task 6 -- mkdir/write/append/delete/
-//! rename).
+//! path plus write path (mkdir/write/append/delete/rename).
 //!
 //! `extern "C"` declarations mirror the exact R0.14b signatures in
 //! `src/fatfs/ff.h` under this harness's `ffconf.h` (FF_FS_EXFAT=0,
@@ -56,13 +55,13 @@ extern "C" {
     fn f_opendir(dp: *mut DIR, path: *const u8) -> i32;
     fn f_readdir(dp: *mut DIR, fno: *mut FILINFO) -> i32;
     fn f_closedir(dp: *mut DIR) -> i32;
-    // Write path (Task 6).
+    // Write path.
     fn f_write(fp: *mut FIL, buff: *const u8, btw: u32, bw: *mut u32) -> i32;
     fn f_mkdir(path: *const u8) -> i32;
     fn f_unlink(path: *const u8) -> i32;
     fn f_rename(path_old: *const u8, path_new: *const u8) -> i32;
     fn f_sync(fp: *mut FIL) -> i32;
-    // R2 Task 2: `exists`/`mtime`'s oracle probe.
+    // `exists`/`mtime`'s oracle probe.
     fn f_stat(path: *const u8, fno: *mut FILINFO) -> i32;
 }
 
@@ -151,7 +150,7 @@ impl CFatFs {
         v
     }
 
-    /// R2 Task 3 test helper: `read_dir` collapsed to the differential's
+    /// Test helper: `read_dir` collapsed to the differential's
     /// comparison shape (`(name, is_dir, size)`), for the enumeration-set
     /// equivalence test against [`EFatFs::readdir_all`](crate::efatfs::EFatFs::readdir_all).
     pub fn readdir_all(&self, path: &str) -> Vec<(String, bool, u32)> {
@@ -172,9 +171,9 @@ impl CFatFs {
         }
     }
 
-    /// `f_stat`-backed existence check (R2 Task 2 oracle: whether an
+    /// `f_stat`-backed existence check: the oracle for whether an
     /// efatfs-side create/rename/unlink actually landed on the shared disk,
-    /// as seen by the OTHER filesystem implementation). True iff `path`
+    /// as seen by the OTHER filesystem implementation. True iff `path`
     /// names an existing file or directory.
     pub fn exists(&self, path: &str) -> bool {
         let c = std::ffi::CString::new(path).unwrap();

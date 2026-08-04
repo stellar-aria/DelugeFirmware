@@ -1,14 +1,14 @@
-// SR2d-4 Task 6 fill-differential harness: a from-scratch C++ replica of `finish_fill`'s
-// convert+stitch orchestration (storage/audio/stream/async_fill.cpp:110-162), over plain buffers
-// instead of a StreamedChunk/SampleStream/Sample -- so the Rust `fill_logic::finish_convert_stitch`
-// port (SR2d-4 Task 5) can be differentially checked against it.
+// Fill-differential harness: a from-scratch C++ replica of `finish_fill`'s convert+stitch
+// orchestration (storage/audio/stream/async_fill.cpp:110-162), over plain buffers instead of a
+// StreamedChunk/SampleStream/Sample -- so the Rust `fill_logic::finish_convert_stitch` port can be
+// differentially checked against it.
 //
 // This mirrors ONLY the orchestration `finish_fill` performs around `convert_cluster_data`/
 // `stitch_boundaries` -- which bytes get converted (`payload()`, not the trailing slack), which
 // neighbour edges get built from where (a neighbour's OWN trailing-slack tail/head), and in what order
 // (convert self, THEN stitch) -- not a re-derivation of either algorithm, which
 // `tests/spec_audio_stream/{convert,stitch,convert_cluster}_spec.cpp` and `sample_convert`'s own suite
-// (SR2d-2) already prove byte-identical against SIMDe. `prev_payload`/`next_payload` being null means
+// already prove byte-identical against SIMDe. `prev_payload`/`next_payload` being null means
 // "absent or not loaded" -- mirrors `prevCluster && prevCluster->loaded` / `nextCluster &&
 // nextCluster->loaded` (async_fill.cpp:116-157); the caller (the Rust test driver) decides that, same
 // as `fill_logic::finish_convert_stitch`'s own `Option<NeighbourView>` contract.

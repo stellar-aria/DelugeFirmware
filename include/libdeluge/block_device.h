@@ -56,7 +56,7 @@ uint32_t deluge_block_sector_size(uint8_t unit);
 /// Flush any pending writes / complete in-flight operations. [task]
 DelugeStatus deluge_block_sync(uint8_t unit);
 
-/// A card-detect edge observed since the last poll.
+/// @brief A card-detect edge observed since the last poll.
 typedef enum DelugeCardEvent : uint8_t {
 	DELUGE_CARD_EVENT_NONE = 0,
 	DELUGE_CARD_EVENT_INSERTED,

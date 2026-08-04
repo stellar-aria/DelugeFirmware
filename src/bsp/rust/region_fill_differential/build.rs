@@ -1,4 +1,4 @@
-//! Compiles `cpp/harness_shim.cpp` (SR2d-4 Task 6's C++ fill-differential reference slice) into this
+//! Compiles `cpp/harness_shim.cpp` (the C++ fill-differential reference slice) into this
 //! crate's Rust test binary via `cc::Build`, so the differential can drive the real
 //! `convert_cluster_data`/`stitch_boundaries` orchestration over FFI. Host-only, x86-64: this crate is
 //! a test harness, never linked into the firmware, so (unlike `sample_convert`'s build.rs) there is no
@@ -106,11 +106,7 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .compile("region_fill_diff_cpp");
 
-    // `tests/native_finish_glue.rs` (SR2d-4 Task 6's native_finish glue harness) used to need a
-    // SECOND `cc::Build`/static-lib output here — a C++ slice (`cpp/native_finish_shim.cpp`) that
-    // placement-new'd a real C++ `StreamedChunk` and re-stated its four field accessors. U4d
-    // relocated the streamed chunk's storage (construct + all seven accessors) into
-    // `deluge_sample_fill::chunk` (Rust); that crate is already this crate's normal dependency, so
-    // `native_finish_glue.rs` now drives it directly with no C++ shim at all. See that test's own
-    // module doc for the current seam.
+    // `tests/native_finish_glue.rs` drives `deluge_sample_fill::chunk` (Rust) directly, with no C++
+    // shim: that crate is already this crate's normal dependency and owns the streamed chunk's
+    // storage (construct + all seven field accessors). See that test's own module doc for the seam.
 }

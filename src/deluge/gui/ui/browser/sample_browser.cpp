@@ -165,10 +165,9 @@ bool SampleBrowser::opened() {
 
 dissectionDone:
 
-	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
-	// happens async: dispatch it and return optimistically. Failure goes through the base
-	// Browser::onListingFailed() (displayError + close()) once the listing completes — the same
-	// close() the old sdError label used here (not goBackToSoundEditor(), which would left-scroll).
+	// The listing (and its post-listing tail, in onBrowserOpened()) happens async: dispatch it and
+	// return optimistically. Failure goes through the base Browser::onListingFailed() (displayError
+	// + close(), not goBackToSoundEditor(), which would left-scroll) once the listing completes.
 	beginListing({.action = ListingAction::Open,
 	              .direction = 1,
 	              .filenameToStartAt = searchFilename ? searchFilename : "",
@@ -388,9 +387,9 @@ void SampleBrowser::enterKeyPress() {
 		// Otherwise, load it normally
 		else {
 			// Dispatch onto the storage owner so pitch-detection (Sample::determinePitch, deep
-			// inside claimCurrentFile()) doesn't block the executor on SD reads (bug B6). Fire-
-			// and-forget: the result was already discarded when this ran inline, and
-			// claimCurrentFile() handles its own loading-animation/close-on-success internally.
+			// inside claimCurrentFile()) doesn't block the executor on SD reads. Fire-and-forget:
+			// the result is discarded, and claimCurrentFile() handles its own loading-animation/
+			// close-on-success internally.
 			deluge::storage::Owner::run_or_inline(&SampleBrowser::runClaimCurrentFileOp, nullptr);
 		}
 	}
@@ -597,8 +596,7 @@ void SampleBrowser::renderPreviewForTarget(const PreviewTarget& target) {
 		}
 	}
 
-	// No FilePointer fast-path any more (FileItem no longer carries one) - previewSample always
-	// resolves target.path fresh, same as any other path-based open.
+	// previewSample always resolves target.path fresh, the same as any other path-based open.
 	AudioEngine::previewSample(target.path, nullptr, shouldActuallySound);
 
 	if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
@@ -1306,8 +1304,8 @@ removeReasonsFromSamplesAndGetOut:
 
 		filePath.resize(dirWithSlashLength), filePath.append(entry->name);
 
-		// No FilePointer fast-path any more (FileItem no longer carries one, and the port's directory
-		// entries don't expose a cluster locator) - resolve fresh by path, same as any other open.
+		// The port's directory entries don't expose a cluster locator, so resolve fresh by path,
+		// the same as any other open.
 		auto* newSample = static_cast<Sample*>(
 		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, nullptr, AudioFileType::SAMPLE));
 		if (error != Error::NONE || newSample == nullptr) {

@@ -39,13 +39,14 @@ public:
 	/// @brief Read up to @p dst.size() bytes at absolute @p byte_offset back through this stream's
 	///        OWN open write context, bounded by its live (not yet flushed to disk) size.
 	///
-	/// R3: used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open
-	/// write context) and `finalizeRecordedFile()`'s header patch-back. (SR3b deleted this doc's
-	/// other former caller, `RecordingReadSource` -- a still-recording sample's evicted-cluster
-	/// read-back -- as a dead end on the real device; see storage/audio/stream/read_source.h.) Both
-	/// backends implement it:
+	/// Used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open write
+	/// context) and `finalizeRecordedFile()`'s header patch-back. Both backends implement it:
 	/// `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on C-FatFS. EOF-honest --
 	/// the returned count may be short of @p dst.size().
+	/// @param byte_offset Absolute byte offset into the stream to read from.
+	/// @param dst          Buffer to read into; up to its full size may be filled.
+	/// @return The number of bytes actually read (may be less than dst.size() at EOF), or a Status
+	///         error.
 	std::expected<uint32_t, Status> read_at_via(uint32_t byte_offset, std::span<std::byte> dst);
 	std::expected<void, Status> truncate(uint32_t new_size);
 	std::expected<uint32_t, Status> size();

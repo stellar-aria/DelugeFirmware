@@ -1,4 +1,4 @@
-//! SPIKE (SR2b) — THROWAWAY de-risk crate, superseded by SR2d.
+//! SPIKE — THROWAWAY de-risk crate, superseded by later work.
 //!
 //! FFI declarations for the `extern "C"` shims (cpp/shim.cpp) over the app's convert.cpp / stitch.cpp,
 //! plus `#[test]`s that (a) round-trip through the cc-built x86-SIMDe objects to prove they behave

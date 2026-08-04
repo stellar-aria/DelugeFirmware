@@ -4,8 +4,8 @@
 # so it fires only when the RZA1 firmware image is actually being linked — NOT for
 # the Rust-BSP `deluge_app` staticlib build, the host-sim, or the unit tests.
 #
-# Context: as of R1 (the efatfs read-path migration) the streaming sample-read
-# path is Rust embedded-fatfs, which lives ONLY in the Rust BSP (src/bsp/rust).
+# Context: the streaming sample-read path is Rust embedded-fatfs, which lives
+# ONLY in the Rust BSP (src/bsp/rust).
 # The RZA1 firmware links the weak `deluge_efatfs_open` no-op, so on this build
 # `open_read_stream()` fails and every streamed sample fails to load at runtime.
 # The image links cleanly but is non-functional — exactly the "silently broken

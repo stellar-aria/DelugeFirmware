@@ -18,9 +18,8 @@ use embassy_sync::blocking_mutex::Mutex;
 
 use crate::{DelugeSampleStreamGeometry, DelugeStreamingFillContext, DELUGE_RESOURCE_NO_ASSET};
 
-/// Fixed slot-table capacity. A plan note flags this against `AudioFileManager`'s own audio-file
-/// cap for later confirmation; started at 256 to match the sibling region-port crates'
-/// (`deluge_sample_source`) own fixed-pool size until that's confirmed.
+/// Fixed slot-table capacity. Set to 256 to match the sibling `deluge_sample_source` crate's own
+/// fixed-pool size; still to be confirmed against `AudioFileManager`'s own audio-file cap.
 pub const CAP: usize = 256;
 
 /// One registered streaming handle: the efatfs read handle (always a real, open handle — a slot
@@ -112,8 +111,8 @@ pub fn open(path: *const c_char, out_table_full: *mut bool) -> u32 {
             (index + 1) as u32
         }
         None => {
-            // No free slot: never silently drop the just-opened efatfs handle -- mirrors the
-            // rung-1 handle-cap discipline (close it, report table-full, fail).
+            // No free slot: never silently drop the just-opened efatfs handle -- close it,
+            // report table-full, fail.
             // SAFETY: `handle` is the live handle `deluge_efatfs_open` just returned above, not
             // yet closed or handed to any slot.
             unsafe { crate::deluge_efatfs_close(handle) };

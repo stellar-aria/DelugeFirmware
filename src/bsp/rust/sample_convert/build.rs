@@ -11,7 +11,7 @@
 //!      convert's object must contain real NEON codegen (`vcvt.s32.f32`, the FLOAT->Q31 path). The
 //!      result is stamped to OUT_DIR/arm_compile_result.txt and asserted by a #[test].
 //!   2. DEVICE (`target_os = "none"`, i.e. as a dependency of `deluge-bsp-rust`'s real
-//!      `cargo device`/armv7a-none-eabihf build — SR2d-4 Task 5, this crate's first real consumer):
+//!      `cargo device`/armv7a-none-eabihf build, this crate's first real consumer):
 //!      compiles ONLY `cpp/shim.cpp` for armv7a-NEON with the real device flags (no SIMDe, the
 //!      toolchain's real `<arm_neon.h>`), archives that one object, and emits the `cargo:rustc-link-lib`
 //!      directive so `deluge-bsp-rust`'s final device link picks it up. Deliberately does NOT recompile
@@ -23,7 +23,7 @@
 //!      `convert_word`/`stitch_boundaries`/helpers undefined for `deluge_app`'s own already-compiled
 //!      objects to resolve at the sim's final link. OFF by default — see the feature's doc in Cargo.toml.
 //!
-//! Dep ownership (SR2d gotcha #4): argon + SIMDe are header-only and pinned by tag. This crate OWNS them
+//! Dep ownership: argon + SIMDe are header-only and pinned by tag. This crate OWNS them
 //! — `fetch_pinned` git-fetches each at the SAME SHA the CMake FetchContent uses into a gitignored
 //! third_party/ cache. It does NOT scavenge a CMake build-*/_deps tree, so a standalone `cargo test`
 //! works from a clean checkout (with network) without any CMake build having run first. The DEVICE path
@@ -91,7 +91,7 @@ fn main() {
     );
     let argon_inc = argon_dir.join("include");
 
-    // SR2d-4 Task 5: this crate now has a real consumer (`deluge-bsp-rust`'s native fill task), which
+    // This crate now has a real consumer (`deluge-bsp-rust`'s native fill task), which
     // links it on the ACTUAL armv7a-none-eabihf device target, not just the x86 host test binary. Same
     // `CARGO_CFG_TARGET_OS` check `deluge-bsp-rust`'s own build.rs uses to distinguish device from host.
     let device = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none");
@@ -347,7 +347,7 @@ fn arm_compile_check(
     )
 }
 
-/// SR2d-4 Task 5: the REAL armv7a-NEON build for the device target — this crate's first actual
+/// The REAL armv7a-NEON build for the device target — this crate's first actual
 /// consumer (`deluge-bsp-rust`'s native fill task) links it into the real firmware image, not just a
 /// verify-only compile. Compiles ONLY `cpp/shim.cpp` (real device NEON flags, no SIMDe, the toolchain's
 /// real `<arm_neon.h>` — same recipe as [`arm_compile_check`]'s per-TU compile, just for one file and

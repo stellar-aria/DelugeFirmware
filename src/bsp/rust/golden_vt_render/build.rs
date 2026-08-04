@@ -6,7 +6,7 @@
 //! `[[bin]]`-only build script with no library surface to import, and duplicating
 //! ~150 lines of straight-line archiving/linking logic is far lower risk here than
 //! inventing a new shared build-script crate for a single (harness-only) consumer.
-//! Verbatim clone of `../lens1_vt_sim/build.rs` (same `DELUGE_HOSTAPP_BUILD_DIR`
+//! Mirrors `../lens1_vt_sim/build.rs` (same `DELUGE_HOSTAPP_BUILD_DIR`
 //! object archiving + `-Wl,-u,deluge_app_init` GC root) — only the log-message
 //! crate label below differs.
 use std::env;
@@ -37,13 +37,13 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
     }
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
-    // U4c Task 2: no C++ caller of `deluge_sample_stream_*` exists yet (a later task flips the
-    // C++ facade onto this crate) — unlike `deluge_app_init` above, nothing has an unresolved
-    // reference into `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never
-    // pull its object in, and rustc's default `--gc-sections` would then prune each unreached
-    // `#[no_mangle]` function's own section even after the object is pulled. Force EACH of the six
-    // ABI entry points as a link root — proves the ABI compiles+links end-to-end ahead of a real
-    // caller.
+    // No C++ caller of `deluge_sample_stream_*` exists yet — unlike `deluge_app_init`
+    // above, nothing has an unresolved reference into `deluge_sample_stream`'s rlib,
+    // so ordinary lazy `.a` extraction would never pull its object in, and rustc's
+    // default `--gc-sections` would then prune each unreached `#[no_mangle]`
+    // function's own section even after the object is pulled. Force EACH of the six
+    // ABI entry points as a link root — proves the ABI compiles+links end-to-end
+    // ahead of a real caller.
     for sym in [
         "deluge_sample_stream_open",
         "deluge_sample_stream_close",

@@ -17,11 +17,8 @@
 
 #pragma once
 
-/// @brief Host-only C-ABI diagnostic, originally built for SR3b Task 2's headline question (see
-///        `.superpowers/sdd/sr3b-routing-spike.md`): CAN a still-recording sample be read back
-///        through the same residency cursor real playback uses? Now (SR3b Task 4) a regression gate
-///        for the answer that spike led to: `RecordingReadSource` is deleted, so the answer is NO on
-///        every target, not just `host_app`.
+/// @brief Host-only C-ABI diagnostic: can a still-recording sample be read back through the same
+///        region-port cursor real playback uses?
 ///
 /// `deluge_harness_recorder_probe()` constructs a real `SampleRecorder`, feeds it a small amount of
 /// deterministic audio (leaving it in `RecorderStatus::CAPTURING_DATA` — never finalized/closed, so
@@ -29,9 +26,9 @@
 /// "still-recording" condition), then opens a `DelugeSampleSource` cursor against that Sample's
 /// `SampleStream` and calls `deluge_sample_region_acquire_ex(index=0)` — the exact same region-port
 /// entry point `SampleLowLevelReader` uses for real playback (see `sample_low_level_reader.cpp`). The
-/// returned `DelugeRegionState`: with `RecordingReadSource` deleted, `SampleStream::make_read_source()`
-/// always returns an `EfatfsReadSource` over a 0 handle, so the read fails and the async fill task
-/// re-queues it at lowest priority (`streaming_loader.rs`'s `fill_once`) rather than failing
+/// returned `DelugeRegionState`: `SampleStream::make_read_source()` always returns an
+/// `EfatfsReadSource` over a 0 handle for a still-recording Sample, so the read fails and the async
+/// fill task re-queues it at lowest priority (`streaming_loader.rs`'s `fill_once`) rather than failing
 /// outright -- the acquire is expected to settle on LOADING, uniformly, on every target.
 ///
 /// `DELUGE_HOST`-only, same reach as `harness/streaming_scenario.h` (compiled into
@@ -66,12 +63,11 @@ uint8_t deluge_harness_recorder_probe_poll();
 ///        call even if no probe is open.
 void deluge_harness_recorder_probe_end();
 
-/// @brief SR3b Task 3 regression probe: "a per-cluster structure finalizeRecordedFile() must grow to
-///        the real cluster count left under-sized after a normal recording finishes" (the Critical
-///        bug commit 5bb397c2b introduced -- see finalizeRecordedFile()'s finalize-grow comment in
-///        sample_recorder.cpp). Originally caught on `SampleStream`'s now-deleted residency table;
-///        the same finalize-time grow-only guard now sizes `Sample::overviewCache_`, which this probe
-///        measures instead (see its `_table_clusters()` accessor below).
+/// @brief Regression probe: a per-cluster structure `finalizeRecordedFile()` grows must reach the
+///        real cluster count once a normal recording finishes (see `finalizeRecordedFile()`'s
+///        finalize-grow comment in sample_recorder.cpp). The finalize-time grow-only guard sizes
+///        `Sample::overviewCache_`, which this probe measures (see its `_table_clusters()` accessor
+///        below).
 ///
 /// Builds a real `SampleRecorder`, feeds it `numFrames` of deterministic mono ramp audio spanning
 /// several `Cluster::size` clusters, and drives it through `endSyncedRecording()` +
@@ -107,11 +103,8 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe_poll();
 
 /// @return The waveform overview cache's physical entry count (`Sample::overviewCacheSize()`)
 ///         captured immediately after finalize (before any acquire) -- the direct assertion for "was
-///         the finalize-time grow left under-sized". Named `_table_clusters()` for its original
-///         target, `SampleStream`'s now-deleted residency table; kept as-is rather than renamed
-///         across this C-ABI's callers (host_recorder_roundtrip_main.cpp,
-///         src/bsp/rust/src/recorder_finalize_probe.rs). 0 if no probe has run (harness-error state,
-///         not a valid measurement).
+///         the finalize-time grow left under-sized". 0 if no probe has run (harness-error state, not
+///         a valid measurement).
 uint32_t deluge_harness_recorder_finalized_multicluster_probe_table_clusters();
 
 /// @return The finalized recording's true required cluster count for the same geometry

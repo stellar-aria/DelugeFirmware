@@ -31,7 +31,7 @@
 
 // ComputedChunk must stay standard-layout + non-polymorphic: it's placement-new'd into a raw slab
 // slot (as a pure metadata header) and its payload lives, via payload_, elsewhere in the same slot.
-// (The streamed chunk's equivalent guarantee is the Rust struct's own Drop-free POD contract, U4d.)
+// (The streamed chunk's equivalent guarantee is the Rust struct's own Drop-free POD contract.)
 static_assert(std::is_standard_layout_v<ComputedChunk> && !std::is_polymorphic_v<ComputedChunk>);
 
 // The slot-geometry guard proof (see cluster.h). The payload sits at kChunkPayloadOffset from the slot

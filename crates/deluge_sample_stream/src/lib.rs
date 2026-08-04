@@ -1,5 +1,5 @@
 //! deluge_sample_stream — the streaming-file slot registry behind
-//! `include/libdeluge/sample_stream.h`'s `deluge_sample_stream_*` C-ABI (U4c Task 1). A
+//! `include/libdeluge/sample_stream.h`'s `deluge_sample_stream_*` C-ABI. A
 //! fixed-capacity table (`registry`) of open efatfs streaming handles, each pairing an efatfs
 //! read handle with the resource-manager asset id + geometry a caller supplies once known,
 //! registering the asset's `DelugeStreamingFillContext` with the resource manager itself the

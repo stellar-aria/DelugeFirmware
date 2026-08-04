@@ -13,7 +13,7 @@ here="$(cd "$(dirname "$0")" && pwd)"; tree="$here/tree"; out="${1:-$here}"
 # the re-walk cost is under measurement noise. FAT32 image only — the FAT16
 # image is 64 MB total and cannot hold a 64 MB file plus the rest of the tree.
 # Content is per-512-byte-sector-varying (byte = (offset>>9)&0xff), not a
-# constant fill: the R0a streaming-pattern non-vacuity test
+# constant fill: the streaming-pattern non-vacuity test
 # (efatfs_streaming_pattern_nonvacuous, tests/efatfs_core.rs) needs distinct
 # cluster contents to prove the differential can detect a wrong-offset read.
 big="$(mktemp)"; huge="$(mktemp)"; trap 'rm -f "$big" "$huge"' EXIT

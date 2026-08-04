@@ -1,5 +1,5 @@
 //! Storage-generic, host-testable core of the embedded-fatfs streaming read
-//! path (SP1a Task 7a). This module holds the load-bearing logic — the
+//! path. This module holds the load-bearing logic — the
 //! file-handle table, the `FileContext` detach/reattach, the generation guard,
 //! and the fill loop — with NO device dependencies: it is generic over the
 //! embedded-fatfs `FileSystem`'s IO type, uses no `static`s, no fibers, and no
@@ -23,7 +23,7 @@
 
 #![allow(dead_code)]
 
-// R2 Task 3: `readdir_open`'s snapshot `Vec` needs `alloc` -- this module
+// `readdir_open`'s snapshot `Vec` needs `alloc` -- this module
 // compiles both `no_std` (device) and `std` (host_app / fs_differential's
 // `#[path]` include), and `extern crate` visibility is per-module in Rust
 // 2018+, so this can't rely on another module's `extern crate alloc;`
@@ -196,7 +196,7 @@ pub enum OpenOutcome {
 /// that ran past logical EOF — see below), `false` only on an actual read
 /// error. embedded-fatfs has no `read_exact`, so loop `Read` by hand.
 ///
-/// C2 fix: the streaming loader's last-cluster read is sector-rounded
+/// The streaming loader's last-cluster read is sector-rounded
 /// (`begin_fill` in `async_fill.cpp` computes
 /// `numSectors = ceil((audioDataEnd - clusterStart) / 512)`), and
 /// `audioDataEnd` is frequently NOT sector-aligned (e.g. a WAV whose `data`
@@ -276,7 +276,7 @@ where
     Some((newctx, filled))
 }
 
-/// R2 Task 1: EOF-honest counterpart of [`read_context`]/[`fill`]. Loops
+/// EOF-honest counterpart of [`read_context`]/[`fill`]. Loops
 /// `File::read` the same way, but on the FIRST `Ok(0)` (real EOF, or a
 /// request that started at/beyond it) stops and returns the true accumulated
 /// byte count in `0..=dst.len()` — it does NOT zero-pad the remainder of
@@ -342,7 +342,7 @@ where
     Some((newctx, written))
 }
 
-/// R3 Task 1: reattach `ctx`, seek to absolute `byte_offset`, write all of
+/// Reattach `ctx`, seek to absolute `byte_offset`, write all of
 /// `src` (`write_context`'s loop), then `File::detach()` instead of
 /// `close()` — the in-memory size advances (`update_dir_entry_after_write`,
 /// same as `write_context`) but the on-disk directory entry is NOT touched.
@@ -374,7 +374,7 @@ where
     Some((f.detach(), written))
 }
 
-/// R3 Task 1: reattach `ctx` and `File::close()` it — flushing the
+/// Reattach `ctx` and `File::close()` it — flushing the
 /// accumulated in-memory size/mtime edit built up by one or more prior
 /// [`write_context_noflush`] calls to the on-disk directory entry. The
 /// finalize half of the persistent-write-handle pair. `None` on any FS error
@@ -392,7 +392,7 @@ where
     f.close().await.ok()
 }
 
-/// R3 Task 1: reattach `ctx`, seek to absolute `byte_offset`, and read —
+/// Reattach `ctx`, seek to absolute `byte_offset`, and read —
 /// bounded by the context's IN-MEMORY size (`File::size`'s
 /// `DirEntryEditor.size`, which [`write_context_noflush`] advances even
 /// though it has not been flushed to disk), so this correctly reads back
@@ -471,14 +471,14 @@ where
     Some((newctx, ()))
 }
 
-// --- R2 Task 2: path ops (create/unlink/rename/mkdir/set_time) -------------
+// --- Path ops (create/unlink/rename/mkdir/set_time) -------------
 //
 // Unlike the handle-based ops above, these operate directly on `fs.root_dir()`
 // plus a `'/'`-separated path -- there is no open `FileContext` to reattach.
 // `create_context` is the one exception: it opens/creates the file, then
 // detaches it to a `FileContext` exactly like `open_context` does, so its
 // caller gets a handle to install into the table. Every crate error maps to
-// `None`; the device layer (`efatfs_fs.rs`, Task 4) decides how to surface
+// `None`; the device layer (`efatfs_fs.rs`) decides how to surface
 // that as a task-context result code.
 
 /// Create `path`, returning a detached [`FileContext`] for the new file --
@@ -632,7 +632,7 @@ where
     Some(())
 }
 
-// --- R2 Task 3: directory enumeration --------------------------------------
+// --- Directory enumeration --------------------------------------------------
 //
 // `Dir`/`DirIter` borrow `&FileSystem` (`Dir::iter(&self) -> DirIter<'a,
 // ..>`, `crates/embedded-fatfs/src/dir.rs:134`), so a live iterator can't be
@@ -643,11 +643,9 @@ where
 // the WHOLE directory to completion under one `with_fs` call and returns an
 // owned snapshot (`DirCursor`, a `Vec` + a walk index), not a live borrow.
 //
-// R2 Task 5a removed the open-by-locator fast-open sub-feature this section
-// used to carry (`EfatfsLocator`/`open_by_locator`/`readdir_locator`): the UI
-// identifies files by path, not by a locator handle, so the locator machinery
-// was a premature optimization with no consumer. `DirCursor` entries are now
-// plain `DirEntryInfo`, no `Option<EfatfsLocator>` half.
+// The UI identifies files by path, not by a locator handle, so `DirCursor`
+// entries are plain `DirEntryInfo` -- there is no separate open-by-locator
+// fast-open path here.
 
 /// One directory entry snapshotted by [`readdir_open`]/[`readdir_next`].
 ///
@@ -719,13 +717,12 @@ where
         if name == "." || name == ".." {
             continue;
         }
-        // R2 Task 4 fix: a name that doesn't fit `heapless::String<256>` (FAT LFN is
-        // 255 UTF-16 units, which can exceed 256 UTF-8 bytes) used to fail this
-        // whole snapshot via `?` -- ONE oversized filename anywhere in the
-        // directory took out the ENTIRE listing. Skip just that entry instead: `?`
-        // here would propagate to the function's `Option<DirCursor>` return and
-        // abort the walk with `None`, which the C-ABI (`efatfs_fs.rs`/
-        // `efatfs_host_shim.rs`, Task 4) can't distinguish from "path is not a
+        // A name that doesn't fit `heapless::String<256>` (FAT LFN is 255 UTF-16
+        // units, which can exceed 256 UTF-8 bytes) is skipped rather than failing
+        // the whole snapshot via `?` -- one oversized filename anywhere in the
+        // directory would otherwise take out the ENTIRE listing. Propagating `?`
+        // here would abort the walk with `None`, which the C-ABI (`efatfs_fs.rs`/
+        // `efatfs_host_shim.rs`) can't distinguish from "path is not a
         // directory" / a real FS error.
         let Ok(name) = heapless::String::try_from(name.as_str()) else {
             continue;
@@ -747,14 +744,12 @@ where
 /// Advance `cursor` and return the next entry. Outer `Option` is an FS
 /// error (`None`); inner `Option` is end-of-directory (`None`). `cursor` is
 /// an owned snapshot (see [`readdir_open`]), so this never touches the FS or
-/// does any FS I/O -- it used to take an (unused) `&FileSystem` parameter
-/// purely to mirror this module's other `fs`-taking primitives, but that made
-/// callers route an in-memory snapshot read through the single FS mutex for
-/// no reason (R2 Task 4 review finding: it serialized dir-page reads behind
-/// any in-flight streaming SD read). Dropped: this is synchronous and
-/// FS-free. An FS-error outer `None` cannot occur for a snapshot cursor
-/// today, but the signature leaves room for a future non-snapshot cursor
-/// that could fail mid-walk.
+/// does any FS I/O -- it deliberately takes no `&FileSystem` parameter, unlike
+/// this module's other `fs`-taking primitives: routing an in-memory snapshot
+/// read through the single FS mutex would serialize dir-page reads behind any
+/// in-flight streaming SD read for no reason. An FS-error outer `None` cannot
+/// occur for a snapshot cursor today, but the signature leaves room for a
+/// future non-snapshot cursor that could fail mid-walk.
 #[allow(clippy::unnecessary_wraps)]
 pub fn readdir_next(cursor: &mut DirCursor) -> Option<Option<DirEntryInfo>> {
     let Some(info) = cursor.entries.get(cursor.idx) else {
@@ -779,7 +774,7 @@ pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, secon
     (u32::from(dos_date) << 16) | u32::from(dos_time)
 }
 
-// --- R2 Task 4: task-context file-handle table + dir-cursor table ----------
+// --- Task-context file-handle table + dir-cursor table ----------------------
 //
 // The streaming-read `HandleTable` above is deliberately NOT reused for
 // task-context file I/O: task-context `deluge::io::File` callers `seek()` then
@@ -789,7 +784,7 @@ pub fn pack_timestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, secon
 // streaming table's `Slot` (generation + `FileContext` only) has no field for
 // and does not need (the streaming read path always passes an explicit
 // absolute `byte_offset`). Extending the streaming `Slot`/`HandleTable` to
-// carry a position would touch the already-proven R1 streaming path for a
+// carry a position would touch the already-proven streaming path for a
 // field it never uses; a separate, small `TaskFileTable` keeps the two
 // concerns apart. `readdir_next` is synchronous (no `.await`, no FS access --
 // see the module comment above [`DirCursor`]), so [`DirHandleTable`] needs no

@@ -3,7 +3,7 @@
 //! `FileBlockDevice` (`fs_differential/src/block_dev.rs`), which mirrors this
 //! shape over a file-backed `RamDisk` instead. Both feed the same
 //! `BufStream`/`embedded-fatfs` stack (`crates/block-device-driver`,
-//! `crates/block-device-adapters`) SP1 is bringing up on-device.
+//! `crates/block-device-adapters`) this crate brings up on-device.
 //!
 //! Unlike the host adapter, `type Error` here is `deluge_bsp::sd::SdError`,
 //! not `core::convert::Infallible`: `sd::read_sectors`/`write_sectors` talk to
@@ -40,8 +40,8 @@ pub struct SdBlockDevice;
 // B7 REGRESSION GUARD: every transfer in this impl MUST go through
 // `crate::sd::locked_*`, never `deluge_bsp::sd::read_sectors`/`write_sectors`
 // directly. The raw calls bypass SD_BUS and let an efatfs transfer interleave
-// with a fiber-side C-FatFS transfer on the single SDHI controller. This was
-// shipped bypassed from SP1 until 2026-07-21 (see docs/dev/known-concurrency-bugs.md B7).
+// with a fiber-side C-FatFS transfer on the single SDHI controller. This
+// shipped bypassed until 2026-07-21 (see docs/dev/known-concurrency-bugs.md B7).
 impl BlockDevice<BLOCK_SIZE> for SdBlockDevice {
     type Error = SdError;
     type Align = A4;
@@ -100,7 +100,7 @@ impl BlockDevice<BLOCK_SIZE> for SdBlockDevice {
 /// Stack-instantiation smoke: names the full device storage stack (`SdBlockDevice`
 /// -> `BufStream` -> `embedded_fatfs::FileSystem`) so the type-checker fully
 /// monomorphizes it for `armv7a-none-eabihf` — the decisive device-readiness
-/// check for SP1 Task 3. Never called (no card mount happens here); its only
+/// check for the on-device storage stack. Never called (no card mount happens here); its only
 /// job is to force codegen of the whole stack. `#[allow(dead_code)]` since
 /// nothing calls it — its existence, not its execution, is the point.
 #[allow(dead_code)]

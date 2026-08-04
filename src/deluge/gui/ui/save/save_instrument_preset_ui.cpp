@@ -94,10 +94,9 @@ bool SaveInstrumentPresetUI::opened() {
 	// not used for midi
 	filePrefix = (outputTypeToLoad == OutputType::SYNTH) ? "SYNT" : "KIT";
 
-	// The listing (and the blinkLed tail that used to run straight after it - see
-	// onBrowserOpened()) now happens async: dispatch it and return optimistically. Failure goes
-	// through the base Browser::onListingFailed() (displayError + close()) once the listing
-	// completes.
+	// The listing dispatches asynchronously; return optimistically here. onBrowserOpened() runs
+	// the blinkLed tail once the listing succeeds. Failure goes through the base
+	// Browser::onListingFailed() (displayError + close()).
 	beginListing(
 	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = enteredText, .defaultDir = defaultDir});
 

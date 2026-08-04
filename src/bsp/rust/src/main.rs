@@ -45,33 +45,33 @@ extern crate deluge_resource;
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_resource;
 
-// SR2d-5 Task 4: link-only, same reasoning as the `deluge_resource` pair above. The C++ reader
+// Link-only, same reasoning as the `deluge_resource` pair above. The C++ reader
 // (sample_low_level_reader.cpp) CALLS the `deluge_sample_source_*`/`deluge_sample_region_*` C ABI;
-// `deluge_sample_source`'s crate (`abi.rs`) is the sole definition of those symbols (the C++ weak
-// fallback sample_source.cpp was deleted in SR3f), gated `cfg(any(target_os = "none", feature =
+// `deluge_sample_source`'s crate (`abi.rs`) is the sole definition of those symbols -- there is no
+// C++ fallback in sample_source.cpp -- gated `cfg(any(target_os = "none", feature =
 // "host_app"))` to match these two `extern crate` arms exactly. Without this, rustc/lld would never pull
 // `deluge_sample_source`'s single-object rlib into the link at all (nothing in this crate's own Rust
-// code references it), so the weak C++ body would keep winning even on device/host_app.
+// code references it), leaving those C ABI symbols undefined at link time on device/host_app.
 #[cfg(target_os = "none")]
 extern crate deluge_sample_source;
 /// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_sample_source;
 
-// U1 Task 1: link-only, same reasoning as the `deluge_sample_source` pair above. Its `abi.rs`
+// Link-only, same reasoning as the `deluge_sample_source` pair above. Its `abi.rs`
 // defines the lifecycle trio of the `deluge_sample_reader_*` C ABI (`include/libdeluge/
-// sample_reader.h`), gated identically. Nothing calls it yet in U1 (no consumer migrates — that is
-// U2), so without this `extern crate` rustc/lld would drop the whole rlib from the link; this just
-// proves the symbols are present and compile clean end-to-end ahead of U2 wiring a real caller.
+// sample_reader.h`), gated identically. Nothing calls it yet (no consumer has migrated to it), so
+// without this `extern crate` rustc/lld would drop the whole rlib from the link; this just
+// proves the symbols are present and compile clean end-to-end ahead of a real caller being wired up.
 #[cfg(target_os = "none")]
 extern crate deluge_sample_reader;
 /// `host_app` feature: host-side sibling of the above — see that `extern crate`'s doc.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 extern crate deluge_sample_reader;
 
-// U4c Task 2: link-only, same reasoning as the `deluge_sample_reader` pair above. Its `abi.rs`
-// (a later task) will define the `deluge_sample_stream_*` C ABI (`include/libdeluge/
-// sample_stream.h`). Nothing calls it yet (no consumer migrates in this task — that is Task 3), so
+// Link-only, same reasoning as the `deluge_sample_reader` pair above. Its `abi.rs`
+// will define the `deluge_sample_stream_*` C ABI (`include/libdeluge/
+// sample_stream.h`). Nothing calls it yet (no consumer has migrated to it), so
 // without this `extern crate` rustc/lld would drop the whole rlib from the link; this just proves
 // the symbols are present and compile clean end-to-end ahead of the facade wiring a real caller.
 #[cfg(target_os = "none")]
@@ -118,7 +118,7 @@ mod audio;
 /// stub in `host_link_stubs.rs`.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod audio_host;
-/// SP1 Task 4: on-device read-throughput benchmark, `embedded-fatfs` vs the
+/// On-device read-throughput benchmark, `embedded-fatfs` vs the
 /// vendored C FatFS — see its module doc. Non-default: `bench_fs` feature.
 #[cfg(all(target_os = "none", feature = "bench_fs"))]
 mod bench_fs;
@@ -137,10 +137,10 @@ mod control;
 mod cv_gate;
 /// display.h — main OLED output over deluge_bsp::oled.
 mod display;
-/// SP1a Task 7a: storage-generic, host-testable core of the efatfs read path
+/// Storage-generic, host-testable core of the efatfs read path
 /// (`HandleTable` + `FileContext` detach/reattach + generation guard + fill
 /// loop). `efatfs_fs` wraps it with the device statics/mutexes/FFI; host tests
-/// and `lens1_vt_sim` drive it directly. R0b: also reachable under `host_app`
+/// and `lens1_vt_sim` drive it directly. Also reachable under `host_app`
 /// (any target, independent of `efatfs_streaming`) so `efatfs_host_shim` — the
 /// host counterpart of `efatfs_fs` — can reuse it unchanged; see that module's
 /// doc.
@@ -149,18 +149,20 @@ mod display;
     feature = "host_app"
 ))]
 mod efatfs_core;
-/// SP1a: the single-owner `embedded-fatfs` mount — one `FileSystem` behind an
+/// The single-owner `embedded-fatfs` mount — one `FileSystem` behind an
 /// async `Mutex`, the only way live code touches the vendored FS. Non-default:
-/// `efatfs_streaming` feature. Nothing calls `mount()`/`with_fs()` yet (later
-/// tasks wire the file-handle table, FFI, and the read swap onto this).
+/// `efatfs_streaming` feature. `mount()`/`with_fs()` are invoked from this
+/// crate's boot path and the streaming read path once the feature is
+/// enabled.
 #[cfg(all(target_os = "none", feature = "efatfs_streaming"))]
 mod efatfs_fs;
-/// R0b: host counterpart of `efatfs_fs` — mounts `embedded-fatfs` over a
-/// `deluge_block_read`-backed block device so a host harness can measure the
-/// real efatfs read path. Test infrastructure only; no device path touched.
+/// Host counterpart of `efatfs_fs` — mounts `embedded-fatfs` over a
+/// block device backed by the SD_BUS-guarded async helpers (see that
+/// module's doc) so a host harness can measure the real efatfs read path.
+/// Test infrastructure only; no device path touched.
 #[cfg(feature = "host_app")]
 mod efatfs_host_shim;
-/// SP1: `block_device_driver::BlockDevice<512>` over the real SD driver
+/// `block_device_driver::BlockDevice<512>` over the real SD driver
 /// (`deluge_bsp::sd`), feeding the `BufStream`/`embedded-fatfs` stack —
 /// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.
 #[cfg(target_os = "none")]
@@ -189,12 +191,12 @@ mod host_link_stubs;
 /// midi_io.h — DIN MIDI over deluge_bsp::uart (+ USB-MIDI peripheral, see usb).
 #[cfg(target_os = "none")]
 mod midi;
-/// SR3b Task 3: does a FINALIZED multi-cluster recording's residency table get sized correctly,
+/// Does a FINALIZED multi-cluster recording's residency table get sized correctly,
 /// and does region index 1+ read back correctly through the region port on THIS target? See its
 /// module doc. `host_app`-only.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod recorder_finalize_probe;
-/// SR3b Task 2 Step 4: does a still-recording sample's live read-back resolve on THIS target
+/// Does a still-recording sample's live read-back resolve on THIS target
 /// (`async_streaming_loader` on)? See its module doc. `host_app`-only.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod recorder_probe;
@@ -256,7 +258,7 @@ unsafe extern "C" {
 #[cfg(target_os = "none")]
 static mut RUST_SRAM_POOL: [u8; 64 * 1024] = [0; 64 * 1024];
 
-/// SP1: `#[global_allocator]` binding for `extern crate alloc` — required as
+/// `#[global_allocator]` binding for `extern crate alloc` — required as
 /// soon as any dependency needs it, which `fat_block_device.rs`'s
 /// `embedded-fatfs` (`alloc` feature) is the first to on this target; nothing
 /// else here used `alloc` before. Backed by `fs_alloc::DelugeGlobalAlloc` — the
@@ -499,16 +501,16 @@ async fn app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
-    // SP1a Task 6 / R1 (`efatfs_streaming` feature, default-on as of R1): give the
+    // With `efatfs_streaming` enabled (the default): give the
     // FS allocator a real backing arena, then mount the single-owner
     // embedded-fatfs `FileSystem` — BEFORE `deluge_app_init` so the FS is ready
     // for the first C++ sample-load. A failed mount must NOT brick boot — but note
-    // (R1) the streaming read is now efatfs-only with NO C-FatFS fallback, so a
+    // the streaming read is efatfs-only with NO C-FatFS fallback, so a
     // failed mount means streamed samples won't load (open_read_stream fails), not
     // that C++ silently reverts to C-FatFS. The SD block driver is already up
     // (boot_init above) and nothing has touched the card yet.
     //
-    // CAVEAT: this and `bench_fs` (Task 4) BOTH init `crate::FS_ALLOCATOR` over
+    // CAVEAT: this and `bench_fs` BOTH init `crate::FS_ALLOCATOR` over
     // their own arena — enabling both features at once would double-init it.
     // Don't: `bench_fs` is a throwaway benchmark feature, `efatfs_streaming` is
     // the real read path.
@@ -551,7 +553,7 @@ async fn app_task() {
         }
     }
 
-    // SP1 Task 4 (`bench_fs` feature, off by default): run the on-device
+    // With `bench_fs` enabled (off by default): run the on-device
     // embedded-fatfs-vs-C-FatFS read-throughput benchmark right here — the SD
     // block driver is up but nothing has touched the card yet, so its two
     // reads are genuinely uncontended. Prints its `SP1_BENCH …` result line
@@ -618,19 +620,19 @@ async fn host_app_task() {
     deluge_bsp::pic::wait_ready().await;
     crate::sd::boot_init().await;
 
-    // R0b: host counterpart of `app_task`'s efatfs mount (see its comment) —
+    // Host counterpart of `app_task`'s efatfs mount (see its comment) —
     // mount the shim's embedded-fatfs `FileSystem` BEFORE `deluge_app_init` so
     // the app's first sample-load can open an efatfs handle. No FS_ALLOCATOR
     // arena needed here (unlike the device): `efatfs_host_shim.rs`'s module doc
     // notes embedded-fatfs's `alloc` feature just uses the host's implicit std
-    // allocator. A failed mount must NOT abort boot — but (R1) the streaming read
-    // is efatfs-only now, so a failed mount means streamed samples won't load
+    // allocator. A failed mount must NOT abort boot — but the streaming read
+    // is efatfs-only, so a failed mount means streamed samples won't load
     // rather than reverting to C-FatFS, exactly like the device. No `sim_latency::set_off_fiber_instant`
-    // dance is needed on this path either: `deluge_block_read`'s off-fiber
-    // dispatch (which this mount's block device goes through — see the shim's
-    // module doc) only needs that workaround when the SAME OS thread also owns
-    // `sim_latency::pump`'s executor, which isn't the case here — `pump` runs on
-    // the dedicated audio OS thread (spawned above in `main`, before this task),
+    // dance is needed on this path either: this mount's block device awaits the
+    // SD_BUS-guarded async helpers directly (see the shim's module doc) rather
+    // than bridging through a synchronous off-fiber dispatch that would need
+    // that workaround, and in any case `sim_latency::pump` runs on the
+    // dedicated audio OS thread (spawned above in `main`, before this task),
     // so this task's `block_on` busy-spin never starves it (see Appendix A of
     // the R0 design doc for why Lens 1's single-threaded shape is different).
     #[cfg(feature = "efatfs_streaming")]
@@ -688,7 +690,7 @@ fn main() {
     // Deliberately called here, synchronously, before any executor/fiber
     // exists — it is a bootstrap-time smoke test of the raw ABI shim itself,
     // not an app FatFS access, so it has no owner to route through yet. Under
-    // `storage-owner-audit` (rung-5's pre-flight gate) this does NOT
+    // `storage-owner-audit`'s pre-flight gate this does NOT
     // trip `sd.rs`'s `on_fiber()` debug_assert!: the assert's guard is
     // `on_fiber() || !worker_started()`, and `worker_started()` only latches
     // true once the first `worker_poll()` runs, which is after this
@@ -707,14 +709,14 @@ fn main() {
     // `tests/sim_latency_host.rs`'s exercise, which brings up a real executor
     // with `sim_latency::pump` running before issuing any transfer.
     //
-    // R0b: also SKIPPED whenever `host_app` is on. This write is destructive
+    // Also SKIPPED whenever `host_app` is on. This write is destructive
     // (it clobbers sector 1 of WHATEVER image `DELUGE_SD_IMAGE` names) and, on
     // a `host_app` build, that can be a real, externally-supplied FAT image —
     // e.g. `preemptive_race_tsan/run.sh`'s own documented, recommended
     // `DELUGE_SD_IMAGE=<cached image>` workflow (its header comment: reusing an
     // already-packed image is "100% reliable", vs. packing fresh in-process).
-    // Found by R0b's Task 5 verification: this self-test's synthetic byte
-    // pattern lands on FAT32's FSInfo sector, which C-FatFS's `f_mount`
+    // This self-test's synthetic byte pattern lands on FAT32's FSInfo sector,
+    // which C-FatFS's `f_mount`
     // tolerates (it just re-derives the free-cluster count) but
     // `embedded-fatfs`'s stricter mount validation rejects outright
     // (`CorruptedFileSystem`) — so enabling `efatfs_streaming` on this path
@@ -902,7 +904,7 @@ fn main() {
                 }
             });
 
-        // --- SR3b Task 2 Step 4: opt-in recorder live-readback probe -------
+        // --- Opt-in recorder live-readback probe ----------------------------
         // Off by default. Set DELUGE_RECORDER_PROBE=1 to switch this run into the diagnostic:
         // construct a real SampleRecorder, feed it audio, and probe whether a still-recording
         // sample's data can be read back through the region port on THIS target — see
@@ -921,7 +923,7 @@ fn main() {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5_000);
 
-        // --- SR3b Task 3: opt-in finalized multi-cluster regression probe ---
+        // --- Opt-in finalized multi-cluster regression probe -----------------
         // Off by default. Set DELUGE_RECORDER_FINALIZE_PROBE=1 to switch this run into the
         // regression gate: construct a real SampleRecorder, drive it to RecorderStatus::COMPLETE,
         // and confirm the residency table was sized correctly + region index 1 reads back
@@ -1187,7 +1189,7 @@ fn main() {
             }
         }
 
-        // SR3b Task 2 Step 4: if the recorder live-readback probe was requested, wait for it
+        // If the recorder live-readback probe was requested, wait for it
         // (spawned above, on the host-app executor) to finish, report the finding, and exit —
         // same shape as the scenario block above. A diagnostic, not a normative gate: any
         // outcome (READY, LOADING-forever, UNAVAILABLE) is a valid, reportable finding, so this
@@ -1246,11 +1248,11 @@ fn main() {
             hard_exit(0);
         }
 
-        // SR3b Task 3: if the finalized multi-cluster regression probe was requested, wait for it
+        // If the finalized multi-cluster regression probe was requested, wait for it
         // (spawned above, on the host-app executor) to finish, report the finding, and exit. This
         // one IS a normative gate (unlike the live-readback probe above): a finalized recording's
         // residency table MUST be sized correctly and region index 1+ MUST read back correctly, on
-        // every target, or this is the SR3b Task 3 Critical regression.
+        // every target, or this is a critical regression.
         if recorder_finalize_probe_requested {
             let watchdog = Duration::from_millis(
                 recorder_finalize_probe_step_timeout_ms

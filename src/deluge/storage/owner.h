@@ -34,29 +34,37 @@ namespace deluge::storage {
 /// async-SD reentrancy proof (tests/fatfs_stress/RESULTS.md) showed is
 /// load-bearing. See docs/superpowers/specs/2026-07-17-async-sd-staging-ladder-roadmap.md.
 struct Owner {
-	/// Queue `fn(ctx)` on the owner. C-ABI-shaped for existing call sites.
+	/// @brief Queue `fn(ctx)` on the owner. C-ABI-shaped for existing call sites.
+	/// @param fn  The op to run.
+	/// @param ctx Context pointer passed through to `fn`.
 	/// @return true if the op ran (inline on legacy/host) or was queued (Embassy fiber);
 	///         false if the dispatch was dropped (Embassy worker queue full) — the op will
 	///         NOT run, so a coalescing caller must reset its single-flight guard.
 	static bool run(void (*fn)(void*), void* ctx);
 
-	/// Like run(), but the op is SD-routine-class: RESOURCE_SD_ROUTINE tasks are
+	/// @brief Like run(), but the op is SD-routine-class: RESOURCE_SD_ROUTINE tasks are
 	/// held off for its whole in-flight window (enqueue → completion) so a
 	/// consumer whose op frees an object (the recorder) can't be freed
 	/// concurrently by another task. Inline on legacy/host (indistinguishable
 	/// from run() there); Embassy takes an SD-routine hold across the op.
+	/// @param fn  The op to run.
+	/// @param ctx Context pointer passed through to `fn`.
 	/// @return as run(): true if it ran/queued, false if the dispatch was dropped.
 	static bool run_sd_routine(void (*fn)(void*), void* ctx);
 
-	/// True iff the current context is the storage worker (the worker fiber on
+	/// @brief True iff the current context is the storage worker (the worker fiber on
 	/// Embassy; always false on cooperative/host, where run() is inline). Use to
 	/// avoid re-dispatching a dual-context op that is already on the worker.
+	/// @return true iff on the storage worker context.
 	static bool on_owner();
 
-	/// Run `fn(ctx)` on the worker, but inline if already on_owner() (or on a
+	/// @brief Run `fn(ctx)` on the worker, but inline if already on_owner() (or on a
 	/// cooperative/host BSP). For dual-context callers: the leaf work runs on the
 	/// worker exactly once, whether reached from a UI handler (dispatched) or from
-	/// inside another worker op (inline). Returns true if it ran/queued.
+	/// inside another worker op (inline).
+	/// @param fn  The op to run.
+	/// @param ctx Context pointer passed through to `fn`.
+	/// @return true if it ran/queued.
 	static bool run_or_inline(void (*fn)(void*), void* ctx);
 };
 
@@ -74,12 +82,15 @@ struct Owner {
 /// issued from inside a running `fill` coalesces).
 class Coalescer {
 public:
+	/// @brief Construct a Coalescer.
 	/// @param sd_routine when true, `request()` dispatches via `Owner::run_sd_routine`
 	/// (SD-routine-class exclusion); when false (default), via `Owner::run`.
 	explicit Coalescer(bool sd_routine = false) : sd_routine_(sd_routine) {}
 
-	/// If no dispatch from this `Coalescer` is in flight, run `fill(ctx)` on the owner;
+	/// @brief If no dispatch from this `Coalescer` is in flight, run `fill(ctx)` on the owner;
 	/// otherwise coalesce (no-op).
+	/// @param fill The op to run.
+	/// @param ctx  Context pointer passed through to `fill`.
 	void request(void (*fill)(void*), void* ctx);
 
 private:

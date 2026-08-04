@@ -2069,8 +2069,8 @@ ActionResult InstrumentClipView::potentiallyRandomizeDrumSamples() {
 	pendingRandomizeTarget_ = target;
 	// Gate: a repeat LOAD+pad(15,2) during the op's SD yield is checked out by padAction()'s
 	// `currentUIMode == UI_MODE_NONE` guard on the Drum Randomizer branch; edit/mute/audition
-	// pad presses and other buttons are checked out the same way this rung's Slicer task used
-	// (UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES isn't in any of those branches' allowed-mode lists).
+	// pad presses and other buttons are checked out the same way (Slicer uses the same pattern)
+	// since UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES isn't in any of those branches' allowed-mode lists.
 	currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
 	if (!deluge::storage::Owner::run_or_inline(&InstrumentClipView::runRandomizeDrumsOp, this)) {
 		// Dispatch dropped (owner queue full) — runRandomizeDrumsOp will never run, so release

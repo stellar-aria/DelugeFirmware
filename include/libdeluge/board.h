@@ -31,7 +31,7 @@
 extern "C" {
 #endif
 
-/// Primary display kind present on the board.
+/// @brief Primary display kind present on the board.
 typedef enum DelugeDisplayKind : uint8_t {
 	DELUGE_DISPLAY_NONE = 0,
 	DELUGE_DISPLAY_OLED = 1,         ///< graphical framebuffer display

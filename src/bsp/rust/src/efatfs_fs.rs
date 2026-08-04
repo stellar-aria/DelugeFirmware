@@ -1,4 +1,4 @@
-//! SP1a Task 2: the single-owner mounted `embedded-fatfs` `FileSystem` —
+//! The single-owner mounted `embedded-fatfs` `FileSystem` —
 //! mounts ONE `FileSystem` over the real SD card (`SdBlockDevice`, see
 //! `fat_block_device.rs`) and stores it behind an `embassy_sync` async
 //! `Mutex`. [`with_fs`] is the ONLY way live code may touch the FS.
@@ -11,13 +11,12 @@
 //! holder `.await` (yield the executor) across the underlying SD transfer,
 //! rather than busy-spinning or blocking other tasks outright.
 //!
-//! Device-only and flag-gated: nothing in this module is called yet. The
-//! file-handle table (Task 3), the FFI boundary (Task 4), and the read-path
-//! swap (Task 5/6) are what actually invoke [`mount`]/[`with_fs`] — until
-//! then this module is dead code by design, hence the blanket
-//! `#![allow(dead_code)]` below (keeps the `efatfs_streaming` build
-//! warning-clean without disturbing the default build, which doesn't compile
-//! this file at all).
+//! Device-only and flag-gated: the file-handle table, the FFI boundary, and
+//! the streaming read path (`streaming_loader.rs`, `main.rs`) are what
+//! invoke [`mount`]/[`with_fs`]; anything in this module not reached from
+//! there stays dead code by design, hence the blanket `#![allow(dead_code)]`
+//! below (keeps the `efatfs_streaming` build warning-clean without
+//! disturbing the default build, which doesn't compile this file at all).
 #![cfg(all(target_os = "none", feature = "efatfs_streaming"))]
 #![allow(dead_code)]
 
@@ -98,7 +97,7 @@ where
     }
 }
 
-// --- File-handle table (Task 3; logic extracted to `efatfs_core` in Task 7a) --
+// --- File-handle table (logic lives in `efatfs_core`) -----------------------
 //
 // The table type, the generation guard, the `FileContext` detach/reattach, and
 // the fill loop all live in the storage-generic, host-testable [`efatfs_core`]
@@ -174,9 +173,9 @@ pub async fn close(handle: u32) {
     HANDLES.lock().await.remove(handle);
 }
 
-// --- FFI bridge (Task 4) ---------------------------------------------------
+// --- FFI bridge --------------------------------------------------------------
 //
-// C++ calls these synchronously at sample-load (`open_read_stream`, Task 6), but
+// C++ calls these synchronously at sample-load (`open_read_stream`), but
 // [`open`]/[`close`] above are async. Bridge via `crate::fiber::block_on_fiber`
 // — the fiber-aware `block_on` that polls the future on the worker fiber and
 // yields the executor (not the whole app) across the SD transfer. Valid ONLY
@@ -206,7 +205,7 @@ pub extern "C" fn deluge_efatfs_open(
     {
         return false;
     }
-    // SAFETY: `path` is a NUL-terminated C string supplied by open_read_stream (Task 6),
+    // SAFETY: `path` is a NUL-terminated C string supplied by open_read_stream,
     // valid for the duration of this call.
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
@@ -247,7 +246,8 @@ pub extern "C" fn deluge_efatfs_close(handle: u32) {
         crate::fiber::block_on_fiber(close(handle));
     }
     // An off-fiber close can't bridge to the async table, so the slot leaks until reuse —
-    // acceptable for SP1a (flag-gated, few handles). A deferred-close queue is future work.
+    // acceptable while this stays flag-gated with few handles. A deferred-close queue is
+    // future work.
 }
 
 /// C-ABI: synchronously read `count` bytes at `byte_offset` of the file behind `handle`, bridging
@@ -279,7 +279,7 @@ pub extern "C" fn deluge_efatfs_read_at(
     }
 }
 
-// --- Task-context file/dir tables (Task 4) ----------------------------------
+// --- Task-context file/dir tables --------------------------------------------
 //
 // Separate from [`HANDLES`] above -- see `efatfs_core::TaskFileTable`'s doc for
 // why task-context file I/O (explicit `seek()` + position-implicit `read`/
@@ -408,7 +408,7 @@ enum NextFit {
 /// Advance `handle`'s cursor to the next entry whose name fits in
 /// `max_name_bytes` (the C caller's buffer, minus room for the NUL --
 /// see `deluge_efatfs_dir_read`), skipping any that don't -- belt-and-suspenders
-/// with the `efatfs_core::readdir_open` fix (Task 4) that already keeps ONE
+/// with `efatfs_core::readdir_open`, which already keeps ONE
 /// oversized name from failing the whole snapshot: this additionally guards the
 /// narrower "fits the 256-byte `heapless::String` but not the caller's
 /// NUL-terminated buffer" edge (a name of exactly 256 UTF-8 bytes fits the
@@ -425,11 +425,11 @@ async fn task_dir_read(
 ) -> Option<Option<efatfs_core::DirEntryInfo>> {
     let mut dir_table = DIR_HANDLES.lock().await;
     let cursor = dir_table.get_mut(handle)?;
-    // R2 Task 4 review fix: `readdir_next` is FS-free (it only walks the
-    // in-memory snapshot `cursor` already holds), so this no longer routes
-    // through `with_fs` -- that used to serialize an in-memory directory-page
-    // read behind the single FS mutex, and thus behind any in-flight
-    // streaming SD read, for no reason.
+    // `readdir_next` is FS-free (it only walks the in-memory snapshot
+    // `cursor` already holds), so this does not route through `with_fs` --
+    // doing so would serialize an in-memory directory-page read behind the
+    // single FS mutex, and thus behind any in-flight streaming SD read, for
+    // no reason.
     let next = loop {
         match efatfs_core::readdir_next(cursor)? {
             None => break NextFit::Eof,
@@ -451,7 +451,7 @@ async fn task_dir_close(handle: u32) {
     DIR_HANDLES.lock().await.remove(handle);
 }
 
-// --- Task-context FFI bridge (Task 4) ---------------------------------------
+// --- Task-context FFI bridge --------------------------------------------------
 //
 // Same `on_fiber()`-gated `block_on_fiber` bridge discipline as the streaming
 // bridge above. See `include/libdeluge/file_io.h` for the C-side contract of
@@ -772,7 +772,7 @@ pub extern "C" fn deluge_efatfs_set_time(
     .is_some()
 }
 
-// --- Persistent stream-write handle table (R3 Task 2) -----------------------
+// --- Persistent stream-write handle table -------------------------------------
 //
 // Backs the sample recorder's efatfs write path (`include/libdeluge/stream_io.h`'s
 // `deluge_efatfs_stream_*`). Unlike [`HANDLES`]/[`TASK_FILES`] above, a slot here holds ONE
@@ -898,7 +898,7 @@ async fn stream_close(handle: u32) -> bool {
     flushed
 }
 
-// --- Persistent stream-write FFI bridge (R3 Task 2) -------------------------
+// --- Persistent stream-write FFI bridge ---------------------------------------
 //
 // Same `on_fiber()`-gated `block_on_fiber` bridge discipline as the task-context bridge above. See
 // `include/libdeluge/stream_io.h` for the C-side contract of every function below.

@@ -237,11 +237,7 @@ clusterSizeChangedButItsOk:
 					// sampleStream's destructor closes the handle once it goes out of scope below.
 
 					// If we couldn't resolve cluster 0's sector at all, the file is gone/unreadable on the
-					// reinserted card.
-					// R3 Task 6: this used to also assert the sector was unchanged against a C-FatFS
-					// sdAddress baseline recorded on recorder-written samples -- sdAddress (and the
-					// recorder's population of it) is retired, so there is no baseline left to compare;
-					// a successful open + resolvable sector 0 is now the whole check.
+					// reinserted card. A successful open + resolvable sector 0 is the whole check.
 					if (!firstSector) {
 						((Sample*)thisAudioFile)->markAsUnloadable();
 						continue;

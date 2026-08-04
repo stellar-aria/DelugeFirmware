@@ -1,8 +1,8 @@
 //! Host `block_device_driver::BlockDevice<512>` over the shared `DISK` image
 //! (`ram_disk.rs`), for `efatfs::EFatFs` to mount `embedded-fatfs` through --
 //! the real `BlockDevice` -> `BufStream` stack (`crates/block-device-driver`,
-//! `crates/block-device-adapters`) SP1 will drive on-device, instead of the
-//! byte-granular `MemIo` shortcut SP0 used.
+//! `crates/block-device-adapters`) driven on-device, rather than a
+//! byte-granular shortcut.
 //!
 //! `RamDisk::read_at`/`write_at` are already byte-granular over `DISK`, so
 //! this just walks the requested blocks and delegates each 512-byte chunk to

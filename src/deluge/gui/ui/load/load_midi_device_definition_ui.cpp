@@ -62,9 +62,8 @@ bool LoadMidiDeviceDefinitionUI::opened() {
 	actionLogger.deleteAllLogs();
 
 	std::string searchFilename = setupForLoadingMidiDeviceDefinition(); // Sets currentDir.
-	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
-	// happens async: dispatch it and return optimistically. Failure goes through the base
-	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
 	beginListing({.action = ListingAction::Open,
 	              .direction = 0,
 	              .filenameToStartAt = searchFilename,
@@ -76,9 +75,9 @@ bool LoadMidiDeviceDefinitionUI::opened() {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstack-usage="
 // Computes the icon/title state and currentDir, and returns the filename to search for within it.
-// Does NOT perform the listing itself (that used to be fused in here) - opened() combines this
-// with MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER to dispatch an async Open listing; the post-listing
-// tail moved to onBrowserOpened().
+// Does NOT perform the listing itself - opened() combines this with
+// MIDI_DEVICES_DEFINITION_DEFAULT_FOLDER to dispatch an async Open listing; the post-listing tail
+// lives in onBrowserOpened().
 // If OLED, then you should make sure renderUIsForOLED() gets called after this.
 std::string LoadMidiDeviceDefinitionUI::setupForLoadingMidiDeviceDefinition() {
 	// reset
@@ -132,9 +131,8 @@ void LoadMidiDeviceDefinitionUI::onBrowserOpened() {
 
 	drawKeys();
 
-	// focusRegained() used to run synchronously right after dispatching the listing (see opened());
-	// move it here so it runs after the listing actually completes, matching the Save* browsers'
-	// convention (rung-5 prerequisite #2).
+	// Runs here so it happens after the listing actually completes, matching the Save* browsers'
+	// convention.
 	focusRegained();
 }
 
@@ -150,7 +148,7 @@ void LoadMidiDeviceDefinitionUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem->isFolder) {
-		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
 		// Browser::onListingFailed() (displayError + close()) once the listing completes.
 		goIntoFolder(currentFileItem->filename.c_str());
 	}

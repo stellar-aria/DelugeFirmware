@@ -4,14 +4,13 @@
 #include "util/segmented_vector.h"
 #include <cstdint>
 
-// Task 3 (waveform overview cache relocation): mechanics for the relocated container --
+// Mechanics for the container backing the waveform overview cache --
 // `OverviewCacheEntry` plus the `SegmentedVector` it's stored in on `Sample` (`Sample::overviewCache_`,
 // sized via `Sample::resizeOverviewCache()`, read via `overviewCacheSize()` / `overviewCacheEntry()`).
 //
 // A real `Sample` can't be constructed in this host harness: `sample.h`'s transitive closure pulls in
 // firmware-only dependencies (e.g. `argon.hpp`), and its cache uses `deluge::memory::fast_allocator`,
-// which routes through the firmware/Rust heap that isn't linked here (see fast_allocator.h) -- and per
-// the task brief, building Sample-construction scaffolding just for this is explicitly out of scope.
+// which routes through the firmware/Rust heap that isn't linked here (see fast_allocator.h).
 // `OverviewCacheEntry` is deliberately its own lightweight header for exactly this reason (see its own
 // docs), and `SegmentedVector`'s allocator defaults to `std::allocator` for exactly this reason too (see
 // its own docs: "stays BSP-free ... links in the plain host ... harness with no initialized heap"). So

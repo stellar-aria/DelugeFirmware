@@ -17,8 +17,8 @@
 
 #include "storage/audio/stream/async_fill.h"
 
-#include "libdeluge/file_io.h"   // R2 Task 4: deluge_efatfs_file_*/_dir_* weak stubs
-#include "libdeluge/stream_io.h" // R3 Task 2: deluge_efatfs_stream_* weak stubs
+#include "libdeluge/file_io.h"   // deluge_efatfs_file_*/_dir_* weak stubs
+#include "libdeluge/stream_io.h" // deluge_efatfs_stream_* weak stubs
 
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
@@ -32,7 +32,7 @@
 
 #include "deluge_resource.h" // deluge_resource_mark_ready
 
-// FFI layout guard (M4): `StreamingFillDescriptor` crosses the C++/Rust boundary by value (see
+// FFI layout guard: `StreamingFillDescriptor` crosses the C++/Rust boundary by value (see
 // streaming_fill.h) with a hand-written `#[repr(C)]` mirror in streaming_loader.rs. These
 // static_asserts catch field drift at compile time on whichever side notices first. Expressed
 // pointer-width-relative (not hardcoded byte offsets) so the same assertions hold unchanged on
@@ -51,7 +51,7 @@ static_assert(offsetof(StreamingFillDescriptor, handle) == sizeof(uint8_t*) + 8)
 static_assert(offsetof(StreamingFillDescriptor, byte_offset) == sizeof(uint8_t*) + 12);
 static_assert(sizeof(StreamingFillDescriptor) == sizeof(uint8_t*) + 16);
 
-// FFI layout guard for DelugeStreamingFillContext (SR2d-4 Task 1), mirroring FillContext's own
+// FFI layout guard for DelugeStreamingFillContext, mirroring FillContext's own
 // `core::mem::offset_of!` guard in streaming_loader.rs. Unlike StreamingFillDescriptor, this struct
 // holds no pointer, so its layout is identical on the 32-bit device and the 64-bit host_app build:
 // two leading u32s (0, 4), then the u64 realigned at its natural 8-byte boundary (already aligned,
@@ -68,9 +68,9 @@ static_assert(offsetof(DelugeStreamingFillContext, byte_depth) == 29);
 static_assert(offsetof(DelugeStreamingFillContext, num_channels) == 30);
 static_assert(sizeof(DelugeStreamingFillContext) == 32);
 
-// The DelugeChunkConvertState FFI layout guard now lives Rust-side only (the crate that owns the
-// convert-state accessors, `deluge_sample_fill`, guards its own mirror in `lib.rs`): U4d relocated
-// those accessor bodies to Rust, so this TU no longer touches the struct.
+// The DelugeChunkConvertState FFI layout guard lives Rust-side only (the crate that owns the
+// convert-state accessors, `deluge_sample_fill`, guards its own mirror in `lib.rs`): those accessor
+// bodies live in Rust, so this TU no longer touches the struct.
 
 extern "C" {
 
@@ -78,8 +78,8 @@ DelugeResource* deluge_streaming_resource_manager(void) {
 	return GeneralMemoryAllocator::get().resourceManager();
 }
 
-// Weak fallback for the region-port open() bridge's stream-backing -> resource-asset accessor
-// (SR2d-5 Task 1). The real definition (sample_stream.cpp) forwards to
+// Weak fallback for the region-port open() bridge's stream-backing -> resource-asset accessor.
+// The real definition (sample_stream.cpp) forwards to
 // deluge_streaming_define_asset() (chunk_residency.cpp) wherever a real SampleStream is compiled in; build
 // configs that link this TU without one (a minimal test driver assembling its own source list,
 // mirroring the other weak fallbacks in this file) resolve this no-op instead.
@@ -88,10 +88,10 @@ __attribute__((weak)) uint32_t deluge_sample_stream_asset_id(void* /*stream_back
 }
 
 // The streamed chunk's seven field accessors (`deluge_streaming_chunk_{unloadable,set_unloadable,
-// payload,set_loaded,loaded,convert_state,set_convert_state}`) now live in Rust
-// (`deluge_sample_fill::chunk`, U4d) alongside the chunk's storage — this TU no longer defines them
-// or reads the chunk's byte layout. `deluge_streaming_resource_manager` (above) and the weak
-// fallbacks (below) stay here; only the chunk-field bodies moved.
+// payload,set_loaded,loaded,convert_state,set_convert_state}`) live in Rust
+// (`deluge_sample_fill::chunk`) alongside the chunk's storage — this TU does not define them or
+// read the chunk's byte layout. `deluge_streaming_resource_manager` (above) and the weak fallbacks
+// (below) stay here; only the chunk-field bodies live elsewhere.
 
 // Weak fallbacks for the two async-streaming-loader selector/wakeup symbols. The Rust Embassy BSP
 // provides the real definitions (streaming_loader.rs) whenever it links this crate —
@@ -99,8 +99,7 @@ __attribute__((weak)) uint32_t deluge_sample_stream_asset_id(void* /*stream_back
 // whether `async_streaming_loader` is enabled (its return value depends on the cargo feature; the
 // symbol's existence does not). Every other BSP/config (legacy/host-cooperative sim, rza1) never
 // links that crate, so these weak definitions are what resolve instead: "no async backing, never
-// signalled" — those retired configs have no streaming-fill drainer at all (the old synchronous
-// fiber pump that once stood in was deleted with `loader.cpp`).
+// signalled" — those retired configs have no streaming-fill drainer at all.
 __attribute__((weak)) bool deluge_streaming_async_active(void) {
 	return false;
 }
@@ -131,8 +130,8 @@ __attribute__((weak)) bool deluge_streaming_drain_queue_blocking(void) {
 // Weak fallbacks for the embedded-fatfs streaming READ symbols. The Rust Embassy BSP provides the
 // real definitions (efatfs_fs.rs / streaming_loader.rs) whenever it links this crate with the
 // `efatfs_streaming` feature; every other BSP/config resolves these instead: "no efatfs backing" —
-// open/read_at always fail, close is a no-op, and the selector is false. NOTE (R1): the streaming
-// read is now efatfs-only — there is NO C-FatFS read fallback anymore. On a non-efatfs BSP (the
+// open/read_at always fail, close is a no-op, and the selector is false. NOTE: the streaming read is
+// efatfs-only — there is NO C-FatFS read fallback. On a non-efatfs BSP (the
 // legacy C/C++ RZA1 BSP, committed for retirement in favour of the Rust BSP) open_read_stream()
 // therefore fails and streamed samples do not load; that BSP's streaming read is retired, not
 // silently falling back.
@@ -156,7 +155,7 @@ __attribute__((weak)) bool deluge_streaming_efatfs_active(void) {
 	return false;
 }
 
-// Weak fallbacks for R2 Task 4's task-context efatfs file/directory C-ABI
+// Weak fallbacks for the task-context efatfs file/directory C-ABI
 // (`include/libdeluge/file_io.h`). The Rust Embassy BSP provides the real
 // definitions (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it
 // links this crate with the `efatfs_streaming` feature; every other
@@ -232,7 +231,7 @@ __attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t
 	return false;
 }
 
-// Weak fallbacks for R3 Task 2's persistent stream-write efatfs C-ABI
+// Weak fallbacks for the persistent stream-write efatfs C-ABI
 // (`include/libdeluge/stream_io.h`). The Rust Embassy BSP provides the real definitions
 // (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it links this crate with the
 // `efatfs_streaming` feature; every other BSP/config resolves these instead. `deluge::io::Stream`

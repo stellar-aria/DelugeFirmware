@@ -1,17 +1,15 @@
-//! SR3b Task 3's regression gate: does a real, FINALIZED (`RecorderStatus::COMPLETE`)
-//! multi-cluster recording read back correctly through the region port on THIS target?
+//! Regression gate: does a real, FINALIZED (`RecorderStatus::COMPLETE`) multi-cluster recording
+//! read back correctly through the region port on THIS target?
 //!
-//! Commit `5bb397c2b` made `SampleRecorder` own private capture buffers, and in doing so dropped
-//! the per-cluster resize side effect the old `createNextCluster()` used to keep a shared
-//! per-cluster structure sized to the real cluster count (originally `SampleStream`'s residency
-//! table, since deleted -- the same finalize-time guard now sizes `Sample::overviewCache_`, the
-//! structure this probe measures via `table_clusters`/`_table_clusters()`, named for its original
-//! target). `finalizeRecordedFile()`'s no-alteration else-branch -- the only branch `AudioClip`
-//! recording ever takes -- never resized it at all, so it stayed the single entry
-//! `Sample::initialize(1)` set in `setup()`. On the Rust-cursor port specifically, `num_clusters`
-//! is derived independently from the finalized `audio_data_length_bytes`
-//! (`abi.rs::num_clusters_for`), so `acquire(index >= 1)` could reach `cluster_construct`/
-//! `cluster_materialize` (`sample_stream.cpp`) before the backing structure had grown to match.
+//! `SampleRecorder` owns private capture buffers and relies on a finalize-time guard to resize
+//! `Sample::overviewCache_` (the structure this probe measures via `table_clusters`/
+//! `_table_clusters()`) to the real cluster count. `finalizeRecordedFile()`'s no-alteration
+//! else-branch -- the only branch `AudioClip` recording ever takes -- never resized it at all, so
+//! it stayed the single entry `Sample::initialize(1)` set in `setup()`. On the Rust-cursor port
+//! specifically, `num_clusters` is derived independently from the finalized
+//! `audio_data_length_bytes` (`abi.rs::num_clusters_for`), so `acquire(index >= 1)` could reach
+//! `cluster_construct`/`cluster_materialize` (`sample_stream.cpp`) before the backing structure
+//! had grown to match.
 //!
 //! This module drives `harness/recorder_readback_probe.h`'s finalized-multicluster C-ABI (a real
 //! `SampleRecorder`, fed real audio, driven all the way to `RecorderStatus::COMPLETE` so
@@ -67,8 +65,7 @@ pub struct RecorderFinalizeProbeResult {
     /// How many poll iterations ran before `final_state` was read.
     pub poll_iterations: u32,
     /// The waveform overview cache's physical entry count captured right after finalize -- the
-    /// direct regression assertion. Named for its original target (`SampleStream`'s now-deleted
-    /// residency table). 0 if the harness itself failed to set up.
+    /// direct regression assertion. 0 if the harness itself failed to set up.
     pub table_clusters: u32,
     /// The finalized recording's true required cluster count for the same geometry -- what
     /// `table_clusters` must be >= for the fix to hold.

@@ -59,16 +59,15 @@ fn main() {
     println!("cargo:rerun-if-changed=linker/memory_rtt.x");
     println!("cargo:rerun-if-changed=linker/sdram_sections.x");
 
-    // U4c Task 2: no C++ caller of `deluge_sample_stream_*` exists yet (a later task flips the
-    // C++ facade onto this crate) — unlike `deluge_app_init` below, nothing in this crate's own
-    // Rust code or the archived C++ closure has an unresolved reference into
-    // `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never pull its object
-    // in at all and its `#[no_mangle]` symbols would be absent from the final ELF even though the
-    // crate compiled clean. Force EACH of the six ABI entry points as a link root (rustc passes
-    // `--gc-sections` by default, which prunes unreached function sections one at a time even
-    // within an already-extracted object — a single `-u` root only keeps the one function its own
-    // call graph reaches, so each symbol needs its own root here). Mirrors `deluge_app_init`'s own
-    // `-u` just below, for the analogous reason on the C++ side.
+    // No C++ caller of `deluge_sample_stream_*` exists yet — unlike `deluge_app_init` below,
+    // nothing in this crate's own Rust code or the archived C++ closure has an unresolved
+    // reference into `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never
+    // pull its object in at all and its `#[no_mangle]` symbols would be absent from the final ELF
+    // even though the crate compiled clean. Force EACH of the six ABI entry points as a link root
+    // (rustc passes `--gc-sections` by default, which prunes unreached function sections one at a
+    // time even within an already-extracted object — a single `-u` root only keeps the one
+    // function its own call graph reaches, so each symbol needs its own root here). Mirrors
+    // `deluge_app_init`'s own `-u` just below, for the analogous reason on the C++ side.
     for sym in [
         "deluge_sample_stream_open",
         "deluge_sample_stream_close",
@@ -211,26 +210,21 @@ fn run_bindgen(
         .allowlist_type("Deluge.*")
         .allowlist_type("RunCondition")
         .use_core()
-        // NO `-fshort-enums`: it stays out of both bindgen paths (device and
-        // host_app) deliberately, and is now IRRELEVANT to enum sizing. Every
-        // one of the 11 libdeluge FFI enums (DelugeInputEventKind,
-        // DelugeCardEvent, DelugeStatus, DelugeRegionState, …) pins its
-        // underlying type explicitly in its header (e.g. `enum
-        // DelugeInputEventKind : uint8_t`, `enum DelugeStatus : int8_t`) at
-        // its arm-none-eabi-gcc `-fshort-enums` width (1 byte, all 11). An
-        // explicit underlying type is authoritative in both C and C++ — no
-        // compiler flag or ABI default can override it — so bindgen sizes
-        // every one of these enums identically on every target (arm device,
-        // x86_64 host_app, host stand-ins) regardless of `-fshort-enums`.
-        // This closes the FFI width trap for good: previously the arm device
-        // (which defaults to short enums) and an un-flagged bindgen target
-        // disagreed on enum width, silently mislaying out every enum-bearing
-        // POD (DelugeInputEvent, DelugeBoard, MIDI/card events, …) — the same
-        // failure mode that first surfaced in `DelugeRegionState` (see
-        // `include/libdeluge/sample_source.h`) and was later found to still
-        // affect `DelugeInputEvent` (control.rs) until every enum got the
-        // same explicit-width treatment. Point libclang at the actual target
-        // purely for pointer width / alignment / calling convention.
+        // NO `-fshort-enums`: it stays out of both bindgen paths (device and host_app)
+        // deliberately, and is IRRELEVANT to enum sizing. Every one of the 11 libdeluge FFI enums
+        // (DelugeInputEventKind, DelugeCardEvent, DelugeStatus, DelugeRegionState, …) pins its
+        // underlying type explicitly in its header (e.g. `enum DelugeInputEventKind : uint8_t`,
+        // `enum DelugeStatus : int8_t`) at its arm-none-eabi-gcc `-fshort-enums` width (1 byte,
+        // all 11). An explicit underlying type is authoritative in both C and C++ — no compiler
+        // flag or ABI default can override it — so bindgen sizes every one of these enums
+        // identically on every target (arm device, x86_64 host_app, host stand-ins) regardless of
+        // `-fshort-enums`.
+        //
+        // Warning: without an explicit underlying type, the arm device (which defaults to short
+        // enums) and an un-flagged bindgen target would silently disagree on enum width,
+        // mislaying out every enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card
+        // events, …) across the FFI boundary. Point libclang at the actual target purely for
+        // pointer width / alignment / calling convention.
         .clang_arg(format!("--target={clang_target}"))
         // Layouts now match the app being linked on every target (explicit
         // fixed-width enums everywhere); the asserts would run host-side
@@ -249,9 +243,9 @@ fn run_bindgen(
 /// pinned to an explicit fixed-width underlying type in its header, so this
 /// matches build-embassy-hostapp's CMake config byte-for-byte regardless of
 /// `-fshort-enums`, which neither build passes) into the real `mod sys`, then
-/// archive the
-/// host-built C++ `deluge_app` object closure and emit link directives so
-/// the crate reaches the linker against real provider-symbol references.
+/// archive the host-built C++ `deluge_app` object closure and emit link
+/// directives so the crate reaches the linker against real provider-symbol
+/// references.
 fn run_host_app(
     repo_root: &std::path::Path,
     manifest_dir: &std::path::Path,
@@ -278,7 +272,7 @@ fn run_host_app(
     // that, gc-sections would strip everything down to just the C++
     // global-constructor subset.
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
-    // U4c Task 2: same reasoning as the device path's identical block — no C++ caller of
+    // Same reasoning as the device path's identical block above — no C++ caller of
     // `deluge_sample_stream_*` exists yet, so without these roots `--gc-sections` (rustc's default)
     // would prune every one of its `#[no_mangle]` functions from the final link.
     for sym in [

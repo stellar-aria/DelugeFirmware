@@ -1,4 +1,4 @@
-//! R0b: the host counterpart of `efatfs_fs.rs` — mounts the SAME vendored
+//! The host counterpart of `efatfs_fs.rs` — mounts the SAME vendored
 //! `embedded-fatfs` over a host block device and reuses the storage-generic
 //! `efatfs_core` (`HandleTable` + `open_context`/`read_context`) UNCHANGED, so
 //! a host harness measures the *real* read path, not a parallel
@@ -11,9 +11,8 @@
 //! [`HostSdBlockDevice`] `.await`s the SD_BUS-guarded async helpers
 //! `crate::sd::locked_read_sectors`/`locked_write_sectors` — a byte-for-byte
 //! mirror of the device `fat_block_device::SdBlockDevice`. It does NOT call the
-//! synchronous `deluge_block_read`/`deluge_block_write` C-ABI (an earlier
-//! version did, to inherit the boot-time `set_off_fiber_instant` flag — see the
-//! history below).
+//! synchronous `deluge_block_read`/`deluge_block_write` C-ABI — see below for
+//! why that path is unsound here.
 //!
 //! ### Why the sync `deluge_block_read` path was WRONG (the Lens 1 deadlock)
 //!
@@ -58,9 +57,9 @@
 //!   `SampleStream::open_read_stream` calls these from it — so the on-fiber
 //!   `block_on_fiber` (a coroutine yield) is the live path, letting an
 //!   open-path SD read pend without livelocking the single-threaded harness.
-//!   (An earlier revision assumed no host fiber and always used
-//!   `embassy_futures::block_on`; that non-yielding spin is unsafe once the
-//!   block device awaits modeled latency — see the block-device section above.)
+//!   Always falling back to `embassy_futures::block_on` (a non-yielding spin)
+//!   would be unsafe once the block device awaits modeled latency — see the
+//!   block-device section above.
 //!
 //! Test infrastructure only (host_app-gated) — no device path touched.
 #![cfg(feature = "host_app")]
@@ -75,10 +74,11 @@ use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConve
 use crate::efatfs_core::{self, DirHandleTable, HandleTable, OpenOutcome, TaskFileTable};
 
 /// Host `block_device_driver::BlockDevice<512>` that routes every read/write
-/// through `crate::sd::deluge_block_read`/`deluge_block_write` — the same
-/// C-ABI dispatch FatFS's diskio uses on both host and device. See this
-/// module's doc for why this (not a bespoke `RamDisk`/`sd::read_sectors` call)
-/// is the load-bearing design choice.
+/// through the SD_BUS-guarded async helpers `crate::sd::locked_read_sectors`/
+/// `locked_write_sectors` — the same async dispatch the device
+/// `fat_block_device::SdBlockDevice` uses. See this module's doc for why this
+/// (not the synchronous `deluge_block_read`/`deluge_block_write` C-ABI, nor a
+/// bespoke `RamDisk`) is the load-bearing design choice.
 pub struct HostSdBlockDevice;
 
 /// Wraps `deluge_block_read`/`_write`'s raw `DelugeStatus` (`i8`) code, just to
@@ -342,7 +342,7 @@ pub extern "C" fn deluge_efatfs_read_at(
     }
 }
 
-// --- Task-context file/dir tables (Task 4) ----------------------------------
+// --- Task-context file/dir tables --------------------------------------------
 //
 // Host sibling of `efatfs_fs.rs`'s task-context tables/bridge -- same split
 // rationale (a separate position-carrying [`TaskFileTable`], distinct from the
@@ -478,10 +478,10 @@ async fn task_dir_read(
 ) -> Option<Option<efatfs_core::DirEntryInfo>> {
     let mut dir_table = DIR_HANDLES.lock().await;
     let cursor = dir_table.get_mut(handle)?;
-    // R2 Task 4 review fix: `readdir_next` is FS-free (it only walks the
-    // in-memory snapshot `cursor` already holds), so this no longer routes
-    // through `with_fs` -- see `efatfs_fs.rs::task_dir_read` for the full
-    // rationale (identical here).
+    // `readdir_next` is FS-free (it only walks the in-memory snapshot
+    // `cursor` already holds), so this does not route through `with_fs` --
+    // see `efatfs_fs.rs::task_dir_read` for the full rationale (identical
+    // here).
     let next = loop {
         match efatfs_core::readdir_next(cursor)? {
             None => break NextFit::Eof,
@@ -503,7 +503,7 @@ async fn task_dir_close(handle: u32) {
     DIR_HANDLES.lock().await.remove(handle);
 }
 
-// --- Task-context FFI bridge (Task 4) ---------------------------------------
+// --- Task-context FFI bridge --------------------------------------------------
 //
 // Same `on_fiber`-gated `block_on_fiber`/`block_on` dispatch as
 // [`deluge_efatfs_open`] above. See `include/libdeluge/file_io.h` for the
@@ -878,7 +878,7 @@ pub extern "C" fn deluge_efatfs_set_time(
     .is_some()
 }
 
-// --- Persistent stream-write handle table (R3 Task 2) -----------------------
+// --- Persistent stream-write handle table -------------------------------------
 //
 // Host sibling of `efatfs_fs.rs`'s persistent stream-write table/bridge -- same rationale (a
 // single `FileContext` held across an entire recording, advanced via `write_context_noflush` and
@@ -992,7 +992,7 @@ async fn stream_close(handle: u32) -> bool {
     flushed
 }
 
-// --- Persistent stream-write FFI bridge (R3 Task 2) -------------------------
+// --- Persistent stream-write FFI bridge ---------------------------------------
 //
 // Same `on_fiber`-gated `block_on_fiber`/`block_on` dispatch as [`deluge_efatfs_open`] above. See
 // `include/libdeluge/stream_io.h` for the C-side contract of every function below.

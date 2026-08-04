@@ -86,12 +86,14 @@ public:
 	// PAD ACTION pad press / release handling
 
 	ActionResult padAction(int32_t x, int32_t y, int32_t velocity) override;
-	/// Snapshots the "Drum Randomizer" gesture's row-selection criteria, dispatches the load
-	/// (which drum(s) get randomized, if any) onto the storage worker, and returns a
-	/// provisional `ActionResult`: `DEALT_WITH` once dispatched (the real work, including the
-	/// SD-dependent directory scan/`loadFile()`, runs in `commitRandomizeDrums()`), or
-	/// `NOT_DEALT_WITH` if no candidate row is eligible (determined synchronously, without SD
-	/// access — same fallthrough-to-edit-pad-action behaviour as before this gesture existed).
+	/// @brief Snapshot the "Drum Randomizer" gesture's row-selection criteria and dispatch the
+	///        load (which drum(s) get randomized, if any) onto the storage worker.
+	///
+	/// The real work, including the SD-dependent directory scan/`loadFile()`, runs in
+	/// `commitRandomizeDrums()`.
+	/// @return `DEALT_WITH` once dispatched, or `NOT_DEALT_WITH` if no candidate row is eligible
+	///         (determined synchronously, without SD access — falls through to a regular edit
+	///         pad action, same as when this gesture doesn't apply).
 	ActionResult potentiallyRandomizeDrumSamples();
 	ActionResult potentiallyRandomizeDrumSample(Kit* kit, Drum* drum, char* chosenFilename);
 	ActionResult commandEnterNoteVelocityEditor(int32_t x, int32_t y);
@@ -373,8 +375,10 @@ private:
 	// the sidebar on their way to Session view.
 	bool sessionMacroSidebarActive{};
 
-	/// Snapshot of the "Drum Randomizer" gesture's row-selection criteria, captured in
-	/// `potentiallyRandomizeDrumSamples()` before the mode gate closes and the op dispatches.
+	/// @brief Snapshot of the "Drum Randomizer" gesture's row-selection criteria, captured in
+	///        `potentiallyRandomizeDrumSamples()` before the mode gate closes and the op
+	///        dispatches.
+	///
 	/// Which rows get randomized depends on live state (`AFFECT_ENTIRE`,
 	/// `auditionPadIsPressed[]`, `UI_MODE_AUDITIONING`, `kit->selectedDrum`) that a concurrent
 	/// audition-pad *release* — not gated by `currentUIMode`, since `auditionPadActionUIModes`
@@ -390,20 +394,26 @@ private:
 		Drum* selectedDrumSnapshot;
 	};
 
-	/// The dispatched op for `potentiallyRandomizeDrumSamples()`. `self` is the
-	/// InstrumentClipView; reads only `self->pendingRandomizeTarget_` (the dispatch-time
-	/// snapshot), never live UI members.
+	/// @brief The dispatched op for `potentiallyRandomizeDrumSamples()`.
+	///
+	/// Reads only `self->pendingRandomizeTarget_` (the dispatch-time snapshot), never live UI
+	/// members.
+	/// @param self The `InstrumentClipView` this op is running for.
 	static void runRandomizeDrumsOp(void* self);
-	/// The randomize body (previously the live-reading loop inside
-	/// `potentiallyRandomizeDrumSamples()`): for each candidate row in `target`, randomizes the
-	/// drum's sample (directory scan + `loadFile()`, on the storage worker) and shows the
-	/// resulting popup. Resets `currentUIMode` to `UI_MODE_NONE` unconditionally on every exit
-	/// path, releasing the gate `potentiallyRandomizeDrumSamples()` closes before dispatch.
+	/// @brief The randomize body: for each candidate row in @p target, randomizes the drum's
+	///        sample and shows the resulting popup.
+	///
+	/// The randomize itself is a directory scan + `loadFile()`, run on the storage worker. Resets
+	/// `currentUIMode` to `UI_MODE_NONE` unconditionally on every exit path, releasing the gate
+	/// `potentiallyRandomizeDrumSamples()` closes before dispatch.
+	/// @param target The dispatch-time snapshot of eligible rows to randomize.
 	void commitRandomizeDrums(const RandomizeDrumsTarget& target);
-	/// True if `drum` is a SoundDrum with a resident `MultiRange`/`AudioFileHolder` and a
-	/// non-empty `filePath` — the fast, SD-free eligibility checks
-	/// `potentiallyRandomizeDrumSample()`'s early guards perform, factored out so the dispatch
-	/// site can decide (before any SD access) whether the gesture will do anything.
+	/// @brief The fast, SD-free eligibility check factored out of `potentiallyRandomizeDrumSample()`'s
+	///        early guards, so the dispatch site can decide (before any SD access) whether the
+	///        gesture will do anything.
+	/// @param drum Drum to test.
+	/// @return True if `drum` is a SoundDrum with a resident `MultiRange`/`AudioFileHolder` and a
+	///         non-empty `filePath`.
 	static bool drumIsRandomizable(Drum* drum);
 
 	RandomizeDrumsTarget pendingRandomizeTarget_{};

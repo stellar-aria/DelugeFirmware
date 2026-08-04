@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# Lens 2 (Task 9) harness runner: audio-preempts-streaming race check under ThreadSanitizer.
+# Lens 2 harness runner: audio-preempts-streaming race check under ThreadSanitizer.
 #
-# Runs the SAME `host_app` scenario path Task 5 wired into `main.rs` (real song load, real-
+# Runs the `host_app` scenario path wired into `main.rs` (real song load, real-
 # time playback on its own preemptive OS-thread executor, a concurrent output recording) —
 # see main.rs's `host_app` boot block and scenario.rs's module doc — against the TSan-
-# instrumented `deluge_app` (Spike B's recipe, HOST_HARNESS.md's "M4c" section), for N
+# instrumented `deluge_app` (HOST_HARNESS.md's "M4c" section), for N
 # iterations, and categorizes every TSan `SUMMARY:` line it sees against the two catalogs
 # in this directory:
 #   - known_patterns.txt          — pre-existing, unrelated-to-streaming debt, matched by
-#                                    broad file/subsystem pattern (Spike B / M4c's original
-#                                    catalog plus this task's own fuller findings — see that
-#                                    file's header for why patterns, not exact lines).
-#   - open_findings_races.txt     — real NEW races this task found on the cluster/loaded/
-#                                    recorder state itself (documented, not suppressed, not
-#                                    fixed — see task-9-report.md).
+#                                    broad file/subsystem pattern (see that file's header
+#                                    for why patterns, not exact lines).
+#   - open_findings_races.txt     — real races found on the cluster/loaded/recorder state
+#                                    itself (documented, not suppressed, not fixed — see
+#                                    that file's header).
 # Anything matching NEITHER catalog is reported as UNCATALOGUED and fails the run — that is
 # the thing this script exists to protect: a genuinely new streaming/priority/flip race must
 # never silently hide behind the known noise above.
@@ -30,7 +29,7 @@
 #     x86_64-unknown-linux-gnu-tsan target (HOST_HARNESS.md, "One-time environment setup").
 #   - mtools (mformat/mcopy) if DELUGE_SD_IMAGE isn't pre-set and no cached fixture exists.
 #
-# Known gotcha (Task 9's own verification pass hit this): each unset-DELUGE_SD_IMAGE
+# Known gotcha: each unset-DELUGE_SD_IMAGE
 # invocation packs a fresh ~2.5GB /tmp/deluge-streaming-scenario-*.img and leaves it behind.
 # Repeated invocations without cleanup can exhaust a tmpfs /tmp; separately (independent of
 # free space), packing an image and consuming it as the SD backing store WITHIN THE SAME
@@ -82,7 +81,7 @@ fi
 BIN="$RUST_DIR/target/x86_64-unknown-linux-gnu-tsan/debug/deluge-rust"
 [[ -x "$BIN" ]] || { echo "missing $BIN — build failed?"; exit 1; }
 
-# One TSan runtime / no undefined tsan symbols sanity check (Spike B's own check).
+# One TSan runtime / no undefined tsan symbols sanity check.
 TSAN_INITS=$(nm "$BIN" | grep -c ' T __tsan_init' || true)
 UNDEF_TSAN=$(nm -D "$BIN" | grep -c tsan || true)
 echo "== TSan link sanity: __tsan_init defs=$TSAN_INITS, undefined tsan symbols=$UNDEF_TSAN =="
@@ -134,7 +133,7 @@ for i in $(seq 1 "$NUM_RUNS"); do
     known=0 open=0 uncat=0
     # Two-tier classification, checked in this order:
     #   1. open_findings_races.txt — exact-line matches for the specific, narrow, REAL
-    #      cluster/loaded/recorder/resource-manager races this task found (kept visible
+    #      cluster/loaded/recorder/resource-manager races found (kept visible
     #      every run, not suppressed — see that file's header).
     #   2. known_patterns.txt      — broad file/subsystem regex patterns for the pre-existing
     #      "cooperative-only, not preemption-safe" debt class, so a fresh run's different

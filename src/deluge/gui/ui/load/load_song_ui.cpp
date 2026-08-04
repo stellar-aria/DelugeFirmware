@@ -102,9 +102,8 @@ bool LoadSongUI::opened() {
 		searchFilename.append(".XML");
 	}
 
-	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
-	// happens async: dispatch it and return optimistically. Failure goes through the base
-	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	// The listing happens async: dispatch it and return optimistically. Failure goes through the
+	// base Browser::onListingFailed() (displayError + close()) once the listing completes.
 	beginListing(
 	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = "SONGS"});
 
@@ -151,7 +150,7 @@ void LoadSongUI::enterKeyPress() {
 
 	// If it's a directory...
 	if (currentFileItem && currentFileItem->isFolder) {
-		// goIntoFolder() now dispatches onto the storage owner; failure is handled by the base
+		// goIntoFolder() dispatches onto the storage owner; failure is handled by the base
 		// Browser::onListingFailed() (displayError + exitAction) once the listing completes.
 		goIntoFolder(currentFileItem->filename.c_str());
 	}
@@ -529,7 +528,7 @@ swapDone:
 	// To override our popup if we did one. (Still necessary?)
 	deluge::hid::display::OLED::displayWorkingAnimation("Loading");
 	// The swap's been done and the first tick of the new song has been done; any samples wanting data
-	// loaded are drained by the async fill task (no synchronous pump needed here anymore).
+	// loaded are drained by the async fill task.
 
 	// Delete the old song
 	AudioEngine::logAction("deleting old song");

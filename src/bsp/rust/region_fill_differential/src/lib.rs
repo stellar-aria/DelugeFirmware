@@ -1,11 +1,11 @@
-//! `region-fill-differential` — SR2d-4 Task 6, the rung's gate: proves the native Rust
-//! `fill_logic::finish_convert_stitch` (SR2d-4 Task 5) is byte-identical to the C++ orchestration it
+//! `region-fill-differential` — proves the native Rust
+//! `fill_logic::finish_convert_stitch` is byte-identical to the C++ orchestration it
 //! replaced (`finish_fill`, `storage/audio/stream/async_fill.cpp:110-162`) at the ORCHESTRATION level
 //! — which bytes get converted, which neighbour edges get built from where, in what order — not just
 //! the underlying convert/stitch primitives (`convert_cluster_data`/`stitch_boundaries`), which
-//! `sample_convert`'s own suite already proved byte-identical against SIMDe (SR2d-2).
+//! `sample_convert`'s own suite already proved byte-identical against SIMDe.
 //!
-//! Mirrors `region_differential`'s structure (SR2c/SR2d-3): a standalone Cargo crate (NOT a workspace
+//! Mirrors `region_differential`'s structure: a standalone Cargo crate (NOT a workspace
 //! member — keeps this test-only harness off the firmware/BSP Cargo graph); `build.rs` `cc`-compiles a
 //! C++ reference slice ([`cpp_ref`]) into the test binary; `tests/` holds the differential gate
 //! (`tests/differential.rs`, including its non-vacuity/perturb case) and the host end-to-end pipeline
@@ -21,8 +21,8 @@ pub mod cpp_ref;
 
 /// The buffer-role/index-dependent, byte-distinguishable seed pattern used across the differential and
 /// host end-to-end tests: tag `t`'s byte `k` is `(t*100 + k) & 0xFF`. Mirrors
-/// `region_differential::ops::make_ramp`'s exact formula (a proven, reproducible pattern from that
-/// rung), generalized from "cluster index" to a plain `tag` so a test can seed self/prev/next with
+/// `region_differential::ops::make_ramp`'s exact formula, generalized from "cluster index" to a
+/// plain `tag` so a test can seed self/prev/next with
 /// distinguishable patterns even when two of them share a cluster index across different scenarios.
 #[must_use]
 pub fn ramp(tag: u32, n: usize) -> Vec<u8> {

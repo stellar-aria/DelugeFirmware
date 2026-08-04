@@ -1,12 +1,12 @@
-// SPIKE (SR2b) — THROWAWAY de-risk, superseded by SR2d.
+// SPIKE — throwaway de-risk shim, not used by the production fill path.
 //
 // extern "C" shims over the app's convert.cpp / stitch.cpp so a Rust build.rs can `cc::Build`-compile
 // them and a Rust #[test] can call them across the FFI boundary. The point is to prove the argon-SIMD
 // translation units compile under `cc` (x86-SIMDe + armv7a-NEON) and that the resulting objects behave
 // correctly — the same behaviour tests/spec_audio_stream/{convert,stitch,convert_cluster}_spec.cpp pin.
 //
-// The only non-trivial shim is convert_cluster_data: it is TEMPLATED on `Yield`. SR2d's Rust fill task
-// will call it, so this proves a concrete no-op-Yield instantiation is reachable behind extern "C".
+// The only non-trivial shim is convert_cluster_data: it is TEMPLATED on `Yield`. The Rust fill task
+// calls it, so this proves a concrete no-op-Yield instantiation is reachable behind extern "C".
 #include "storage/audio/stream/convert.h"
 #include "storage/audio/stream/stitch.h"
 
@@ -25,7 +25,7 @@ int32_t spike_convert_word(int32_t word, uint8_t format) {
 }
 
 // --- convert_cluster_data: the TEMPLATED entry point, concretized here with a counting Yield. -------
-// yield_counter may be null (the no-op case SR2d cares about); when non-null it is bumped once per
+// yield_counter may be null (the no-op case the fill path uses); when non-null it is bumped once per
 // yield so the test can assert the cooperative-scheduling cadence still fires through the shim.
 void spike_convert_cluster_data(std::byte* data, size_t data_len, int32_t cluster_index, uint8_t format,
                                 uint32_t audio_data_start_pos_bytes, uint64_t audio_data_length_bytes,

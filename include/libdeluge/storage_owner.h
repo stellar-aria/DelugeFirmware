@@ -24,11 +24,14 @@
 extern "C" {
 #endif
 
-/// True when the calling context is the storage owner (the only context permitted
-/// to touch FatFS). Cooperative/host BSPs: always true (FatFS runs inline on the
-/// caller). Embassy: true only on the worker fiber. Used by the migration-phase
-/// diskio assert (rungs 1-4) to catch a stray non-owner FatFS caller before the
-/// rung-5 yield flip would turn it into corruption.
+/// @brief True when the calling context is the storage owner (the only context permitted to
+///        touch FatFS).
+///
+/// Cooperative/host BSPs: always true (FatFS runs inline on the caller). Embassy: true only on
+/// the worker fiber.
+/// @note Used by the diskio assert to catch a stray non-owner FatFS caller before making FatFS
+///       itself yield would turn that into corruption.
+/// @return true iff the calling context is the storage owner.
 bool deluge_storage_on_owner(void);
 
 #ifdef __cplusplus

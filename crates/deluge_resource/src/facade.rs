@@ -86,7 +86,7 @@ impl<'m> Resource<'m> {
     /// takes into the RAII `Lease` guard. `None` on OOM, a full table with nothing
     /// evictable, or an asset with no `construct` callback attached (nothing was
     /// leased in that case). The returned `Lease` is the caller's owned pin on the
-    /// reserved-but-not-yet-ready chunk — e.g. what SR2d's cursor stores as its
+    /// reserved-but-not-yet-ready chunk — e.g. what a streaming cursor stores as its
     /// `pending` slot while the loader fills it; dropping it releases the reservation.
     pub fn request(&self, asset: u32, index: u32, size: usize) -> Option<Lease> {
         Chunk::from_ptr(self.mgr.request(asset, index, size))
@@ -222,8 +222,8 @@ impl<'m> Resource<'m> {
 /// the guard that took the lease may release it.
 ///
 /// Holds the manager as a raw `*const Manager`, not `&'m Manager` — so `Lease` carries
-/// NO lifetime parameter and is freely storable in a `Cell<Option<Lease>>` (SR2d-3's
-/// per-slot cursor state, which lives far longer than any single `Resource<'m>`
+/// NO lifetime parameter and is freely storable in a `Cell<Option<Lease>>` (a per-slot
+/// streaming cursor's state, which lives far longer than any single `Resource<'m>`
 /// borrow used to create the lease). This is sound because the manager is a
 /// boot-singleton: `deluge_resource_create`/`_unhooked` allocates it once from the
 /// heap and it is never freed or moved for the remaining life of the program (see
@@ -497,9 +497,9 @@ mod tests {
     }
 
     /// Compile-check (and a real drop-cycle exercise): `Lease` carries no lifetime, so
-    /// it must be storable in a `Cell<Option<Lease>>` — SR2d-3's per-slot cursor state,
-    /// which lives far longer than any single `Resource<'m>` borrow used to create the
-    /// lease. `Cell::take` moves the guard out (leaving `None`); dropping the taken
+    /// it must be storable in a `Cell<Option<Lease>>` — a per-slot streaming cursor's
+    /// state, which lives far longer than any single `Resource<'m>` borrow used to
+    /// create the lease. `Cell::take` moves the guard out (leaving `None`); dropping the taken
     /// value releases the lease, exactly like the cursor's state-transition `take`s will.
     #[test]
     fn lease_is_storable_in_cell_option_and_take_drops_it() {
@@ -525,8 +525,8 @@ mod tests {
         assert_eq!(rsrc.lease_count_by_slot(slot), base);
     }
 
-    /// SR2d-3's cornerstone: the RAII cursor will store `Cell<Option<Lease>>` per
-    /// slot and drop a `Lease` (via `take`/`replace`) from BOTH the audio-ISR path
+    /// The RAII cursor stores `Cell<Option<Lease>>` per slot and drops a `Lease`
+    /// (via `take`/`replace`) from BOTH the audio-ISR path
     /// (`acquire`) and the main path (`close`). This proves `Lease::drop ->
     /// Manager::release` composes with the manager's asymmetric masked discipline
     /// (`sync::Masked`) exactly right in each context — it decrements exactly once
@@ -596,8 +596,8 @@ mod tests {
         stubs::deluge_in_interrupt_set(false); // restore for other tests on this thread
     }
 
-    /// The cross-slot non-corruption fact: SR2d-3 drops leases from the main path
-    /// and the ISR path on DIFFERENT cursor slots. Interleaving a main-context
+    /// The cross-slot non-corruption fact: the RAII cursor drops leases from the main
+    /// path and the ISR path on DIFFERENT cursor slots. Interleaving a main-context
     /// lease/drop on slot0 with an ISR-context lease/drop on slot1 must leave EACH
     /// slot's count decremented by exactly its own lease — a masked release on one
     /// slot never corrupts the lock-free release on another (and vice versa).

@@ -68,6 +68,9 @@ public:
 	bool loopLocked;
 	PhaseIncrementFineTuner fineTuner;
 
+	/// Passive lookahead reservation anchored at this voice's loop-start marker; pins a small window
+	/// of cluster residency around the loop point, mirroring SampleHolder::clustersForStart_.
+	/// `nullptr` when not yet opened (or after being released).
 	DelugeSampleReservation* clustersForLoopStart_ = nullptr;
 
 	// These two now only exist for loading in data from old files

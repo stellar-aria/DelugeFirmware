@@ -69,10 +69,15 @@ public:
 
 	~SegmentedVector() { clear_and_free(); }
 
+	/// @return The number of live elements.
 	[[nodiscard]] std::size_t size() const { return size_; }
+	/// @return `true` if there are no live elements.
 	[[nodiscard]] bool empty() const { return size_ == 0; }
 
+	/// @param i Element index; must be `< size()`.
+	/// @return A reference to element @p i. Stable across all later growth (see class docs).
 	[[nodiscard]] T& operator[](std::size_t i) { return *slot(i); }
+	/// @copydoc operator[](std::size_t)
 	[[nodiscard]] const T& operator[](std::size_t i) const { return *slot(i); }
 
 	/// @brief Resize to exactly @p n: grow default-constructs new tail elements,

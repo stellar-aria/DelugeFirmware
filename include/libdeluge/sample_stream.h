@@ -15,7 +15,7 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-/// libdeluge/sample_stream.h — the streaming-file slot registry C-ABI (U4c).
+/// libdeluge/sample_stream.h — the streaming-file slot registry C-ABI.
 ///
 /// A fixed-capacity table of open efatfs streaming handles (`deluge_sample_stream` Rust crate),
 /// each pairing an efatfs read handle with the resource-manager asset id + geometry a caller
@@ -24,9 +24,9 @@
 /// opaque `uint32_t`s (`0` = invalid/fail), NOT a pointer — the registry owns a fixed slot table
 /// rather than heap-boxing per-stream state.
 ///
-/// This is the U4c rung's relocation target: a later task flips `SampleStream`'s own held efatfs
-/// handle + geometry (`sample_stream.cpp`'s `register_fill_context`) onto this registry, so the
-/// C++ side stops holding that state itself.
+/// This registry is the eventual home for `SampleStream`'s own held efatfs handle + geometry
+/// (`sample_stream.cpp`'s `register_fill_context`); moving them here lets the C++ side stop
+/// holding that state itself.
 #ifndef LIBDELUGE_SAMPLE_STREAM_H
 #define LIBDELUGE_SAMPLE_STREAM_H
 
@@ -38,9 +38,10 @@
 extern "C" {
 #endif
 
-/// The geometry a stream slot needs to register its asset's fill-context — `streaming_fill.h`'s
-/// `DelugeStreamingFillContext` minus `efatfs_handle` (the registry supplies that field itself,
-/// from the slot's own efatfs handle).
+/// @brief The geometry a stream slot needs to register its asset's fill-context.
+///
+/// `streaming_fill.h`'s `DelugeStreamingFillContext` minus `efatfs_handle` (the registry supplies
+/// that field itself, from the slot's own efatfs handle).
 typedef struct DelugeSampleStreamGeometry {
 	uint32_t audio_data_start_pos_bytes; ///< Offset from the start of the file to the first audio byte.
 	uint64_t audio_data_length_bytes;    ///< Audio payload length in bytes; 0x8FFFFFFFFFFFFFFF = still recording.

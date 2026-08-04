@@ -1,17 +1,13 @@
-//! SR3b Task 2 Step 4's `host_app` diagnostic: does reading a STILL-RECORDING sample back
-//! resolve on the target where `async_streaming_loader` is on by default?
+//! `host_app` diagnostic: does reading a STILL-RECORDING sample back resolve on the target where
+//! `async_streaming_loader` is on by default?
 //!
-//! `.superpowers/sdd/sr3b-routing-spike.md`'s central finding was that the recording byte-read
-//! routing diverged by target: the C-host sim's fiber `loader::pump()` used to drain through
-//! `RecordingReadSource` and resolve READY, while device/`host_app` route the fill onto the Rust
-//! async task (`streaming_loader.rs`), which reads via `efatfs_fs::read_at(handle=0, ...)` — and a
-//! recording's `efatfs_handle == 0`, predicted to fail there. SR3b Task 4 acted on that finding and
-//! deleted `RecordingReadSource` outright, so a still-recording sample now resolves LOADING
-//! (re-queued, never READY) uniformly on every target, sim included. This module is what turns
-//! that into a measurement: it drives `harness/recorder_readback_probe.h`'s C-ABI (a real
-//! `SampleRecorder`, fed real audio, never finalized) through the SAME region-port entry point
-//! (`deluge_sample_region_acquire_ex`) real playback uses, on THIS target, and reports what
-//! actually comes back.
+//! Device/`host_app` route the fill onto the Rust async task (`streaming_loader.rs`), which reads
+//! via `efatfs_fs::read_at(handle=0, ...)` — and a recording's `efatfs_handle == 0`, so a
+//! still-recording sample resolves LOADING (re-queued, never READY) uniformly on every target, sim
+//! included. This module turns that into a measurement: it drives
+//! `harness/recorder_readback_probe.h`'s C-ABI (a real `SampleRecorder`, fed real audio, never
+//! finalized) through the SAME region-port entry point (`deluge_sample_region_acquire_ex`) real
+//! playback uses, on THIS target, and reports what actually comes back.
 //!
 //! Thread-agnostic like [`crate::scenario::run`]: only `.await`s [`embassy_time::Timer`], no thread
 //! spawn, no `sim_latency` dependency. [`recorder_probe_task`] is the same not-reusable

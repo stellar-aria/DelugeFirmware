@@ -416,8 +416,8 @@ set_target_properties(deluge
 # Deluge sources
 add_subdirectory(src)
 
-# --- Legacy RZA1 BSP retirement guard (R1) -------------------------------------
-# efatfs (the streaming sample-read path as of R1) is Rust-BSP-only, so the RZA1
+# --- Legacy RZA1 BSP retirement guard -------------------------------------
+# efatfs (the streaming sample-read path) is Rust-BSP-only, so the RZA1
 # firmware links only the weak `deluge_efatfs_open` no-op and its sample loading
 # is non-functional at runtime (see scripts/cmake/retired_rza1_bsp_guard.cmake).
 # Fail the RZA1 executable build LOUDLY so a dead image can't ship silently.

@@ -19,11 +19,9 @@
 
 /// @file
 /// A small C++23 bridge over `libdeluge/sample_reader.h` (the Rust `deluge_sample_reader_*`
-/// C-ABI, U1) for non-voice consumers that read raw-PCM frame RANGES (pitch detect, waveform
+/// C-ABI) for non-voice consumers that read raw-PCM frame RANGES (pitch detect, waveform
 /// overview, crossfade averages, perc-cache, wavetable build, hop search) instead of reaching
-/// `StreamedChunk` internals directly. This is now the residency read path for those consumers:
-/// the `deluge::audio::stream` facade it once coexisted with (`peek`/`prefetch`/`load_now`/
-/// `request`/`dequeue`) has since been deleted.
+/// `StreamedChunk` internals directly. This is the residency read path for those consumers.
 
 #include "libdeluge/sample_reader.h"
 

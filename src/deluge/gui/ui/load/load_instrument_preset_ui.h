@@ -32,28 +32,30 @@ class Output;
 
 class LoadInstrumentPresetUI final : public LoadUI {
 private:
-	/// Snapshot of the file identity to load, recorded at dispatch time by currentFileChanged()
-	/// (mirrors SampleBrowser::PreviewTarget - see sample_browser.h/.cpp). performLoad()/
-	/// performLoadSynthToKit() take this BY VALUE COPY (never a pointer into Browser::fileItems or
-	/// a live Browser member) so that once the op starts running, a scroll on the UI task during the
-	/// op's own SD-yield points (loadInstrumentFromFile() calls block_on_fiber internally) cannot
-	/// mutate or free anything the op is still reading - see runScrollLoadOp()'s doc for why that
-	/// matters (this used to alias `enteredText`/`currentDir`/`getCurrentFileItem()` directly, which
-	/// was a use-after-free: a scroll during the yield could rebuild Browser::fileItems and free the
-	/// FileItem the op still held a raw pointer to).
+	/// @brief Snapshot of the file identity to load, recorded at dispatch time by
+	///        currentFileChanged() (mirrors SampleBrowser::PreviewTarget).
+	///
+	/// @note performLoad()/performLoadSynthToKit() take this BY VALUE COPY (never a pointer into
+	///       Browser::fileItems or a live Browser member): once the op starts running, a scroll on
+	///       the UI task during the op's own SD-yield points (loadInstrumentFromFile() calls
+	///       block_on_fiber internally) could otherwise rebuild Browser::fileItems and free a
+	///       FileItem the op still held a raw pointer to. See runScrollLoadOp()'s doc for how the
+	///       snapshot is used.
 	struct LoadTarget {
 		bool loadingSynthToKitRow = false;
-		int32_t movementDirection = 1; // Scroll-animation hint; currently unused by performLoad() (was
-		                               // already an unused parameter of currentFileChanged() pre-port).
+		int32_t movementDirection = 1; // Scroll-animation hint; currently unused by performLoad().
 
-		/// Whether there was a current file selection at dispatch time (getCurrentFileItem() != nullptr).
+		/// @brief Whether there was a current file selection at dispatch time
+		///        (getCurrentFileItem() != nullptr).
 		bool hasFile = false;
 		bool isFolder = false;
 		bool maybeExistsOnCard = true;
 
-		/// FileItem::instrument at dispatch time: an already-loaded (possibly hibernating) Instrument
-		/// for this file, if any. This is a Song-owned pointer, NOT a pointer into Browser::fileItems,
-		/// so - unlike a FileItem* - it stays valid even if the file listing is rebuilt mid-op.
+		/// @brief FileItem::instrument at dispatch time: an already-loaded (possibly hibernating)
+		///        Instrument for this file, if any.
+		///
+		/// This is a Song-owned pointer, NOT a pointer into Browser::fileItems, so - unlike a
+		/// FileItem* - it stays valid even if the file listing is rebuilt mid-op.
 		Instrument* existingInstrument = nullptr;
 
 		std::string path;    // getCurrentFilePath() at dispatch.
@@ -69,7 +71,22 @@ public:
 	ActionResult padAction(int32_t x, int32_t y, int32_t velocity) override;
 	ActionResult verticalEncoderAction(int32_t offset, bool inCardRoutine) override;
 	void instrumentEdited(Instrument* instrument);
+	/// @brief Load the selected instrument preset, replacing instrumentToReplace (or cloning it).
+	///
+	/// @param doClone   If true, create a new Instrument even when the target file is already
+	///                  loaded as instrumentToReplace, instead of reusing it.
+	/// @param snapshot  If non-null, a LoadTarget captured at dispatch time (see LoadTarget) whose
+	///                  fields are used instead of live Browser state; if null, the live current
+	///                  file selection is read directly.
+	/// @return Error::NONE on success, otherwise the failure.
 	Error performLoad(bool doClone = false, const LoadTarget* snapshot = nullptr);
+	/// @brief Load the selected instrument preset as a SoundDrum into the kit row being edited
+	///        (soundDrumToReplace / noteRow).
+	///
+	/// @param snapshot If non-null, a LoadTarget captured at dispatch time (see LoadTarget) whose
+	///                 fields are used instead of live Browser state; if null, the live current
+	///                 file selection is read directly.
+	/// @return Error::NONE on success, otherwise the failure.
 	Error performLoadSynthToKit(const LoadTarget* snapshot = nullptr);
 	ActionResult timerCallback() override;
 	bool getGreyoutColsAndRows(uint32_t* cols, uint32_t* rows) override;
@@ -128,15 +145,19 @@ private:
 	bool isInstrumentInList(Instrument* searchInstrument, Output* list);
 	bool findUnusedSlotVariation(std::string* oldName, std::string* newName);
 
-	/// The dispatched scroll-load op: loads loadCoalescer_.current() (performLoad()/
-	/// performLoadSynthToKit()), surfaces a failure, then re-dispatches the latest-wins target if a
-	/// newer scroll arrived while it ran. Runs on the storage owner (inline on legacy/host). `self`
-	/// is the LoadInstrumentPresetUI.
+	/// @brief The dispatched scroll-load op: loads loadCoalescer_.current() (performLoad()/
+	///        performLoadSynthToKit()), surfaces a failure, then re-dispatches the latest-wins
+	///        target if a newer scroll arrived while it ran.
+	///
+	/// Runs on the storage owner (inline on legacy/host).
+	/// @param self The LoadInstrumentPresetUI instance.
 	static void runScrollLoadOp(void* self);
-	/// The dispatched commit op (enterKeyPress): does its OWN authoritative performLoad()/
-	/// performLoadSynthToKit() - a cache hit if a scroll-load already warmed it - handles the error,
-	/// and runs the post-load commit tail (recalculateColours() + close()) that used to live inline
-	/// in enterKeyPress(). `self` is the LoadInstrumentPresetUI.
+	/// @brief The dispatched commit op (enterKeyPress).
+	///
+	/// Does its OWN authoritative performLoad()/performLoadSynthToKit() - a cache hit if a
+	/// scroll-load already warmed it - handles the error, and runs the post-load commit tail
+	/// (recalculateColours() + close()) that used to live inline in enterKeyPress().
+	/// @param self The LoadInstrumentPresetUI instance.
 	static void runCommitOp(void* self);
 
 	// Tells changeOutputType()'s Open listing apart from opened()'s in the shared onBrowserOpened()/
@@ -156,7 +177,7 @@ private:
 
 	// Coalesces the scroll-triggered load (currentFileChanged(), fires on every non-reload encoder
 	// tick) onto the storage worker: a fast scroll only actually loads the preset the user settles
-	// on. Port of SampleBrowser's previewCoalescer_ (sample_browser.h:110).
+	// on. Mirrors SampleBrowser's previewCoalescer_.
 	deluge::storage::LatestWins<LoadTarget> loadCoalescer_{};
 
 	int16_t initialChannel{};

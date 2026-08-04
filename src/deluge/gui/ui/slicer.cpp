@@ -355,11 +355,11 @@ ActionResult Slicer::buttonAction(deluge::hid::Button b, bool on, bool inCardRou
 		// SampleBrowser beneath it) off the UI navigation stack from inside the dispatched op.
 		// Without this gate, a BACK press reaching the BACK case below during that window would
 		// call close() on `this` from the executor at the same time the op is mutating the same
-		// uiNavigationHierarchy/numUIsOpen globals from the worker — the UI-stack-corruption shape
-		// Task 3 hit for ClearSong (da9882d6a). A repeat SELECT_ENC would re-dispatch doSlice()
-		// mid-flight (double-slicing the same commit). currentUIMode != UI_MODE_NONE makes
-		// buttonAction() a no-op for both (top-of-function guard above) until runDoSliceOp()
-		// resets it. Mirrors ClearSong's da9882d6a / LoadSongUI::performLoad.
+		// uiNavigationHierarchy/numUIsOpen globals from the worker — a UI-stack-corruption hazard
+		// (the same shape ClearSong and LoadSongUI::performLoad guard against). A repeat
+		// SELECT_ENC would re-dispatch doSlice() mid-flight (double-slicing the same commit).
+		// currentUIMode != UI_MODE_NONE makes buttonAction() a no-op for both (top-of-function
+		// guard above) until runDoSliceOp() resets it.
 		currentUIMode = UI_MODE_LOADING_SONG_ESSENTIAL_SAMPLES;
 		if (!deluge::storage::Owner::run_or_inline(&Slicer::runDoSliceOp, this)) {
 			// Dispatch dropped (owner queue full) — runDoSliceOp will never run, so release the

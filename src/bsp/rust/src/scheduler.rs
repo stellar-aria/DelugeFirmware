@@ -225,14 +225,12 @@ static CURRENT: AtomicI8 = AtomicI8::new(-1);
 /// can't run concurrently. Audio (RESOURCE_NONE) never touches this, so the
 /// audio interrupt-executor never blocks on it.
 ///
-/// There is no equivalent RESOURCE_SD gate: that serialization is now provided
-/// by the single-owner storage discipline (the storage owner IS the worker
-/// fiber; see `deluge_storage_on_owner` in sd.rs and the `storage-owner-audit`
-/// feature) plus the rung-5 `block_on_fiber` flip in sd.rs, which yields the
-/// fiber mid-transfer instead of parking the executor. `SD_GATE` served that
-/// purpose in the run-to-completion staging model and has been retired now
-/// that the real mechanism is live. `RESOURCE_SD_ROUTINE` tasks still get a
-/// hold-off, but via `fiber::sd_routine_held()` below, not a gate.
+/// There is no equivalent RESOURCE_SD gate: that serialization is provided by the
+/// single-owner storage discipline (the storage owner IS the worker fiber; see
+/// `deluge_storage_on_owner` in sd.rs and the `storage-owner-audit` feature) plus
+/// the `block_on_fiber` flip in sd.rs, which yields the fiber mid-transfer instead
+/// of parking the executor. `RESOURCE_SD_ROUTINE` tasks still get a hold-off, but
+/// via `fiber::sd_routine_held()` below, not a gate.
 static USB_GATE: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
@@ -456,11 +454,10 @@ async fn task_runner(slot: &'static TaskSlot) {
         // Hold off RESOURCE_SD_ROUTINE tasks while an SD-routine op is in flight on
         // the worker (fiber.rs SD_ROUTINE_HELD). Mirrors the cooperative BSP's
         // isSDRoutineActive() gate: a task that would free an object such an op is
-        // mid-way through (discardRecorder freeing the recorder) must not run. Live
-        // (not inert) now that the rung-5 flip (sd.rs `block_on_fiber`) makes SD
-        // transfers actually yield: the counter lingers across the whole in-flight
-        // window, not just a synchronous run-to-completion instant, so this is the
-        // real hold-off — independent of (and unaffected by) `SD_GATE`'s retirement.
+        // mid-way through (discardRecorder freeing the recorder) must not run. The
+        // counter lingers across the whole in-flight window (sd.rs `block_on_fiber`
+        // makes SD transfers actually yield), not just a synchronous
+        // run-to-completion instant, so this is the real hold-off.
         if resource & RESOURCE_SD_ROUTINE != 0 && crate::fiber::sd_routine_held() {
             continue;
         }

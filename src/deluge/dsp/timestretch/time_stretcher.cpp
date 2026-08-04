@@ -725,7 +725,7 @@ startSearch:
 				const DelugeFrameWindow window =
 				    deluge_sample_peek(sourceId, frame, static_cast<int8_t>(searchDirection));
 				if (window.frames == nullptr) {
-					goto skipSearch; // Not resident / not ready — the old `!cluster || !cluster->loaded` bail.
+					goto skipSearch; // Not resident / not ready.
 				}
 
 				int32_t bytePosWithinCluster = readByte[i] & (Cluster::size - 1);
@@ -743,8 +743,7 @@ startSearch:
 
 				// `window.frames` points AT this frame's own bytes; the `+ byteDepth - 4` aligns for the
 				// `int32`-over-`byteDepth` read below, and the `bytesLeftThisCluster` clamp keeps a
-				// boundary-straddling frame reading this cluster's own physical slack — byte-identical to
-				// `frame_read_origin(bytePosWithinCluster, byteDepth)`.
+				// boundary-straddling frame reading within this cluster's own physical slack.
 				currentPos[i] = reinterpret_cast<char const*>(window.frames) + byteDepth - 4;
 			}
 

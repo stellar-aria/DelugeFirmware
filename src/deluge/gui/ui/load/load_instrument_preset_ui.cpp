@@ -123,9 +123,9 @@ bool LoadInstrumentPresetUI::opened() {
 	actionLogger.deleteAllLogs();
 
 	std::string searchFilename = setupForOutputType(); // Sets currentDir.
-	// The listing (and the tail that used to run straight after it - see onBrowserOpened()) now
-	// happens async: dispatch it and return optimistically. Failure goes through the base
-	// Browser::onListingFailed() (displayError + close()) once the listing completes.
+	// The listing (and its post-listing tail, in onBrowserOpened()) happens async: dispatch it and
+	// return optimistically. Failure goes through the base Browser::onListingFailed() (displayError
+	// + close()) once the listing completes.
 	beginListing({.action = ListingAction::Open,
 	              .direction = 0,
 	              .filenameToStartAt = searchFilename,
@@ -135,11 +135,11 @@ bool LoadInstrumentPresetUI::opened() {
 }
 
 // Computes the LED/icon/title state and currentDir for outputTypeToLoad's category, and returns
-// the filename to search for within it (empty if none). Does NOT perform the listing itself
-// (that used to be fused in here) - callers combine this with getInstrumentFolder(outputTypeToLoad)
-// (the category's default dir) to dispatch an async Open listing, either from opened() or from
-// changeOutputType() (both go through beginListing() now; see changeOutputType()'s comment for how
-// its Open listing is told apart from opened()'s).
+// the filename to search for within it (empty if none). Does NOT perform the listing itself -
+// callers combine this with getInstrumentFolder(outputTypeToLoad) (the category's default dir) to
+// dispatch an async Open listing, either from opened() or from changeOutputType() (both go through
+// beginListing(); see changeOutputType()'s comment for how its Open listing is told apart from
+// opened()'s).
 std::string LoadInstrumentPresetUI::setupForOutputType() {
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false);
@@ -285,16 +285,14 @@ void LoadInstrumentPresetUI::onBrowserOpened() {
 
 	if (changingOutputType_) {
 		// This Open listing was dispatched by changeOutputType(), not opened() - run its post-listing
-		// follow-up now that the listing has actually completed (it used to run synchronously, inline,
-		// straight after arrivedInNewFolder() - see changeOutputType()'s comment).
+		// follow-up now that the listing has actually completed (see changeOutputType()'s comment).
 		changingOutputType_ = false;
 		renderUIsForOled();
 		performLoad();
 	}
 	else {
-		// opened()'s post-listing tail: focusRegained() used to run synchronously right after
-		// dispatching the listing (see opened()); move it here so it runs after the listing actually
-		// completes, matching the Save* browsers' convention (rung-5 prerequisite #2).
+		// opened()'s post-listing tail: focusRegained() runs here, after the listing actually
+		// completes, matching the Save* browsers' convention.
 		focusRegained();
 	}
 }
@@ -315,16 +313,16 @@ void LoadInstrumentPresetUI::folderContentsReady(int32_t entryDirection) {
 	currentFileChanged(0);
 }
 
-// Port of SampleBrowser::previewIfPossible() (sample_browser.cpp:531): coalesce the scroll-triggered
-// load onto the storage worker instead of running it synchronously (bug B6 - this fires on every
-// non-reload encoder tick while scrolling Load Synth/Kit, and used to block the executor for the
-// whole load). LatestWins collapses a fast scroll onto the settled preset - see runScrollLoadOp().
+// Coalesces the scroll-triggered load onto the storage worker instead of running it synchronously:
+// this fires on every non-reload encoder tick while scrolling Load Synth/Kit, and a synchronous load
+// would block the executor for the whole load. LatestWins collapses a fast scroll onto the settled
+// preset - see runScrollLoadOp().
 //
 // The LoadTarget snapshot is built here, at dispatch time, from live Browser state - the ONLY point
 // where it's safe to read enteredText/currentDir/getCurrentFileItem() directly, because nothing else
 // runs between this tick and the snapshot being taken. Once dispatched, runScrollLoadOp()/performLoad()
-// must never go back to that live state (see LoadTarget's doc for why - it used to, and that was the
-// use-after-free this port fixes).
+// must never go back to that live state (see LoadTarget's doc): doing so would race a scroll on the UI
+// task against the op's own SD-yield points, freeing state the op still holds a raw pointer to.
 void LoadInstrumentPresetUI::currentFileChanged(int32_t movementDirection) {
 	FileItem* currentFileItem = getCurrentFileItem();
 	LoadTarget target{
@@ -388,7 +386,7 @@ void LoadInstrumentPresetUI::enterKeyPress() {
 		// performLoad()/performLoadSynthToKit() rather than trusting currentInstrumentLoadError,
 		// because under coalescing a scroll-load may still be in flight when SELECT_ENC arrives.
 		// (A cache hit - getAudioFileFromFilename - if the scroll already warmed it; a fresh load
-		// otherwise.) See runCommitOp() for the rest of what used to be inline here.
+		// otherwise.) See runCommitOp() for the commit tail.
 		deluge::storage::Owner::run_or_inline(&LoadInstrumentPresetUI::runCommitOp, this);
 	}
 }
@@ -556,14 +554,11 @@ void LoadInstrumentPresetUI::changeOutputType(OutputType newOutputType) {
 		outputTypeToLoad = newOutputType;
 
 		std::string searchFilename = setupForOutputType();
-		// Route this listing through the owner too, the same way opened() does - it's the last
-		// browser-listing path in this file that was still calling arrivedInNewFolder() (and the
-		// renderUIsForOled()/performLoad() follow-up) synchronously and inline. changingOutputType_
+		// Route this listing through the owner too, the same way opened() does. changingOutputType_
 		// tells the shared onBrowserOpened()/onListingFailed() hooks apart from opened()'s Open
 		// listing so they can run this path's own follow-up/revert once the listing actually
-		// completes, instead of before it (see onBrowserOpened() and onListingFailed()).
-		// buttonAction()'s doChangeOutputType gate (listingInProgress_) still guards re-entry while
-		// this is in flight.
+		// completes (see onBrowserOpened() and onListingFailed()). buttonAction()'s
+		// doChangeOutputType gate (listingInProgress_) still guards re-entry while this is in flight.
 		outputTypeBeforeChange_ = oldOutputType;
 		changingOutputType_ = true;
 		bool dispatched = beginListing({.action = ListingAction::Open,
@@ -819,13 +814,13 @@ addNumber:
 // `snapshot`, when non-null, is a LoadTarget recorded at dispatch time (see currentFileChanged()):
 // every read below that would otherwise touch live Browser state (getCurrentFileItem(), enteredText,
 // currentDir) instead comes from op-local copies taken from `snapshot`, so nothing here aliases
-// Browser::fileItems or a live member across loadInstrumentFromFile()'s internal SD-yield points. When
-// `snapshot` is null (the pre-existing live-state call sites: onBrowserOpened()'s changeOutputType()
-// tail, runCommitOp(), and the clone context-menu action), behaviour is unchanged from before this port.
+// Browser::fileItems or a live member across loadInstrumentFromFile()'s internal SD-yield points.
+// `snapshot` is null on the live-state call sites: onBrowserOpened()'s changeOutputType() tail,
+// runCommitOp(), and the clone context-menu action.
 Error LoadInstrumentPresetUI::performLoad(bool doClone, const LoadTarget* snapshot) {
 
 	// currentFileItem is only ever touched here, before the yielding load call below - never held
-	// across it (that's the bug this snapshot path fixes; see LoadTarget's doc).
+	// across it (see LoadTarget's doc for why that matters).
 	FileItem* currentFileItem = snapshot != nullptr ? nullptr : getCurrentFileItem();
 	bool hasFile;
 	bool fileIsFolder;
@@ -1013,13 +1008,12 @@ giveUsedError:
 
 	// Cache the loaded Instrument on its FileItem so navigating back to it is a cache hit instead of
 	// a reload. currentFileItem is only non-null on the live (non-snapshot) path, where it was taken
-	// at the very top of this call, before the yielding load above - so this write is exactly as
-	// "stale-listing-safe" as it always was on that path (unchanged from before this port). On the
-	// snapshot path there is deliberately no live FileItem* to write through here (that pointer is
-	// exactly what could have been freed by a scroll-triggered listing rebuild during the yield) -
-	// this is a perf-only cache warm, so skipping it is safe: a future re-list re-associates this
-	// Instrument with its FileItem via the normal Song-instrument scan, and the commit op
-	// (runCommitOp) always does its own authoritative load regardless.
+	// at the very top of this call, before the yielding load above, so this write can't race a
+	// listing rebuild. On the snapshot path there is deliberately no live FileItem* to write through
+	// here (that pointer is exactly what could have been freed by a scroll-triggered listing rebuild
+	// during the yield) - this is a perf-only cache warm, so skipping it is safe: a future re-list
+	// re-associates this Instrument with its FileItem via the normal Song-instrument scan, and the
+	// commit op (runCommitOp) always does its own authoritative load regardless.
 	if (currentFileItem != nullptr) {
 		currentFileItem->instrument = newInstrument;
 	}

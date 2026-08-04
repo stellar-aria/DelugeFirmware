@@ -32,6 +32,7 @@
 extern "C" {
 #endif
 
+/// @brief Kind of memory region a DelugeMemoryRegion describes.
 typedef enum DelugeMemoryKind : uint8_t {
 	DELUGE_MEM_FAST_INTERNAL = 0, ///< small, low-latency on-chip SRAM
 	DELUGE_MEM_LARGE_EXTERNAL = 1 ///< large external SDRAM

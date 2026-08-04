@@ -50,6 +50,17 @@ public:
 	void fillInterpolationBufferRetrospectively(Sample* sample, int32_t bufferSize, int32_t startI,
 	                                            int32_t playDirection);
 	void jumpBackSamples(Sample* sample, int32_t numToJumpBack, int32_t playDirection);
+	/// @brief Position the play cursor at @p bytePosWithinNewCluster within the cluster whose resident
+	///        base is @p clusterBase, and recompute the reassessment window for it.
+	///
+	/// Called once playback has just crossed into a new resident cluster.
+	/// @param guide                   Playback guide supplying playback state.
+	/// @param sample                  The sample being played.
+	/// @param clusterBase             Resident base of the new cluster (the region port's
+	///                                `region.payload_base`, sourced by the caller from the region it
+	///                                just acquired).
+	/// @param bytePosWithinNewCluster Byte offset of the play position within that cluster.
+	/// @param byteDepth               Byte depth of the sample; currently unused by this function.
 	void setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuide* guide, Sample* sample, char* clusterBase,
 	                                        int32_t bytePosWithinNewCluster, int32_t byteDepth);
 	bool setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample, int32_t byteOvershoot = 0,
@@ -90,6 +101,23 @@ public:
 	                                  bool loopingAtLowLevel, int32_t jumpAmount, int32_t bufferSize,
 	                                  TimeStretcher* timeStretcher, bool bufferingToTimeStretcher,
 	                                  int32_t whichPlayHead, int32_t whichKernel, int32_t priorityRating);
+	/// @brief Reconcile lease ownership after copying `region_` from @p other into this reader.
+	///
+	/// The caller has already copied `region_` (this reader's residency, including its independent
+	/// lease via `region_.lease`) from @p other -- via the copy/move constructors' initializer list, or
+	/// the move-assignment operator just before calling here. This function only settles who owns the
+	/// leases that copy implies.
+	///
+	/// If @p stealReasons, `this` takes over @p other's residency wholesale: the region-port cursor
+	/// (and the leases it holds on the current/prefetch chunks) transfers from @p other to `this`, and
+	/// `other.region_` is cleared so @p other won't release the independent lease `this` now owns.
+	/// Otherwise (the non-stealing copy used by `TimeStretcher::olderPartReader`), `this` takes its own
+	/// independent hard lease on the chunk `region_` describes, so both readers pin the shared chunk and
+	/// the refcount rises by one; this reader's `source_` is left null and re-opens lazily on the next
+	/// assignClusters().
+	/// @param other        The reader whose residency was just copied into this one.
+	/// @param stealReasons True to steal @p other's residency outright; false to take an additional,
+	///                     independent lease alongside it.
 	void adoptResidencyFrom(SampleLowLevelReader& other, bool stealReasons);
 
 	void bufferIndividualSampleForInterpolation(int32_t numChannels, int32_t byteDepth, char* playPosNow);
@@ -110,28 +138,36 @@ public:
 	deluge::dsp::Interpolator interpolator_{};
 
 protected:
-	// The cursor + its retained region are `protected`, not `private`, because the cache-replay resync
-	// in VoiceSample::render (the subclass) acquires the uncached resume cluster through this same
-	// cursor -- that is what keeps `region_` tracking the CACHE position instead of the stale pre-cache
-	// one. No other class can reach them.
-	//
-	// Residency acquisition goes through the region port (libdeluge/sample_source.h). `source_` is a
-	// per-reader cursor opened lazily against the sample's `stream()` (see ensureSource); it holds the
-	// current + prefetch pins.
+	/// @name Residency cursor and its retained region
+	///
+	/// @note Protected, not private: the cache-replay resync in `VoiceSample::render` (the subclass)
+	///       acquires the uncached resume cluster through this same cursor -- that is what keeps
+	///       `region_` tracking the CACHE position instead of the stale pre-cache one. No other class
+	///       can reach them.
+	/// @{
+
+	/// @brief Per-reader residency cursor over the region port (libdeluge/sample_source.h), opened
+	///        lazily against the sample's `stream()` (see ensureSource). Holds the current + prefetch
+	///        pins.
 	DelugeSampleSource* source_ = nullptr;
 	void* source_backing_ = nullptr; ///< the &sample->stream() `source_` was opened against (reader reuse)
 
-	// The reader's SOLE residency representation: the last region acquired through the port (assignClusters
-	// / moveOnToNextCluster / the cache-resync). Its `payload_base` is the source of the interpolation
-	// window's base pointer -- the `clusterStartLocation` look-behind floor and the `reassessmentLocation`
-	// trailing/front slack reach are computed from it in setupReassessmentLocation(). `region_.payload_base`
-	// gates presence (hasCurrentRegion()), `region_.region_index` supplies the current cluster index, and
-	// `region_.lease` IS the resident chunk pointer -- the reader holds exactly ONE independent hard lease
-	// on it while `region_` is populated (taken at each acquire, released in unassignAllReasons). The port
-	// cursor `source_` holds its own separate current/prefetch leases; this independent lease is what keeps
-	// the chunk pinned for the reader's residency lifetime, including the non-stealing copy
-	// (TimeStretcher::olderPartReader) which has no `source_` of its own.
+	/// @brief The reader's sole residency representation: the last region acquired through the port
+	///        (assignClusters / moveOnToNextCluster / the cache-resync).
+	///
+	/// Its `payload_base` is the source of the interpolation window's base pointer -- the
+	/// `clusterStartLocation` look-behind floor and the `reassessmentLocation` trailing/front slack
+	/// reach are computed from it in setupReassessmentLocation(). `region_.payload_base` gates
+	/// presence (hasCurrentRegion()), `region_.region_index` supplies the current cluster index, and
+	/// `region_.lease` IS the resident chunk pointer.
+	/// @note The reader holds exactly ONE independent hard lease on it while `region_` is populated
+	///       (taken at each acquire, released in unassignAllReasons). The port cursor `source_` holds
+	///       its own separate current/prefetch leases; this independent lease is what keeps the chunk
+	///       pinned for the reader's residency lifetime, including the non-stealing copy
+	///       (TimeStretcher::olderPartReader) which has no `source_` of its own.
 	DelugeSampleRegion region_{};
+
+	/// @}
 
 	/// @brief Open `source_` once for @p sample (re-opening if the reader is reused for a new sample).
 	void ensureSource(Sample* sample);

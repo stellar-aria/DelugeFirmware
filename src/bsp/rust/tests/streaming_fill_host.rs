@@ -1,4 +1,4 @@
-//! Host unit test for `streaming_loader::fill_once` (R1.1) — the async
+//! Host unit test for `streaming_loader::fill_once` — the async
 //! cluster-fill drain loop, exercised against an in-memory [`FakeOps`] double
 //! rather than the real C++ resource manager/`StreamedChunk`. See
 //! `src/streaming_loader.rs`'s module doc ("Why the drain loop is generic over
@@ -250,9 +250,8 @@ fn fill_once_happy_path_drains_one_cluster() {
 /// Read failure while still leased: `read` returns false → `finish` is NOT
 /// called (it's the success-only convert/stitch/publish tail) → the lease
 /// count is checked and found still > 0 → the cluster is re-enqueued at
-/// `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop stops immediately (the
-/// failed-read-still-wanted behaviour the now-deleted `loader.cpp`
-/// `reconstruct_one` used) — no second `next()` call in the same `fill_once`.
+/// `LOWEST_PRIORITY` (0xFFFF_FFFF) and the loop stops immediately — no
+/// second `next()` call in the same `fill_once`.
 #[test]
 fn fill_once_read_failure_reenqueues_lowest_and_stops() {
     let mut chunk = one_chunk(0, true);
@@ -282,11 +281,11 @@ fn fill_once_read_failure_reenqueues_lowest_and_stops() {
 /// Read failure while UNLEASED: `read` returns false, and by the time it's
 /// checked the cluster has already dropped to 0 leases (already unwanted) →
 /// no `finish`, no `enqueue_lowest` — the cluster is just dropped and the loop
-/// keeps draining the next queued cluster (the `lease_count(...) == 0`,
-/// keep-draining behaviour the now-deleted `loader.cpp` `reconstruct_one`/`pump()`
-/// used rather than stopping). Both queued clusters are unleased-and-failing here so the whole
-/// queue drains to empty rather than stopping after the first — the
-/// "continues" half of the behaviour, complementing the single-chunk case in
+/// keeps draining the next queued cluster (the `lease_count(...) == 0` case
+/// keeps draining rather than stopping). Both queued clusters are
+/// unleased-and-failing here so the whole queue drains to empty rather than
+/// stopping after the first — the "continues" half of the behaviour,
+/// complementing the single-chunk case in
 /// `fill_once_read_failure_reenqueues_lowest_and_stops`.
 #[test]
 fn fill_once_read_failure_unleased_drops_and_continues() {
@@ -372,7 +371,7 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
 /// (`handle`/`byte_offset` → `read` → `buf`) only — the REAL
 /// `efatfs_fs::read_at` is device-only (`target_os = "none"`) and cannot be
 /// called from a host test. It's covered on host by `fs_differential`'s
-/// round-trip test (Task 3) and on-device by Task 8.
+/// round-trip test, and separately on-device.
 #[test]
 fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
     let num_sectors = 2u32;
@@ -417,8 +416,7 @@ fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
 
 /// A chunk marked unloadable (`is_unloadable` reports true) is skipped right
 /// after `next()` — no `begin`, no `read`, no `finish` — while a following
-/// loadable chunk still drains normally (the "Safety net" skip the now-deleted
-/// `loader.cpp` `pump()` ran just before `reconstruct_one`).
+/// loadable chunk still drains normally.
 #[test]
 fn fill_once_skips_unloadable_chunk() {
     let mut unloadable = one_chunk(0, true);

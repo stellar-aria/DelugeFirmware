@@ -77,8 +77,16 @@ public:
 	// Build this WaveTable from an already-in-memory Sample (the Sample→WaveTable conversion). Reads the
 	// Sample's cluster data; takes its cycle size / channels / byte depth from the Sample.
 	Error setupFromSample(Sample& sample);
-	// Build this WaveTable by reading audio data from a file, via the deserializer-backed byte source. The
-	// header fields come from the parser (parseWaveTableHeader).
+	/// @brief Build this WaveTable by reading audio data from a file, via a FileByteSource.
+	///
+	/// The header fields come from the parser (parseWaveTableHeader).
+	/// @param source                 Byte source positioned to read the file's audio data.
+	/// @param cycleSize              Sample count per cycle.
+	/// @param audioDataStartPosBytes File offset of the start of the audio data.
+	/// @param audioDataLengthBytes   Length of the audio data in bytes.
+	/// @param byteDepth              Sample byte depth.
+	/// @param rawDataFormat          Raw sample data format.
+	/// @return Error::NONE on success.
 	Error setupFromFile(FileByteSource& source, int32_t cycleSize, uint32_t audioDataStartPosBytes,
 	                    uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat);
 	void deleteAllBandsAndData();
@@ -97,9 +105,19 @@ protected:
 	void numReasonsDecreasedToZero(char const* errorCode) override;
 
 private:
-	// Shared implementation behind setupFromSample / setupFromFile. Exactly one of `sample` (in-memory source)
-	// or `byteSource` (file source) is used; the other parameters are ignored in the in-memory case (taken from
-	// the Sample). The two public entry points keep this nullable split off the API.
+	/// @brief Shared implementation behind setupFromSample() and setupFromFile().
+	///
+	/// Exactly one of @p sample (in-memory source) or @p byteSource (file source) is used; the
+	/// other parameters are ignored in the in-memory case (taken from the Sample). The two public
+	/// entry points keep this nullable split off the API.
+	/// @param sample                 In-memory source, or nullptr when reading from a file.
+	/// @param rawFileCycleSize       Sample count per cycle (file-source case only).
+	/// @param audioDataStartPosBytes File offset of the start of the audio data (file-source case only).
+	/// @param audioDataLengthBytes   Length of the audio data in bytes (file-source case only).
+	/// @param byteDepth              Sample byte depth (file-source case only).
+	/// @param rawDataFormat          Raw sample data format (file-source case only).
+	/// @param byteSource             Byte source, or nullptr when reading from an in-memory Sample.
+	/// @return Error::NONE on success.
 	Error setup(Sample* sample, int32_t rawFileCycleSize, uint32_t audioDataStartPosBytes,
 	            uint32_t audioDataLengthBytes, int32_t byteDepth, RawDataFormat rawDataFormat,
 	            FileByteSource* byteSource);

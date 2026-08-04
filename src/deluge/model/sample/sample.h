@@ -148,9 +148,8 @@ public:
 		return ((audioDataStartPosBytes + audioDataLengthBytes - 1) >> Cluster::size_magnitude) + 1;
 	}
 
-	/// @return The sample's logical cluster count, DERIVED: the geometry implied by its audio-data extent
+	/// @return The sample's logical cluster count, derived: the geometry implied by its audio-data extent
 	///         once `isLengthKnown()`, else the live recorder's captured-cluster count while recording.
-	///         (Relocated off SampleStream -- pure Sample geometry, not residency dispatch.)
 	[[nodiscard]] size_t num_clusters() const;
 
 	uint32_t bitMask{0};
@@ -206,16 +205,17 @@ public:
 
 	uint32_t waveTableCycleSize{0}; // In case this later gets used for a WaveTable
 
-	/// Owns the read-stream handle and the resource-manager Asset. See
-	/// storage/audio/stream/sample_stream.h.
+	/// @brief Owns the read-stream handle and the resource-manager Asset.
 	///
+	/// See storage/audio/stream/sample_stream.h.
 	/// @note ~Sample releases the Asset explicitly, before `stream_` destructs -- see ~Sample's
 	///       definition.
 	deluge::audio::stream::SampleStream stream_{*this};
 
-	/// The waveform overview cache: one `OverviewCacheEntry` per cluster of the file. A stable-address
-	/// `SegmentedVector` so a `OverviewCacheEntry&` handed out by overviewCacheEntry() stays valid
-	/// across later growth -- see `resizeOverviewCache()`.
+	/// @brief The waveform overview cache: one `OverviewCacheEntry` per cluster of the file.
+	///
+	/// A stable-address `SegmentedVector` so a `OverviewCacheEntry&` handed out by
+	/// overviewCacheEntry() stays valid across later growth -- see `resizeOverviewCache()`.
 	deluge::SegmentedVector<OverviewCacheEntry, 256, deluge::memory::fast_allocator> overviewCache_{};
 
 protected:

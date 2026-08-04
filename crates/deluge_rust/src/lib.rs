@@ -18,8 +18,8 @@
 pub use deluge_alloc::*;
 pub use deluge_resource::*;
 
-// SR3a Task 1: link-only force-link for the sim's `sim` feature (see Cargo.toml), mirroring
-// `src/bsp/rust/src/main.rs`'s device `extern crate deluge_sample_source` (SR2d-5 Task 4).
+// Link-only force-link for the sim's `sim` feature (see Cargo.toml), mirroring
+// `src/bsp/rust/src/main.rs`'s device `extern crate deluge_sample_source`.
 // Unlike `deluge_alloc`/`deluge_resource` above, nothing in this crate's own Rust code
 // references `deluge_sample_source`'s items -- there is no `pub use` to keep it live -- so
 // without this, rustc/lld would never pull its single-object rlib into `libdeluge_rust.a`'s
@@ -28,18 +28,18 @@ pub use deluge_resource::*;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_source;
 
-// SIM (C2b): force-link the Rust cluster fill + the std critical-section impl into libdeluge_rust.a,
+// Force-link the Rust cluster fill + the std critical-section impl into libdeluge_rust.a,
 // same reasoning as `deluge_sample_source` above — nothing in this crate's Rust code references their
 // items, so without an explicit `extern crate` rustc/lld would not retain their objects in the
 // staticlib, and the sim's C++ would keep resolving async_fill.cpp's weak fill wrappers. Retaining the
-// fill member lets Task 3's deletion pull the strong override from the archive; retaining
+// fill member lets the strong override be pulled from the archive; retaining
 // critical_section keeps its `_critical_section_1_0_acquire` impl present for FILL_CONTEXTS's mutex.
 #[cfg(feature = "sim")]
 extern crate critical_section;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_fill;
 
-// SIM (U2 Task 0): force-link the sample range-reader into libdeluge_rust.a, same reasoning as the
+// Force-link the sample range-reader into libdeluge_rust.a, same reasoning as the
 // fill/cursor above — nothing in this crate's Rust code references its items, so without an explicit
 // `extern crate` rustc/lld would drop its objects from the staticlib, and the migrated C++ consumers'
 // `deluge_sample_reader_*` references would go unresolved at the sim link. No weak fallback to override
@@ -47,10 +47,10 @@ extern crate deluge_sample_fill;
 #[cfg(feature = "sim")]
 extern crate deluge_sample_reader;
 
-// SIM (U4c Task 2): force-link the streaming-file slot registry into libdeluge_rust.a, same
+// Force-link the streaming-file slot registry into libdeluge_rust.a, same
 // reasoning as the reader above — nothing in this crate's Rust code references its items, so
 // without an explicit `extern crate` rustc/lld would drop its objects from the staticlib. No
-// consumer yet (a later task flips the C++ facade onto it), so retention alone suffices.
+// consumer yet (the C++ facade will flip onto it later), so retention alone suffices.
 #[cfg(feature = "sim")]
 extern crate deluge_sample_stream;
 

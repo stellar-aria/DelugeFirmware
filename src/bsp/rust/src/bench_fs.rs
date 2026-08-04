@@ -1,4 +1,4 @@
-//! SP1 Task 4: on-device read-throughput benchmark, `embedded-fatfs` vs the
+//! On-device read-throughput benchmark, `embedded-fatfs` vs the
 //! vendored C FatFS — both ultimately bottoming out at `deluge_bsp::sd` (the
 //! real SDHI1 DMA driver), so the comparison isolates the two filesystem
 //! *implementations'* overhead rather than the hardware underneath them.
@@ -6,8 +6,7 @@
 //! **NEEDS-HARDWARE.** This module only proves the comparison is wired up
 //! correctly and cross-compiles for device — the MB/s numbers it prints are
 //! only meaningful from a real on-device run (no host proxy substitutes: the
-//! whole point is genuine SDHI/DMA timing, which no simulator models). See
-//! `.superpowers/sdd/task-4-brief.md` / `task-4-report.md`.
+//! whole point is genuine SDHI/DMA timing, which no simulator models).
 //!
 //! Non-default: gated behind the `bench_fs` cargo feature (see `Cargo.toml`),
 //! so a normal firmware build never links or runs this. Enabled, it still
@@ -20,8 +19,8 @@
 //!
 //! - **efatfs**: `embedded_fatfs::FileSystem` over
 //!   `BufStream<`[`SdBlockDevice`](crate::fat_block_device::SdBlockDevice)`, 512>`
-//!   — the exact device storage stack Task 3 built and Task 2/3's
-//!   `fs_differential` harness already exercises on host. `BufStream`
+//!   — the same device storage stack the `fs_differential`
+//!   harness already exercises on host. `BufStream`
 //!   buffers exactly one 512-byte block internally (see its module doc) —
 //!   there is no multi-block readahead knob in this vendored
 //!   `block_device_adapters` fork to expose.
@@ -59,7 +58,7 @@ type Efatfs = FileSystem<
 
 /// Backing arena for `crate::FS_ALLOCATOR` (see `main.rs`'s doc comment on
 /// that static). `embedded-fatfs`'s `alloc` feature needs a live heap before
-/// its first allocation — Task 3 registered the global allocator but left it
+/// its first allocation — the global allocator is registered elsewhere but left
 /// UNINITIALISED (an allocation through a null handle returns null rather
 /// than UB, but nothing that actually needs `alloc` can run correctly until
 /// `.init()` is called with a real backing arena). This benchmark is the
@@ -353,7 +352,7 @@ fn cfatfs_bench_read(path: &str) -> Option<(u64, f64)> {
     Some((total, mb_per_s(total, elapsed)))
 }
 
-/// Run the SP1 Task 4 benchmark: mount `embedded-fatfs`, find the largest
+/// Run the on-device read-throughput benchmark: mount `embedded-fatfs`, find the largest
 /// file under `SAMPLES/` (or root), time a sequential read of it through
 /// both `embedded-fatfs` and the raw C FatFS ABI, and log the
 /// `SP1_BENCH efatfs read=… MB/s ; cfatfs read=… MB/s` result line.

@@ -159,9 +159,15 @@ void* deluge_resource_acquire(DelugeResource* mgr, uint32_t asset, uint32_t inde
 /// that is `request`ed but not yet `mark_ready`'d). The seam for the RT render / embassy storage path.
 void* deluge_resource_try_acquire(DelugeResource* mgr, uint32_t asset, uint32_t index);
 
-/// Non-leasing residency peek: the backing pointer for (asset,index) if resident (ready OR not),
-/// else null. Does NOT take a lease and does NOT bump recency — a peek must not perturb eviction
-/// ordering. Callers that need loaded data check the chunk's own ready/loaded flag.
+/// @brief Non-leasing residency peek: the backing pointer for `(asset, index)` if resident (ready
+///        or not), else null.
+///
+/// Does NOT take a lease and does NOT bump recency — a peek must not perturb eviction ordering.
+/// Callers that need loaded data check the chunk's own ready/loaded flag.
+/// @param mgr   Resource manager instance.
+/// @param asset Asset id.
+/// @param index Chunk index within the asset.
+/// @return The backing pointer if resident, else NULL.
 void* deluge_resource_peek(DelugeResource* mgr, uint32_t asset, uint32_t index);
 
 /// Mark a `request`ed (Loading) chunk ready — called when its read completes (the C++ loader after
@@ -186,9 +192,13 @@ void deluge_resource_loader_remove(DelugeResource* mgr, uint32_t slot);
 void* deluge_resource_loader_next(DelugeResource* mgr);
 /// Whether any queued + leased chunk sits at the lowest priority (0xFFFFFFFF) — the load-song yield gate.
 bool deluge_resource_loader_has_lowest(DelugeResource* mgr);
-/// Whether any queued + leased chunk remains at all (any priority) — the non-destructive
-/// loader-queue-non-empty predicate the offline async drain blocks on. Answers "would
-/// deluge_resource_loader_next return non-null" without popping or mutating anything.
+/// @brief Whether any queued + leased chunk remains at all (any priority).
+///
+/// The non-destructive loader-queue-non-empty predicate the offline async drain blocks on.
+/// Answers "would deluge_resource_loader_next return non-null" without popping or mutating
+/// anything.
+/// @param mgr Resource manager instance.
+/// @return True if the loader queue holds at least one queued + leased chunk.
 bool deluge_resource_loader_has_any(DelugeResource* mgr);
 
 /// Number of cost classes `evictions_by_cost` buckets by (must match the Rust COST_BUCKETS).

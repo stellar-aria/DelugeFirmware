@@ -1,4 +1,4 @@
-//! U1 Task 5 — the reader differential, the rung's gate: drives `deluge_sample_reader`'s
+//! The reader differential: drives `deluge_sample_reader`'s
 //! `open`/`window`/`advance`/`deluge_sample_read` over REAL, constructed streamed chunks (a real
 //! `deluge_resource` manager, a synthetic sample whose converted cluster bytes are KNOWN) and asserts
 //! the bytes it returns are BYTE-IDENTICAL to a direct read of each chunk's own resident payload
@@ -22,26 +22,17 @@
 //! (`deluge_sample_convert::stitch_boundaries`) production fills use — so a straddling frame's oracle
 //! bytes are the real stitched bytes, not hand-seeded ones (see [`ChunkHarness::new`]).
 //!
-//! **U4d note.** Before U4d, this file's oracle instead read through the real, unmodified C++
-//! `StreamedChunk::frame_read_origin`/`payload_with_trailing_slack()` (`storage/cluster/cluster.h`,
-//! via a `cc`-compiled shim, `cpp/harness_shim.cpp`) — an extra proof that the byte-copy oracle
-//! below agreed with the actual production accessor, not just with itself
-//! (`direct_oracle_matches_frame_read_origin_oracle`, since deleted). U4d relocated the streamed
-//! chunk's storage into Rust and deleted `frame_read_origin` for the streamed SAMPLE role entirely
-//! (it survives only on the unrelated `ComputedChunk`/SampleCache role, `storage/cluster/cluster.h`)
-//! — so that self-consistency proof no longer has a production function to check against, and was
-//! retired along with the C++ shim and its `region_read_diff_frame_via_origin` entry point (U4d
-//! Task 3). [`oracle_frame`] itself is unchanged in substance: `payload_with_trailing_slack()` was
-//! always just "the payload pointer, `cluster_size + 7` bytes" — expressed directly here now,
-//! through the same `deluge_sample_fill::chunk::payload` accessor the reader itself uses, with no C++
-//! involved at all.
+//! **Note.** [`oracle_frame`] reads the payload pointer directly — `cluster_size + 7` bytes,
+//! through the same `deluge_sample_fill::chunk::payload` accessor the reader itself uses — with no
+//! C++ involved. That accessor is equivalent to the streamed chunk's `payload_with_trailing_slack()`
+//! semantics: "the payload pointer, `cluster_size + 7` bytes".
 //!
 //! ## The synthetic sample
 //!
 //! Every case builds a fresh [`ChunkHarness`]: a real `deluge_resource` manager (slab-backed, the
 //! same backing kind production streaming clusters use) over a real heap, with `N` real streamed
-//! chunks constructed via `deluge_resource_request` (never payload == backing — the SR2d-4 lesson
-//! `deluge_sample_reader`'s own tests already flag; payload is always reached through the real
+//! chunks constructed via `deluge_resource_request` (payload is never the same address as backing —
+//! `deluge_sample_reader`'s own tests flag this too; payload is always reached through the real
 //! `deluge_sample_fill::chunk::payload` accessor). Each cluster's own `cluster_size` bytes are seeded
 //! with a deterministic, per-cluster-index ramp (`region_read_differential::ramp`), then EVERY
 //! cluster is `native_finish`ed, in increasing index order, so the REAL stitch
@@ -171,9 +162,8 @@ const CLUSTER_SIZE: u32 = 512;
 const CLUSTER_MAGNITUDE: u32 = 9;
 
 /// 24-bit mono: `byte_depth = 3, num_channels = 1` -> `frame_stride = 3`, which does NOT divide
-/// `CLUSTER_SIZE` (`512 % 3 == 2`) — the real case `sample_recorder.cpp` sets, and per the brief the
-/// stride the straddle/scan cases must use: this is where the boundary arithmetic matters (T3's own
-/// bugs lived exactly here).
+/// `CLUSTER_SIZE` (`512 % 3 == 2`) — the real case `sample_recorder.cpp` sets, and the stride the
+/// straddle/scan cases must use: this is where the boundary arithmetic matters.
 const BYTE_DEPTH: u8 = 3;
 const NUM_CHANNELS: u8 = 1;
 const FRAME_STRIDE: u32 = BYTE_DEPTH as u32 * NUM_CHANNELS as u32;
@@ -490,9 +480,9 @@ fn straddle_forward_across_one_cluster_boundary_matches_oracle_and_read() {
     let geo = map_geometry(&ctx);
 
     // Frame 165..185: crosses cluster 0/1's boundary (the straddling frame sits at frame 170, byte
-    // 510) and continues well past it into cluster 1's own plain payload -- the "boundary re-pin
-    // near cluster ends with a non-dividing stride" edge T3 documented, and the re-pin across the
-    // boundary within one continuous read.
+    // 510) and continues well past it into cluster 1's own plain payload -- the boundary re-pin
+    // near cluster ends with a non-dividing stride, and the re-pin across the boundary within one
+    // continuous read.
     let (start, count) = (165u64, 20u32);
     let expected = oracle_read(&h, &geo, start, count, 1);
     let (actual, visited, ok) = handle_read(h.asset, start, count, 1, ReadHint::Cached);
@@ -692,7 +682,7 @@ fn forced_read_failure_sets_not_ok_distinct_from_eof() {
 }
 
 // =====================================================================================================
-// NON-VACUITY (mandatory, the SR2d-4 lesson): a passing comparison above proves nothing unless a
+// NON-VACUITY: a passing comparison above proves nothing unless a
 // REAL divergence is provably caught. Perturb the oracle's own frame position/geometry by exactly
 // the amounts a genuinely wrong reader offset/stride would produce, and confirm the SAME comparison
 // this file uses throughout now FAILS.
@@ -714,8 +704,8 @@ fn non_vacuity_an_off_by_one_start_frame_is_detected() {
     );
 
     // Perturb the OFFSET the oracle is read from by one frame -- standing in for a hypothetical
-    // reader bug that resolved `current_frame` one frame off (T3's own boundary bugs lived exactly
-    // in this class of off-by-one).
+    // reader bug that resolved `current_frame` one frame off (this class of off-by-one is exactly
+    // where boundary bugs tend to hide).
     let mutated = oracle_read(&h, &geo, start + 1, count, 1);
     assert_ne!(
         actual, mutated,

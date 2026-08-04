@@ -70,9 +70,22 @@ public:
 
 	int32_t neutralPhaseIncrement{};
 
+	/// Passive lookahead reservation anchored at this holder's start marker; pins a small window of
+	/// cluster residency ahead of/behind the start playback position. `nullptr` when not yet opened
+	/// (or after being released). Opened/moved by claimClusterReasonsForMarker(), closed by
+	/// unassignAllClusterReasons().
 	DelugeSampleReservation* clustersForStart_ = nullptr;
 
 protected:
+	/// @brief Open or re-anchor a passive lookahead reservation at a playback marker.
+	///
+	/// If @p reservation is null, opens a new one; otherwise re-anchors the existing one to the new
+	/// marker position.
+	/// @param reservation          The reservation to open/move, by reference so a fresh open can
+	///                             write the new handle back into the caller's storage.
+	/// @param startPlaybackAtByte  Byte offset of the marker within the sample's audio data.
+	/// @param playDirection        +1 forward, -1 reverse.
+	/// @param clusterLoadInstruction One of the CLUSTER_* load modes, translated to a DelugeLoadMode.
 	void claimClusterReasonsForMarker(DelugeSampleReservation*& reservation, uint32_t startPlaybackAtByte,
 	                                  int32_t playDirection, int32_t clusterLoadInstruction);
 	virtual void sampleBeenSet(bool reversed, bool manuallySelected) {}

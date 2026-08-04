@@ -1078,18 +1078,16 @@ void routine() {
 	else {
 		if (!isSDRoutineActive()) {
 			// An offline render is by definition NOT paced by real time, so the work done per
-			// audioRoutine call must never be bounded by the wall clock. This loop used to run
-			// `while (getSystemTime() < timeNow + 32 / 44100.)` - "as many blocks as fit in one
-			// block's worth of real time" - which made the block count per call a function of host
-			// speed, host load, and how long the work inside each iteration happened to take. That
-			// count decides how rendering interleaves with the cluster loader, the SD routine and the
-			// recorder's cluster write-out, which decides eviction and underrun behaviour, which
-			// changes the rendered audio. It was measurably that fragile: the host sat exactly on the
-			// two-blocks-per-call boundary, and adding a bare fprintf to an unrelated translation unit
-			// was enough to tip some calls to one block and flip a fixture's rendered payload.
+			// audioRoutine call must never be bounded by the wall clock: the block count per call
+			// must not depend on host speed, host load, or how long the work inside each iteration
+			// happens to take. That count decides how rendering interleaves with the cluster loader,
+			// the SD routine and the recorder's cluster write-out, which decides eviction and
+			// underrun behaviour, which changes the rendered audio -- fragile enough that adding a
+			// bare fprintf to an unrelated translation unit could tip a call's block count and flip a
+			// fixture's rendered payload.
 			//
-			// So bound the batch by a fixed block count. Do not reintroduce any time-based bound here
-			// (the real-time branch above is the one that legitimately paces off the clock).
+			// So the batch is bounded by a fixed block count. Do not reintroduce any time-based bound
+			// here (the real-time branch above is the one that legitimately paces off the clock).
 			//
 			// The batch is still a batch - the point of looping is to amortise the surrounding
 			// machinery (the loader pump and the slow/recorder routines run between audioRoutine
@@ -1562,8 +1560,7 @@ void requestRecorderCardRoutines() {
 	if (deluge_in_interrupt()) {
 		return;
 	}
-	// Already on the owner (fiber on Embassy; always on legacy/host) — run inline,
-	// so legacy/host is byte-identical to the direct call (golden-inert) and a
+	// Already on the owner (fiber on Embassy; always on legacy/host) — run inline, so a
 	// fiber-context caller doesn't re-dispatch onto the fiber it already runs on.
 	if (deluge_storage_on_owner()) {
 		doRecorderCardRoutines();

@@ -11,7 +11,7 @@
 //! armv7a-NEON compile/verify check (stamped by build.rs) succeeded.
 
 #![deny(unsafe_op_in_unsafe_fn)]
-// SR2d-4 Task 5: this crate now has a real consumer -- the native fill task
+// This crate now has a real consumer -- the native fill task
 // (`deluge-bsp-rust`'s `fill_logic::finish_convert_stitch`) -- which links it on the actual
 // armv7a-none-eabihf device target, not just the x86 host test binary. `no_std` there only
 // (mirrors `deluge_resource`'s `#![cfg_attr(target_os = "none", no_std)]`): every non-test item here

@@ -1,11 +1,11 @@
-//! Pure byte-range arithmetic for the native cluster fill (SR2d-4 Task 4): [`begin`]
+//! Pure byte-range arithmetic for the native cluster fill: [`begin`]
 //! reimplements `deluge::audio::stream::begin_fill`'s "resolve where/how much" step
 //! (`storage/audio/stream/async_fill.cpp:76-98`) — the last-cluster short-read
 //! sector-count calc and the cluster's byte offset within the file — from geometry
 //! alone. No `StreamedChunk`, no FFI, no statics: this is arithmetic over plain
 //! values, so it's trivially host-testable and needs no `unsafe`.
 //!
-//! Wired into `streaming_loader::prod::ProdOps::begin`/`finish` (SR2d-4 Task 5), replacing the
+//! Wired into `streaming_loader::prod::ProdOps::begin`/`finish`, replacing the
 //! `deluge_streaming_begin_fill`/`_finish_fill` upcalls.
 //!
 //! ## `#[allow(dead_code)]` despite being wired
@@ -17,7 +17,7 @@
 //! `--target`, no `--features host_app` — e.g. what a bare `cargo clippy --all-targets` runs, and what
 //! `tests/streaming_fill_host.rs`'s own `#[path]` recompilation of `streaming_loader.rs` exercises)
 //! therefore still never reaches these items outside `#[cfg(test)]`, so each carries
-//! `#[allow(dead_code)]` — not because nothing calls them (this task wires them into a real,
+//! `#[allow(dead_code)]` — not because nothing calls them (they are wired into a real,
 //! non-test call site), but because that call site doesn't exist on EVERY tier this file compiles on.
 //!
 //! ## Mirroring `begin_fill` bit-for-bit, including its 32-bit truncation
@@ -39,7 +39,7 @@
 /// Per-cluster geometry `begin` (and [`finish_convert_stitch`]) need, mirroring the fields of
 /// `DelugeStreamingFillContext` (`include/libdeluge/streaming_fill.h`). `begin` itself only touches
 /// the first four fields; `first_cluster_index_with_no_audio_data` and `raw_data_format` are read by
-/// [`finish_convert_stitch`]'s convert/stitch step (SR2d-4 Task 5) — kept in ONE struct rather than
+/// [`finish_convert_stitch`]'s convert/stitch step — kept in ONE struct rather than
 /// two narrower ones since both are built from the exact same `FillContext` registration record at
 /// each call site (`streaming_loader::prod::{to_fill_geometry, resolve}`).
 ///
@@ -135,7 +135,7 @@ pub fn begin(index: u32, geo: &FillGeometry) -> BeginResult {
     }
 }
 
-// ── `finish`'s pure convert + stitch core (SR2d-4 Task 5) ──────────────────────────────────────
+// ── `finish`'s pure convert + stitch core ──────────────────────────────────────
 //
 // Reimplements `finish_fill`'s post-read tail (`storage/audio/stream/async_fill.cpp:107-163`, minus
 // the `loaded`/`mark_ready` publish step, which stays in `streaming_loader::prod::ProdOps::finish` —
@@ -143,8 +143,8 @@ pub fn begin(index: u32, geo: &FillGeometry) -> BeginResult {
 // (`cluster.cpp:76` -> `convert_cluster_data`, here [`deluge_sample_convert::convert_cluster`]) then
 // the neighbour-edge stitch (`stitch_boundaries`, `stitch.cpp`, here
 // [`deluge_sample_convert::stitch_boundaries`]). Deliberately does NOT re-transliterate either
-// algorithm — both are already implemented, tested, and NEON-verified in `deluge_sample_convert`
-// (SR2d-2); this module only reproduces the ORCHESTRATION `finish_fill` does around them: which
+// algorithm — both are already implemented, tested, and NEON-verified in `deluge_sample_convert`;
+// this module only reproduces the ORCHESTRATION `finish_fill` does around them: which
 // bytes to convert (the plain `payload()`, not the trailing slack), which span to stitch (the FULL
 // `payload_with_trailing_slack()`), and how to build each neighbour's edge from a `NeighbourView`.
 
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(r.byte_offset, 32768);
     }
 
-    // ── finish_convert_stitch (SR2d-4 Task 5) ──────────────────────────────────────────────────
+    // ── finish_convert_stitch ──────────────────────────────────────────────────
     //
     // Small, misaligned (`audio_data_start_pos_bytes & 0b11 != 0`), non-24-bit geometry (UNSIGNED_8,
     // same shape `deluge_sample_convert`'s own `stitch_unsigned8_misaligned_both_neighbors` test

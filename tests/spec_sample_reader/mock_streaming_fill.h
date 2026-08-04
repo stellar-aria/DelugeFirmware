@@ -15,9 +15,12 @@
 #include "libdeluge/streaming_fill.h"
 #include "storage/audio/stream/chunk_residency.h"
 
-/// Test control: the process-wide "active manager" `deluge_streaming_resource_manager()` resolves
-/// (mirrors the Rust reader crate's own `host_streaming_stubs::set_active_manager`). Defaults to
+/// @brief Test control: set the process-wide "active manager" that `deluge_streaming_resource_manager()`
+///        resolves.
+///
+/// Mirrors the Rust reader crate's own `host_streaming_stubs::set_active_manager`. Defaults to
 /// NULL, matching `sample_reader_bridge_spec.cpp`'s deliberately-unregistered-asset scenario;
 /// `sample_peek_spec.cpp` calls this to register a REAL manager first, so `deluge_sample_peek` has
 /// something to peek into.
+/// @param handle The resource manager to make active, or `nullptr` to clear it.
 void set_active_manager(DelugeResource* handle);

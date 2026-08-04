@@ -1,9 +1,7 @@
-//! Spike A (`feat/streaming-underrun-harness` Task 1): can a `MockDriver`-style
-//! discrete-event loop — run the executor to quiescence, jump virtual time to
-//! the next due timer deadline, repeat — deterministically drive Embassy
-//! tasks with near-zero wall-clock cost? See
-//! `.superpowers/sdd/task-1-report.md` for the full verdict + evidence this
-//! binary produces.
+//! A discrete-event driver spike: can a `MockDriver`-style discrete-event
+//! loop — run the executor to quiescence, jump virtual time to the next due
+//! timer deadline, repeat — deterministically drive Embassy tasks with
+//! near-zero wall-clock cost?
 //!
 //! # Why this doesn't use `embassy_executor::Executor` (`platform-std`)
 //!

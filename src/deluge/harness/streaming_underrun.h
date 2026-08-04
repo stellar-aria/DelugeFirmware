@@ -17,11 +17,13 @@
 
 #pragma once
 
-/// Host-only instrumentation for the streaming-underrun harness's PRIMARY signal: the audio
-/// thread reaching a region-port NotReady residency check (`!hasCurrentRegion()`, or
-/// `deluge_sample_region_state` returning LOADING) on a play-needed path and either deferring
-/// (WAIT) or dropping (UNASSIGN) the voice as a result. Not a fault, not a blocking wait — just
-/// the exact moment playback discovers the region it needs isn't ready yet.
+/// @brief Host-only instrumentation for the streaming-underrun harness's PRIMARY signal: the
+///        audio thread reaching a region-port NotReady residency check (`!hasCurrentRegion()`,
+///        or `deluge_sample_region_state` returning LOADING) on a play-needed path and either
+///        deferring (WAIT) or dropping (UNASSIGN) the voice as a result.
+///
+/// Not a fault, not a blocking wait — just the exact moment playback discovers the region it
+/// needs isn't ready yet.
 ///
 /// `DELUGE_HOST`-only (see `sim/CMakeLists.txt`'s `add_compile_definitions(DELUGE_HOST)`,
 /// same guard `harness/streaming_scenario.h` uses): compiled into every x86 build off this

@@ -57,7 +57,7 @@ std::span<std::byte> DeserializerBlockReader::blockBuffer() {
 
 Error DeserializerBlockReader::readBlock([[maybe_unused]] uint32_t clusterIndex) {
 	// Sequential read: the deserializer file cursor advances one block per call, so the cluster index is
-	// implicit (unused) — this mirrors the old DeserializerByteSource::readNewCluster exactly.
+	// implicit (unused).
 	auto result = smDeserializer.file->read(
 	    std::span<std::byte>(reinterpret_cast<std::byte*>(smDeserializer.fileClusterBuffer), Cluster::size));
 	if (!result) {

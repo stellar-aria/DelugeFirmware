@@ -392,11 +392,11 @@ tryGettingFFTConfig:
 
 	uint32_t bitMask = 0xFFFFFFFF << ((4 - byteDepth) * 8);
 
-	// In-memory sample path: a single reusable, file-cluster-aligned block buffer, refilled per cluster from the
-	// streaming frame reader (deluge_sample_read), reproducing the native bytes the old resident-cluster payload gave.
-	// It carries CACHE_LINE_SIZE of slack either side — mirroring smDeserializer.fileClusterBuffer — because the
-	// band loop below does misaligned 32-bit reads a few bytes BEFORE the buffer start and just PAST its end. The
-	// frame temp holds whole stride-sized frames (the reader serves whole frames only) before the straddle copy.
+	// In-memory sample path: a single reusable, file-cluster-aligned block buffer holding the native audio bytes,
+	// refilled per cluster from the streaming frame reader (deluge_sample_read). It carries CACHE_LINE_SIZE of
+	// slack either side — mirroring smDeserializer.fileClusterBuffer — because the band loop below does
+	// misaligned 32-bit reads a few bytes BEFORE the buffer start and just PAST its end. The frame temp holds
+	// whole stride-sized frames (the reader serves whole frames only) before the straddle copy.
 	char* sampleBlockBuffer = nullptr;
 	void* sampleFrameTemp = nullptr;
 	size_t sampleFrameTempBytes = 0;
@@ -468,13 +468,12 @@ tryGettingFFTConfig:
 
 						// The first frame may begin a few bytes BEFORE fileLo when the cluster boundary falls
 						// mid-frame; the reader lands whole frames stride-aligned in the temp, and we copy from that
-						// in-frame offset so the straddle is stitched exactly as the old payload bytes were.
+						// in-frame offset so the straddle is stitched together correctly.
 						const uint32_t framesRead = deluge_sample_read(sampleSourceId, firstFrame, numFrames,
 						                                               sampleFrameTemp, sampleFrameTempBytes);
 						if (framesRead < numFrames) {
-							// A short/zero read left needed audio bytes unfilled (card failure / EOF): preserve the
-							// old load_now failure semantics (return Error::SD_CARD through allocGuard) rather than
-							// silently zero-filling real audio.
+							// A short/zero read left needed audio bytes unfilled (card failure / EOF): fail loudly
+							// (return Error::SD_CARD through allocGuard) rather than silently zero-filling real audio.
 							return Error::SD_CARD; // allocGuard frees the sample buffers + FFT buffers + bands.
 						}
 

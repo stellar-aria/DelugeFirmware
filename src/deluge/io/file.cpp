@@ -8,9 +8,9 @@ namespace deluge::io {
 
 namespace {
 
-// R2 Task 4: the efatfs backend's `u32` handles are boxed into the opaque
-// DelugeFile*/DelugeDir* pointers, mirroring R1's streaming handle -- these
-// are never dereferenced, only cast back to `u32` before crossing into Rust.
+// The efatfs backend's `u32` handles are boxed into the opaque DelugeFile*/DelugeDir* pointers,
+// the same convention the streaming handle uses -- these are never dereferenced, only cast back
+// to `u32` before crossing into Rust.
 //
 // The Rust TaskFileTable/DirHandleTable `insert` hands out the lowest free
 // slot starting at 0, so the offset-less cast used to box slot 0 into

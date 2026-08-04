@@ -24,8 +24,8 @@
 
 // Resource-manager Source callbacks (contract documented in sample_stream.h and chunk_residency.h).
 // `owner` is the Sample* registered by deluge_streaming_define_asset() below. The chunk IS the
-// manager's slab backing (placement-new'd at `dest`); residency lives entirely in the manager, so
-// these callbacks no longer mirror anything into SampleStream (SR3d).
+// manager's slab backing (placement-new'd at `dest`); residency lives entirely in the manager, and
+// these callbacks do not mirror anything into SampleStream.
 
 uint32_t deluge_streaming_define_asset(Sample* sample) {
 	deluge::audio::stream::SampleStream& stream = sample->stream();
@@ -54,7 +54,7 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 	if (sample->isProjectReferenced()) {
 		deluge_resource_reference(mgr, stream.resource_asset_id());
 	}
-	// Register this asset's fill-context (SR2d-4 Task 1). Ordering: open_read_stream() is always
+	// Register this asset's fill-context. Ordering: open_read_stream() is always
 	// called before this point on the only path that ever assigns an efatfs handle
 	// (AudioFileManager::buildAudioFileFromCard opens the stream, then loadFile()'s cluster reads
 	// trigger this function on first use) — so efatfs_handle_ is already whatever it will be for this
@@ -66,10 +66,10 @@ uint32_t deluge_streaming_define_asset(Sample* sample) {
 }
 
 // The chunk-construct callback (`deluge_streaming_chunk_construct`, registered above) and every
-// chunk field accessor now live in Rust (`deluge_sample_fill::chunk`, U4d) — the streamed chunk's
-// storage was relocated there, so this TU only *registers* the Rust construct symbol; it no longer
-// defines it or touches the chunk's byte layout.
+// chunk field accessor live in Rust (`deluge_sample_fill::chunk`) — the streamed chunk's storage
+// lives there, so this TU only *registers* the Rust construct symbol; it does not define it or
+// touch the chunk's byte layout.
 
-// No evict callback (SR3d): the streamed chunk is a trivially-destructible POD living in the
+// No evict callback: the streamed chunk is a trivially-destructible POD living in the
 // manager's slab, and the manager frees the slab + auto-de-queues the loader entry on eviction —
 // there is nothing an evict callback would need to do, so the asset registers a null on_evict.

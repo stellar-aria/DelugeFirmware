@@ -7,9 +7,7 @@ use deluge_resource::DelugeResource;
 // (`src/deluge/storage/audio/stream/async_fill.cpp`). This crate's own `cargo test` binary links
 // `deluge_resource` (and this crate) standalone, with no app around to supply it, so a
 // `#[cfg(test)]` stub below stands in — mirroring the `host_critical_section_stubs` pattern in
-// `lib.rs`. `deluge_streaming_chunk_payload` used to live here too (U4d Task 6 resolved it directly
-// through `deluge_sample_fill::chunk::payload` instead, retiring this crate's own C-ABI hop and its
-// identity-stub test mock).
+// `lib.rs`.
 unsafe extern "C" {
     /// Wakes the async fill task (mirrors `SampleStream::get_cluster`'s post-enqueue
     /// signal) so an enqueued-but-unwoken chunk doesn't stall on `FILL_WAKE`.

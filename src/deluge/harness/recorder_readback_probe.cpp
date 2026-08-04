@@ -114,7 +114,7 @@ void teardown() {
 	}
 }
 
-// --- SR3b Task 3 regression probe (finalized multi-cluster residency-table sizing) -------------
+// --- Finalized multi-cluster overview-cache sizing regression probe ----------------------------
 
 SampleRecorder* g_finalizedRecorder = nullptr;
 DelugeSampleSource* g_finalizedSource = nullptr;
@@ -238,9 +238,8 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels
 
 	g_finalizedRecorder = new SampleRecorder();
 	// allowFileAlterationAfter defaults false and is never set here -- finalizeRecordedFile() is
-	// therefore GUARANTEED to take its no-alteration else-branch (the one branch the SR3b Task 3
-	// regression left completely unresized, and the only branch AudioClip recording itself ever
-	// takes), independent of numChannels.
+	// therefore GUARANTEED to take its no-alteration else-branch (the only branch AudioClip
+	// recording itself ever takes), independent of numChannels.
 	Error err = g_finalizedRecorder->setup(numChannels, AudioInputChannel::MIX, /*newKeepingReasons=*/false,
 	                                       /*shouldRecordExtraMargins=*/false, AudioRecordingFolder::RESAMPLE,
 	                                       /*buttonPressLatency=*/0, /*outputRecordingFrom=*/nullptr);
@@ -296,10 +295,8 @@ uint8_t deluge_harness_recorder_finalized_multicluster_probe(uint8_t numChannels
 
 	// The exact formula finalizeRecordedFile()'s hoisted resize uses -- the PHYSICAL waveform overview
 	// cache (overviewCacheSize(), captured right below) MUST be >= this for the grow to have fired.
-	// SampleStream's own residency table (the original target of this probe) is gone as of the
-	// residency-table deletion; overviewCache_ is the one remaining structure finalizeRecordedFile()
-	// grows to the final cluster count via the same grow-only guard, so it exercises the same
-	// regression. We deliberately read overviewCacheSize() and NOT num_clusters() here: num_clusters()
+	// overviewCache_ is the structure finalizeRecordedFile() grows to the final cluster count via a
+	// grow-only guard. We deliberately read overviewCacheSize() and NOT num_clusters() here: num_clusters()
 	// is derived from this same geometric formula, so reading it would make this probe tautological
 	// and blind to a skipped grow (the exact regression this case exists to catch).
 	uint32_t idealFileSizeAfterAction =

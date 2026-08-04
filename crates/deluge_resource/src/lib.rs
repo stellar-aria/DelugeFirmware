@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn cache_hit_same_asset_index_still_leases() {
-        // Guards the Fix-1 identity revalidation: a genuine cache hit for a resident
+        // Guards the identity revalidation: a genuine cache hit for a resident
         // (asset,index) must still lease and return the SAME backing, not be rejected
         // by the strengthened bail (which only fires when the slot's identity changed
         // out from under the scan).
@@ -1225,11 +1225,10 @@ mod tests {
 
     #[test]
     fn concurrent_enqueue_drain_holds_invariants() {
-        // R1.2: proves the one genuinely-new R1 concurrency contract — the loader
-        // queue drained by an async task (`streaming_loader::fill_once`'s
-        // `deluge_resource_loader_next`, then the B1 readiness publish
-        // `deluge_resource_mark_ready`) racing concurrently against enqueue from
-        // another context (`deluge_resource_loader_enqueue`, the C++/producer
+        // Proves the loader queue's concurrency contract: the queue drained by an
+        // async task (`streaming_loader::fill_once`'s `deluge_resource_loader_next`,
+        // then the readiness publish `deluge_resource_mark_ready`) racing concurrently
+        // against enqueue from another context (`deluge_resource_loader_enqueue`, the C++/producer
         // side that decides a chunk needs a fill). `concurrent_lease_churn_*`
         // above already TSan-proved the underlying masked `ChunkSlot` access for
         // acquire/lease churn; this test targets the specific
@@ -1250,7 +1249,7 @@ mod tests {
         // with genuine cross-thread contention, which is a strictly harder bar.
         #[derive(Clone, Copy)]
         struct H(*mut crate::DelugeResource);
-        // SAFETY: every access below goes through the same masked helpers B1
+        // SAFETY: every access below goes through the same masked helpers already
         // proved race-free.
         unsafe impl Send for H {}
 
@@ -1307,7 +1306,7 @@ mod tests {
         });
 
         // Consumer thread: the async-drain stand-in. Pops the most-urgent
-        // queued+leased chunk, publishes it ready (the B1 readiness publish),
+        // queued+leased chunk, publishes it ready via `deluge_resource_mark_ready`,
         // then drops the lease the pop implicitly took ownership of.
         let consumer = std::thread::spawn(move || {
             let handle = handle; // see note in thread `producer` above.

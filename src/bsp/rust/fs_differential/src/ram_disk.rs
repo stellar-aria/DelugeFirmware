@@ -31,8 +31,8 @@ impl RamDisk {
         RamDisk
     }
 
-    /// A snapshot copy of the current disk contents (for differential
-    /// before/after comparisons in later tasks).
+    /// A snapshot copy of the current disk contents, for differential
+    /// before/after comparisons.
     pub fn snapshot(&self) -> Vec<u8> {
         DISK.lock().unwrap().clone()
     }

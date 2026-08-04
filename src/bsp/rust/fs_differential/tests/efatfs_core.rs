@@ -1,16 +1,17 @@
-//! SP1a Task 7a: host coverage of the REAL `efatfs_core` handle-table logic.
+//! Host coverage of the REAL `efatfs_core` handle-table logic.
 //!
 //! The device handle table (`src/efatfs_fs.rs`) is `#![cfg(target_os = "none")]`
-//! and can't be reached from any host build; Task 7a extracted its logic into
-//! the storage-generic `src/efatfs_core.rs`. This test `#[path]`-includes that
+//! and can't be reached from any host build; its logic lives in the
+//! storage-generic `src/efatfs_core.rs`. This test `#[path]`-includes that
 //! exact source and drives it over `fs_differential`'s host `FileSystem`
 //! (`FileBlockDevice` → `BufStream` → embedded-fatfs), so the generation guard,
 //! the `FileContext` detach/reattach, and the fill loop get real execution on
-//! host — coverage the Task-3 reviewer flagged as missing.
+//! host.
 //!
 //! DIVERGENCE: host is single-threaded `block_on`, so this validates the core's
 //! logic (round-trip, interleave, recycle guard) ONLY, not the device
-//! `static`/embassy-`Mutex` serialization — that is the on-device Task 8 gate.
+//! `static`/embassy-`Mutex` serialization — that still needs on-device
+//! verification.
 
 // Recompile the real core into this test binary (same `#[path]` convention the
 // BSP host tests use). efatfs_core depends only on embedded_fatfs +
@@ -112,8 +113,8 @@ fn efatfs_core_open_read_and_interleave_fat32() {
 /// The generation guard: a `checkout` captured before a `remove` + `insert`
 /// recycle of the same slot index must NOT be able to `commit` a stale context
 /// onto the file now occupying that slot. This is the device `read_at`
-/// write-back race the Task-3 fix guards against — untestable on the device
-/// (statics), covered here against the real core.
+/// write-back race the generation guard protects against — untestable on the
+/// device (statics), covered here against the real core.
 #[test]
 fn efatfs_core_generation_guard_rejects_stale_commit() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -343,12 +344,11 @@ fn efatfs_core_looping_playback_transfer_overhead() {
     );
 
     // Measured 1.03x (looping playback amortizes its one backward seek per
-    // wrap over ~1024 sequential reads) — this is the evidence SP1b's planned
-    // cached FAT cluster chain was dropped for; see
-    // `efatfs_core_adversarial_seek_transfer_overhead` for the isolated
-    // seek-cost measurement and .superpowers/sdd/task-1-report.md for the
-    // full derivation. A regression here means looping-sample playback
-    // itself got slower, not merely that seeking got more expensive.
+    // wrap over ~1024 sequential reads) — this is why a cached FAT cluster
+    // chain isn't needed; see `efatfs_core_adversarial_seek_transfer_overhead`
+    // for the isolated seek-cost measurement. A regression here means
+    // looping-sample playback itself got slower, not merely that seeking got
+    // more expensive.
     assert!(
         overhead < 1.10,
         "looping-playback transfer overhead {overhead:.2}x regressed \
@@ -373,10 +373,8 @@ fn efatfs_core_looping_playback_transfer_overhead() {
 //
 // Consequence: typical Deluge samples (single-digit MB) cost on the order of
 // 1.6% even under CONSTANT adversarial seeking, and real looping playback
-// (above) costs 1.03x. That is why SP1b's cached FAT cluster chain was
-// dropped — the re-walk it would have eliminated is already cheap at
-// realistic sizes. See .superpowers/sdd/task-1-report.md for the full
-// measurement record.
+// (above) costs 1.03x. A cached FAT cluster chain isn't worth adding — the
+// re-walk it would eliminate is already cheap at realistic sizes.
 
 /// Two seek-dense access patterns over the same 2048-cluster file, neither of
 /// which ever reads two consecutive clusters in file order: reverse
@@ -464,8 +462,8 @@ fn efatfs_core_adversarial_seek_transfer_overhead() {
 /// `ceil(256/128)` = 2 FAT sectors, predicting ~1.03x — **measured 1.060x**
 /// (475/448). The idealized model undercounts both sides by the same constant:
 /// `read_context` reattaches a fresh `File` on every read via
-/// `File::new_from_context` (file.rs:76-91, the PR #59 stale-context guard),
-/// which reads+compares the on-disk 32-byte directory entry every time —
+/// `File::new_from_context` (file.rs:76-91, the stale-context guard), which
+/// reads+compares the on-disk 32-byte directory entry every time —
 /// one more block read per read call, independent of the chain walk, present
 /// whether or not this fix applies. The 1.10x bound sits well below the
 /// measured broken number (1.154x) and with clear margin above the measured
@@ -515,9 +513,9 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
         // Measured 1.154x without the fix (restart from first_cluster) vs
         // 1.060x with it (continue from current_cluster) — see the doc
         // comment above for the full derivation, including the constant
-        // per-read directory-entry-validation cost (PR #59) that both
-        // numbers carry. 1.10x sits with real margin below the broken
-        // number and above the fixed one.
+        // per-read directory-entry-validation cost that both numbers carry.
+        // 1.10x sits with real margin below the broken number and above the
+        // fixed one.
         assert!(
             overhead < 1.10,
             "forward seek overhead {overhead:.2}x suggests seek() is still restarting \
@@ -526,7 +524,7 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
     });
 }
 
-/// R0a: the AUDIO read access pattern — cluster-aligned reads in playback order,
+/// The AUDIO read access pattern — cluster-aligned reads in playback order,
 /// including loop-point backward seeks — must be byte-identical through efatfs and
 /// C FatFS. Complements the whole-file/interleave differentials with the pattern the
 /// streaming engine actually issues. The C-FatFS whole-file read is the oracle.
@@ -572,7 +570,7 @@ fn efatfs_streaming_pattern_matches_cfatfs_fat32() {
     }
 }
 
-/// R0a non-vacuity: reading the WRONG cluster must NOT match the oracle — proves the
+/// Non-vacuity check: reading the WRONG cluster must NOT match the oracle — proves the
 /// streaming differential above can actually detect a divergence (per the project's
 /// real-execution mandate). If this ever passes-as-equal, the differential is blind.
 #[test]
@@ -600,7 +598,7 @@ fn efatfs_streaming_pattern_nonvacuous() {
     );
 }
 
-/// R1 (C2 fix): the sector-rounded LAST-CLUSTER read the streaming loader issues
+/// The sector-rounded LAST-CLUSTER read the streaming loader issues
 /// (`begin_fill` in `async_fill.cpp`) legitimately requests bytes past the file's
 /// logical EOF — `numSectors = ceil((audioDataEnd - clusterStart) / 512)` rounds the
 /// read up to a whole number of 512-byte sectors, and `audioDataEnd` is frequently
@@ -664,10 +662,9 @@ fn efatfs_core_fill_zero_pads_past_logical_eof_last_cluster() {
     );
 }
 
-/// Task 1: byte-offset read-exactness at a non-cluster-aligned offset — the operation
+/// Byte-offset read-exactness at a non-cluster-aligned offset — the operation
 /// `deluge_efatfs_read_at` performs (arbitrary byte_offset, arbitrary length), proven byte-exact
-/// against the C-FatFS oracle. (The FFI's block_on bridge is thin glue over exactly this call; its
-/// integration is exercised by Lens 2 in Task 5.)
+/// against the C-FatFS oracle. (The FFI's block_on bridge is thin glue over exactly this call.)
 #[test]
 fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -695,7 +692,7 @@ fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
     }
 }
 
-/// R2 Task 1: write-then-read round-trip through the new core write/read-exact
+/// Write-then-read round-trip through the core write/read-exact
 /// primitives, including the EOF-honest read's contract — a request for MORE
 /// bytes than the file holds must return the true short count, NOT a
 /// zero-padded full buffer (that's `read_context`/`fill`'s streaming-read
@@ -724,7 +721,7 @@ fn efatfs_write_then_read_roundtrip_fat32() {
     assert_eq!(&buf[..n], &payload[..]);
 }
 
-/// R2 Task 1: `truncate_context` shrinks the on-disk size, confirmed via
+/// `truncate_context` shrinks the on-disk size, confirmed via
 /// `size_context`.
 #[test]
 fn efatfs_truncate_shrinks_size_fat32() {
@@ -739,7 +736,7 @@ fn efatfs_truncate_shrinks_size_fat32() {
     assert_eq!(sz, 1000);
 }
 
-/// R2 Task 2: mkdir + create-in-dir + rename + unlink, each verified via the
+/// mkdir + create-in-dir + rename + unlink, each verified via the
 /// C-FatFS oracle (a DIFFERENT filesystem implementation reading the SAME
 /// shared disk) so the check proves the efatfs-side op actually landed on
 /// disk, not just that efatfs's own in-memory view agrees with itself.
@@ -762,7 +759,7 @@ fn efatfs_create_unlink_rename_mkdir_fat32() {
     assert!(!CFatFs::mount().exists("/R2DIR/B.BIN"));
 }
 
-/// R2 Task 2: WRITE_CREATE_NEW (`exclusive == true`) must fail — not
+/// WRITE_CREATE_NEW (`exclusive == true`) must fail — not
 /// silently truncate — when the target path already exists.
 #[test]
 fn efatfs_create_new_fails_if_exists_fat32() {
@@ -776,7 +773,7 @@ fn efatfs_create_new_fails_if_exists_fat32() {
     );
 }
 
-/// R2 Task 2: `set_time` writes a packed FAT date/time (the same
+/// `set_time` writes a packed FAT date/time (the same
 /// `(dos_date << 16) | dos_time` convention C-FatFS's `get_fattime()` uses)
 /// that a re-mount of the C-FatFS oracle reads back identically — the same
 /// shared-disk cross-check the create/rename/unlink test above uses.
@@ -804,10 +801,10 @@ fn efatfs_set_time_matches_cfatfs_fat32() {
     );
 }
 
-// --- R2 Task 3: directory enumeration ---------------------------------------
+// --- Directory enumeration ---------------------------------------
 
-/// R2 Task 3 Step 1 (brief-verbatim): efatfs's directory listing matches
-/// C-FatFS's, as a SET of (name, is_dir, size) tuples (order not compared).
+/// efatfs's directory listing matches C-FatFS's, as a SET of (name, is_dir,
+/// size) tuples (order not compared).
 #[test]
 fn efatfs_readdir_matches_cfatfs_set_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -825,7 +822,7 @@ fn efatfs_readdir_matches_cfatfs_set_fat32() {
     );
 }
 
-/// R3 Task 1: the load-bearing proof for the persistent-write-handle
+/// The load-bearing proof for the persistent-write-handle
 /// mechanism the sample recorder needs -- write N clusters through the
 /// no-flush primitives (accumulating ONLY the in-memory size), confirm an
 /// independent C-FatFS open-by-path still sees the stale (pre-write) on-disk
@@ -864,11 +861,10 @@ fn efatfs_noflush_write_then_read_via_context_before_flush_fat32() {
     assert_eq!(CFatFs::mount().read_file(path).len(), 3 * CB, "flush must persist the full size");
 }
 
-/// R2 Task 3: the REAL `efatfs_core::readdir_open`/`readdir_next` (not the
+/// The REAL `efatfs_core::readdir_open`/`readdir_next` (not the
 /// `EFatFs`/`CFatFs` differential wrappers above) walked directly, matching
-/// C-FatFS's listing as a set. (R2 Task 5a: this used to also round-trip the
-/// now-removed `EfatfsLocator`/`open_by_locator` open-by-locator fast-open --
-/// dropped along with that machinery; the UI identifies files by path.)
+/// C-FatFS's listing as a set. (The UI identifies files by path, not by a
+/// held FS locator.)
 #[test]
 fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -902,7 +898,7 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
     );
 }
 
-// --- R3 Task 6: mid-write read-back via the write context (retires sdAddress/sector_of) ----
+// --- Mid-write read-back via the write context -----------------------------
 //
 // `deluge::io::Stream` (stream.cpp) routes the sample recorder's writes through the
 // `deluge_efatfs_stream_*` C-ABI (`efatfs_fs.rs`/`efatfs_host_shim.rs`), which composes the SAME
@@ -913,12 +909,11 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
 // host_app,efatfs_streaming` + `cargo test -p deluge-bsp-rust --target x86_64-unknown-linux-gnu`
 // (the whole host suite, which builds and links those symbols). This test proves the primitive
 // underneath them: a recording-shaped sequential multi-cluster write through the no-flush write
-// path, then EVERY already-written cluster -- not just the most recently written one, unlike the
-// retired `sector_of_context`/`deluge_efatfs_stream_sector_of` mechanism this test used to also
-// exercise -- reading back byte-exact through the SAME still-open, unflushed write context, and a
-// final flush+close making the whole file visible byte-exact to an independent C-FatFS reader.
+// path, then EVERY already-written cluster -- not just the most recently written one -- reading
+// back byte-exact through the SAME still-open, unflushed write context, and a final flush+close
+// making the whole file visible byte-exact to an independent C-FatFS reader.
 
-/// R3 Task 6 (brief-verbatim): a recording-shaped sequential write via the efatfs
+/// A recording-shaped sequential write via the efatfs
 /// persistent-context write primitives, no flush between clusters, then -- mirroring how the
 /// sample recorder's `alterFile()`/finalize header patch-back read their own still-open write
 /// context back via `read_at_via` -- every EARLIER cluster read back byte-exact through the SAME
@@ -933,7 +928,7 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let path = "/R3READ.BIN";
-    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the R3 Task 1 test)
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry)
     const NUM_CLUSTERS: u32 = 4;
 
     let mut ctx = e.create_context(path, false); // WRITE_CREATE
@@ -947,14 +942,14 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
         clusters.push(payload);
     }
 
-    // On-disk dir size is still stale pre-flush (same precondition the R3 Task 1 test checks).
+    // On-disk dir size is still stale pre-flush (same precondition the write/read-via-context test checks).
     assert_eq!(
         CFatFs::mount().read_file(path).len(),
         0,
         "precondition: dir size not yet flushed"
     );
 
-    // Mid-write read-back (R3 Task 6): read EVERY already-written cluster -- including the
+    // Mid-write read-back: read EVERY already-written cluster -- including the
     // earliest, long since superseded as "most recently written" -- back through the same
     // still-open, unflushed write context. The write context's in-memory size covers the whole
     // written extent even though the on-disk directory entry is stale (proven above), so this
@@ -984,9 +979,9 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
     assert_eq!(got, want, "flushed file contents diverged from what was written");
 }
 
-// --- R3 Task 4: finalize header-patch positional write -----------------------------------
+// --- Finalize header-patch positional write -----------------------------------
 
-/// R3 Task 4 (brief-verbatim): write a recording-shaped multi-cluster file through the no-flush
+/// Write a recording-shaped multi-cluster file through the no-flush
 /// write primitives, then -- on the SAME still-open write context, mirroring
 /// `SampleRecorder::finalizeRecordedFile`'s chosen ordering (patch the WAV header via
 /// `Stream::write_at(0, first-sector-span)` BEFORE `Stream::close()`, since `write_at` needs an
@@ -1001,7 +996,7 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let path = "/R3HDR.BIN";
-    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the R3 Task 1/3 tests)
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry)
     const NUM_CLUSTERS: u32 = 3;
     const SECTOR: usize = 512;
 
@@ -1052,9 +1047,9 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
     );
 }
 
-// --- R3 Task 5: alterFile in-place middle-cluster rewrite ---------------------------------
+// --- alterFile in-place middle-cluster rewrite ---------------------------------
 
-/// R3 Task 5 (brief-verbatim): write a multi-cluster file, then rewrite a MIDDLE cluster IN
+/// Write a multi-cluster file, then rewrite a MIDDLE cluster IN
 /// PLACE via `write_at(middleIndex << mag, newSpan)` -- mirroring
 /// `SampleRecorder::alterFile`'s two positional-write sites, which rewrite already-recorded
 /// clusters at their own byte offset (`clusterIndex << Cluster::size_magnitude`) through a write
@@ -1071,7 +1066,7 @@ fn efatfs_write_at_middle_cluster_rewrite_matches_cfatfs_fat32() {
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let path = "/R3ALTER.BIN";
-    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry, matches the earlier R3 tests)
+    const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry)
     const NUM_CLUSTERS: u32 = 4;
     const MIDDLE: u32 = 1; // neither the first nor the last cluster
 

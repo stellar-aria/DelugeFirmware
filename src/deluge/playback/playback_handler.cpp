@@ -73,7 +73,7 @@
 #include "processing/stem_export/stem_export.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/flash_storage.h"
-#include "storage/owner.h" // deluge::storage::Owner::run_or_inline — B6 #6, run undo()/redo() on the worker
+#include "storage/owner.h" // deluge::storage::Owner::run_or_inline — run undo()/redo() on the worker
 #include "storage/storage_manager.h"
 #include "sync/sd_access.h"
 #include "util/cfunctions.h"
@@ -159,10 +159,9 @@ void PlaybackHandler::routine() {
 namespace {
 /// The dispatched op for `PlaybackHandler::slowRoutine()`'s pending UNDO/REDO handling: runs
 /// `actionLogger.undo()`/`.redo()` on the storage worker so `ConsequenceAudioClipSetSample::revert()`'s
-/// `AudioFileHolder::loadFile()` (bug B6, chain #6) doesn't block the executor. `resumePlayback()`'s
-/// dependency on the loaded sample lives inside `revert()` itself, so it travels with the op
-/// automatically — no post-op work needed here, unlike the context-menu/whole-gesture patterns
-/// elsewhere in this rung.
+/// `AudioFileHolder::loadFile()` (see docs/dev/known-concurrency-bugs.md, B6) doesn't block the
+/// executor. `resumePlayback()`'s dependency on the loaded sample lives inside `revert()` itself,
+/// so it travels with the op automatically — no post-op work needed here.
 ///
 /// `command` is the snapshot taken by `slowRoutine()` before dispatch (see its comment) — NOT a
 /// re-read of `pendingGlobalMIDICommand`, which `slowRoutine()` has already reset to NONE by the
@@ -191,8 +190,8 @@ void PlaybackHandler::slowRoutine() {
 		D_PRINTLN("actioning pending command -----------------------------------------");
 
 		// Snapshot which command (UNDO vs REDO) and clear the pending flag now, synchronously,
-		// before the dispatch below. undo()/redo() can load a sample (bug B6, chain #6) and, once
-		// dispatched onto the storage worker, can outlive this call (Embassy fire-and-forget).
+		// before the dispatch below. undo()/redo() can load a sample (see docs/dev/known-concurrency-bugs.md,
+		// B6) and, once dispatched onto the storage worker, can outlive this call (Embassy fire-and-forget).
 		// slowRoutine() can be re-entered before that op completes — e.g. from this same repeating
 		// task's own next tick (deluge.cpp). Clearing pendingGlobalMIDICommand here means a
 		// re-entrant call sees NONE and does nothing, instead of double-dispatching the same command.

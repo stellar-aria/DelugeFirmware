@@ -27,7 +27,7 @@
 using namespace deluge::gui;
 
 namespace {
-// --- DX cartridge preview dispatch (the item deferred from rung 4a) ------------------------
+// --- DX cartridge preview dispatch ------------------------------------------------------------
 //
 // DxCartridge::tryLoad() reads+parses the cartridge file (FatFS open/read); its result gates
 // whether we enter the cartridge submenu. That's a preview-style read, not a beginListing(Open)
@@ -43,8 +43,7 @@ std::string g_cartridgeLoadPath;
 bool g_cartridgeLoadInFlight = false;
 
 /// Owner-op trampoline: read+parse the cartridge (tryLoad already shows its own error popups on
-/// failure), then on success enter the submenu — the same "enter on success" tail enterKeyPress
-/// used to run inline.
+/// failure), then on success enter the submenu — the "enter on success" tail for enterKeyPress.
 void runCartridgeLoadOp(void*) {
 	bool loaded = menu_item::dxCartridge.tryLoad(g_cartridgeLoadPath);
 	g_cartridgeLoadInFlight = false;

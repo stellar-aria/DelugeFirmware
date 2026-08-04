@@ -28,8 +28,8 @@
 //! `deluge_worker_run` directly from ordinary `std::thread`s (no protection)
 //! while `worker_poll`'s `dequeue()` runs concurrently on the host executor
 //! thread reliably fires a genuine TSan data race (`fiber.rs:413` `dequeue`
-//! vs. `fiber.rs:402` the enqueue write) — see `HOST_HARNESS.md` / the Task 4
-//! report for the transcript. This is a real, load-bearing constraint, not
+//! vs. `fiber.rs:402` the enqueue write) — see `HOST_HARNESS.md` for the
+//! transcript. This is a real, load-bearing constraint, not
 //! just a stale comment: **`deluge_worker_run` (and therefore `Owner::run`)
 //! must only ever be called from the executor thread**, same as any other
 //! cooperative-task API on this BSP.
@@ -199,7 +199,7 @@ extern "C" fn sd_routine_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
-// Drop-retry contract (rung 4a): `deluge_worker_run` returns false when the
+// Drop-retry contract: `deluge_worker_run` returns false when the
 // fixed-capacity ring is full, and once drained a resubmission is accepted
 // again. The one-shot UI/smsysex dispatchers rely on that false return to
 // release their single-flight guard and retry (LatestWins::reset,
@@ -254,7 +254,7 @@ async fn drop_test() {
 }
 
 // ---------------------------------------------------------------------------
-// Render-then-complete contract (rung 4b, shape 1): models the async browser
+// Render-then-complete contract: models the async browser
 // op's on-fiber UI callback (`folderContentsReady`/`onBrowserOpened`) — it
 // mutates shared UI-model state and completes. The property "the executor
 // keeps running other tasks while an op is in flight" is already proven above
@@ -309,7 +309,7 @@ extern "C" fn render_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
-// Optimistic-open back-out contract (rung 4b, shape 2): models an optimistic
+// Optimistic-open back-out contract: models an optimistic
 // browser-open that tentatively commits, then discovers the listing failed
 // and unwinds (`onListingFailed`) — all inside the same op body, on the
 // fiber. Asserts the unwind genuinely runs on the fiber and that the
@@ -354,7 +354,7 @@ extern "C" fn backout_op(_ctx: *mut core::ffi::c_void) {
 }
 
 // ---------------------------------------------------------------------------
-// `block_on_fiber` contract (rung 5, the flip): the SD device transfer sites
+// `block_on_fiber` contract: the SD device transfer sites
 // (`sd.rs` `deluge_block_read`/`deluge_block_write`) now drive the real SD
 // transfer future through `fiber::block_on_fiber` when on the owner fiber —
 // suspending the fiber (not parking the whole executor, unlike `block_on`)
@@ -375,7 +375,7 @@ extern "C" fn backout_op(_ctx: *mut core::ffi::c_void) {
 // the same ring while it's suspended does NOT start executing until it
 // completes — `worker_poll`'s `FIBER_BUSY` gate means only one op ever
 // occupies the fiber at a time, so this is the single-owner/no-re-entrancy
-// property the whole ladder exists to preserve, now checked against the
+// property the Owner dispatch guarantees, checked here against the
 // actual Future-driving mechanism rather than the `yield_until` primitive
 // the other phases above use; (3) it resolves within a bound tight enough
 // to prove the Waker is actually driving it forward, not just an unrelated
@@ -687,7 +687,7 @@ pub fn run() {
         || !crate::fiber::sd_routine_held(),
     );
 
-    // --- drop-retry contract: a full ring refuses, a drained ring accepts again (rung 4a) ---
+    // --- drop-retry contract: a full ring refuses, a drained ring accepts again ---
     let drop_deadline = Instant::now() + Duration::from_secs(20);
     DROP_TEST_GO.store(true, Ordering::SeqCst);
     wait_until(drop_deadline, "drop_test to finish", || {
@@ -708,7 +708,7 @@ pub fn run() {
         "after the ring drained, a resubmission should be accepted again (drop-retry)"
     );
 
-    // --- render-then-complete (rung 4b, shape 1): submit render_op, let it
+    // --- render-then-complete: submit render_op, let it
     // park (modelling "in flight, rendering"), then resume it and assert the
     // UI-state write landed exactly once, on the fiber, serialized ---
     assert_eq!(
@@ -754,7 +754,7 @@ pub fn run() {
         "render_op overlapped with another op body (serialization contract broken)"
     );
 
-    // --- optimistic-open back-out (rung 4b, shape 2): submit backout_op,
+    // --- optimistic-open back-out: submit backout_op,
     // which commits optimistically then unwinds a simulated listing failure
     // in the same op body — assert the unwind ran on the fiber and the
     // "committed" flag is not left set afterward ---
@@ -792,7 +792,7 @@ pub fn run() {
         "browser-open-committed flag left set after a failed+unwound optimistic open"
     );
 
-    // --- block_on_fiber (rung 5, the flip): submit block_on_fiber_op (which
+    // --- block_on_fiber: submit block_on_fiber_op (which
     // drives a hand-built, AtomicWaker-backed BofFuture through the actual
     // fiber::block_on_fiber fn — the same fn sd.rs's device read/write sites
     // now use for the real SD transfer future; see the header above for why

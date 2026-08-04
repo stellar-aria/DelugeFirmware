@@ -91,10 +91,9 @@ doReturnFalse:
 
 	// TODO: create folder if doesn't exist.
 
-	// The listing (and the LED-blink tail that used to run straight after it - see
-	// onBrowserOpened()) now happens async: dispatch it and return optimistically. Failure goes
-	// through the base Browser::onListingFailed() (displayError + close()) once the listing
-	// completes.
+	// The listing (and the LED-blink tail in onBrowserOpened()) happens async: dispatch it and
+	// return optimistically. Failure goes through the base Browser::onListingFailed()
+	// (displayError + close()) once the listing completes.
 	beginListing(
 	    {.action = ListingAction::Open, .direction = 0, .filenameToStartAt = searchFilename, .defaultDir = "SONGS"});
 

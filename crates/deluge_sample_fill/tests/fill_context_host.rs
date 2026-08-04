@@ -1,5 +1,5 @@
-//! Host round-trip test for the per-asset streaming fill-context table (SR2d-4 Task 1, relocated to
-//! `deluge_sample_fill` in C2a Task 2): `deluge_streaming_set_fill_context` (the main/load-thread
+//! Host round-trip test for the per-asset streaming fill-context table:
+//! `deluge_streaming_set_fill_context` (the main/load-thread
 //! write, called from C++ at sample-load) → `fill_context_for` (the read side the native fill task
 //! wires in). Always-compiled tier (see the crate's `lib.rs` doc) — unlike
 //! `deluge-bsp-rust`'s `tests/streaming_fill_host.rs`, this does NOT need `async_streaming_loader`
@@ -36,9 +36,9 @@ fn registered_asset_round_trips() {
     deluge_streaming_set_fill_context(ptr::null_mut(), 3, ctx);
     let got = fill_context_for(3);
     assert_eq!(got, Some(ctx));
-    // byte_depth/num_channels explicitly, on top of the whole-struct equality above: these are
-    // the two fields this task adds, and the fill itself never reads them back (`to_fill_geometry`
-    // drops them), so this test is their only coverage.
+    // byte_depth/num_channels explicitly, on top of the whole-struct equality above: the fill
+    // itself never reads them back (`to_fill_geometry` drops them), so this test is their only
+    // coverage.
     let got = got.unwrap();
     assert_eq!(got.byte_depth, ctx.byte_depth);
     assert_eq!(got.num_channels, ctx.num_channels);

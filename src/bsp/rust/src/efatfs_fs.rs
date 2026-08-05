@@ -757,6 +757,17 @@ pub extern "C" fn deluge_efatfs_mount() -> bool {
     crate::fiber::block_on_fiber(mount()).is_ok()
 }
 
+/// C-ABI: whether the FS is currently mounted (pure state check, no I/O). Lets a caller distinguish
+/// a fresh `mount()` transition from the already-mounted case, since `mount()`'s own success return
+/// can't tell them apart (it's idempotent).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
+    if !crate::fiber::on_fiber() {
+        return false;
+    }
+    crate::fiber::block_on_fiber(with_fs(async |_fs| ())).is_some()
+}
+
 /// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
 /// (see [`remount`]). For a card SWAP: gives a clean FS against the new card
 /// and invalidates stale Rust-side handle state from the old one.

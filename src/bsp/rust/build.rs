@@ -79,13 +79,15 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
 
-    // Same reasoning again: `deluge_efatfs_mount`/`_remount`/`_cluster_size` (efatfs_fs.rs) have no
-    // C++ caller yet (this is the additive foundation task — Tasks 2-4 wire callers in), so without
-    // these roots `--gc-sections` would prune all three from the final link.
+    // Same reasoning again: `deluge_efatfs_remount` (efatfs_fs.rs) still has no C++ caller (only
+    // Task 2's card-swap follow-up wires it in), so without this root `--gc-sections` would prune it
+    // from the final link. `_mount`/`_cluster_size`/`_is_mounted` now have real callers via
+    // storage_manager.cpp/audio_file_manager.cpp, but keeping them rooted here too is harmless.
     for sym in [
         "deluge_efatfs_mount",
         "deluge_efatfs_remount",
         "deluge_efatfs_cluster_size",
+        "deluge_efatfs_is_mounted",
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
@@ -296,12 +298,13 @@ fn run_host_app(
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
-    // Same reasoning again: `deluge_efatfs_mount`/`_remount`/`_cluster_size` (efatfs_host_shim.rs)
-    // have no C++ caller yet — see the device path's identical block above.
+    // Same reasoning again: `deluge_efatfs_remount` (efatfs_host_shim.rs) still has no C++ caller —
+    // see the device path's identical block above.
     for sym in [
         "deluge_efatfs_mount",
         "deluge_efatfs_remount",
         "deluge_efatfs_cluster_size",
+        "deluge_efatfs_is_mounted",
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }

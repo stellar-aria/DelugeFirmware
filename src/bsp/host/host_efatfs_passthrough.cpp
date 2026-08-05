@@ -95,6 +95,11 @@ struct FileSlot {
 };
 std::array<FileSlot, kMaxAuxHandles> g_files{};
 
+// Tracks whether deluge_efatfs_mount has ever run in this process, so deluge_efatfs_is_mounted can
+// report a real not-mounted -> mounted transition on the first call (the host image itself needs no
+// bring-up, but callers still need to see exactly one "fresh mount" at boot).
+bool g_mounted = false;
+
 FileSlot* file_slot(uint32_t handle) {
 	if (handle == 0 || handle > kMaxAuxHandles) {
 		return nullptr;
@@ -457,9 +462,16 @@ bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_cluste
 }
 
 bool deluge_efatfs_mount(void) {
-	// The host image (reconstructed project directory under DELUGE_SD_ROOT) is always mounted --
-	// there is no separate Rust-owned FS object to bring up here. No-op success.
+	// The host image (reconstructed project directory under DELUGE_SD_ROOT) needs no real bring-up
+	// -- there is no separate Rust-owned FS object here -- but g_mounted still tracks whether this
+	// has run before, so deluge_efatfs_is_mounted can report one real not-mounted->mounted
+	// transition (callers use it to fire one-time "fresh card" setup, matching the device backend).
+	g_mounted = true;
 	return true;
+}
+
+bool deluge_efatfs_is_mounted(void) {
+	return g_mounted;
 }
 
 bool deluge_efatfs_remount(void) {

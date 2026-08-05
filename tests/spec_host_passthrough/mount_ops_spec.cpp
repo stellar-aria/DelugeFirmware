@@ -13,6 +13,12 @@ describe mount_ops("passthrough deluge_efatfs_mount/_remount/_cluster_size", $ {
 		expect(deluge_efatfs_mount()).to_equal(true);
 	});
 
+	it("is_mounted reports true once mount has run", _ {
+		fresh_root();
+		expect(deluge_efatfs_mount()).to_equal(true);
+		expect(deluge_efatfs_is_mounted()).to_equal(true);
+	});
+
 	it("remount is a no-op success on the host", _ {
 		fresh_root();
 		expect(deluge_efatfs_remount()).to_equal(true);

@@ -851,6 +851,20 @@ pub extern "C" fn deluge_efatfs_mount() -> bool {
     .is_ok()
 }
 
+/// C-ABI: whether the FS is currently mounted (pure state check, no I/O). Lets a caller distinguish
+/// a fresh `mount()` transition from the already-mounted case, since `mount()`'s own success return
+/// can't tell them apart (it's idempotent).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
+    let fut = with_fs(async |_fs| ());
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .is_some()
+}
+
 /// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
 /// (see [`remount`]).
 #[unsafe(no_mangle)]

@@ -85,10 +85,6 @@ Serializer& GetSerializer() {
 extern void initialiseConditions();
 extern void songLoaded(Song* song);
 
-// Because FATFS and FIL objects store buffers for SD read data to be read to via DMA, we have to space them apart from
-// any other data so that invalidation and stuff works
-FatFS::Filesystem fileSystem;
-
 Error StorageManager::checkSpaceOnCard() {
 	uint32_t freeClusters = 0;
 	uint32_t totalClusters = 0;
@@ -230,32 +226,27 @@ bool StorageManager::fileExists(char const* pathName) {
 // just no card inserted.
 Error StorageManager::initSD() {
 
-	// If we know the SD card is still initialised AND the volume is already mounted, no need to
-	// actually initialise. The fs_type check matters where the block device can report "ready"
-	// before the FAT volume has ever been mounted (e.g. the host-sim opens its disk image
-	// eagerly): without it we'd take the delayed-mount path below, leaving fileSystem.csize == 0
-	// — and then Cluster::set_size(0) makes every file read request 0 bytes. On hardware the volume
-	// is always mounted by the time the card reports initialised, so this is a no-op there.
+	// If there's no card present, we're in trouble - check this first, before touching the
+	// filesystem, so callers get SD_CARD_NOT_PRESENT (not a generic mount failure) when the card
+	// is simply absent. This is the BSP's card-detect line, not a FatFS/efatfs concept.
 	DSTATUS status = disk_status(deluge_block_sd_unit());
-	if ((status & STA_NOINIT) == 0 && fileSystem.fs_type != 0) {
-		auto _ = fileSystem.mount(0); // check that it's mounted but don't block if not
-		return Error::NONE;
-	}
-
-	// But if there's no card present, we're in trouble
 	if (status & STA_NODISK) {
 		return Error::SD_CARD_NOT_PRESENT;
 	}
 
-	// Otherwise, we can mount the filesystem...
-	bool success = D_TRY_CATCH(fileSystem.mount(1).transform_error(fatfsErrorToDelugeError), error, {
-		return error; //<
-	});
-	if (success) {
-		audioFileManager.firstCardRead(); // tell the audio file manager that we have a new card
-		return Error::NONE;
+	// Query mounted state BEFORE mounting so we can tell a fresh mount transition apart from the
+	// already-mounted fast path (deluge_efatfs_mount is idempotent, so its return alone can't
+	// distinguish them). firstCardRead()->cardReinserted() walks every audioFile in memory, which
+	// is too heavy to re-run on every initSD call (this runs before every FS access) - it must only
+	// fire once per actual (re)mount.
+	bool wasMounted = deluge_efatfs_is_mounted();
+	if (!deluge_efatfs_mount()) {
+		return Error::SD_CARD;
 	}
-	return Error::SD_CARD;
+	if (!wasMounted) {
+		audioFileManager.firstCardRead(); // tell the audio file manager that we have a new card
+	}
+	return Error::NONE;
 }
 
 bool StorageManager::checkSDPresent() {

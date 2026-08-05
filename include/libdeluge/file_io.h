@@ -209,6 +209,12 @@ bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_cluste
 /// @return true if mounted (or already was); false on mount failure or if the call is off-fiber.
 bool deluge_efatfs_mount(void);
 
+/// @brief Query whether the storage volume is currently mounted. Pure state check, no I/O — lets a
+///        caller distinguish a fresh `deluge_efatfs_mount` transition from the already-mounted case
+///        (`deluge_efatfs_mount`'s own return can't tell them apart, since it's idempotent).
+/// @return true if mounted; false if unmounted, or if the call is off-fiber.
+bool deluge_efatfs_is_mounted(void);
+
 /// @brief Drop the mounted volume and re-mount fresh, invalidating every outstanding handle
 ///        (streaming reads, task-context files/dirs, and in-progress stream-writes all become
 ///        invalid — callers must reopen). Used to pick up a card SWAP.

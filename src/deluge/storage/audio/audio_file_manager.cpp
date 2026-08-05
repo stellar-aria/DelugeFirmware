@@ -27,6 +27,7 @@
 #include "io/midi/midi_device_manager.h"
 #include "io/stream.hpp"
 #include "libdeluge/block_device.h"
+#include "libdeluge/file_io.h"       // deluge_efatfs_cluster_size
 #include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/stream_io.h"
 #include "libdeluge/system.h" // deluge_in_interrupt
@@ -140,7 +141,13 @@ void AudioFileManager::init() {
 
 	Error error = StorageManager::initSD();
 	if (error == Error::NONE) {
-		Cluster::set_size(fileSystem.csize * 512);
+		uint32_t clusterBytes = 0;
+		// Shouldn't fail right after a successful mount, but never let a 0 cluster size through -
+		// Cluster::set_size(0) would make every file read request 0 bytes.
+		if (!deluge_efatfs_cluster_size(&clusterBytes)) {
+			clusterBytes = Cluster::kSizeFAT16Max;
+		}
+		Cluster::set_size(clusterBytes);
 
 		D_PRINTLN("Cluster::size  %d clusterSizeMagnitude  %d", Cluster::size, Cluster::size_magnitude);
 		cardEjected = false;
@@ -162,11 +169,18 @@ void AudioFileManager::cardReinserted() {
 		highestUsedAudioRecordingNumberNeedsReChecking[i] = true;
 	}
 
+	// Query the reinserted card's cluster size. On failure (shouldn't happen right after a fresh
+	// mount) the out-param is left untouched, so pre-seeding it with the current size makes an
+	// unavailable query fall through to the "stayed the same" branch below - never a spurious
+	// increased/decreased trip.
+	uint32_t newClusterSize = Cluster::size;
+	deluge_efatfs_cluster_size(&newClusterSize);
+
 	// If cluster size has increased, we're in trouble
-	if (fileSystem.csize * 512 > Cluster::size) {
+	if (newClusterSize > Cluster::size) {
 
 		// But, if it's still not as big as it was when we booted up, that's still manageable
-		if (fileSystem.csize * 512 <= clusterSizeAtBoot) {
+		if (newClusterSize <= clusterSizeAtBoot) {
 			goto clusterSizeChangedButItsOk;
 		}
 
@@ -177,7 +191,7 @@ void AudioFileManager::cardReinserted() {
 
 	// If cluster size decreased, we have to stop all current samples from ever sounding again. Pretty big trouble
 	// really...
-	else if (fileSystem.csize * 512 < Cluster::size) {
+	else if (newClusterSize < Cluster::size) {
 
 clusterSizeChangedButItsOk:
 		D_PRINTLN("cluster size changed, and smaller than original so it's ok");
@@ -201,7 +215,7 @@ clusterSizeChangedButItsOk:
 		}
 
 		// That was all a pain, but now we can update the cluster size
-		Cluster::set_size(fileSystem.csize * 512);
+		Cluster::set_size(newClusterSize);
 	}
 
 	// Or if cluster size stayed the same...

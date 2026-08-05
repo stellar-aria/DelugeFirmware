@@ -198,6 +198,10 @@ __attribute__((weak)) bool deluge_efatfs_mount(void) {
 	return false;
 }
 
+__attribute__((weak)) bool deluge_efatfs_is_mounted(void) {
+	return false;
+}
+
 __attribute__((weak)) bool deluge_efatfs_remount(void) {
 	return false;
 }

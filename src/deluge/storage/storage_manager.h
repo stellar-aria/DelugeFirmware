@@ -34,8 +34,6 @@ extern "C" {
 
 extern void deleteOldSongBeforeLoadingNew();
 
-extern FatFS::Filesystem fileSystem;
-
 class Instrument;
 class PlaybackMode;
 class ParamManagerForTimeline;

@@ -88,6 +88,22 @@ FileSlot* file_slot(uint32_t handle) {
 	return s.fd >= 0 ? &s : nullptr;
 }
 
+// Persistent stream-write handles (deluge_efatfs_stream_*): unlike g_files, the size tracked here
+// is an IN-MEMORY extent advanced by write_at, distinct from the on-disk size until flush/close.
+struct StreamSlot {
+	int fd = -1;
+	uint32_t size = 0; // in-memory extent (advanced by write_at, persisted-equivalent under POSIX)
+};
+std::array<StreamSlot, kMaxAuxHandles> g_streams{};
+
+StreamSlot* stream_slot(uint32_t handle) {
+	if (handle == 0 || handle > kMaxAuxHandles) {
+		return nullptr;
+	}
+	StreamSlot& s = g_streams[handle - 1];
+	return s.fd >= 0 ? &s : nullptr;
+}
+
 // mkdir -p the parent directory chain of a resolved absolute path (matches efatfs's create-parents).
 void mkdir_parents(const std::string& full) {
 	size_t last = full.find_last_of('/');
@@ -582,6 +598,153 @@ bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint
 	}
 	struct timeval times[2] = {{mt, 0}, {mt, 0}};
 	return utimes(full.c_str(), times) == 0;
+}
+
+bool deluge_efatfs_stream_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+	if (path == nullptr || out_handle == nullptr) {
+		return false;
+	}
+	std::string full = resolve_root_relative(path);
+	if (full.empty()) {
+		return false;
+	}
+	int flags = 0;
+	switch (mode) {
+	case DELUGE_STREAM_READ:
+		flags = O_RDONLY;
+		break;
+	case DELUGE_STREAM_WRITE_CREATE:
+		flags = O_RDWR | O_CREAT | O_TRUNC;
+		break;
+	case DELUGE_STREAM_WRITE_CREATE_NEW:
+		flags = O_RDWR | O_CREAT | O_EXCL;
+		break;
+	case DELUGE_STREAM_WRITE_APPEND:
+		flags = O_RDWR; // open existing, no truncation (position is per-write_at, not seek-to-end)
+		break;
+	default:
+		return false;
+	}
+	if (mode == DELUGE_STREAM_WRITE_CREATE || mode == DELUGE_STREAM_WRITE_CREATE_NEW) {
+		mkdir_parents(full);
+	}
+	int fd = open(full.c_str(), flags, 0666);
+	if (fd < 0) {
+		return false;
+	}
+	uint32_t size = 0;
+	if (mode == DELUGE_STREAM_READ || mode == DELUGE_STREAM_WRITE_APPEND) {
+		struct stat st{};
+		if (fstat(fd, &st) == 0) {
+			size = static_cast<uint32_t>(st.st_size);
+		}
+	}
+	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {
+		if (g_streams[i].fd < 0) {
+			g_streams[i] = {fd, size};
+			*out_handle = i + 1;
+			return true;
+		}
+	}
+	close(fd);
+	return false;
+}
+
+bool deluge_efatfs_stream_write_at(uint32_t handle, uint32_t byte_offset, const void* src, uint32_t count,
+                                   uint32_t* out_written) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr || src == nullptr || out_written == nullptr) {
+		return false;
+	}
+	const auto* buf = static_cast<const uint8_t*>(src);
+	uint32_t done = 0;
+	while (done < count) {
+		ssize_t n = pwrite(s->fd, buf + done, count - done, static_cast<off_t>(byte_offset) + done);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+		if (n == 0) {
+			break;
+		}
+		done += static_cast<uint32_t>(n);
+	}
+	if (byte_offset + done > s->size) {
+		s->size = byte_offset + done; // extend the in-memory extent
+	}
+	*out_written = done;
+	return true;
+}
+
+bool deluge_efatfs_stream_read_at_via(uint32_t handle, uint32_t byte_offset, void* dst, uint32_t count,
+                                      uint32_t* out_read) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr || dst == nullptr || out_read == nullptr) {
+		return false;
+	}
+	uint32_t avail = (byte_offset < s->size) ? (s->size - byte_offset) : 0; // bound by in-memory size
+	uint32_t want = std::min(count, avail);
+	auto* buf = static_cast<uint8_t*>(dst);
+	uint32_t got = 0;
+	while (got < want) {
+		ssize_t n = pread(s->fd, buf + got, want - got, static_cast<off_t>(byte_offset) + got);
+		if (n == 0) {
+			break;
+		}
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		got += static_cast<uint32_t>(n);
+	}
+	*out_read = got; // EOF-honest, never zero-padded
+	return true;
+}
+
+bool deluge_efatfs_stream_flush(uint32_t handle) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr) {
+		return false;
+	}
+	return fsync(s->fd) == 0; // POSIX pwrite is already durable; on-disk size already matches
+}
+
+bool deluge_efatfs_stream_truncate(uint32_t handle, uint32_t new_len) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr) {
+		return false;
+	}
+	uint32_t clamped = std::min(new_len, s->size); // shrink-only
+	if (ftruncate(s->fd, clamped) != 0) {
+		return false;
+	}
+	s->size = clamped;
+	return true;
+}
+
+bool deluge_efatfs_stream_size(uint32_t handle, uint32_t* out_size) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr || out_size == nullptr) {
+		return false;
+	}
+	*out_size = s->size; // in-memory extent, not on-disk dir entry
+	return true;
+}
+
+bool deluge_efatfs_stream_close(uint32_t handle) {
+	StreamSlot* s = stream_slot(handle);
+	if (s == nullptr) {
+		return false;
+	}
+	bool ok = (fsync(s->fd) == 0); // flush first...
+	close(s->fd);
+	s->fd = -1;
+	s->size = 0;
+	return ok; // ...slot is freed either way
 }
 
 } // extern "C"

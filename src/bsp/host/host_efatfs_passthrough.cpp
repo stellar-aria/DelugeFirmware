@@ -67,6 +67,7 @@
 #include <string>
 #include <strings.h> // strcasecmp
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -433,6 +434,25 @@ bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
 		return false;
 	}
 	*out_size = static_cast<uint32_t>(st.st_size); // cursor untouched
+	return true;
+}
+
+bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_clusters) {
+	if (out_free_clusters == nullptr || out_total_clusters == nullptr) {
+		return false;
+	}
+	const char* root = getenv("DELUGE_SD_ROOT");
+	if (root == nullptr || root[0] == '\0') {
+		return false;
+	}
+	struct statvfs st{};
+	if (statvfs(root, &st) != 0) {
+		return false;
+	}
+	// Report allocation units directly as "clusters" (cluster size := f_frsize): free = unprivileged
+	// available blocks, total = total blocks. Matches the u32 out-param cluster contract.
+	*out_free_clusters = static_cast<uint32_t>(st.f_bavail);
+	*out_total_clusters = static_cast<uint32_t>(st.f_blocks);
 	return true;
 }
 

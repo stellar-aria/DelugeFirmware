@@ -695,6 +695,30 @@ pub extern "C" fn deluge_efatfs_dir_close(handle: u32) {
     }
 }
 
+/// C-ABI: free + total cluster counts of the mounted volume.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stats(
+    out_free_clusters: *mut u32,
+    out_total_clusters: *mut u32,
+) -> bool {
+    if !crate::fiber::on_fiber() || out_free_clusters.is_null() || out_total_clusters.is_null() {
+        return false;
+    }
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::fs_stats(fs).await))
+        .flatten()
+    {
+        Some((free, total)) => {
+            // SAFETY: both out-params non-null (checked above).
+            unsafe {
+                *out_free_clusters = free;
+                *out_total_clusters = total;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 /// C-ABI: create a directory.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_efatfs_mkdir(path: *const c_char) -> bool {

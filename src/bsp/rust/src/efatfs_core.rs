@@ -540,6 +540,17 @@ where
     fs.root_dir().remove(path).await.ok()
 }
 
+/// Free + total cluster counts of the mounted volume.
+pub async fn fs_stats<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>) -> Option<(u32, u32)>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    let s = fs.stats().await.ok()?;
+    Some((s.free_clusters(), s.total_clusters()))
+}
+
 /// Create the directory at `path`, creating any missing parent directories too
 /// (`mkdir -p` semantics). `None` on any FS error.
 ///

@@ -197,6 +197,13 @@ bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset);
 /// @return `true` on success.
 bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size);
 
+/// @brief Free + total cluster counts of the mounted volume (whole-FS query).
+/// @param out_free_clusters  Set to the free cluster count on success.
+/// @param out_total_clusters Set to the total cluster count on success.
+/// @return true on success (both out-params written); false if no volume is mounted, the call is
+///         off-fiber, or a query error occurs — in which case the out-params are left untouched.
+bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_clusters);
+
 /// @brief Truncate the file behind `handle` to `new_len` bytes. The handle's
 ///        cursor position is left unchanged (matches POSIX `ftruncate`).
 ///

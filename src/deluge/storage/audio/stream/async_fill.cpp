@@ -190,6 +190,10 @@ __attribute__((weak)) bool deluge_efatfs_file_size(uint32_t /*handle*/, uint32_t
 	return false;
 }
 
+__attribute__((weak)) bool deluge_efatfs_stats(uint32_t* /*out_free_clusters*/, uint32_t* /*out_total_clusters*/) {
+	return false;
+}
+
 __attribute__((weak)) bool deluge_efatfs_file_truncate(uint32_t /*handle*/, uint32_t /*new_len*/) {
 	return false;
 }

@@ -25,6 +25,7 @@
 #include "io/file.hpp"
 #include "libdeluge/block_device.h"
 #include "libdeluge/control_surface.h"
+#include "libdeluge/file_io.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/instrument_clip.h"
 #include "model/drum/gate_drum.h"
@@ -89,8 +90,15 @@ extern void songLoaded(Song* song);
 FatFS::Filesystem fileSystem;
 
 Error StorageManager::checkSpaceOnCard() {
-	D_PRINTLN("free clusters:  %d", fileSystem.free_clst);
-	return fileSystem.free_clst ? Error::NONE : Error::SD_CARD_FULL; // This doesn't seem to always be 100% accurate...
+	uint32_t freeClusters = 0;
+	uint32_t totalClusters = 0;
+	// Best-effort: if the query can't run (unmounted, off-fiber, or a non-efatfs BSP whose weak stub
+	// returns false), don't spuriously report the card full — treat it as space available.
+	if (!deluge_efatfs_stats(&freeClusters, &totalClusters)) {
+		return Error::NONE;
+	}
+	D_PRINTLN("free clusters:  %d", freeClusters);
+	return freeClusters ? Error::NONE : Error::SD_CARD_FULL;
 }
 
 // Creates folders and subfolders as needed!

@@ -48,6 +48,23 @@ describe stream_ops("passthrough stream-write", $ {
 		expect(sz).to_equal(4u);
 		deluge_efatfs_stream_close(h);
 	});
+
+	it("write_at reports failure on a hard I/O error instead of swallowing it", _ {
+		fresh_root();
+		uint32_t h = 0;
+		deluge_efatfs_stream_open("G.BIN", DELUGE_STREAM_WRITE_CREATE, &h);
+		uint32_t w = 0;
+		deluge_efatfs_stream_write_at(h, 0, "12345", 5, &w);
+		deluge_efatfs_stream_close(h);
+
+		// Reopen READ-ONLY: the slot's fd is O_RDONLY, so pwrite() fails with EBADF
+		// (a hard error, not EINTR) -- deluge_efatfs_stream_write_at must report that as failure,
+		// not swallow it and return true with a partial *out_written.
+		expect(deluge_efatfs_stream_open("G.BIN", DELUGE_STREAM_READ, &h)).to_equal(true);
+		uint32_t w2 = 0;
+		expect(deluge_efatfs_stream_write_at(h, 0, "ab", 2, &w2)).to_equal(false);
+		deluge_efatfs_stream_close(h);
+	});
 });
 
 CPPSPEC_SPEC(stream_ops)

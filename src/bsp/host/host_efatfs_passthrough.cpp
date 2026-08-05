@@ -518,6 +518,9 @@ bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_c
 		struct tm tmv{};
 		localtime_r(&st.st_mtime, &tmv);
 		*out_modified = pack_fat_datetime(tmv);
+		// NOTE: FAT HIDDEN (0x02) and SYSTEM (0x04), which the device efatfs can surface, are
+		// deliberately NOT reproduced here — a reconstructed project directory on the C-host has no
+		// POSIX equivalent for either bit, so this is an intentional host-sim divergence.
 		uint8_t attrs = is_dir ? 0x10 /*DIR*/ : 0x20 /*ARC*/;
 		if ((st.st_mode & S_IWUSR) == 0) {
 			attrs |= 0x01; // RDO
@@ -686,7 +689,9 @@ bool deluge_efatfs_stream_write_at(uint32_t handle, uint32_t byte_offset, const 
 			if (errno == EINTR) {
 				continue;
 			}
-			break;
+			return false; // hard I/O error (e.g. ENOSPC/EIO/EBADF): propagate as failure, matching
+			              // deluge_efatfs_file_write and the device efatfs's write-error behaviour;
+			              // *out_written/s->size are left untouched
 		}
 		if (n == 0) {
 			break;

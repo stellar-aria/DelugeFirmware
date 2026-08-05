@@ -997,11 +997,16 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 
 		// here we loop until we are able to successfully create a folder
 		while (true) {
-			// try to create folder
+			// efatfs mkdir is idempotent (succeeds on an existing dir), so a successful mkdir does
+			// not imply the folder was new. Only accept a folder that does not already exist, so we
+			// never reuse an occupied stem-export folder (old C-FatFS f_mkdir returned FR_EXIST here).
 			deluge_file_invalidate_cache();
-			// successful, exit out of loop
-			if (deluge::io::mkdir(tempPathForSearch.c_str()).has_value()) {
-				break;
+			if (!deluge::io::Directory::open(tempPathForSearch.c_str()).has_value()) {
+				// try to create folder
+				if (deluge::io::mkdir(tempPathForSearch.c_str()).has_value()) {
+					// successful, exit out of loop
+					break;
+				}
 			}
 			// not successful — an existing folder is how we find a free number; try the next
 			// increment folder number so we can append it to the folder name

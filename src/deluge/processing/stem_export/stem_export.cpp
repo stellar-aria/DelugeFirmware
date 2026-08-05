@@ -18,7 +18,6 @@
 #include "processing/stem_export/stem_export.h"
 #include "definitions_cxx.hpp"
 #include "extern.h"
-#include "fatfs/ff.h"
 #include "gui/context_menu/stem_export/cancel_stem_export.h"
 #include "gui/context_menu/stem_export/done_stem_export.h"
 #include "gui/l10n/l10n.h"
@@ -28,6 +27,7 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
+#include "io/file.hpp"
 #include "libdeluge/file_io.h"
 #include "libdeluge/streaming_fill.h" // deluge_streaming_drain_queue_blocking
 #include "model/clip/clip.h"
@@ -43,6 +43,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/owner.h" // deluge::storage::Owner::run — run the export on the worker fiber
 #include "util/etl_string.h"
+#include "util/functions.h"
 #include "util/string.h"
 #include <iterator>
 #include <new>
@@ -924,10 +925,10 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 
 	// try to create the STEMS folder if it doesn't exist
 	deluge_file_invalidate_cache();
-	FRESULT result = f_mkdir(tempPath.c_str());
 	// if we couldn't create folder and it doesn't exist, return error
-	if (result != FR_OK && result != FR_EXIST) {
-		return fresultToDelugeErrorCode(result);
+	if (auto made = deluge::io::mkdir(tempPath.c_str());
+	    !made.has_value() && made.error() != deluge::io::Status::EXISTS) {
+		return delugeStatusToError(deluge::io::to_deluge_status(made.error()));
 	}
 
 	// tempPath = SAMPLES/EXPORTS/
@@ -948,10 +949,10 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 
 	// try to create folder
 	deluge_file_invalidate_cache();
-	result = f_mkdir(tempPath.c_str());
 	// if we couldn't create folder and it doesn't exist, return error
-	if (result != FR_OK && result != FR_EXIST) {
-		return fresultToDelugeErrorCode(result);
+	if (auto made = deluge::io::mkdir(tempPath.c_str());
+	    !made.has_value() && made.error() != deluge::io::Status::EXISTS) {
+		return delugeStatusToError(deluge::io::to_deluge_status(made.error()));
 	}
 
 	switch (currentStemExportType) {
@@ -998,31 +999,28 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 		while (true) {
 			// try to create folder
 			deluge_file_invalidate_cache();
-			result = f_mkdir(tempPathForSearch.c_str());
 			// successful, exit out of loop
-			if (result == FR_OK) {
+			if (deluge::io::mkdir(tempPathForSearch.c_str()).has_value()) {
 				break;
 			}
-			// not successful
-			else {
-				// increment folder number so we can append it to the folder name
-				highestUsedStemFolderNumber++;
+			// not successful — an existing folder is how we find a free number; try the next
+			// increment folder number so we can append it to the folder name
+			highestUsedStemFolderNumber++;
 
-				// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS
-				tempPathForSearch = tempPath.c_str();
+			// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS
+			tempPathForSearch = tempPath.c_str();
 
-				// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS-
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS-
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS-
-				tempPathForSearch.append("-");
+			// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS-
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS-
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS-
+			tempPathForSearch.append("-");
 
-				// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS-##
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS-##
-				// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS-##
-				tempPathForSearch.append(deluge::string::fromInt(highestUsedStemFolderNumber, 2));
-			}
+			// tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/TRACKS-##
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS-##
+			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS-##
+			tempPathForSearch.append(deluge::string::fromInt(highestUsedStemFolderNumber, 2));
 		}
 
 		// copy folder path created above into the filePath so it can be used by the caller

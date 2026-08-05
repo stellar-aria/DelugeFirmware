@@ -420,12 +420,12 @@ aborted:
 			this->file.reset();
 
 			deluge_file_invalidate_cache();
-			FRESULT result = f_unlink(filePathCreated.c_str());
+			bool unlinked = deluge::io::unlink(filePathCreated).has_value();
 
 			// If this was the most recent recording in this category, tick the counter backwards - so long as
 			// either the delete was successful or it was for an AudioClip, which means the file is in the TEMP folder
 			// and can be overwritten anyway
-			if (result == FR_OK || folderID == AudioRecordingFolder::CLIPS) {
+			if (unlinked || folderID == AudioRecordingFolder::CLIPS) {
 				if (audioFileManager.highestUsedAudioRecordingNumber[util::to_underlying(folderID)]
 				    == audioFileNumber) {
 					audioFileManager.highestUsedAudioRecordingNumber[util::to_underlying(folderID)]--;

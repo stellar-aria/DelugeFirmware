@@ -15,27 +15,41 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-/// Host-sim efatfs passthrough: STRONG definitions of the `libdeluge/streaming_fill.h`
-/// streaming-read symbols (`deluge_efatfs_open` / `_close` / `_read_at`) and the
-/// `libdeluge/file_io.h` task-context file symbols (`deluge_efatfs_file_*`), overriding the
-/// `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time.
+/// Host-sim efatfs passthrough: STRONG definitions of the FULL `deluge::io` task-context C-ABI
+/// surface — the `libdeluge/streaming_fill.h` streaming-read triplet (`deluge_efatfs_open` /
+/// `_close` / `_read_at`), the `libdeluge/file_io.h` file/dir/path-op symbols
+/// (`deluge_efatfs_file_*`, `deluge_efatfs_dir_*`, `deluge_efatfs_mkdir`/`_unlink`/`_rename`/
+/// `_set_time`), and the `libdeluge/stream_io.h` stream-write symbols (`deluge_efatfs_stream_*`)
+/// — overriding the `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time. This
+/// TU also owns the host selector `deluge_streaming_efatfs_active()` (strong, → true below),
+/// which is what routes `deluge::io::File`/`Directory`/`OutputStream` (file.cpp/stream.cpp) onto
+/// this passthrough instead of the C-FatFS `f_*` path on the C-host sim.
 ///
-/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) and `deluge::io::File`
-/// (file.cpp, when `deluge_streaming_efatfs_active()` is true) are efatfs-only — there is no
-/// C-FatFS fallback for either path. The host-sim `deluge_render`/`deluge_loadcheck` link no Rust
-/// efatfs provider (that only exists on the Rust/Embassy BSP), so without this file every streamed
-/// sample fails to open and every task-context file operation no-ops. This gives the host sim a
-/// real backend for both over plain POSIX file I/O against the RECONSTRUCTED PROJECT DIRECTORY
-/// (not the packed FAT image a real device uses — see `host_render_main.cpp`'s `DELUGE_SD_ROOT`
-/// setenv).
+/// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) is efatfs-only — there
+/// is no C-FatFS fallback for the streaming-read path at all, on any BSP. `deluge::io`'s
+/// task-context surface (file.cpp/stream.cpp) does have a C-FatFS fallback, but with the selector
+/// here forced true it always prefers this passthrough on the C-host. The host-sim
+/// `deluge_render`/`deluge_loadcheck`/`deluge_host` link no Rust efatfs provider (that only exists
+/// on the Rust/Embassy BSP), so without this file every streamed sample would fail to open and
+/// every task-context file operation would no-op. This gives the host sim a real backend for both
+/// over plain POSIX file I/O against the RECONSTRUCTED PROJECT DIRECTORY (not the packed FAT image
+/// a real device uses — see `host_render_main.cpp`'s `DELUGE_SD_ROOT` setenv). The packed FAT
+/// image (`DELUGE_SD_IMAGE`) and C-FatFS still mount alongside this passthrough — this file does
+/// not remove either; it just wins the task-context routing choice on the C-host (Phase A/B/C
+/// retire the image/C-FatFS separately).
 ///
 /// Design: a small fixed handle table per concern (`g_slots` for streaming reads, `g_files` for
-/// task-context files), no heap churn per read. The streaming `read_at` mirrors
-/// `efatfs_core::fill`'s (src/bsp/rust/src/efatfs_core.rs) over-EOF behaviour exactly: a read that
-/// runs past the end of the file is zero-padded rather than failed (the short-final-cluster fix)
-/// and reports `*out_read == count` on success regardless of how many bytes actually came off disk.
+/// task-context files, `g_dirs` for directory enumeration, `g_streams` for stream-writes), no heap
+/// churn per read. The streaming `read_at` mirrors `efatfs_core::fill`'s
+/// (src/bsp/rust/src/efatfs_core.rs) over-EOF behaviour exactly: a read that runs past the end of
+/// the file is zero-padded rather than failed (the short-final-cluster fix) and reports
+/// `*out_read == count` on success regardless of how many bytes actually came off disk.
 /// `deluge_efatfs_file_read` matches that same FILL convention; `deluge_efatfs_file_read_exact` is
-/// the EOF-honest counterpart `deluge::io::File::read` actually wants (see file_io.h).
+/// the EOF-honest counterpart `deluge::io::File::read` actually wants (see file_io.h). The
+/// directory/path-op/stream-write bodies mirror efatfs's own semantics one-for-one (documented at
+/// each definition below): create-parents-on-write, rename-fails-if-destination-exists,
+/// shrink-only truncate, 2-second FAT datetime resolution, and an in-memory stream-write extent
+/// distinct from on-disk size until flush/close.
 
 #include "libdeluge/file_io.h"
 #include "libdeluge/stream_io.h"
@@ -266,6 +280,14 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 		filled += static_cast<uint32_t>(n);
 	}
 	*out_read = count;
+	return true;
+}
+
+// Route deluge::io's task-context path (file.cpp/stream.cpp) to the efatfs C-ABI on the C-host sim —
+// i.e. to the passthrough bodies above — overriding the weak-false stub in async_fill.cpp. The
+// streaming-read path was already reaching the passthrough; this brings task-context files, directories,
+// and stream-writes onto it too. (Phase C deletes this selector once it is unconditionally true.)
+bool deluge_streaming_efatfs_active(void) {
 	return true;
 }
 

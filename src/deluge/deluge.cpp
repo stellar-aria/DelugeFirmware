@@ -43,6 +43,7 @@
 #include "hid/led/pad_leds.h"
 #include "hid/matrix/matrix_driver.h"
 #include "io/debug/log.h"
+#include "io/file.hpp"
 #include "io/midi/midi_device_manager.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/midi_follow.h"
@@ -72,10 +73,6 @@
 #include "util/misc.h"
 #include "util/pack.h"
 #include <stdlib.h>
-
-extern "C" {
-#include "fatfs/ff.h"
-}
 
 namespace encoders = deluge::hid::encoders;
 
@@ -429,16 +426,18 @@ void setupStartupSong() {
 		[[fallthrough]];
 	case StartupSongMode::LASTSAVED: {
 		// Create canary
-		FIL f;
 		deluge_file_invalidate_cache();
-		if (f_open(&f, failSafePath.c_str(), FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
-			f_close(&f);
-		}
-		else {
-			// Could not create canary, not a user-facing error so code is fine.
-			// We're going to skip the startup song to avoid any issues.
-			display->consoleText("Startup fault F2");
-			return; // no canary, no cleanup
+		{
+			auto canary = deluge::io::File::open(failSafePath, DELUGE_FILE_WRITE_CREATE);
+			if (canary.has_value()) {
+				(void)canary->close(); // RAII would close anyway; explicit for parity with the old f_close
+			}
+			else {
+				// Could not create canary, not a user-facing error so code is fine.
+				// We're going to skip the startup song to avoid any issues.
+				display->consoleText("Startup fault F2");
+				return; // no canary, no cleanup
+			}
 		}
 		// Handle missing song
 		if (!StorageManager::fileExists(filename)) {
@@ -447,7 +446,7 @@ void setupStartupSong() {
 				display->consoleText("Startup fault F3");
 				// cleanup, this wasn't a crash
 				deluge_file_invalidate_cache();
-				f_unlink(failSafePath.c_str());
+				(void)deluge::io::unlink(failSafePath);
 				return;
 			}
 			display->consoleText("Song missing");
@@ -460,7 +459,7 @@ void setupStartupSong() {
 			else {
 				// cleanup, this wasn't a crash
 				deluge_file_invalidate_cache();
-				f_unlink(failSafePath.c_str());
+				(void)deluge::io::unlink(failSafePath);
 				return;
 			}
 		}
@@ -480,7 +479,7 @@ void setupStartupSong() {
 		}
 		// ...but we got this far, cleanup
 		deluge_file_invalidate_cache();
-		f_unlink(failSafePath.c_str());
+		(void)deluge::io::unlink(failSafePath);
 	} break;
 	case StartupSongMode::BLANK:
 		[[fallthrough]];
@@ -744,49 +743,6 @@ static void deluge_boot(const DelugeBoard* board) {
 #ifdef TEST_VECTOR_DUPLICATES
 	NoteVector noteVector;
 	noteVector.testDuplicates();
-#endif
-
-#ifdef TEST_SD_WRITE
-
-	FIL fil; // File object
-	FATFS fs;
-	DIR dp;
-	FRESULT result; //	 FatFs return code
-	int32_t sdTotalBytesWritten;
-
-	int32_t count = 0;
-
-	while (true) {
-
-		int32_t fileNumber = (uint32_t)getNoise() % 10000;
-		int32_t fileSize = (uint32_t)getNoise() % 1000000;
-
-		char fileName[20];
-		strcpy(fineName, "TEST/") intToString(fileNumber, &fileName[5], 4);
-		strcat(fileName, ".TXT");
-
-		result = f_open(&fil, fileName, FA_CREATE_ALWAYS | FA_WRITE);
-		if (result) {
-			while (1) {}
-		}
-
-		sdTotalBytesWritten = 0;
-
-		while (sdTotalBytesWritten < fileSize) {
-			UINT bytesWritten = 0;
-			result = f_write(&fil, &miscStringBuffer, 256, &bytesWritten);
-
-			if (bytesWritten != 256) {
-				while (1) {}
-			}
-
-			sdTotalBytesWritten += 256;
-		}
-
-		f_close(&fil);
-
-		count++;
-	}
 #endif
 
 	inputRoutine();

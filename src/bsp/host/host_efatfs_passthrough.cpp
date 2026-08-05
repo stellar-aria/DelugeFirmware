@@ -456,6 +456,35 @@ bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_cluste
 	return true;
 }
 
+bool deluge_efatfs_mount(void) {
+	// The host image (reconstructed project directory under DELUGE_SD_ROOT) is always mounted --
+	// there is no separate Rust-owned FS object to bring up here. No-op success.
+	return true;
+}
+
+bool deluge_efatfs_remount(void) {
+	// No card-swap concept on the host sim; nothing to drop/reset/re-mount. No-op success.
+	return true;
+}
+
+bool deluge_efatfs_cluster_size(uint32_t* out_bytes) {
+	if (out_bytes == nullptr) {
+		return false;
+	}
+	const char* root = getenv("DELUGE_SD_ROOT");
+	if (root == nullptr || root[0] == '\0') {
+		return false;
+	}
+	struct statvfs st{};
+	if (statvfs(root, &st) != 0) {
+		return false;
+	}
+	// f_frsize is the fundamental allocation-unit size, matching deluge_efatfs_stats's convention
+	// of reporting allocation units directly as "clusters".
+	*out_bytes = static_cast<uint32_t>(st.f_frsize);
+	return true;
+}
+
 bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr) {

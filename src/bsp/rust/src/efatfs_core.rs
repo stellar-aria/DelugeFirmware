@@ -551,6 +551,16 @@ where
     Some((s.free_clusters(), s.total_clusters()))
 }
 
+/// The mounted volume's cluster (allocation-unit) size, in bytes.
+pub async fn fs_cluster_size<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>) -> Option<u32>
+where
+    IO: ReadWriteSeek,
+    TP: TimeProvider,
+    OCC: OemCpConverter,
+{
+    fs.stats().await.ok().map(|s| s.cluster_size())
+}
+
 /// Create the directory at `path`, creating any missing parent directories too
 /// (`mkdir -p` semantics). `None` on any FS error.
 ///

@@ -79,6 +79,17 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
 
+    // Same reasoning again: `deluge_efatfs_mount`/`_remount`/`_cluster_size` (efatfs_fs.rs) have no
+    // C++ caller yet (this is the additive foundation task — Tasks 2-4 wire callers in), so without
+    // these roots `--gc-sections` would prune all three from the final link.
+    for sym in [
+        "deluge_efatfs_mount",
+        "deluge_efatfs_remount",
+        "deluge_efatfs_cluster_size",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+
     // ---------------------------------------------------------------------
     // Link the portable C++ application (built by CMake into the `build/` dir).
     // deluge_app is an OBJECT lib (no .a), so archive its objects here, then
@@ -282,6 +293,15 @@ fn run_host_app(
         "deluge_sample_stream_get_asset_id",
         "deluge_sample_stream_set_asset_id",
         "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+    // Same reasoning again: `deluge_efatfs_mount`/`_remount`/`_cluster_size` (efatfs_host_shim.rs)
+    // have no C++ caller yet — see the device path's identical block above.
+    for sym in [
+        "deluge_efatfs_mount",
+        "deluge_efatfs_remount",
+        "deluge_efatfs_cluster_size",
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }

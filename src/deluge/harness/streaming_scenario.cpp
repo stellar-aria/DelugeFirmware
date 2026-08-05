@@ -22,11 +22,11 @@
 #include "harness/recorder_roundtrip_scenario.h" // deluge_scenario_run_recorder_roundtrip
 
 #include "definitions_cxx.hpp"
-#include "fatfs/ff.h"
 #include "gui/ui/audio_recorder.h"
 #include "gui/ui/load/load_song_ui.h"
 #include "gui/ui/ui.h"
 #include "gui/views/arranger_view.h"
+#include "io/file.hpp"
 #include "model/song/song.h"
 #include "playback/playback_handler.h"
 #include "processing/stem_export/stem_export.h"
@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <span>
 #include <string>
 #include <strings.h> // strcasecmp
 #include <sys/stat.h>
@@ -219,59 +220,64 @@ void deluge_scenario_copy_stems_out(const char* out_dir) {
 		return;
 	}
 
-	mkdir(out_dir, 0755); // best-effort; ignore EEXIST
+	mkdir(out_dir, 0755); // host POSIX output dir; best-effort, ignore EEXIST
 
-	DIR dir;
-	if (f_opendir(&dir, folder) != FR_OK) {
+	auto dir = deluge::io::Directory::open(folder);
+	if (!dir.has_value()) {
 		fprintf(stderr, "[golden-scenario] cannot open stem folder '%s' in image\n", folder);
 		return;
 	}
 
 	static char buf[65536];
 	int count = 0;
-	FILINFO fno;
-	while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
-		if (fno.fattrib & AM_DIR) {
+	while (true) {
+		auto entry = dir->read();
+		if (!entry.has_value() || !entry->has_value()) {
+			break; // read error OR end-of-directory
+		}
+		const DelugeDirEntry& e = **entry;
+		if (e.is_directory) {
 			continue;
 		}
-		size_t len = strlen(fno.fname);
-		if (len < 4 || strcasecmp(fno.fname + len - 4, ".WAV") != 0) {
+		size_t len = strlen(e.name);
+		if (len < 4 || strcasecmp(e.name + len - 4, ".WAV") != 0) {
 			continue;
 		}
 
 		char src[600];
 		char dst[700];
-		snprintf(src, sizeof src, "%s/%s", folder, fno.fname);
-		snprintf(dst, sizeof dst, "%s/%s", out_dir, fno.fname);
+		snprintf(src, sizeof src, "%s/%s", folder, e.name);
+		snprintf(dst, sizeof dst, "%s/%s", out_dir, e.name);
 
-		FIL fil;
-		if (f_open(&fil, src, FA_READ) != FR_OK) {
+		auto in = deluge::io::File::open(src, DELUGE_FILE_READ);
+		if (!in.has_value()) {
 			fprintf(stderr, "[golden-scenario] cannot read '%s'\n", src);
 			continue;
 		}
 		int ofd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (ofd < 0) {
 			fprintf(stderr, "[golden-scenario] cannot create '%s'\n", dst);
-			f_close(&fil);
-			continue;
+			continue; // `in` auto-closes (RAII)
 		}
-		UINT br = 0;
-		while (f_read(&fil, buf, sizeof buf, &br) == FR_OK && br > 0) {
+		while (true) {
+			auto chunk = in->read(std::span<std::byte>(reinterpret_cast<std::byte*>(buf), sizeof buf));
+			if (!chunk.has_value() || chunk->empty()) {
+				break; // read error OR EOF
+			}
 			size_t off = 0;
+			size_t br = chunk->size();
 			while (off < br) {
 				ssize_t w = write(ofd, buf + off, br - off);
 				if (w <= 0) {
 					break;
 				}
-				off += (size_t)w;
+				off += static_cast<size_t>(w);
 			}
 		}
 		close(ofd);
-		f_close(&fil);
 		count++;
 		fprintf(stderr, "[golden-scenario]   %s\n", dst);
 	}
-	f_closedir(&dir);
 	fprintf(stderr, "[golden-scenario] copied %d stem(s) to %s\n", count, out_dir);
 }
 

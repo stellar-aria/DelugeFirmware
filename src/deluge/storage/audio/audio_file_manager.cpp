@@ -527,18 +527,22 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		return true;
 	}
 
-	// Look up one proposed name in the (already-open) alternate load dir; on a hit, fill effectiveFilePointer /
-	// usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the now-non-alternate location).
+	// Look up one proposed name in the (known-to-exist) alternate load dir by full path; on a hit, fill
+	// effectiveFilePointer / usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the
+	// now-non-alternate location).
 	const auto tryAlternateName = [&](const std::string& proposedFileName) -> bool {
-		const char* proposedFileNamePointer = proposedFileName.c_str();
-		if (create_name(&alternateLoadDir, &proposedFileNamePointer) != FR_OK) { // Can only fail if name too weird.
+		std::string candidate = alternateAudioFileLoadPath;
+		candidate.append("/");
+		candidate.append(proposedFileName);
+		auto opened = deluge::io::File::open(candidate, DELUGE_FILE_READ);
+		if (!opened.has_value()) {
 			return false;
 		}
-		if (dir_find(&alternateLoadDir) != FR_OK) {
+		auto sz = opened->size();
+		if (!sz.has_value()) {
 			return false;
 		}
-		effectiveFilePointer.sclust = ld_clust(&fileSystem, alternateLoadDir.dir);
-		effectiveFilePointer.objsize = ld_dword(alternateLoadDir.dir + DIR_FileSize);
+		effectiveFilePointer.objsize = *sz;
 		usingAlternateLocation = alternateAudioFileLoadPath;
 		usingAlternateLocation.append("/");
 		usingAlternateLocation.append(proposedFileName);
@@ -568,16 +572,18 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		return tryAlternateName(getFileNameFromEndOfPath(filePath.c_str())) ? AltResult::Found : AltResult::NotFound;
 	};
 
-	// Open the file at its regular path; on success fill effectiveFilePointer. Returns the FatFS result.
-	const auto tryRegularPath = [&]() -> FRESULT {
-		FIL fil;
-		const FRESULT result = f_open(&fil, filePath.c_str(), FA_READ);
-		if (result == FR_OK) {
-			effectiveFilePointer.sclust = fil.obj.sclust;
-			effectiveFilePointer.objsize = fil.obj.objsize;
-			f_close(&fil);
+	// Open the file at its regular path; on success fill effectiveFilePointer.objsize. Returns whether it opened.
+	const auto tryRegularPath = [&]() -> bool {
+		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
+		if (!opened.has_value()) {
+			return false;
 		}
-		return result;
+		auto sz = opened->size();
+		if (!sz.has_value()) {
+			return false;
+		}
+		effectiveFilePointer.objsize = *sz;
+		return true; // File auto-closes on scope exit (RAII)
 	};
 
 	// If we already know the alternate dir exists there's a high chance the file is in it, so try that first and
@@ -590,18 +596,18 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		case AltResult::HardError:
 			return false;
 		case AltResult::NotFound:
-			if (tryRegularPath() == FR_OK) {
+			if (tryRegularPath()) {
 				return true;
 			}
 		}
 	}
 	else {
-		if (tryRegularPath() == FR_OK) {
+		if (tryRegularPath()) {
 			return true;
 		}
 		// Regular path failed — if an alternate dir might exist, open it and search there.
 		if (alternateLoadDirStatus == AlternateLoadDirStatus::MIGHT_EXIST) {
-			if (f_opendir(&alternateLoadDir, alternateAudioFileLoadPath.c_str()) != FR_OK) {
+			if (!deluge::io::Directory::open(alternateAudioFileLoadPath.c_str()).has_value()) {
 				alternateLoadDirStatus = AlternateLoadDirStatus::NOT_FOUND;
 				*error = Error::FILE_UNREADABLE;
 				return false;

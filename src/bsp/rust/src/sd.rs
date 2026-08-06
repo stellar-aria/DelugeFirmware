@@ -343,6 +343,28 @@ pub extern "C" fn disk_status(pdrv: u8) -> u8 {
     0
 }
 
+/// block_device.h — true if the card is present and initialised. A safe
+/// superset of the app's old `!(disk_status(unit) & STA_NODISK)` card-detect
+/// check: this also folds in `STA_NOINIT`, which is fine because the app's
+/// `initSD` immediately requires full readiness for the mount that follows
+/// anyway (see `storage_manager.cpp`'s `initSD`/`checkSDInitialized`).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_ready(unit: u8) -> bool {
+    if unit != 0 {
+        return false;
+    }
+    status_bits() & (STA_NOINIT | STA_NODISK) == 0
+}
+
+/// Host: mirrors `disk_status` above — the file-backed disk image is always
+/// ready once openable, no controller bring-up or card-detect to model.
+#[cfg(not(target_os = "none"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_ready(unit: u8) -> bool {
+    unit == 0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn disk_ioctl(pdrv: u8, cmd: u8, buff: *mut core::ffi::c_void) -> i32 {
     if pdrv != 0 {

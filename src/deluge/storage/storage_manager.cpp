@@ -223,8 +223,7 @@ Error StorageManager::initSD() {
 	// If there's no card present, we're in trouble - check this first, before touching the
 	// filesystem, so callers get SD_CARD_NOT_PRESENT (not a generic mount failure) when the card
 	// is simply absent. This is the BSP's card-detect line, not a FatFS/efatfs concept.
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	if (status & STA_NODISK) {
+	if (!deluge_block_ready(deluge_block_sd_unit())) {
 		return Error::SD_CARD_NOT_PRESENT;
 	}
 
@@ -244,14 +243,12 @@ Error StorageManager::initSD() {
 }
 
 bool StorageManager::checkSDPresent() {
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	bool present = !(status & STA_NODISK);
+	bool present = deluge_block_ready(deluge_block_sd_unit());
 	return present;
 }
 
 bool StorageManager::checkSDInitialized() {
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	return !(status & STA_NOINIT);
+	return deluge_block_ready(deluge_block_sd_unit());
 }
 
 Error StorageManager::openInstrumentFile(OutputType outputType, char const* path) {

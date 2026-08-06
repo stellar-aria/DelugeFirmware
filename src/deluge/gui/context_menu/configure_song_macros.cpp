@@ -23,10 +23,6 @@
 #include "hid/display/display.h"
 #include "model/song/song.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 namespace deluge::gui::context_menu {
 
 ConfigureSongMacros configureSongMacros{};

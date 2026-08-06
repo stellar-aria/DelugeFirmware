@@ -37,11 +37,8 @@
 #include "util/string.h"
 #include "util/try.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
-
-extern "C" {
-#include "fatfs/ff.h"
-}
 
 using namespace deluge;
 using namespace gui;

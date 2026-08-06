@@ -1059,9 +1059,10 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 	return Error::NONE;
 }
 
-/// FatFS rejects any path component longer than FF_MAX_LFN, so a stem file name can never be longer
-/// than that no matter how big a buffer we format it into.
-constexpr int32_t kMaxStemFileNameChars = FF_MAX_LFN;
+/// The SD card filesystem rejects any path component longer than 255 characters (the FAT/VFAT
+/// long-filename limit), so a stem file name can never be longer than that no matter how big a
+/// buffer we format it into.
+constexpr int32_t kMaxStemFileNameChars = 255;
 
 /// based on Stem Export Type, will set a WAV file name in the format of:
 /// /OutputType_StemExportType_OutputName_IndexNumber.WAV

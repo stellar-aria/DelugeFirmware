@@ -17,8 +17,6 @@
 
 #include "util/functions.h"
 #include "definitions_cxx.hpp"
-#include "fatfs/fatfs.hpp"
-#include "fatfs/ff.h"
 #include "gui/colour/colour.h"
 #include "gui/l10n/l10n.h"
 #include "gui/l10n/strings.h"
@@ -1872,59 +1870,6 @@ bool doesFilenameFitPrefixFormat(char const* fileName, char const* filePrefix, i
 	}
 
 	return true;
-}
-
-Error fresultToDelugeErrorCode(FRESULT result) {
-	switch (result) {
-	case FR_OK:
-		return Error::NONE;
-
-	case FR_NO_FILESYSTEM:
-		return Error::SD_CARD_NO_FILESYSTEM;
-
-	case FR_NO_FILE:
-		return Error::FILE_NOT_FOUND;
-
-	case FR_NO_PATH:
-		return Error::FOLDER_DOESNT_EXIST;
-
-	case FR_WRITE_PROTECTED:
-		return Error::WRITE_PROTECTED;
-
-	case FR_NOT_ENOUGH_CORE:
-		return Error::INSUFFICIENT_RAM;
-
-	case FR_EXIST:
-		return Error::FILE_ALREADY_EXISTS;
-
-	default:
-		return Error::SD_CARD;
-	}
-}
-
-Error fatfsErrorToDelugeError(FatFS::Error result) {
-	switch (result) {
-	case FatFS::Error::NO_FILESYSTEM:
-		return Error::SD_CARD_NO_FILESYSTEM;
-
-	case FatFS::Error::NO_FILE:
-		return Error::FILE_NOT_FOUND;
-
-	case FatFS::Error::NO_PATH:
-		return Error::FOLDER_DOESNT_EXIST;
-
-	case FatFS::Error::WRITE_PROTECTED:
-		return Error::WRITE_PROTECTED;
-
-	case FatFS::Error::NOT_ENOUGH_CORE:
-		return Error::INSUFFICIENT_RAM;
-
-	case FatFS::Error::EXIST:
-		return Error::FILE_ALREADY_EXISTS;
-
-	default:
-		return Error::SD_CARD;
-	}
 }
 
 Error delugeStatusToError(DelugeStatus status) {

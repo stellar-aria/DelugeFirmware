@@ -301,12 +301,12 @@ Error StorageManager::loadInstrumentFromFile(Song* song, InstrumentClip* clip, O
 
 	error = newInstrument->readFromFile(smDeserializer, song, clip, 0);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
+	if (error != Error::NONE || !fileSuccess) {
 		D_PRINTLN("reading instrument file failed -  %s", name->c_str());
-		if (!fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -400,12 +400,12 @@ Error StorageManager::loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrumen
 
 	error = midiInstrument->readDeviceDefinitionFile(smDeserializer, false);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
+	if (error != Error::NONE || !fileSuccess) {
 		D_PRINTLN("reading midi device definition file failed -  %s", fileName->c_str());
-		if (!fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -454,11 +454,11 @@ Error StorageManager::loadPatternFile(char const* path, std::string* fileName, b
 	error = instrumentClipView.pasteNotesFromFile(smDeserializer, overwriteExisting, noScaling, previewOnly,
 	                                              selectedDrumOnly);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
-		if (!fileSuccess) {
+	if (error != Error::NONE || !fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -482,11 +482,11 @@ Error StorageManager::loadFavouriteFile(char const* path, std::string* fileName)
 
 	error = favouritesManager.loadFavouritesFromFile(smDeserializer);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
-		if (!fileSuccess) {
+	if (error != Error::NONE || !fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -519,7 +519,7 @@ Error StorageManager::loadSynthToDrum(Song* song, InstrumentClip* clip, bool may
 
 	error = newDrum->readFromFile(smDeserializer, song, clip, 0);
 
-	bool fileSuccess = activeDeserializer->closeWriter() == FR_OK;
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
 	if (error != Error::NONE || !fileSuccess) {
@@ -811,7 +811,7 @@ bool FileReader::readFileCluster() {
 	if (!result) {
 		return false;
 	}
-	currentReadBufferEndPos = static_cast<UINT>(result->size());
+	currentReadBufferEndPos = static_cast<uint32_t>(result->size());
 
 	// If error or we reached end of file
 	if (!currentReadBufferEndPos) {
@@ -869,13 +869,13 @@ void FileReader::readDone() {
 	}
 }
 
-FRESULT FileReader::closeWriter() {
+bool FileReader::closeWriter() {
 	if (memoryBased) {
-		return FRESULT::FR_OK;
+		return true;
 	}
 	auto result = file->close();
 	file.reset();
-	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
+	return result.has_value();
 }
 
 FileWriter::FileWriter() {
@@ -902,19 +902,19 @@ void FileWriter::resetWriter() {
 	fileAccessFailedDuringWrite = false;
 }
 
-FRESULT FileWriter::closeWriter() {
+bool FileWriter::closeWriter() {
 	if (memoryBased) {
 		if (fileWriteBufferCurrentPos < bufferSize) {
 			writeClusterBuffer[fileWriteBufferCurrentPos] = 0;
-			return FRESULT::FR_OK;
+			return true;
 		}
 		else {
-			return FRESULT::FR_INT_ERR;
+			return false;
 		}
 	}
 	auto result = file->close();
 	file.reset();
-	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
+	return result.has_value();
 }
 
 void FileWriter::writeBlock(uint8_t* block, uint32_t size) {
@@ -995,8 +995,8 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 		return Error::WRITE_FAIL;
 	}
 
-	FRESULT result = closeWriter();
-	if (result) {
+	bool result = closeWriter();
+	if (!result) {
 		return Error::WRITE_FAIL;
 	}
 
@@ -1041,7 +1041,7 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 
 	if (path) {
 		result = closeWriter();
-		if (result) {
+		if (!result) {
 			return Error::WRITE_FAIL;
 		}
 	}

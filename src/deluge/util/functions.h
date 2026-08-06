@@ -19,7 +19,6 @@
 
 #include "const_functions.h"
 #include "definitions_cxx.hpp"
-#include "fatfs/ff.h"
 #include "gui/colour/colour.h" // IWYU pragma: export todo: this probably shouldn't be exported from here
 #include "libdeluge/file_io.h"
 #include "util/audio_format_helpers.h" // byte/format helpers (charsToIntegerConstant, swapEndianness*, …) re-exported
@@ -404,11 +403,6 @@ int32_t getNoteMagnitudeFfromNoteLength(uint32_t noteLength, int32_t tickMagnitu
 void getNoteLengthNameFromMagnitude(etl::istring& buf, int32_t magnitude, char const* durrationSuffix = "-notes",
                                     bool clarifyPerColumn = false);
 bool doesFilenameFitPrefixFormat(char const* fileName, char const* filePrefix, int32_t prefixLength);
-Error fresultToDelugeErrorCode(FRESULT result);
-namespace FatFS {
-enum class Error;
-}
-Error fatfsErrorToDelugeError(FatFS::Error result);
 Error delugeStatusToError(DelugeStatus status);
 
 [[gnu::always_inline]] inline void writeInt16(char** address, uint16_t number) {

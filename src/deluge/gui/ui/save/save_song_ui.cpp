@@ -371,7 +371,7 @@ gotError:
 							display->displayError(error);
 							return false;
 						}
-						UINT bytesRead = static_cast<UINT>(readResult->size());
+						uint32_t bytesRead = static_cast<uint32_t>(readResult->size());
 						if (!bytesRead) {
 							break; // Stop, on rare case where file ended right at end of last cluster
 						}

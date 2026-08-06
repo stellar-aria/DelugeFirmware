@@ -79,10 +79,11 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
 
-    // Same reasoning again: `deluge_efatfs_remount` (efatfs_fs.rs) still has no C++ caller (only
-    // Task 2's card-swap follow-up wires it in), so without this root `--gc-sections` would prune it
-    // from the final link. `_mount`/`_cluster_size`/`_is_mounted` now have real callers via
-    // storage_manager.cpp/audio_file_manager.cpp, but keeping them rooted here too is harmless.
+    // The efatfs mount C-ABI (efatfs_fs.rs). All four now have real C++ callers via
+    // storage_manager.cpp / audio_file_manager.cpp (`_mount`/`_is_mounted` in initSD,
+    // `_remount` in reinitEjectedCard, `_cluster_size` in init/cardReinserted), so these
+    // `-u` roots are belt-and-suspenders — harmless, and they keep the link robust against a
+    // future refactor that drops the last caller of any one of them.
     for sym in [
         "deluge_efatfs_mount",
         "deluge_efatfs_remount",
@@ -298,8 +299,8 @@ fn run_host_app(
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
-    // Same reasoning again: `deluge_efatfs_remount` (efatfs_host_shim.rs) still has no C++ caller —
-    // see the device path's identical block above.
+    // The efatfs mount C-ABI (efatfs_host_shim.rs) — belt-and-suspenders roots; see the
+    // device path's block above for the caller list.
     for sym in [
         "deluge_efatfs_mount",
         "deluge_efatfs_remount",

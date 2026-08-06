@@ -46,7 +46,6 @@ target_include_directories(deluge_app PUBLIC
 )
 
 target_link_libraries(deluge_app PUBLIC
-    fatfs
     NE10
     eyalroz_printf
     deluge_dsp

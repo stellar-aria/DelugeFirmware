@@ -27,15 +27,13 @@
 /// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) is efatfs-only — there
 /// is no C-FatFS fallback for the streaming-read path at all, on any BSP. `deluge::io`'s
 /// task-context surface (file.cpp/stream.cpp) calls the efatfs C-ABI unconditionally too, so this
-/// passthrough is what backs it on the C-host. The host-sim
-/// `deluge_render`/`deluge_loadcheck`/`deluge_host` link no Rust efatfs provider (that only exists
-/// on the Rust/Embassy BSP), so without this file every streamed sample would fail to open and
-/// every task-context file operation would no-op. This gives the host sim a real backend for both
-/// over plain POSIX file I/O against the RECONSTRUCTED PROJECT DIRECTORY (not the packed FAT image
-/// a real device uses — see `host_render_main.cpp`'s `DELUGE_SD_ROOT` setenv). The packed FAT
-/// image (`DELUGE_SD_IMAGE`) and C-FatFS still mount alongside this passthrough — this file does
-/// not remove either; it just wins the task-context routing choice on the C-host (Phase A/B/C
-/// retire the image/C-FatFS separately).
+/// passthrough is what backs it on the C-host. The host-sim `deluge_loadcheck`/`deluge_host` link
+/// no Rust efatfs provider (that only exists on the Rust/Embassy BSP), so without this file every
+/// streamed sample would fail to open and every task-context file operation would no-op. This
+/// gives the host sim a real backend for both over plain POSIX file I/O against a project directory
+/// named by `DELUGE_SD_ROOT` — the SD card itself on the C-host, now that it no longer mounts a
+/// packed FAT image or compiles C-FatFS (`src/fatfs` — see `host_platform.c`'s
+/// `deluge_block_ready`, which reports presence from this same directory).
 ///
 /// Design: a small fixed handle table per concern (`g_slots` for streaming reads, `g_files` for
 /// task-context files, `g_dirs` for directory enumeration, `g_streams` for stream-writes), no heap

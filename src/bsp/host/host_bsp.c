@@ -300,10 +300,10 @@ uint8_t deluge_block_sd_unit(void) {
 	return 0;
 }
 // deluge_block_init/deluge_block_ready are defined in host_platform.c, backed
-// by the real DELUGE_SD_IMAGE-backed disk (host_sd_open()/host_img_fd) that
-// disk_status/deluge_block_read/deluge_block_write already use there — a stub
-// here would always report "not ready" and silently defeat SD-image-backed
-// host runs (initSD -> SD_CARD_NOT_PRESENT).
+// by the real DELUGE_SD_ROOT directory that host_efatfs_passthrough.cpp
+// serves task-context file I/O from — a stub here would always report "not
+// ready" and silently defeat directory-backed host runs (initSD ->
+// SD_CARD_NOT_PRESENT).
 uint32_t deluge_block_sector_count(uint8_t unit) {
 	(void)unit;
 	return 0;

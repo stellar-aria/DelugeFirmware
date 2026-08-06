@@ -39,8 +39,8 @@
 #include "RZA1/sdhi/inc/sdif.h"
 #include "RZA1/system/rza_io_regrw.h"
 #include "bsp/rza1/drivers/uart/uart.h"
-#include "diskio.h"
-#include "ff.h"
+#include "fatfs/diskio.h"
+#include "fatfs/ff.h"
 #include "libdeluge/block_device.h"
 #include "libdeluge/system.h"
 

@@ -308,7 +308,6 @@ add_subdirectory(${REPO_ROOT}/lib            ${CMAKE_BINARY_DIR}/_lib)        # 
 add_subdirectory(${REPO_ROOT}/src/foundation ${CMAKE_BINARY_DIR}/foundation) # deluge_foundation
 add_subdirectory(${REPO_ROOT}/src/midi       ${CMAKE_BINARY_DIR}/midi)       # deluge_midi
 add_subdirectory(${REPO_ROOT}/src/lib        ${CMAKE_BINARY_DIR}/printf)     # eyalroz_printf
-add_subdirectory(${REPO_ROOT}/src/fatfs      ${CMAKE_BINARY_DIR}/fatfs)      # fatfs
 add_subdirectory(${REPO_ROOT}/src/OSLikeStuff ${CMAKE_BINARY_DIR}/scheduler) # deluge_scheduler
 add_subdirectory(${REPO_ROOT}/src/deluge     ${CMAKE_BINARY_DIR}/app)        # deluge_app + deluge_dsp + generators
 
@@ -421,7 +420,8 @@ endif()
 # deluge_loadcheck: headless "load these audio files, print their parsed descriptors" utility — the Tier-2
 # regression net for the file-loading redesign. Same app + host BSP as deluge_render, with its own
 # main()/driver (host_loadcheck_main.cpp) that drives AudioFileManager::getAudioFileFromFilename (and so
-# ClusterByteSource + the parser) against a FAT image. Requires mtools at runtime (--project packing).
+# ClusterByteSource + the parser) against a project directory served by host_efatfs_passthrough.cpp
+# (DELUGE_SD_ROOT). No external tools required.
 add_executable(deluge_loadcheck
     ${REPO_ROOT}/src/bsp/host/host_bsp.c
     ${REPO_ROOT}/src/bsp/host/host_platform.c

@@ -100,7 +100,7 @@ fn main() {
     // C++ calls our deluge_* services, we call its deluge_main()).
     //
     // BRING-UP: assumes the Release config is already built in <root>/build
-    // (`cmake --build build --target deluge_app fatfs NE10 …`). Parametrize the
+    // (`cmake --build build --target deluge_app NE10 …`). Parametrize the
     // build dir / config later; this is the two-step flow from the plan.
     // ---------------------------------------------------------------------
     let build_dir = env::var("DELUGE_BUILD_DIR")
@@ -118,7 +118,7 @@ fn main() {
     if !app_objs_dir.is_dir() {
         panic!(
             "C++ app objects not found at {}. Build them first:\n  \
-             cmake --build {} --target deluge_app fatfs NE10 eyalroz_printf \
+             cmake --build {} --target deluge_app NE10 eyalroz_printf \
              deluge_dsp deluge_scheduler deluge_foundation deluge_midi",
             app_objs_dir.display(),
             build_dir.display()
@@ -145,9 +145,10 @@ fn main() {
         .expect("run arm-none-eabi-ar");
     assert!(status.success(), "archiving deluge_app objects failed");
 
-    // The portable static-lib closure (argon/etl are header-only).
-    let deps: [(&str, &str); 7] = [
-        ("src/fatfs", "libfatfs.a"),
+    // The portable static-lib closure (argon/etl are header-only). No fatfs entry: src/fatfs
+    // (C-FatFS) is retired and no longer part of the CMake build graph — deluge_app's storage
+    // calls go through the efatfs C-ABI (deluge_efatfs_*), implemented natively in this crate.
+    let deps: [(&str, &str); 6] = [
         ("src/NE10", "libNE10.a"),
         ("src/lib", "libeyalroz_printf.a"),
         ("src/deluge/dsp", "libdeluge_dsp.a"),
@@ -323,7 +324,7 @@ fn run_host_app(
     if !app_objs_dir.is_dir() {
         panic!(
             "host C++ app objects not found at {}. Build them first:\n  \
-             ninja -C {} deluge_app fatfs NE10 eyalroz_printf deluge_dsp \
+             ninja -C {} deluge_app NE10 eyalroz_printf deluge_dsp \
              deluge_scheduler deluge_foundation deluge_midi",
             app_objs_dir.display(),
             build_dir.display()
@@ -385,8 +386,7 @@ fn run_host_app(
     // host tree (see the panic message above). Paths mirror build-embassy-hostapp's
     // actual layout (NE10 at the build root, dsp under app/, not src/deluge/ —
     // both differ from the device tree's layout; see collect step above).
-    let deps: [(&str, &str); 7] = [
-        ("fatfs", "libfatfs.a"),
+    let deps: [(&str, &str); 6] = [
         (".", "libNE10.a"),
         ("printf", "libeyalroz_printf.a"),
         ("app/dsp", "libdeluge_dsp.a"),

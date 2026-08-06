@@ -18,13 +18,14 @@
 /// deluge_loadcheck — headless "load these audio files and print their parsed descriptors" utility.
 ///
 /// Drives the real file-loading path (AudioFileManager::getAudioFileFromFilename → FileByteSource →
-/// parseAudioFileHeader → buildSample) against a FAT disk image, so it exercises the construction path
-/// end-to-end (FAT cluster walk + on-demand cluster streaming + header parse). It is the Tier-2 regression
-/// net for the file-loading redesign: load known WAV/AIFF files off a card image and dump every descriptor
-/// field; a diff in the output across a refactor flags a behavioural change.
+/// parseAudioFileHeader → buildSample) against a project directory served through the host efatfs
+/// passthrough (host_efatfs_passthrough.cpp, DELUGE_SD_ROOT), so it exercises the construction path
+/// end-to-end (directory walk + on-demand cluster streaming + header parse). It is the Tier-2 regression
+/// net for the file-loading redesign: load known WAV/AIFF files off the project directory and dump every
+/// descriptor field; a diff in the output across a refactor flags a behavioural change.
 ///
-/// Usage: deluge_loadcheck (--project <dir> | --image <img.fat>) --file SAMPLES/A.WAV [--file ... | --wavetable PATH]
-/// Requires mtools (mformat, mcopy) on PATH for --project. Deterministic.
+/// Usage: deluge_loadcheck --project <dir> --file SAMPLES/A.WAV [--file ... | --wavetable PATH]
+/// Deterministic. No external tools required — the project directory IS the SD card.
 
 #include "model/sample/sample.h"
 #include "storage/audio/audio_file_manager.h"
@@ -38,7 +39,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 extern "C" int32_t deluge_main(void);
@@ -46,20 +46,12 @@ extern TaskHandle startupConditionalTask;
 
 namespace {
 
-char g_temp_image[512] = {0};
 // Files to load, captured from argv. `wavetable` selects AudioFileType::WAVETABLE.
 struct LoadItem {
 	std::string path;
 	bool wavetable;
 };
 std::vector<LoadItem> g_items;
-
-void cleanup_temp_image() {
-	if (g_temp_image[0] != '\0') {
-		unlink(g_temp_image);
-		g_temp_image[0] = '\0';
-	}
-}
 
 const char* errorName(Error e) {
 	switch (e) {
@@ -156,58 +148,20 @@ void deluge_loadcheck_driver() {
 	quick_exit(failures == 0 ? 0 : 1);
 }
 
-bool pack_image(const char* project, char* out_path, size_t out_size) {
-	char tmpl[] = "/tmp/deluge_loadcheck_XXXXXX.img";
-	int fd = mkstemps(tmpl, 4);
-	if (fd < 0) {
-		perror("[loadcheck] mkstemps");
-		return false;
-	}
-	close(fd);
-	snprintf(out_path, out_size, "%s", tmpl);
-
-	// >= 2.5 GB sparse image so it formats as a valid FAT32 with 32 KB clusters (the geometry the
-	// firmware's FatFS expects; see host_render_main.cpp for the rationale).
-	const long long bytes = 2560LL << 20;
-	char cmd[2200];
-	snprintf(cmd, sizeof cmd, "truncate -s %lld '%s'", bytes, out_path);
-	if (system(cmd) != 0) {
-		fprintf(stderr, "[loadcheck] truncate failed\n");
-		return false;
-	}
-	snprintf(cmd, sizeof cmd, "mformat -i '%s' -F -c 64 ::", out_path);
-	if (system(cmd) != 0) {
-		fprintf(stderr, "[loadcheck] mformat failed (is mtools installed?)\n");
-		return false;
-	}
-	snprintf(cmd, sizeof cmd, "mcopy -s -Q -i '%s' '%s'/* ::/", out_path, project);
-	if (system(cmd) != 0) {
-		fprintf(stderr, "[loadcheck] mcopy failed\n");
-		return false;
-	}
-	fprintf(stderr, "[loadcheck] packed '%s' -> %s\n", project, out_path);
-	return true;
-}
-
 void usage(const char* argv0) {
-	fprintf(stderr, "usage: %s (--project <dir> | --image <img>) (--file PATH | --wavetable PATH)...\n", argv0);
+	fprintf(stderr, "usage: %s --project <dir> (--file PATH | --wavetable PATH)...\n", argv0);
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
 	const char* project = nullptr;
-	const char* image = nullptr;
 
 	for (int i = 1; i < argc; i++) {
 		const char* a = argv[i];
 		const char* v = (i + 1 < argc) ? argv[i + 1] : nullptr;
 		if (strcmp(a, "--project") == 0 && v) {
 			project = v;
-			i++;
-		}
-		else if (strcmp(a, "--image") == 0 && v) {
-			image = v;
 			i++;
 		}
 		else if (strcmp(a, "--file") == 0 && v) {
@@ -224,26 +178,14 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	if (g_items.empty() || (project == nullptr && image == nullptr)) {
+	if (g_items.empty() || project == nullptr) {
 		usage(argv[0]);
 		return 1;
 	}
 
-	if (project != nullptr) {
-		if (!pack_image(project, g_temp_image, sizeof g_temp_image)) {
-			return 1;
-		}
-		at_quick_exit(cleanup_temp_image);
-		atexit(cleanup_temp_image);
-		setenv("DELUGE_SD_IMAGE", g_temp_image, 1);
-		// The streaming-read path (SampleStream::open_read_stream) is efatfs-only and bypasses
-		// the packed FAT image entirely — point the host passthrough (host_efatfs_passthrough.cpp)
-		// at the reconstructed project directory itself so streamed samples actually load.
-		setenv("DELUGE_SD_ROOT", project, 1);
-	}
-	else {
-		setenv("DELUGE_SD_IMAGE", image, 1);
-	}
+	// The project directory IS the SD card: host_efatfs_passthrough.cpp serves every task-context
+	// file operation (including the streaming-read path, which is efatfs-only) straight from it.
+	setenv("DELUGE_SD_ROOT", project, 1);
 
 	if (getenv("DELUGE_HOST_DETERMINISTIC") == nullptr) {
 		setenv("DELUGE_HOST_DETERMINISTIC", "1", 1);
@@ -257,6 +199,5 @@ int main(int argc, char** argv) {
 	deluge_platform_init();
 	deluge_main(); // never returns; deluge_loadcheck_driver quick_exit()s
 
-	cleanup_temp_image();
 	return 0;
 }

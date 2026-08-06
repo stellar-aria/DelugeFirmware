@@ -6,7 +6,6 @@ add_library(RZA1 STATIC ${RZA1_SOURCES})
 # yield, card-detect, logAudioAction, console, l10n). It depends on the boundary
 # contract directly instead of the app's deluge.h.
 target_include_directories(RZA1 PRIVATE ${SHARED_INCLUDE} ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(RZA1 PRIVATE fatfs)
 # The HAL's OLED/USB timing uses the foundation timer-count helpers. PUBLIC so the
 # archive is ordered after RZA1 on the final link and propagates to consumers.
 target_link_libraries(RZA1 PUBLIC deluge_foundation)

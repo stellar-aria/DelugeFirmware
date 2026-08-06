@@ -27,7 +27,6 @@ import util
 # The C++ targets the Rust build.rs archives + links (mirrors its panic message).
 CPP_TARGETS = [
     "deluge_app",
-    "fatfs",
     "NE10",
     "eyalroz_printf",
     "deluge_dsp",

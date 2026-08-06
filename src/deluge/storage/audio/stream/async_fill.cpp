@@ -151,6 +151,15 @@ __attribute__((weak)) bool deluge_efatfs_read_at(uint32_t /*handle*/, uint32_t /
 	return false; // No efatfs handle table on this BSP/config.
 }
 
+// Weak fallback for `deluge_file_invalidate_cache` (`include/libdeluge/file_io.h`): a hook a few
+// call sites (deluge.cpp, delete_file.cpp, sample_recorder.cpp, save_song_ui.cpp, stem_export.cpp)
+// still use to invalidate directory-listing caches after writing through some path other than
+// `deluge::io::File`/`Directory` itself. No BSP maintains such a cache any more (the C-FatFS
+// adapter that once did, `src/fatfs/file_io.cpp`, is retired) -- a no-op everywhere, kept only so
+// those call sites keep linking.
+__attribute__((weak)) void deluge_file_invalidate_cache(void) {
+}
+
 // Weak fallbacks for the task-context efatfs file/directory C-ABI
 // (`include/libdeluge/file_io.h`). The Rust Embassy BSP provides the real
 // definitions (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it

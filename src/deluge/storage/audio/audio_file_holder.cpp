@@ -32,8 +32,7 @@ AudioFileHolder::~AudioFileHolder() {
 // NULL, but that's not a problem. Or that the SD card would need to be accessed but we didn't have permission for that
 // (!mayActuallyReadFile).
 Error AudioFileHolder::loadFile(bool reversed, bool manuallySelected, bool mayActuallyReadFile,
-                                int32_t clusterLoadInstruction, FilePointer* filePointer,
-                                bool makeWaveTableWorkAtAllCosts) {
+                                int32_t clusterLoadInstruction, bool makeWaveTableWorkAtAllCosts) {
 
 	// See if this AudioFile object already all loaded up
 	if (audioFile != nullptr) {
@@ -46,7 +45,7 @@ Error AudioFileHolder::loadFile(bool reversed, bool manuallySelected, bool mayAc
 
 	Error error;
 	AudioFile* maybeNewAudioFile = audioFileManager.getAudioFileFromFilename(
-	    filePath, mayActuallyReadFile, &error, filePointer, audioFileType, makeWaveTableWorkAtAllCosts);
+	    filePath, mayActuallyReadFile, &error, audioFileType, makeWaveTableWorkAtAllCosts);
 	// If we found it...
 	if (maybeNewAudioFile != nullptr) {
 

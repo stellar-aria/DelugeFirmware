@@ -136,8 +136,8 @@ void deluge_loadcheck_driver() {
 		std::string path = item.path;
 		Error error = Error::NONE;
 		AudioFile* audioFile = audioFileManager.getAudioFileFromFilename(
-		    path, /*mayReadCard=*/true, &error, /*suppliedFilePointer=*/nullptr,
-		    item.wavetable ? AudioFileType::WAVETABLE : AudioFileType::SAMPLE, /*makeWaveTableWorkAtAllCosts=*/false);
+		    path, /*mayReadCard=*/true, &error, item.wavetable ? AudioFileType::WAVETABLE : AudioFileType::SAMPLE,
+		    /*makeWaveTableWorkAtAllCosts=*/false);
 
 		if (audioFile == nullptr) {
 			printf("FAILED %s | error=%s (%d)\n", item.path.c_str(), errorName(error), static_cast<int>(error));

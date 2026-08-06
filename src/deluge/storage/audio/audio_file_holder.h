@@ -22,10 +22,6 @@
 #include "definitions_cxx.hpp"
 #include "util/c_string.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 class Sample;
 class AudioFile;
 
@@ -50,8 +46,7 @@ public:
 	virtual void setAudioFile(AudioFile* newSample, bool reversed = false, bool manuallySelected = false,
 	                          int32_t clusterLoadInstruction = CLUSTER_ENQUEUE);
 	Error loadFile(bool reversed, bool manuallySelected, bool mayActuallyReadFile,
-	               int32_t clusterLoadInstruction = CLUSTER_ENQUEUE, FilePointer* filePointer = nullptr,
-	               bool makeWaveTableWorkAtAllCosts = false);
+	               int32_t clusterLoadInstruction = CLUSTER_ENQUEUE, bool makeWaveTableWorkAtAllCosts = false);
 	virtual void unassignAllClusterReasons(bool beingDestructed = false) {}
 
 	std::string filePath{};

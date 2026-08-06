@@ -2206,7 +2206,7 @@ ActionResult InstrumentClipView::potentiallyRandomizeDrumSample(Kit* kit, Drum* 
 
 		afh->filePath.append("/");
 		afh->filePath.append(chosenFilename);
-		afh->loadFile(false, true, true, 1, nullptr, false);
+		afh->loadFile(false, true, true, 1, false);
 
 		char* dot = strrchr(chosenFilename, '.');
 		if (dot) {

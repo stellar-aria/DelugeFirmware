@@ -519,9 +519,8 @@ Error AudioFileManager::setupAlternateAudioFilePath(std::string& newPath, int32_
 	return Error::NONE;
 }
 
-bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* suppliedFilePointer, bool mayReadCard,
-                                          std::string& usingAlternateLocation, FilePointer& effectiveFilePointer,
-                                          Error* error) {
+bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, std::string& usingAlternateLocation,
+                                       uint64_t& sizeBytes, Error* error) {
 	// Try and load it in.
 	if (!mayReadCard) {
 		return false; // NB: leaves *error untouched (caller initialised it to NONE) — a "silently absent" miss.
@@ -540,14 +539,8 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 	}
 	*/
 
-	// If we got given a FilePointer, it's easy.
-	if (suppliedFilePointer != nullptr) {
-		effectiveFilePointer = *suppliedFilePointer;
-		return true;
-	}
-
 	// Look up one proposed name in the (known-to-exist) alternate load dir by full path; on a hit, fill
-	// effectiveFilePointer / usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the
+	// sizeBytes / usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the
 	// now-non-alternate location).
 	const auto tryAlternateName = [&](const std::string& proposedFileName) -> bool {
 		std::string candidate = alternateAudioFileLoadPath;
@@ -561,7 +554,7 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		if (!sz.has_value()) {
 			return false;
 		}
-		effectiveFilePointer.objsize = *sz;
+		sizeBytes = *sz;
 		usingAlternateLocation = alternateAudioFileLoadPath;
 		usingAlternateLocation.append("/");
 		usingAlternateLocation.append(proposedFileName);
@@ -591,7 +584,7 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		return tryAlternateName(getFileNameFromEndOfPath(filePath.c_str())) ? AltResult::Found : AltResult::NotFound;
 	};
 
-	// Open the file at its regular path; on success fill effectiveFilePointer.objsize. Returns whether it opened.
+	// Open the file at its regular path; on success fill sizeBytes. Returns whether it opened.
 	const auto tryRegularPath = [&]() -> bool {
 		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
 		if (!opened.has_value()) {
@@ -601,7 +594,7 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		if (!sz.has_value()) {
 			return false;
 		}
-		effectiveFilePointer.objsize = *sz;
+		sizeBytes = *sz;
 		return true; // File auto-closes on scope exit (RAII)
 	};
 
@@ -702,8 +695,7 @@ AudioFile* AudioFileManager::convertSampleToWaveTable(Sample& foundSample, bool 
 }
 
 AudioFile* AudioFileManager::getAudioFileFromFilename(std::string& filePath, bool mayReadCard, Error* error,
-                                                      FilePointer* suppliedFilePointer, AudioFileType type,
-                                                      bool makeWaveTableWorkAtAllCosts) {
+                                                      AudioFileType type, bool makeWaveTableWorkAtAllCosts) {
 
 	*error = Error::NONE;
 
@@ -765,33 +757,32 @@ AudioFile* AudioFileManager::getAudioFileFromFilename(std::string& filePath, boo
 		}
 	}
 
-	FilePointer effectiveFilePointer;
+	uint64_t sizeBytes;
 	std::string usingAlternateLocation;
-	if (!resolveFilePointer(filePath, suppliedFilePointer, mayReadCard, usingAlternateLocation, effectiveFilePointer,
-	                        error)) {
+	if (!resolveFileSize(filePath, mayReadCard, usingAlternateLocation, sizeBytes, error)) {
 		return nullptr;
 	}
 
-	return buildAudioFileFromCard(filePath, usingAlternateLocation, effectiveFilePointer, type,
-	                              makeWaveTableWorkAtAllCosts, error);
+	return buildAudioFileFromCard(filePath, usingAlternateLocation, sizeBytes, type, makeWaveTableWorkAtAllCosts,
+	                              error);
 }
 
 AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
-                                                    const std::string& usingAlternateLocation,
-                                                    FilePointer& effectiveFilePointer, AudioFileType type,
-                                                    bool makeWaveTableWorkAtAllCosts, Error* error) {
+                                                    const std::string& usingAlternateLocation, uint64_t sizeBytes,
+                                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts,
+                                                    Error* error) {
 	// 0-byte files not allowed.
-	if (effectiveFilePointer.objsize == 0) {
+	if (sizeBytes == 0) {
 		*error = Error::FILE_CORRUPTED;
 		return nullptr;
 	}
 	// Files bigger than 1GB not allowed.
-	if (effectiveFilePointer.objsize > kMaxFileSize) {
+	if (sizeBytes > kMaxFileSize) {
 		*error = Error::FILE_TOO_BIG;
 		return nullptr;
 	}
 
-	const uint32_t numClusters = ((effectiveFilePointer.objsize - 1) >> Cluster::size_magnitude) + 1;
+	const uint32_t numClusters = ((sizeBytes - 1) >> Cluster::size_magnitude) + 1;
 	const int32_t memorySizeNeeded = (type == AudioFileType::SAMPLE) ? sizeof(Sample) : sizeof(WaveTable);
 
 	void* audioFileMemory = deluge::memory::alloc_external(memorySizeNeeded, 16);
@@ -818,10 +809,10 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// (the async streaming-fill task, over this Sample's efatfs handle) go through it.
 		//
 		// `filePath` is only the file's *actual* on-disk location when it wasn't resolved via the
-		// alternate-load-dir mechanism (see resolveFilePointer): when `usingAlternateLocation` is
-		// non-empty, that's where the bytes backing `effectiveFilePointer` really live (filePath stays
-		// the nominal/display path). Must open the same file effectiveFilePointer was resolved from, or
-		// numClusters (computed from effectiveFilePointer.objsize) mismatches the opened file's real
+		// alternate-load-dir mechanism (see resolveFileSize): when `usingAlternateLocation` is
+		// non-empty, that's where the bytes backing `sizeBytes` really live (filePath stays
+		// the nominal/display path). Must open the same file sizeBytes was resolved from, or
+		// numClusters (computed from sizeBytes) mismatches the opened file's real
 		// size/cluster layout.
 		Sample* sampleFile = static_cast<Sample*>(audioFile);
 		const std::string& pathToOpen = usingAlternateLocation.empty() ? filePath : usingAlternateLocation;
@@ -835,7 +826,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// The byte source reads the header raw off the sample's efatfs handle (through the file-io boundary),
 		// block by block, taking no manager lease and touching no StreamedChunk.
 		FileByteSource source{std::make_unique<ReadSourceBlockReader>(sampleFile->stream().make_read_source()),
-		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
+		                      static_cast<uint32_t>(sizeBytes)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts);
 
 		// loadFile() parses the WAV header, which is what finally populates the Sample's geometry
@@ -860,7 +851,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		// WaveTable reads the file more normally, so open it for the deserializer to stream from. `filePath`
 		// is already the correct final resolved path (regular or alternate) at this point, and Tier 2's
 		// adapter-side directory cache makes this reopen fast even though the file was just opened once
-		// already (in tryRegularPath, to discover effectiveFilePointer).
+		// already (in tryRegularPath, to discover sizeBytes).
 		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
 		if (!opened) {
 			*error = Error::FILE_NOT_FOUND;
@@ -871,8 +862,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 
 		// One deserializer-backed source serves both the header parse (via the AudioByteSource surface) and
 		// WaveTable::setup's zero-copy band read (via its cluster accessors) — hence passed both ways.
-		FileByteSource source{std::make_unique<DeserializerBlockReader>(),
-		                      static_cast<uint32_t>(effectiveFilePointer.objsize)};
+		FileByteSource source{std::make_unique<DeserializerBlockReader>(), static_cast<uint32_t>(sizeBytes)};
 		*error = audioFile->loadFile(source, makeWaveTableWorkAtAllCosts, &source);
 	}
 
@@ -891,7 +881,7 @@ AudioFile* AudioFileManager::buildAudioFileFromCard(const std::string& filePath,
 		return nullptr;
 	}
 
-	audioFile->finalizeAfterLoad(effectiveFilePointer.objsize);
+	audioFile->finalizeAfterLoad(sizeBytes);
 	overviewScanAllDone = false; // A newly loaded audio file may need pre-scanning (#4460)
 
 	audioFile->removeReason("E399"); // Setup done; drop the protect-during-setup reason (the caller re-leases).

@@ -25,16 +25,26 @@ use block_device_driver::BlockDevice;
 use efatfs_core::HandleTable;
 use embassy_futures::block_on;
 use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConverter};
-use fs_differential::{efatfs::EFatFs, fatfs_c::CFatFs, ram_disk::RamDisk};
+use fs_differential::{efatfs::EFatFs, ram_disk::RamDisk};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-// Shared with tests/differential.rs's rationale: the RAM `DISK` + C FatFS
-// volume are process-wide singletons, so serialize the load-mount-read span.
+// Shared with tests/differential.rs's rationale: the RAM `DISK` is a
+// process-wide singleton, so serialize the load-mount-read span.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn fat32() -> String {
     std::env::var("SP0_FAT32").expect("run mk_fixture.sh; set SP0_FAT32=/tmp/fat32.img")
+}
+
+/// `mk_fixture.sh`'s `/SAMPLES/huge.bin` (FAT32 fixture only): 64 MiB, byte
+/// at offset `i` is `(i >> 9) & 0xff` -- the exact formula the fixture
+/// generator's Python one-liner uses. A deterministic known-good "oracle"
+/// that doesn't require a second filesystem implementation to compute.
+fn known_huge_bytes() -> Vec<u8> {
+    (0..67_108_864u64)
+        .map(|i| ((i >> 9) & 0xff) as u8)
+        .collect()
 }
 
 /// (a) round-trip + (b) two-handle interleave, driven through the REAL
@@ -525,11 +535,13 @@ fn efatfs_forward_seek_does_not_restart_chain_walk() {
 }
 
 /// The AUDIO read access pattern — cluster-aligned reads in playback order,
-/// including loop-point backward seeks — must be byte-identical through efatfs and
-/// C FatFS. Complements the whole-file/interleave differentials with the pattern the
-/// streaming engine actually issues. The C-FatFS whole-file read is the oracle.
+/// including loop-point backward seeks — must be byte-identical against
+/// `/SAMPLES/huge.bin`'s known-good content (`known_huge_bytes`, matching
+/// `mk_fixture.sh`'s exact generator formula). Complements the
+/// whole-file/interleave tests with the pattern the streaming engine
+/// actually issues.
 #[test]
-fn efatfs_streaming_pattern_matches_cfatfs_fat32() {
+fn efatfs_streaming_pattern_matches_known_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let img = fat32();
     let _disk = RamDisk::load(&img);
@@ -539,8 +551,7 @@ fn efatfs_streaming_pattern_matches_cfatfs_fat32() {
     const CLUSTER_BYTES: usize = CLUSTER_SECTORS * 512;
     let path = "/SAMPLES/huge.bin"; // 64 MiB = 2048 clusters
 
-    // Oracle: the whole file via C FatFS (a DIFFERENT filesystem from efatfs).
-    let oracle = CFatFs::mount().read_file(path);
+    let oracle = known_huge_bytes();
     let clusters = oracle.len().div_ceil(CLUSTER_BYTES);
     assert!(clusters > 4, "fixture too small to exercise the pattern");
 
@@ -565,14 +576,14 @@ fn efatfs_streaming_pattern_matches_cfatfs_fat32() {
         assert_eq!(
             &buf[..],
             &oracle[c * CLUSTER_BYTES..c * CLUSTER_BYTES + want],
-            "efatfs streaming-pattern read diverged from C FatFS at cluster {c}"
+            "efatfs streaming-pattern read diverged from the known-good content at cluster {c}"
         );
     }
 }
 
 /// Non-vacuity check: reading the WRONG cluster must NOT match the oracle — proves the
-/// streaming differential above can actually detect a divergence (per the project's
-/// real-execution mandate). If this ever passes-as-equal, the differential is blind.
+/// streaming check above can actually detect a divergence (per the project's
+/// real-execution mandate). If this ever passes-as-equal, the check is blind.
 #[test]
 fn efatfs_streaming_pattern_nonvacuous() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -582,7 +593,7 @@ fn efatfs_streaming_pattern_nonvacuous() {
 
     const CLUSTER_BYTES: usize = 64 * 512;
     let path = "/SAMPLES/huge.bin";
-    let oracle = CFatFs::mount().read_file(path);
+    let oracle = known_huge_bytes();
 
     // Read cluster 3 but compare against the oracle's cluster 0 slice — a real
     // multi-cluster file has distinct cluster contents unless the test is blind.
@@ -594,7 +605,7 @@ fn efatfs_streaming_pattern_nonvacuous() {
         &buf[..],
         &oracle[0..CLUSTER_BYTES],
         "cluster 3 matched the oracle's cluster 0 — the fixture's clusters are not \
-         distinguishable, so the streaming differential cannot detect a wrong-offset read"
+         distinguishable, so the streaming check cannot detect a wrong-offset read"
     );
 }
 
@@ -620,7 +631,7 @@ fn efatfs_core_fill_zero_pads_past_logical_eof_last_cluster() {
 
     const CLUSTER_BYTES: usize = 64 * 512; // mk_fixture.sh formats FAT32 -c 64 (32 KiB clusters)
     let path = "/SAMPLES/huge.bin"; // 64 MiB, exactly cluster-aligned (2048 * 32 KiB)
-    let oracle = CFatFs::mount().read_file(path);
+    let oracle = known_huge_bytes();
     let file_len = oracle.len();
 
     // Emulate a sector-rounded last-cluster read: start near EOF, request a length
@@ -664,16 +675,16 @@ fn efatfs_core_fill_zero_pads_past_logical_eof_last_cluster() {
 
 /// Byte-offset read-exactness at a non-cluster-aligned offset — the operation
 /// `deluge_efatfs_read_at` performs (arbitrary byte_offset, arbitrary length), proven byte-exact
-/// against the C-FatFS oracle. (The FFI's block_on bridge is thin glue over exactly this call.)
+/// against the known-good content. (The FFI's block_on bridge is thin glue over exactly this call.)
 #[test]
-fn efatfs_read_at_arbitrary_offset_matches_cfatfs_fat32() {
+fn efatfs_read_at_arbitrary_offset_matches_known_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let img = fat32();
     let _disk = RamDisk::load(&img);
     let e = EFatFs::mount();
 
     let path = "/SAMPLES/huge.bin";
-    let oracle = CFatFs::mount().read_file(path);
+    let oracle = known_huge_bytes();
 
     // Offsets deliberately NOT on cluster boundaries, spanning cluster edges.
     let ctx = e.open_context(path);
@@ -736,27 +747,28 @@ fn efatfs_truncate_shrinks_size_fat32() {
     assert_eq!(sz, 1000);
 }
 
-/// mkdir + create-in-dir + rename + unlink, each verified via the
-/// C-FatFS oracle (a DIFFERENT filesystem implementation reading the SAME
-/// shared disk) so the check proves the efatfs-side op actually landed on
-/// disk, not just that efatfs's own in-memory view agrees with itself.
+/// mkdir + create-in-dir + rename + unlink, each verified via a FRESH
+/// [`EFatFs::mount`] (a brand-new `FileSystem` over the same shared `DISK`,
+/// re-walking the on-disk directory structures from scratch) so the check
+/// proves the op actually landed on disk, not just that the writer's own
+/// in-memory `EFatFs` view agrees with itself.
 #[test]
 fn efatfs_create_unlink_rename_mkdir_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
-    // mkdir + create-in-dir + rename + unlink, verifying via C-FatFS oracle that each landed on disk.
+    // mkdir + create-in-dir + rename + unlink, verifying via a fresh mount that each landed on disk.
     e.mkdir("/R2DIR");
     let ctx = e.create_context("/R2DIR/A.BIN", false);
     let (_ctx, _) = e.write_at_context(&ctx, 0, b"hello");
     assert!(
-        CFatFs::mount().exists("/R2DIR/A.BIN"),
-        "efatfs create not visible to C-FatFS oracle"
+        EFatFs::mount().exists("/R2DIR/A.BIN"),
+        "efatfs create not visible to a fresh mount"
     );
     e.rename("/R2DIR/A.BIN", "/R2DIR/B.BIN");
-    assert!(CFatFs::mount().exists("/R2DIR/B.BIN") && !CFatFs::mount().exists("/R2DIR/A.BIN"));
+    assert!(EFatFs::mount().exists("/R2DIR/B.BIN") && !EFatFs::mount().exists("/R2DIR/A.BIN"));
     e.unlink("/R2DIR/B.BIN");
-    assert!(!CFatFs::mount().exists("/R2DIR/B.BIN"));
+    assert!(!EFatFs::mount().exists("/R2DIR/B.BIN"));
 }
 
 /// WRITE_CREATE_NEW (`exclusive == true`) must fail — not
@@ -773,21 +785,20 @@ fn efatfs_create_new_fails_if_exists_fat32() {
     );
 }
 
-/// `set_time` writes a packed FAT date/time (the same
-/// `(dos_date << 16) | dos_time` convention C-FatFS's `get_fattime()` uses)
-/// that a re-mount of the C-FatFS oracle reads back identically — the same
-/// shared-disk cross-check the create/rename/unlink test above uses.
+/// `set_time` writes a packed FAT date/time (`(dos_date << 16) | dos_time`)
+/// that a FRESH [`EFatFs::mount`] reads back identically — the same
+/// fresh-mount cross-check the create/rename/unlink test above uses.
 #[test]
-fn efatfs_set_time_matches_cfatfs_fat32() {
+fn efatfs_set_time_roundtrips_via_fresh_mount_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let path = "/R2TIME.BIN";
     let _ = e.create_context(path, false);
 
-    // 2019-03-04 05:06:08, packed as GET_FATTIME() would: high 16 bits DOS
-    // date ((year-1980)<<9 | month<<5 | day), low 16 bits DOS time
-    // (hour<<11 | min<<5 | sec/2).
+    // 2019-03-04 05:06:08, packed the same way `set_time`/`mtime` document:
+    // high 16 bits DOS date ((year-1980)<<9 | month<<5 | day), low 16 bits
+    // DOS time (hour<<11 | min<<5 | sec/2).
     let dos_date: u32 = ((2019u32 - 1980) << 9) | (3 << 5) | 4;
     let dos_time: u32 = (5 << 11) | (6 << 5) | (8 / 2);
     let timestamp = (dos_date << 16) | dos_time;
@@ -795,40 +806,55 @@ fn efatfs_set_time_matches_cfatfs_fat32() {
     e.set_time(path, timestamp);
 
     assert_eq!(
-        CFatFs::mount().mtime(path),
+        EFatFs::mount().mtime(path),
         timestamp,
-        "efatfs set_time not visible (or mismatched) via the C-FatFS oracle"
+        "efatfs set_time not visible (or mismatched) via a fresh mount"
     );
 }
 
 // --- Directory enumeration ---------------------------------------
 
-/// efatfs's directory listing matches C-FatFS's, as a SET of (name, is_dir,
-/// size) tuples (order not compared).
+/// efatfs's directory listing of the fixture's `/SAMPLES` matches the
+/// known-good expected SET of (name, is_dir, size) tuples (order not
+/// compared).
 #[test]
-fn efatfs_readdir_matches_cfatfs_set_fat32() {
+fn efatfs_readdir_matches_known_set_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
     let dir = "/SAMPLES"; // exists in the fixture tree
-                          // efatfs entries as a set of (name, is_dir, size)
     let mut got: Vec<(String, bool, u32)> = e.readdir_all(dir);
     got.sort();
-    let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all(dir); // add this helper
-    want.sort();
     assert_eq!(
-        got, want,
-        "efatfs directory listing diverged from C-FatFS (as a set)"
+        got,
+        known_samples_dir_set(),
+        "efatfs directory listing diverged from the known-good expected set"
     );
+}
+
+/// The `/SAMPLES` fixture directory's known-good expected entries, as a
+/// sorted set of (name, is_dir, size). `hello.txt` is 11 bytes
+/// (`b"DELUGE-SP0\n"`); `big_multicluster.bin`/`huge.bin` sizes are fixed by
+/// `fixtures/mk_fixture.sh`'s generator; `Kicks` is a subdirectory (size 0
+/// by this harness's `Entry` convention).
+fn known_samples_dir_set() -> Vec<(String, bool, u32)> {
+    let mut v = vec![
+        ("Kicks".to_string(), true, 0u32),
+        ("big_multicluster.bin".to_string(), false, 1_048_576),
+        ("hello.txt".to_string(), false, 11),
+        ("huge.bin".to_string(), false, 67_108_864),
+    ];
+    v.sort();
+    v
 }
 
 /// The load-bearing proof for the persistent-write-handle
 /// mechanism the sample recorder needs -- write N clusters through the
-/// no-flush primitives (accumulating ONLY the in-memory size), confirm an
-/// independent C-FatFS open-by-path still sees the stale (pre-write) on-disk
-/// size, confirm a read back THROUGH the write context sees the true
-/// in-memory extent (byte-exact), then flush once and confirm the
-/// independent C-FatFS reader now sees the full size.
+/// no-flush primitives (accumulating ONLY the in-memory size), confirm a
+/// FRESH open-by-path mount still sees the stale (pre-write) on-disk size,
+/// confirm a read back THROUGH the write context sees the true in-memory
+/// extent (byte-exact), then flush once and confirm a fresh mount now sees
+/// the full size.
 #[test]
 fn efatfs_noflush_write_then_read_via_context_before_flush_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -836,7 +862,7 @@ fn efatfs_noflush_write_then_read_via_context_before_flush_fat32() {
     let e = EFatFs::mount();
     let path = "/R3REC.BIN";
     const CB: usize = 64 * 512; // one 32KiB cluster (fixture geometry)
-    // Create empty, get a write context.
+                                // Create empty, get a write context.
     let ctx = e.create_context(path, false);
     // Write 3 clusters with DISTINCT content, NO flush between.
     let mut ctx = ctx;
@@ -848,25 +874,33 @@ fn efatfs_noflush_write_then_read_via_context_before_flush_fat32() {
         ctx = nc;
         clusters.push(payload);
     }
-    // On-disk dir size is STILL STALE (no flush) — an independent open-by-path read sees ~0 bytes.
-    assert_eq!(CFatFs::mount().read_file(path).len(), 0, "precondition: dir size not yet flushed");
+    // On-disk dir size is STILL STALE (no flush) — a fresh open-by-path mount sees ~0 bytes.
+    assert_eq!(
+        EFatFs::mount().read_file(path).len(),
+        0,
+        "precondition: dir size not yet flushed"
+    );
     // But reading cluster 0 back THROUGH THE WRITE CONTEXT succeeds (in-memory size = written extent).
     let mut buf = vec![0u8; CB];
     let (nc, n) = e.read_at_via_context(&ctx, 0, &mut buf);
     ctx = nc;
     assert_eq!(n, CB);
     assert_eq!(&buf[..], &clusters[0][..], "mid-write read-back diverged");
-    // Finalize flush persists the size; now an independent reader sees all 3 clusters.
+    // Finalize flush persists the size; now a fresh mount sees all 3 clusters.
     let _ctx = e.flush_context(&ctx);
-    assert_eq!(CFatFs::mount().read_file(path).len(), 3 * CB, "flush must persist the full size");
+    assert_eq!(
+        EFatFs::mount().read_file(path).len(),
+        3 * CB,
+        "flush must persist the full size"
+    );
 }
 
 /// The REAL `efatfs_core::readdir_open`/`readdir_next` (not the
-/// `EFatFs`/`CFatFs` differential wrappers above) walked directly, matching
-/// C-FatFS's listing as a set. (The UI identifies files by path, not by a
-/// held FS locator.)
+/// `EFatFs` wrapper above) walked directly, matching the known-good
+/// expected set. (The UI identifies files by path, not by a held FS
+/// locator.)
 #[test]
-fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
+fn efatfs_core_readdir_matches_known_set_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let efatfs = EFatFs::mount();
@@ -890,11 +924,10 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
     });
 
     got.sort();
-    let mut want: Vec<(String, bool, u32)> = CFatFs::mount().readdir_all("/SAMPLES");
-    want.sort();
     assert_eq!(
-        got, want,
-        "efatfs_core readdir diverged from C-FatFS (as a set)"
+        got,
+        known_samples_dir_set(),
+        "efatfs_core readdir diverged from the known-good expected set"
     );
 }
 
@@ -911,7 +944,7 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
 // underneath them: a recording-shaped sequential multi-cluster write through the no-flush write
 // path, then EVERY already-written cluster -- not just the most recently written one -- reading
 // back byte-exact through the SAME still-open, unflushed write context, and a final flush+close
-// making the whole file visible byte-exact to an independent C-FatFS reader.
+// making the whole file visible byte-exact to a fresh mount.
 
 /// A recording-shaped sequential write via the efatfs
 /// persistent-context write primitives, no flush between clusters, then -- mirroring how the
@@ -920,8 +953,8 @@ fn efatfs_core_readdir_matches_cfatfs_set_fat32() {
 /// still-open write context via
 /// `read_at_via_context`, all while the on-disk directory entry is still stale (proving the
 /// write context's IN-MEMORY size, not the stale on-disk size, is what bounds the read). Finally
-/// closed+flushed and read back byte-exact via an independent C-FatFS read, proving the
-/// persistent-context Stream write path round-trips end to end.
+/// closed+flushed and read back byte-exact via a FRESH mount, proving the persistent-context
+/// Stream write path round-trips end to end.
 #[test]
 fn efatfs_stream_mid_write_read_back_via_context_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -935,16 +968,21 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
     let mut clusters: Vec<Vec<u8>> = Vec::new();
     for c in 0..NUM_CLUSTERS {
         // Distinct-per-cluster content so a mixed-up cluster read fails loudly.
-        let payload: Vec<u8> = (0..CB).map(|i| ((c as usize * 31 + i) & 0xff) as u8).collect();
+        let payload: Vec<u8> = (0..CB)
+            .map(|i| ((c as usize * 31 + i) & 0xff) as u8)
+            .collect();
         let (newctx, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
-        assert_eq!(w, CB, "write_at_via_context_noflush must write a whole cluster");
+        assert_eq!(
+            w, CB,
+            "write_at_via_context_noflush must write a whole cluster"
+        );
         ctx = newctx;
         clusters.push(payload);
     }
 
     // On-disk dir size is still stale pre-flush (same precondition the write/read-via-context test checks).
     assert_eq!(
-        CFatFs::mount().read_file(path).len(),
+        EFatFs::mount().read_file(path).len(),
         0,
         "precondition: dir size not yet flushed"
     );
@@ -958,7 +996,10 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
         let mut buf = vec![0u8; CB];
         let (newctx, n) = e.read_at_via_context(&ctx, c * CB as u32, &mut buf);
         ctx = newctx;
-        assert_eq!(n, CB, "read_at_via_context must read a whole cluster for cluster {c}");
+        assert_eq!(
+            n, CB,
+            "read_at_via_context must read a whole cluster for cluster {c}"
+        );
         assert_eq!(
             buf, clusters[c as usize],
             "cluster {c} read back via the write context doesn't match what was written"
@@ -968,15 +1009,18 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
     // Finalize: flush persists the accumulated size/mtime edit (`Stream::close`'s efatfs branch).
     let _ctx = e.flush_context(&ctx);
 
-    // Independent C-FatFS read: byte-exact round trip of every cluster written, in order.
+    // Fresh mount: byte-exact round trip of every cluster written, in order.
     let want: Vec<u8> = clusters.into_iter().flatten().collect();
-    let got = CFatFs::mount().read_file(path);
+    let got = EFatFs::mount().read_file(path);
     assert_eq!(
         got.len(),
         want.len(),
         "flushed file size doesn't match the total bytes written"
     );
-    assert_eq!(got, want, "flushed file contents diverged from what was written");
+    assert_eq!(
+        got, want,
+        "flushed file contents diverged from what was written"
+    );
 }
 
 // --- Finalize header-patch positional write -----------------------------------
@@ -987,11 +1031,11 @@ fn efatfs_stream_mid_write_read_back_via_context_fat32() {
 /// `Stream::write_at(0, first-sector-span)` BEFORE `Stream::close()`, since `write_at` needs an
 /// open handle) -- overwrite just the first 512-byte sector at offset 0 with a distinct "patched
 /// header" pattern via a second no-flush positional write. Flush+close, then read the WHOLE file
-/// back via an independent C-FatFS read and assert the first sector reflects the patch AND every
-/// byte after it is untouched -- proving a positional write back to offset 0 composes correctly
-/// with a prior sequential multi-cluster write under the SAME persistent write context.
+/// back via a FRESH mount and assert the first sector reflects the patch AND every byte after it
+/// is untouched -- proving a positional write back to offset 0 composes correctly with a prior
+/// sequential multi-cluster write under the SAME persistent write context.
 #[test]
-fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
+fn efatfs_write_at_header_patch_after_body_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
@@ -1005,7 +1049,9 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
     let mut ctx = e.create_context(path, false); // WRITE_CREATE
     let mut clusters: Vec<Vec<u8>> = Vec::new();
     for c in 0..NUM_CLUSTERS {
-        let payload: Vec<u8> = (0..CB).map(|i| ((c as usize * 17 + i) & 0xff) as u8).collect();
+        let payload: Vec<u8> = (0..CB)
+            .map(|i| ((c as usize * 17 + i) & 0xff) as u8)
+            .collect();
         let (nc, w) = e.write_at_via_context_noflush(&ctx, c * CB as u32, &payload);
         assert_eq!(w, CB, "body write must write a whole cluster");
         ctx = nc;
@@ -1017,16 +1063,19 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
     // `Stream::write_at(0, first-sector-span)` before `Stream::close()`.
     let patched_header: Vec<u8> = (0..SECTOR).map(|i| 0xEEu8 ^ (i as u8)).collect();
     let (nc, w) = e.write_at_via_context_noflush(&ctx, 0, &patched_header);
-    assert_eq!(w, SECTOR, "header-patch write must write the full first sector");
+    assert_eq!(
+        w, SECTOR,
+        "header-patch write must write the full first sector"
+    );
     ctx = nc;
 
     // Finalize: flush persists the accumulated size/mtime edit and every write (patch included) --
     // `Stream::close`'s efatfs branch.
     let _ctx = e.flush_context(&ctx);
 
-    // Independent C-FatFS read proves the patch landed on disk (not just in the in-memory
+    // A fresh mount proves the patch landed on disk (not just in the in-memory
     // context), and that the rest of the recorded body is untouched by it.
-    let got = CFatFs::mount().read_file(path);
+    let got = EFatFs::mount().read_file(path);
     let mut want: Vec<u8> = clusters.into_iter().flatten().collect();
     want[..SECTOR].copy_from_slice(&patched_header);
 
@@ -1054,14 +1103,14 @@ fn efatfs_write_at_header_patch_after_body_matches_cfatfs_fat32() {
 /// `SampleRecorder::alterFile`'s two positional-write sites, which rewrite already-recorded
 /// clusters at their own byte offset (`clusterIndex << Cluster::size_magnitude`) through a write
 /// context reopened (`DELUGE_STREAM_WRITE_APPEND` -- `open_context`, no truncation) at the top of
-/// the alteration and held open across every rewrite -- then flush, and read back via an
-/// INDEPENDENT C-FatFS read. Asserts the rewritten cluster holds the new content AND every
-/// surrounding cluster (both before and after it) is byte-identical to what was originally
-/// written -- an in-place rewrite must not disturb its neighbors, and the file's total size must
-/// not change (no truncation happened, unlike `alterFile`'s own end-of-alteration truncate,
-/// which is a separate, already-covered primitive -- `truncate_context`/`Stream::truncate`).
+/// the alteration and held open across every rewrite -- then flush, and read back via a FRESH
+/// mount. Asserts the rewritten cluster holds the new content AND every surrounding cluster
+/// (both before and after it) is byte-identical to what was originally written -- an in-place
+/// rewrite must not disturb its neighbors, and the file's total size must not change (no
+/// truncation happened, unlike `alterFile`'s own end-of-alteration truncate, which is a separate,
+/// already-covered primitive -- `truncate_context`/`Stream::truncate`).
 #[test]
-fn efatfs_write_at_middle_cluster_rewrite_matches_cfatfs_fat32() {
+fn efatfs_write_at_middle_cluster_rewrite_fat32() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _disk = RamDisk::load(&fat32());
     let e = EFatFs::mount();
@@ -1102,9 +1151,9 @@ fn efatfs_write_at_middle_cluster_rewrite_matches_cfatfs_fat32() {
     // in this test -- the rewrite didn't change the file's size).
     let _alter_ctx = e.flush_context(&alter_ctx);
 
-    // Independent C-FatFS read: the rewritten cluster must hold the NEW content, and every other
+    // Fresh mount: the rewritten cluster must hold the NEW content, and every other
     // cluster must be untouched.
-    let got = CFatFs::mount().read_file(path);
+    let got = EFatFs::mount().read_file(path);
     assert_eq!(
         got.len(),
         NUM_CLUSTERS as usize * CB,

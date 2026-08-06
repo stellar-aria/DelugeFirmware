@@ -40,9 +40,9 @@ public:
 	///        OWN open write context, bounded by its live (not yet flushed to disk) size.
 	///
 	/// Used by `SampleRecorder::alterFile()` (a positional read/write pass over its own open write
-	/// context) and `finalizeRecordedFile()`'s header patch-back. Both backends implement it:
-	/// `deluge_efatfs_stream_read_at_via` on efatfs, `deluge_stream_read_at` on C-FatFS. EOF-honest --
-	/// the returned count may be short of @p dst.size().
+	/// context) and `finalizeRecordedFile()`'s header patch-back. Backed by
+	/// `deluge_efatfs_stream_read_at_via`. EOF-honest -- the returned count may be short of
+	/// @p dst.size().
 	/// @param byte_offset Absolute byte offset into the stream to read from.
 	/// @param dst          Buffer to read into; up to its full size may be filled.
 	/// @return The number of bytes actually read (may be less than dst.size() at EOF), or a Status

@@ -37,10 +37,10 @@
 // so deluge_block_ready/deluge_block_init report presence directly from
 // DELUGE_SD_ROOT, agreeing with what the passthrough actually serves. The
 // plain sector-addressed block device below (deluge_block_read/_write) has no
-// reader left on host: it only ever fed C-FatFS's ff.c, which this BSP no
-// longer compiles. Kept as no-op stubs so audio_file_manager.cpp's
-// disk_read/disk_write FatFs-porting shim (now itself unreferenced, pending
-// src/fatfs's own retirement) still links.
+// reader left on host: the app's storage calls go through the efatfs C-ABI
+// (host_efatfs_passthrough.cpp) or the POSIX-backed passthrough, never raw
+// sectors. Kept as no-op stubs purely to satisfy `block_device.h`'s C-ABI
+// shape (declared there, defined here) in case a future caller needs it.
 // ===========================================================================
 
 // True iff DELUGE_SD_ROOT is set and names an existing directory.

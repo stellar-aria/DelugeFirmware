@@ -37,8 +37,8 @@ pub type Fs = FileSystem<Storage, DefaultTimeProvider, LossyOemCpConverter>;
 static FS: Mutex<CriticalSectionRawMutex, Option<Fs>> = Mutex::new(None);
 
 /// Detect MBR partition (real cards) vs superfloppy, return the byte window.
-/// Same logic proven on-device in `bench_fs.rs`: sector 0 is either a FAT VBR
-/// (partitionless "superfloppy" — jump `EB`/`E9`) or an MBR whose partition-0
+/// Sector 0 is either a FAT VBR (partitionless "superfloppy" — jump
+/// `EB`/`E9`) or an MBR whose partition-0
 /// entry (type @ +4, start_lba @ +8, sector-count @ +12 from offset 446) gives
 /// the real FAT volume's byte window. On any sector-0 read error, fall back
 /// to the whole-device window rather than panicking — `mount` below still

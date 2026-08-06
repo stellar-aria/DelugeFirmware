@@ -155,8 +155,8 @@ __attribute__((weak)) bool deluge_efatfs_read_at(uint32_t /*handle*/, uint32_t /
 // call sites (deluge.cpp, delete_file.cpp, sample_recorder.cpp, save_song_ui.cpp, stem_export.cpp)
 // still use to invalidate directory-listing caches after writing through some path other than
 // `deluge::io::File`/`Directory` itself. No BSP maintains such a cache any more (the C-FatFS
-// adapter that once did, `src/fatfs/file_io.cpp`, is retired) -- a no-op everywhere, kept only so
-// those call sites keep linking.
+// adapter that once did is deleted) -- a no-op everywhere, kept only so those call sites keep
+// linking.
 __attribute__((weak)) void deluge_file_invalidate_cache(void) {
 }
 

@@ -1,7 +1,6 @@
 //! Mounts the vendored `embedded-fatfs` (`crates/embedded-fatfs/`) over the
-//! SAME shared `DISK` image `ram_disk.rs` gives the C FatFS FFI bridge
-//! (`fatfs_c.rs`), and reads through it -- the Rust half of this
-//! differential's read path.
+//! shared `DISK` image (`ram_disk.rs`) and reads/writes through it -- this
+//! harness's whole storage backend.
 //!
 //! Confirmed async API, from the vendored source (not the crates.io docs,
 //! not guessed -- this crate is never published and pins its own fork):
@@ -15,8 +14,8 @@
 //!   `FileSystem::root_dir(&self) -> Dir<'_, IO, TP, OCC>`             -- sync (fs.rs:629)
 //!   `Dir::open_file(&self, path: &str) -> Result<File<'a,IO,TP,OCC>, Error<IO::Error>>`
 //!       -- async; `path` is '/'-separated, leading/trailing '/' trimmed by
-//!       `split_path`, so an absolute path like "/SAMPLES/hello.txt" works the
-//!       same as `CFatFs::read_file`'s.                                 (dir.rs:307)
+//!       `split_path`, so an absolute path like "/SAMPLES/hello.txt" works.
+//!                                                                       (dir.rs:307)
 //!   `File` implements `embedded_io_async::Read`:
 //!       `async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<IO::Error>>`,
 //!       `Ok(0)` at EOF. embedded-io-async 0.7 ships no `ReadExt::read_to_end`,
@@ -60,13 +59,13 @@ use crate::ops::Entry;
 use block_device_adapters::BufStream;
 use embassy_futures::block_on;
 use embedded_fatfs::{
-    Date, DateTime, DefaultTimeProvider, File, FileContext, FileSystem, FsOptions, LossyOemCpConverter, Time,
+    Date, DateTime, DefaultTimeProvider, File, FileContext, FileSystem, FsOptions,
+    LossyOemCpConverter, Time,
 };
 use embedded_io_async::{Read, Seek, SeekFrom, Write};
 
-/// A mounted `embedded-fatfs` volume, read + write path. Same public
-/// surface as `fatfs_c::CFatFs` (`mount`/`read_file`/`read_dir`/write ops)
-/// so `ops::FsOps`/`ops::FsOpsMut` can wrap both identically.
+/// A mounted `embedded-fatfs` volume, read + write path. Implements
+/// `ops::FsOps`/`ops::FsOpsMut` (`mount`/`read_file`/`read_dir`/write ops).
 pub struct EFatFs {
     fs: FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter>,
 }
@@ -81,7 +80,10 @@ impl EFatFs {
 
     /// The raw mounted `FileSystem`, for tests that drive the shared
     /// `efatfs_core` handle-table logic directly over it.
-    pub fn raw(&self) -> &FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter> {
+    pub fn raw(
+        &self,
+    ) -> &FileSystem<BufStream<FileBlockDevice, 512>, DefaultTimeProvider, LossyOemCpConverter>
+    {
         &self.fs
     }
 
@@ -121,12 +123,19 @@ impl EFatFs {
     /// buffer was filled (`false` on a short read / EOF). Mirrors the device
     /// `read_at`'s clone-out → reattach → seek → fill → write-back, minus the
     /// `HANDLES`/FS mutexes (host is single-threaded `block_on`).
-    pub fn read_at_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, bool) {
+    pub fn read_at_context(
+        &self,
+        ctx: &FileContext,
+        offset: u32,
+        dst: &mut [u8],
+    ) -> (FileContext, bool) {
         block_on(async {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(offset)))
+                .await
+                .expect("seek");
             let mut filled = 0;
             while filled < dst.len() {
                 match f.read(&mut dst[filled..]).await.expect("read") {
@@ -178,12 +187,19 @@ impl EFatFs {
     /// `read_at_context`'s inlined (not `efatfs_core`-delegating) style since
     /// this library crate doesn't depend on `efatfs_core` — only the test
     /// binary `#[path]`-includes it.
-    pub fn write_at_context(&self, ctx: &FileContext, offset: u32, src: &[u8]) -> (FileContext, usize) {
+    pub fn write_at_context(
+        &self,
+        ctx: &FileContext,
+        offset: u32,
+        src: &[u8],
+    ) -> (FileContext, usize) {
         block_on(async {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(offset)))
+                .await
+                .expect("seek");
             let mut written = 0;
             while written < src.len() {
                 match f.write(&src[written..]).await.expect("write") {
@@ -203,12 +219,19 @@ impl EFatFs {
     /// [`flush_context`](Self::flush_context). Inlined (not
     /// `efatfs_core`-delegating), same rationale as
     /// [`write_at_context`](Self::write_at_context).
-    pub fn write_at_via_context_noflush(&self, ctx: &FileContext, offset: u32, src: &[u8]) -> (FileContext, usize) {
+    pub fn write_at_via_context_noflush(
+        &self,
+        ctx: &FileContext,
+        offset: u32,
+        src: &[u8],
+    ) -> (FileContext, usize) {
         block_on(async {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(offset)))
+                .await
+                .expect("seek");
             let mut written = 0;
             while written < src.len() {
                 match f.write(&src[written..]).await.expect("write") {
@@ -227,12 +250,19 @@ impl EFatFs {
     /// even before it's been flushed to disk), EOF-honest short count, then
     /// `File::detach()` (no flush) — preserving the dirty write state for a
     /// later [`flush_context`](Self::flush_context).
-    pub fn read_at_via_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, usize) {
+    pub fn read_at_via_context(
+        &self,
+        ctx: &FileContext,
+        offset: u32,
+        dst: &mut [u8],
+    ) -> (FileContext, usize) {
         block_on(async {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(offset)))
+                .await
+                .expect("seek");
             let mut filled = 0;
             while filled < dst.len() {
                 match f.read(&mut dst[filled..]).await.expect("read") {
@@ -262,12 +292,19 @@ impl EFatFs {
     /// the true accumulated byte count on the first short read, NO
     /// zero-padding (unlike `read_at_context`/`fill`'s streaming-read
     /// tolerance).
-    pub fn read_exact_context(&self, ctx: &FileContext, offset: u32, dst: &mut [u8]) -> (FileContext, usize) {
+    pub fn read_exact_context(
+        &self,
+        ctx: &FileContext,
+        offset: u32,
+        dst: &mut [u8],
+    ) -> (FileContext, usize) {
         block_on(async {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(offset))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(offset)))
+                .await
+                .expect("seek");
             let mut filled = 0;
             while filled < dst.len() {
                 match f.read(&mut dst[filled..]).await.expect("read") {
@@ -302,7 +339,9 @@ impl EFatFs {
             let mut f = File::new_from_context(ctx.clone(), &self.fs)
                 .await
                 .expect("new_from_context");
-            f.seek(SeekFrom::Start(u64::from(new_len))).await.expect("seek");
+            f.seek(SeekFrom::Start(u64::from(new_len)))
+                .await
+                .expect("seek");
             f.truncate().await.expect("truncate");
             let newctx = f.close().await.expect("close");
             (newctx, ())
@@ -325,11 +364,10 @@ impl EFatFs {
                 let name = e.file_name();
                 // HARNESS NORMALIZATION: embedded-fatfs's directory iterator
                 // yields `.` and `..` pseudo-entries for non-root
-                // directories; C FatFS's f_readdir never does (it suppresses
-                // them internally). This is an API-convention difference
-                // between the two libraries, not a data/metadata bug in
-                // either -- filter them out here so both backends present
-                // the same logical directory view to the differential.
+                // directories, which the C++ app's own directory-listing
+                // consumers never expect -- filter them out here so this
+                // harness's `read_dir` presents the same logical view a
+                // caller expects.
                 if name == "." || name == ".." {
                     continue;
                 }
@@ -344,14 +382,40 @@ impl EFatFs {
         })
     }
 
-    /// Test helper: `read_dir` collapsed to the differential's
-    /// comparison shape (`(name, is_dir, size)`), for the enumeration-set
-    /// equivalence test against [`CFatFs::readdir_all`](crate::fatfs_c::CFatFs::readdir_all).
+    /// Test helper: `read_dir` collapsed to the harness's comparison shape
+    /// (`(name, is_dir, size)`), for enumeration-set equivalence tests against
+    /// a hardcoded known-good expected set.
     pub fn readdir_all(&self, path: &str) -> Vec<(String, bool, u32)> {
         self.read_dir(path)
             .into_iter()
             .map(|e| (e.name, e.is_dir, e.size as u32))
             .collect()
+    }
+
+    /// True if `path` (file or directory) exists. A fresh
+    /// [`mount`](Self::mount)ed `EFatFs` calling this is an independent,
+    /// from-disk check: it walks the on-disk directory structure through a
+    /// brand-new `FileSystem`, not any in-process cache a writer's `EFatFs`
+    /// instance might hold.
+    pub fn exists(&self, path: &str) -> bool {
+        block_on(async { self.fs.root_dir().exists(path).await.unwrap_or(false) })
+    }
+
+    /// The packed FAT modified-date/time (`(dos_date << 16) | dos_time`,
+    /// matching `set_time`'s convention) of `path`, read via `Dir::open_meta`
+    /// (directory-entry metadata only, no file data touched).
+    pub fn mtime(&self, path: &str) -> u32 {
+        block_on(async {
+            let entry = self.fs.root_dir().open_meta(path).await.expect("open_meta");
+            let dt = entry.modified();
+            let dos_date = (u32::from(dt.date.year - 1980) << 9)
+                | (u32::from(dt.date.month) << 5)
+                | u32::from(dt.date.day);
+            let dos_time = (u32::from(dt.time.hour) << 11)
+                | (u32::from(dt.time.min) << 5)
+                | (u32::from(dt.time.sec) / 2);
+            (dos_date << 16) | dos_time
+        })
     }
 
     /// Create a directory. `path`'s parent must already exist.
@@ -362,7 +426,11 @@ impl EFatFs {
     /// storage, not `self` itself.
     pub fn mkdir(&self, path: &str) {
         block_on(async {
-            self.fs.root_dir().create_dir(path).await.expect("create_dir");
+            self.fs
+                .root_dir()
+                .create_dir(path)
+                .await
+                .expect("create_dir");
         });
     }
 
@@ -430,10 +498,9 @@ impl EFatFs {
     }
 
     /// Host analog of `efatfs_core::set_time`: `timestamp` is the
-    /// same packed FAT date/time (`(dos_date << 16) | dos_time`, matching
-    /// C-FatFS's `get_fattime()`/`FILINFO::fdate,ftime` convention) `efatfs_core::set_time`
-    /// documents. Panics on any FS error or out-of-range date/time
-    /// component.
+    /// same packed FAT date/time (`(dos_date << 16) | dos_time`) that
+    /// `efatfs_core::set_time` documents. Panics on any FS error or
+    /// out-of-range date/time component.
     pub fn set_time(&self, path: &str, timestamp: u32) {
         block_on(async {
             let dos_date = (timestamp >> 16) as u16;
@@ -446,7 +513,10 @@ impl EFatFs {
             let sec = (dos_time & 0x1F) * 2;
             let mut f = self.fs.root_dir().open_file(path).await.expect("open_file");
             #[allow(deprecated)]
-            f.set_modified(DateTime::new(Date::new(year, month, day), Time::new(hour, min, sec, 0)));
+            f.set_modified(DateTime::new(
+                Date::new(year, month, day),
+                Time::new(hour, min, sec, 0),
+            ));
             f.close().await.expect("close");
         });
     }

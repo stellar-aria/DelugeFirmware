@@ -79,12 +79,11 @@ void operator delete(void* p, std::size_t) noexcept {
 }
 
 // C++17 over-aligned allocation (operator new(size, align_val_t)). Without these overrides, any type whose
-// alignment exceeds __STDCPP_DEFAULT_NEW_ALIGNMENT__ (e.g. FatFS::File/Directory, which embed a FIL/DIR
-// with a 32-byte FF_CACHE_ALIGN'd buffer -- see src/fatfs/file_io.cpp's `new FatFS::File(...)`) silently
-// falls back to libstdc++'s default aligned-new, which calls into libc's malloc/aligned_alloc -- undefined
-// on this freestanding target (no _sbrk), so the link fails. Route the aligned forms through GMA exactly
-// like the unaligned ones above; alloc_external already takes a runtime alignment, and dealloc doesn't need
-// one to free correctly.
+// alignment exceeds __STDCPP_DEFAULT_NEW_ALIGNMENT__ (e.g. a type with an `alignas`-tagged SIMD-width
+// member) silently falls back to libstdc++'s default aligned-new, which calls into libc's
+// malloc/aligned_alloc -- undefined on this freestanding target (no _sbrk), so the link fails. Route the
+// aligned forms through GMA exactly like the unaligned ones above; alloc_external already takes a runtime
+// alignment, and dealloc doesn't need one to free correctly.
 void* operator new(std::size_t n, std::align_val_t align) noexcept(false) {
 	void* address = deluge::memory::alloc_external(n, static_cast<std::size_t>(align));
 	if (address == nullptr) [[unlikely]] {

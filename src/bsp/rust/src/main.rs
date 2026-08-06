@@ -118,10 +118,6 @@ mod audio;
 /// stub in `host_link_stubs.rs`.
 #[cfg(all(not(target_os = "none"), feature = "host_app"))]
 mod audio_host;
-/// On-device read-throughput benchmark, `embedded-fatfs` vs the
-/// vendored C FatFS — see its module doc. Non-default: `bench_fs` feature.
-#[cfg(all(target_os = "none", feature = "bench_fs"))]
-mod bench_fs;
 /// board.h — capability descriptor + GPIO/audio/CV bring-up. Compiled on host
 /// too under `host_app` (the descriptor/probe are pure data/logic; the GPIO/CV
 /// bring-up bodies get host no-op siblings — see board.rs).
@@ -505,29 +501,22 @@ async fn app_task() {
     // FS allocator a real backing arena, then mount the single-owner
     // embedded-fatfs `FileSystem` — BEFORE `deluge_app_init` so the FS is ready
     // for the first C++ sample-load. A failed mount must NOT brick boot — but note
-    // the streaming read is efatfs-only with NO C-FatFS fallback, so a
-    // failed mount means streamed samples won't load (open_read_stream fails), not
-    // that C++ silently reverts to C-FatFS. The SD block driver is already up
-    // (boot_init above) and nothing has touched the card yet.
-    //
-    // CAVEAT: this and `bench_fs` BOTH init `crate::FS_ALLOCATOR` over
-    // their own arena — enabling both features at once would double-init it.
-    // Don't: `bench_fs` is a throwaway benchmark feature, `efatfs_streaming` is
-    // the real read path.
+    // the streaming read is efatfs-only with no fallback filesystem, so a
+    // failed mount means streamed samples won't load (open_read_stream fails).
+    // The SD block driver is already up (boot_init above) and nothing has
+    // touched the card yet.
     #[cfg(feature = "efatfs_streaming")]
     {
         // Backing arena for `crate::FS_ALLOCATOR` (see its doc): embedded-fatfs's
         // `alloc` feature needs a live heap before its first allocation (LFN
-        // directory-scan scratch, handle-table strings). 96 KiB matches the size
-        // `bench_fs` proved on-device — plain `.bss`, well within the RZ/A1L's
-        // on-chip SRAM.
+        // directory-scan scratch, handle-table strings). 96 KiB — plain `.bss`,
+        // well within the RZ/A1L's on-chip SRAM.
         const EFATFS_ARENA_SIZE: usize = 96 * 1024;
         static mut EFATFS_ARENA: [u8; EFATFS_ARENA_SIZE] = [0; EFATFS_ARENA_SIZE];
 
         // SAFETY: `EFATFS_ARENA` is a function-local static this block alone ever
         // touches; this runs at most once (app_task runs once). `addr_of_mut!` +
-        // `size_of_val(&*p)` (not `&mut EFATFS_ARENA` directly) mirrors the exact
-        // idiom `bench_fs::init_allocator` / `RUST_SRAM_POOL` use, avoiding a
+        // `size_of_val(&*p)` (not `&mut EFATFS_ARENA` directly) avoids a
         // `static_mut_refs` reference to the static itself.
         let (base, size) = unsafe {
             let p = core::ptr::addr_of_mut!(EFATFS_ARENA);
@@ -549,17 +538,9 @@ async fn app_task() {
 
         match crate::efatfs_fs::mount().await {
             Ok(()) => log::info!("efatfs: mounted"),
-            Err(()) => log::warn!("efatfs: mount failed — streaming falls back to C FatFS"),
+            Err(()) => log::warn!("efatfs: mount failed — streamed samples will not load"),
         }
     }
-
-    // With `bench_fs` enabled (off by default): run the on-device
-    // embedded-fatfs-vs-C-FatFS read-throughput benchmark right here — the SD
-    // block driver is up but nothing has touched the card yet, so its two
-    // reads are genuinely uncontended. Prints its `SP1_BENCH …` result line
-    // over RTT/log and returns either way; boot continues normally after.
-    #[cfg(feature = "bench_fs")]
-    bench_fs::run().await;
 
     log::info!("deluge-rust: deluge_app_init() (registers + spawns task runners)");
     // deluge_app_init → registerTasks() spawns the per-task runners onto this

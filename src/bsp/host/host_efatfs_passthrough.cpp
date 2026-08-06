@@ -32,7 +32,7 @@
 /// streamed sample would fail to open and every task-context file operation would no-op. This
 /// gives the host sim a real backend for both over plain POSIX file I/O against a project directory
 /// named by `DELUGE_SD_ROOT` — the SD card itself on the C-host, now that it no longer mounts a
-/// packed FAT image or compiles C-FatFS (`src/fatfs` — see `host_platform.c`'s
+/// packed FAT image or compiles the (now-deleted) C-FatFS library (see `host_platform.c`'s
 /// `deluge_block_ready`, which reports presence from this same directory).
 ///
 /// Design: a small fixed handle table per concern (`g_slots` for streaming reads, `g_files` for

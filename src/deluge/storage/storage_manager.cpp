@@ -17,7 +17,6 @@
 
 #include "storage/storage_manager.h"
 #include "definitions_cxx.hpp"
-#include "fatfs/fatfs.hpp"
 #include "gui/ui/sound_editor.h"
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
@@ -53,8 +52,6 @@
 #include "libdeluge/display.h"
 
 extern "C" {
-#include "fatfs/diskio.h"
-#include "fatfs/ff.h"
 #include <scheduler_api.h>
 }
 

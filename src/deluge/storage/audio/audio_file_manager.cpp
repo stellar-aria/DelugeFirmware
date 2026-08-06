@@ -52,34 +52,6 @@
 #include <string.h>
 #include <strings.h>
 
-extern "C" {
-#include "fatfs/diskio.h"
-#include "fatfs/ff.h"
-#include "libdeluge/block_device.h"
-
-extern int32_t pendingGlobalMIDICommandNumClustersWritten;
-extern int currentlySearchingForCluster;
-
-// FatFs porting symbols: plain sector I/O via the libdeluge block-device boundary. (Cluster
-// streaming is drained by the async fill task now, not pumped from the diskio callbacks.)
-DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-	DelugeStatus status =
-	    deluge_block_read(pdrv, reinterpret_cast<uint8_t*>(buff), static_cast<uint32_t>(sector), count);
-
-	if (currentlySearchingForCluster) {
-		pendingGlobalMIDICommandNumClustersWritten++;
-	}
-
-	return status == DELUGE_OK ? RES_OK : RES_ERROR;
-}
-
-DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-	DelugeStatus status =
-	    deluge_block_write(pdrv, reinterpret_cast<const uint8_t*>(buff), static_cast<uint32_t>(sector), count);
-	return status == DELUGE_OK ? RES_OK : RES_ERROR;
-}
-}
-
 AudioFileManager audioFileManager{};
 
 // === Resource-manager adopt for AudioFile objects (the unified SDRAM reclaim coordinator) =====

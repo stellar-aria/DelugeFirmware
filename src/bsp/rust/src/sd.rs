@@ -101,7 +101,8 @@ const CARD_INSERTED: DelugeCardEvent = 1;
 #[cfg(not(target_os = "none"))]
 const CARD_EJECTED: DelugeCardEvent = 2;
 
-// FatFS diskio status/result codes (src/fatfs/diskio.h).
+// FatFs diskio status/result codes (ChaN's FatFs `diskio.h` convention; no longer
+// vendored in this tree, but these numeric values are the de-facto standard).
 const STA_NOINIT: u8 = 0x01;
 const STA_NODISK: u8 = 0x02;
 const STA_PROTECT: u8 = 0x04;

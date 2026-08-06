@@ -26,9 +26,8 @@
 // `readdir_open`'s snapshot `Vec` needs `alloc` -- this module
 // compiles both `no_std` (device) and `std` (host_app / fs_differential's
 // `#[path]` include), and `extern crate` visibility is per-module in Rust
-// 2018+, so this can't rely on another module's `extern crate alloc;`
-// (`bench_fs.rs` declares its own for the same reason). Harmless under a
-// `std` build too -- `alloc` is always in the sysroot there.
+// 2018+, so this can't rely on another module's `extern crate alloc;`.
+// Harmless under a `std` build too -- `alloc` is always in the sysroot there.
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -605,9 +604,8 @@ where
 }
 
 /// Set `path`'s modified-time directory-entry field from `timestamp`, a
-/// packed 32-bit FAT date/time exactly matching C-FatFS's `get_fattime()` /
-/// `FILINFO::fdate,ftime` convention this codebase already uses elsewhere
-/// (`src/fatfs/ff.c`'s `GET_FATTIME()`): the high 16 bits are the DOS date
+/// packed 32-bit FAT date/time matching the standard FatFs `get_fattime()` /
+/// `FILINFO::fdate,ftime` convention: the high 16 bits are the DOS date
 /// (`(year-1980)<<9 | month<<5 | day`), the low 16 bits are the DOS time
 /// (`hour<<11 | min<<5 | sec/2`) -- i.e. the same halves `Date`/`Time` encode,
 /// concatenated as `(date << 16) | time`.

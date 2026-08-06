@@ -6,16 +6,15 @@
 //!
 //! `RamDisk::read_at`/`write_at` are already byte-granular over `DISK`, so
 //! this just walks the requested blocks and delegates each 512-byte chunk to
-//! them -- same shared image the C FatFS FFI bridge's `disk_read`/`disk_write`
-//! callbacks address sector-granular.
+//! them.
 
 use aligned::{Aligned, A4};
 use block_device_driver::BlockDevice;
 
 use crate::ram_disk::RamDisk;
 
-/// Block size this harness's fixtures and the vendored C FatFS `ffconf.h`
-/// both fix (`FF_MIN_SS == FF_MAX_SS == 512`, see `ram_disk.rs`).
+/// Block size this harness's fixtures fix (matches the real target SD
+/// card's sector size).
 const BLOCK_SIZE: usize = 512;
 
 /// A `BlockDevice<512>` over the shared `DISK` image.

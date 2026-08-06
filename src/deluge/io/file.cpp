@@ -30,8 +30,8 @@ uint32_t unbox_dir_handle(DelugeDir* handle) {
 	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle) - 1);
 }
 
-// FAT attribute bits (embedded_fatfs::FileAttributes::bits(), bit-for-bit
-// C-FatFS's AM_* -- see efatfs_core.rs's DirEntryInfo doc).
+// FAT attribute bits (embedded_fatfs::FileAttributes::bits() -- see
+// efatfs_core.rs's DirEntryInfo doc).
 constexpr uint8_t kFatAttrReadOnly = 0x01;
 constexpr uint8_t kFatAttrHidden = 0x02;
 constexpr uint8_t kFatAttrSystem = 0x04;
@@ -39,9 +39,7 @@ constexpr uint8_t kFatAttrArchive = 0x20;
 
 // Unpacks deluge_efatfs_dir_read's `out_modified` -- the same
 // `(dos_date << 16) | dos_time` convention deluge_efatfs_set_time packs and
-// efatfs_core.rs's `pack_fat_datetime`/`set_time` document, mirroring
-// src/fatfs/file_io.cpp's `from_fat_date_time` for the C-FatFS backend (not
-// shared with it -- that helper is private to the fatfs_adapter namespace).
+// efatfs_core.rs's `pack_fat_datetime`/`set_time` document.
 DelugeTimestamp unpack_fat_datetime(uint32_t packed) {
 	auto dos_date = static_cast<uint16_t>(packed >> 16);
 	auto dos_time = static_cast<uint16_t>(packed & 0xFFFFU);

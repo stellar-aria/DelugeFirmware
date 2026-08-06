@@ -61,10 +61,13 @@ async fn partition_window() -> (u64, u64) {
     }
 }
 
-/// Mount the FS once, storing it in [`FS`]. Idempotent-unsafe by design (no
-/// caller yet — later tasks are responsible for calling this exactly once at
-/// boot, after the SD block driver is up).
+/// Mount the FS, storing it in [`FS`]. Idempotent: returns `Ok(())`
+/// immediately if a FS is already mounted, so both the eager boot mount and a
+/// later C-ABI [`deluge_efatfs_mount`] call can invoke this safely.
 pub async fn mount() -> Result<(), ()> {
+    if FS.lock().await.is_some() {
+        return Ok(()); // already mounted -- idempotent
+    }
     let (start, end) = partition_window().await;
     let slice = StreamSlice::new(
         BufStream::<SdBlockDevice, 512>::new(SdBlockDevice),
@@ -78,6 +81,31 @@ pub async fn mount() -> Result<(), ()> {
         .map_err(|_| ())?;
     *FS.lock().await = Some(fs);
     Ok(())
+}
+
+/// Reset the four handle tables ([`HANDLES`], [`TASK_FILES`], [`DIR_HANDLES`],
+/// [`STREAM_WRITE_CTX`]) back to empty. Each holds detached `FileContext`-ish
+/// state keyed against the FS that was mounted when the handle was opened, so
+/// all four go stale the instant the underlying [`Fs`] is dropped (a card
+/// swap). Re-`new()`ing each under its own lock IS the reset: every table's
+/// `new()` is a plain const zero-init, so there's no drop side effect worth
+/// preserving.
+async fn reset_all_handle_tables() {
+    *HANDLES.lock().await = HandleTable::new();
+    *TASK_FILES.lock().await = TaskFileTable::new();
+    *DIR_HANDLES.lock().await = DirHandleTable::new();
+    *STREAM_WRITE_CTX.lock().await = HandleTable::new();
+}
+
+/// Drop the mounted FS, reset the four handle tables, and re-mount fresh.
+/// For a card SWAP: gives a clean [`Fs`] against the new card and invalidates
+/// every stale Rust-side handle from the old one (open streaming reads, task
+/// files, directory browses, and in-progress stream-writes all become
+/// invalid — callers must reopen).
+pub async fn remount() -> Result<(), ()> {
+    *FS.lock().await = None; // drop the old Fs (BufStream/StreamSlice discarded with it)
+    reset_all_handle_tables().await;
+    mount().await // re-mount fresh against the (new) card
 }
 
 /// Run `f` with exclusive access to the mounted FS (the ONLY entry point).
@@ -692,6 +720,82 @@ pub extern "C" fn deluge_efatfs_dir_read(
 pub extern "C" fn deluge_efatfs_dir_close(handle: u32) {
     if crate::fiber::on_fiber() {
         crate::fiber::block_on_fiber(task_dir_close(handle));
+    }
+}
+
+/// C-ABI: free + total cluster counts of the mounted volume.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stats(
+    out_free_clusters: *mut u32,
+    out_total_clusters: *mut u32,
+) -> bool {
+    if !crate::fiber::on_fiber() || out_free_clusters.is_null() || out_total_clusters.is_null() {
+        return false;
+    }
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::fs_stats(fs).await))
+        .flatten()
+    {
+        Some((free, total)) => {
+            // SAFETY: both out-params non-null (checked above).
+            unsafe {
+                *out_free_clusters = free;
+                *out_total_clusters = total;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: mount the FS if it isn't already mounted (idempotent -- see
+/// [`mount`]). True if mounted (or already was), false on failure/off-fiber.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_mount() -> bool {
+    if !crate::fiber::on_fiber() {
+        return false;
+    }
+    crate::fiber::block_on_fiber(mount()).is_ok()
+}
+
+/// C-ABI: whether the FS is currently mounted (pure state check, no I/O). Lets a caller distinguish
+/// a fresh `mount()` transition from the already-mounted case, since `mount()`'s own success return
+/// can't tell them apart (it's idempotent).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
+    if !crate::fiber::on_fiber() {
+        return false;
+    }
+    crate::fiber::block_on_fiber(with_fs(async |_fs| ())).is_some()
+}
+
+/// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
+/// (see [`remount`]). For a card SWAP: gives a clean FS against the new card
+/// and invalidates stale Rust-side handle state from the old one.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_remount() -> bool {
+    if !crate::fiber::on_fiber() {
+        return false;
+    }
+    crate::fiber::block_on_fiber(remount()).is_ok()
+}
+
+/// C-ABI: the mounted volume's cluster (allocation-unit) size, in bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_cluster_size(out_bytes: *mut u32) -> bool {
+    if !crate::fiber::on_fiber() || out_bytes.is_null() {
+        return false;
+    }
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::fs_cluster_size(fs).await))
+        .flatten()
+    {
+        Some(bytes) => {
+            // SAFETY: `out_bytes` is non-null (checked above).
+            unsafe {
+                *out_bytes = bytes;
+            }
+            true
+        }
+        None => false,
     }
 }
 

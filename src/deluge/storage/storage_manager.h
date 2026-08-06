@@ -34,8 +34,6 @@ extern "C" {
 
 extern void deleteOldSongBeforeLoadingNew();
 
-extern FatFS::Filesystem fileSystem;
-
 class Instrument;
 class PlaybackMode;
 class ParamManagerForTimeline;
@@ -403,8 +401,6 @@ Error openInstrumentFile(OutputType outputType, char const* path);
 } // namespace StorageManager
 
 extern FirmwareVersion song_firmware_version;
-extern FILINFO staticFNO;
-extern FatFS::Directory staticDIR;
 extern const bool writeJsonFlag;
 
 inline bool isCardReady() {

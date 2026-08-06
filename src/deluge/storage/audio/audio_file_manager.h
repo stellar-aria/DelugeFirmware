@@ -142,7 +142,6 @@ public:
 	std::string alternateAudioFileLoadPath{};
 	AlternateLoadDirStatus alternateLoadDirStatus = AlternateLoadDirStatus::NONE_SET;
 	ThingType thingTypeBeingLoaded = ThingType::NONE;
-	DIR alternateLoadDir{};
 
 	std::array<int32_t, kNumAudioRecordingFolders> highestUsedAudioRecordingNumber{};
 	std::bitset<kNumAudioRecordingFolders> highestUsedAudioRecordingNumberNeedsReChecking{};

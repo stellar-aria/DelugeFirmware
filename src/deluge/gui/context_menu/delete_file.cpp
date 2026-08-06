@@ -21,11 +21,8 @@
 #include "gui/l10n/l10n.h"
 #include "gui/ui/browser/browser.h"
 #include "hid/display/display.h"
+#include "io/file.hpp"
 #include "libdeluge/file_io.h"
-
-extern "C" {
-#include "fatfs/ff.h"
-}
 
 namespace deluge::gui::context_menu {
 
@@ -62,15 +59,15 @@ bool DeleteFile::acceptCurrentOption() {
 		std::string filePath = browser->getCurrentFilePath();
 
 		deluge_file_invalidate_cache();
-		FRESULT result = f_unlink(filePath.c_str());
+		auto removed = deluge::io::unlink(filePath);
 
 		// The file might not exist on the card in the first place, in which case whatever
-		if (result == FR_OK) {
+		if (removed.has_value()) {
 			display->displayPopup(l10n::get(STRING_FOR_FILE_DELETED));
 			browser->currentFileDeleted();
 			existed = true;
 		}
-		else if (result == FR_NO_FILE) {
+		else if (removed.error() == deluge::io::Status::NOT_FOUND) {
 			existed = false;
 		}
 		// If didn't work

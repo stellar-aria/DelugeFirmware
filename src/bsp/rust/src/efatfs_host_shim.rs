@@ -146,19 +146,44 @@ pub type Fs = FileSystem<Storage, DefaultTimeProvider, LossyOemCpConverter>;
 // the identical `Mutex` shape costs nothing and keeps this a faithful mirror.
 static FS: Mutex<CriticalSectionRawMutex, Option<Fs>> = Mutex::new(None);
 
-/// Mount the FS once, storing it in [`FS`]. No partition-window detection (see
-/// module doc) — the harness image is always a single raw FAT volume. Called
-/// (`.await`ed) from the host_app/lens boot task, a genuine async context: the
-/// mount's block reads go through [`HostSdBlockDevice`], which now `.await`s
-/// `crate::sd::locked_*_sectors`, so they suspend and resume normally on the
-/// executor — no `set_off_fiber_instant` wrap or special-casing needed here.
+/// Mount the FS, storing it in [`FS`]. Idempotent: returns `Ok(())`
+/// immediately if a FS is already mounted, so both the eager boot mount and a
+/// later C-ABI [`deluge_efatfs_mount`] call can invoke this safely. No
+/// partition-window detection (see module doc) — the harness image is always
+/// a single raw FAT volume. Called (`.await`ed) from the host_app/lens boot
+/// task, a genuine async context: the mount's block reads go through
+/// [`HostSdBlockDevice`], which now `.await`s `crate::sd::locked_*_sectors`,
+/// so they suspend and resume normally on the executor — no
+/// `set_off_fiber_instant` wrap or special-casing needed here.
 pub async fn mount() -> Result<(), ()> {
+    if FS.lock().await.is_some() {
+        return Ok(()); // already mounted -- idempotent
+    }
     let storage = BufStream::<HostSdBlockDevice, 512>::new(HostSdBlockDevice);
     let fs = FileSystem::new(storage, FsOptions::new())
         .await
         .map_err(|_| ())?;
     *FS.lock().await = Some(fs);
     Ok(())
+}
+
+/// Reset the four handle tables ([`HANDLES`], [`TASK_FILES`], [`DIR_HANDLES`],
+/// [`STREAM_WRITE_CTX`]) back to empty. Same rationale as the device
+/// `efatfs_fs::reset_all_handle_tables` -- re-`new()`ing each under its own
+/// lock IS the reset.
+async fn reset_all_handle_tables() {
+    *HANDLES.lock().await = HandleTable::new();
+    *TASK_FILES.lock().await = TaskFileTable::new();
+    *DIR_HANDLES.lock().await = DirHandleTable::new();
+    *STREAM_WRITE_CTX.lock().await = HandleTable::new();
+}
+
+/// Drop the mounted FS, reset the four handle tables, and re-mount fresh. See
+/// the device `efatfs_fs::remount` for the full card-swap rationale.
+pub async fn remount() -> Result<(), ()> {
+    *FS.lock().await = None; // drop the old Fs
+    reset_all_handle_tables().await;
+    mount().await // re-mount fresh
 }
 
 /// Run `f` with exclusive access to the mounted FS (the ONLY entry point).
@@ -781,6 +806,100 @@ pub extern "C" fn deluge_efatfs_dir_close(handle: u32) {
         crate::fiber::block_on_fiber(task_dir_close(handle));
     } else {
         embassy_futures::block_on(task_dir_close(handle));
+    }
+}
+
+/// C-ABI: free + total cluster counts of the mounted volume.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_stats(
+    out_free_clusters: *mut u32,
+    out_total_clusters: *mut u32,
+) -> bool {
+    if out_free_clusters.is_null() || out_total_clusters.is_null() {
+        return false;
+    }
+    let fut = with_fs(async |fs| efatfs_core::fs_stats(fs).await);
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten();
+    match result {
+        Some((free, total)) => {
+            // SAFETY: both out-params non-null (checked above), owned by the caller for this call.
+            unsafe {
+                *out_free_clusters = free;
+                *out_total_clusters = total;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// C-ABI: mount the FS if it isn't already mounted (idempotent -- see
+/// [`mount`]). True if mounted (or already was), false on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_mount() -> bool {
+    let fut = mount();
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .is_ok()
+}
+
+/// C-ABI: whether the FS is currently mounted (pure state check, no I/O). Lets a caller distinguish
+/// a fresh `mount()` transition from the already-mounted case, since `mount()`'s own success return
+/// can't tell them apart (it's idempotent).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
+    let fut = with_fs(async |_fs| ());
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .is_some()
+}
+
+/// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
+/// (see [`remount`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_remount() -> bool {
+    let fut = remount();
+    if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .is_ok()
+}
+
+/// C-ABI: the mounted volume's cluster (allocation-unit) size, in bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_efatfs_cluster_size(out_bytes: *mut u32) -> bool {
+    if out_bytes.is_null() {
+        return false;
+    }
+    let fut = with_fs(async |fs| efatfs_core::fs_cluster_size(fs).await);
+    let result = if crate::fiber::on_fiber() {
+        crate::fiber::block_on_fiber(fut)
+    } else {
+        embassy_futures::block_on(fut)
+    }
+    .flatten();
+    match result {
+        Some(bytes) => {
+            // SAFETY: `out_bytes` is non-null (checked above), owned by the caller for this call.
+            unsafe {
+                *out_bytes = bytes;
+            }
+            true
+        }
+        None => false,
     }
 }
 

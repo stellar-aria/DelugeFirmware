@@ -17,11 +17,11 @@
 
 #include "cartridge.h"
 #include "dsp/dx/engine.h"
-#include "fatfs.hpp"
 #include "gui/ui/browser/dx_browser.h"
 #include "gui/ui/sound_editor.h"
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
+#include "io/file.hpp"
 #include "memory/allocate_unique.h"
 #include "memory/sdram_allocator.h"
 #include "model/song/song.h"
@@ -38,20 +38,14 @@ static bool openFile(std::string_view path, DX7Cartridge* data) {
 	using enum deluge::l10n::String;
 	constexpr size_t minSize = kSmallSysexSize;
 
-	FatFS::FileInfo fno = D_TRY_CATCH(FatFS::stat(path), error, {
-		return false; // fail quickly if file doesn't exist
+	io::File file = D_TRY_CATCH_MOVE(io::File::open(path, DELUGE_FILE_READ), error, {
+		return false; // fail quickly if the file doesn't exist / can't open
 	});
 
-	FSIZE_t filesize = fno.fsize;
+	uint32_t filesize = D_TRY_CATCH(file.size(), error, { return false; });
 	if (filesize < minSize) {
 		display->displayPopup(l10n::get(STRING_FOR_DX_ERROR_FILE_TOO_SMALL));
 	}
-
-	// Open the file
-	FatFS::File file = D_TRY_CATCH(FatFS::File::open(path, FA_READ), error, {
-		display->displayPopup(l10n::get(STRING_FOR_DX_ERROR_READ_ERROR));
-		return false;
-	});
 
 	l10n::String error = EMPTY_STRING;
 	int readsize = std::min((int)filesize, 8192);
@@ -61,9 +55,10 @@ static bool openFile(std::string_view path, DX7Cartridge* data) {
 		return false;
 	});
 
-	std::span<std::byte> readbuffer = D_TRY_CATCH(file.read({buffer.get(), filesize}), error, {
-		return false; //
-	});
+	std::span<std::byte> readbuffer =
+	    D_TRY_CATCH(file.read(std::span<std::byte>(buffer.get(), static_cast<size_t>(readsize))), error, {
+		    return false; //
+	    });
 
 	if (readbuffer.size() < minSize) {
 		display->displayPopup(l10n::get(STRING_FOR_DX_ERROR_FILE_TOO_SMALL));

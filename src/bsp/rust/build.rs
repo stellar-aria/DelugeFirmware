@@ -79,6 +79,20 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
 
+    // The efatfs mount C-ABI (efatfs_fs.rs). All four now have real C++ callers via
+    // storage_manager.cpp / audio_file_manager.cpp (`_mount`/`_is_mounted` in initSD,
+    // `_remount` in reinitEjectedCard, `_cluster_size` in init/cardReinserted), so these
+    // `-u` roots are belt-and-suspenders — harmless, and they keep the link robust against a
+    // future refactor that drops the last caller of any one of them.
+    for sym in [
+        "deluge_efatfs_mount",
+        "deluge_efatfs_remount",
+        "deluge_efatfs_cluster_size",
+        "deluge_efatfs_is_mounted",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+
     // ---------------------------------------------------------------------
     // Link the portable C++ application (built by CMake into the `build/` dir).
     // deluge_app is an OBJECT lib (no .a), so archive its objects here, then
@@ -282,6 +296,16 @@ fn run_host_app(
         "deluge_sample_stream_get_asset_id",
         "deluge_sample_stream_set_asset_id",
         "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+    // The efatfs mount C-ABI (efatfs_host_shim.rs) — belt-and-suspenders roots; see the
+    // device path's block above for the caller list.
+    for sym in [
+        "deluge_efatfs_mount",
+        "deluge_efatfs_remount",
+        "deluge_efatfs_cluster_size",
+        "deluge_efatfs_is_mounted",
     ] {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }

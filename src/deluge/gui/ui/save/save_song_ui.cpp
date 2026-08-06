@@ -189,15 +189,15 @@ gotError:
 				if (!sample.tempFilePathForRecording.empty()) {
 					StorageManager::buildPathToFile(audioFile->filePath.c_str());
 					deluge_file_invalidate_cache();
-					FRESULT result = f_rename(sample.tempFilePathForRecording.c_str(), audioFile->filePath.c_str());
-					if (result == FR_OK) {
+					auto renamed = deluge::io::rename(sample.tempFilePathForRecording, audioFile->filePath);
+					if (renamed.has_value()) {
 						sample.tempFilePathForRecording.clear();
 					}
 					else {
 						// We at least need to warn the user that although the main file save was (hopefully soon to be)
 						// successful, something's gone wrong
 						anyErrorMovingTempFiles = true;
-						D_PRINTLN("rename failed.  %d %s %s", result, sample.tempFilePathForRecording.c_str(),
+						D_PRINTLN("rename failed. %s %s", sample.tempFilePathForRecording.c_str(),
 						          audioFile->filePath.c_str());
 					}
 				}
@@ -476,18 +476,16 @@ gotError:
 
 		// Delete the old file
 		deluge_file_invalidate_cache();
-		FRESULT result = f_unlink(filePath.c_str());
-		if (result != FR_OK) {
-cardError:
-			error = fresultToDelugeErrorCode(result);
+		if (auto removed = deluge::io::unlink(filePath); !removed.has_value()) {
+			error = delugeStatusToError(deluge::io::to_deluge_status(removed.error()));
 			goto gotError;
 		}
 
 		// Rename the new file
 		deluge_file_invalidate_cache();
-		result = f_rename(filePathDuringWrite.c_str(), filePath.c_str());
-		if (result != FR_OK) {
-			goto cardError;
+		if (auto renamed = deluge::io::rename(filePathDuringWrite, filePath); !renamed.has_value()) {
+			error = delugeStatusToError(deluge::io::to_deluge_status(renamed.error()));
+			goto gotError;
 		}
 	}
 

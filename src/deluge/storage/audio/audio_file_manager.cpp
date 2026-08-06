@@ -27,6 +27,7 @@
 #include "io/midi/midi_device_manager.h"
 #include "io/stream.hpp"
 #include "libdeluge/block_device.h"
+#include "libdeluge/file_io.h"       // deluge_efatfs_cluster_size
 #include "libdeluge/storage_owner.h" // deluge_storage_on_owner
 #include "libdeluge/stream_io.h"
 #include "libdeluge/system.h" // deluge_in_interrupt
@@ -49,6 +50,7 @@
 
 #include <new>
 #include <string.h>
+#include <strings.h>
 
 extern "C" {
 #include "fatfs/diskio.h"
@@ -140,7 +142,13 @@ void AudioFileManager::init() {
 
 	Error error = StorageManager::initSD();
 	if (error == Error::NONE) {
-		Cluster::set_size(fileSystem.csize * 512);
+		uint32_t clusterBytes = 0;
+		// Shouldn't fail right after a successful mount, but never let a 0 cluster size through -
+		// Cluster::set_size(0) would make every file read request 0 bytes.
+		if (!deluge_efatfs_cluster_size(&clusterBytes)) {
+			clusterBytes = Cluster::kSizeFAT16Max;
+		}
+		Cluster::set_size(clusterBytes);
 
 		D_PRINTLN("Cluster::size  %d clusterSizeMagnitude  %d", Cluster::size, Cluster::size_magnitude);
 		cardEjected = false;
@@ -162,11 +170,18 @@ void AudioFileManager::cardReinserted() {
 		highestUsedAudioRecordingNumberNeedsReChecking[i] = true;
 	}
 
+	// Query the reinserted card's cluster size. On failure (shouldn't happen right after a fresh
+	// mount) the out-param is left untouched, so pre-seeding it with the current size makes an
+	// unavailable query fall through to the "stayed the same" branch below - never a spurious
+	// increased/decreased trip.
+	uint32_t newClusterSize = Cluster::size;
+	deluge_efatfs_cluster_size(&newClusterSize);
+
 	// If cluster size has increased, we're in trouble
-	if (fileSystem.csize * 512 > Cluster::size) {
+	if (newClusterSize > Cluster::size) {
 
 		// But, if it's still not as big as it was when we booted up, that's still manageable
-		if (fileSystem.csize * 512 <= clusterSizeAtBoot) {
+		if (newClusterSize <= clusterSizeAtBoot) {
 			goto clusterSizeChangedButItsOk;
 		}
 
@@ -177,7 +192,7 @@ void AudioFileManager::cardReinserted() {
 
 	// If cluster size decreased, we have to stop all current samples from ever sounding again. Pretty big trouble
 	// really...
-	else if (fileSystem.csize * 512 < Cluster::size) {
+	else if (newClusterSize < Cluster::size) {
 
 clusterSizeChangedButItsOk:
 		D_PRINTLN("cluster size changed, and smaller than original so it's ok");
@@ -201,7 +216,7 @@ clusterSizeChangedButItsOk:
 		}
 
 		// That was all a pain, but now we can update the cluster size
-		Cluster::set_size(fileSystem.csize * 512);
+		Cluster::set_size(newClusterSize);
 	}
 
 	// Or if cluster size stayed the same...
@@ -316,34 +331,38 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 	// recordings will be much smaller
 	if (highestUsedAudioRecordingNumberNeedsReChecking[folderID]) {
 
-		auto maybeDIR = staticDIR.open(audioRecordingFolderNames[folderID]);
-		if (maybeDIR) {
-			staticDIR = *maybeDIR;
-
+		// Local RAII handle (not a shared FatFS::Directory global) -- the port selector picks efatfs or
+		// C-FatFS underneath; the destructor closes it on every return path below.
+		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
+		if (dir.has_value()) {
 			while (true) {
-				/* Read a directory item */
-				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
+				std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir->read(), error, {
 					return Error::SD_CARD; // error if invalid
 				});
 
-				if (__builtin_expect((*(uint32_t*)staticFNO.altname & 0x00FFFFFF) == 0x00434552, 1)) { // "REC"
-					if (*(uint32_t*)&staticFNO.altname[8] == 0x5641572E) {                             // ".WAV"
+				if (!entry.has_value()) {
+					break; // Break on end of dir
+				}
+				if (entry->is_directory) {
+					continue;
+				}
 
-						int32_t thisSlot = memToUIntOrError(&staticFNO.altname[3], &staticFNO.altname[8]);
-						if (thisSlot == -1) {
-							continue;
-						}
+				// Match REC?????.WAV (5 digits), case-insensitive. The recorder only ever writes
+				// exactly this 8.3-clean shape (see the `filePath.append(...)` block below), so the
+				// long name always equals what the old code read as the FAT short name.
+				const char* name = entry->name;
+				size_t len = strlen(name);
+				if (len == 12 && strncasecmp(name, "REC", 3) == 0 && strncasecmp(name + 8, ".WAV", 4) == 0) {
+					int32_t thisSlot = memToUIntOrError(name + 3, name + 8);
+					if (thisSlot == -1) {
+						continue;
+					}
 
-						if (thisSlot > highestUsedAudioRecordingNumber[folderID]) {
-							highestUsedAudioRecordingNumber[folderID] = thisSlot;
-						}
+					if (thisSlot > highestUsedAudioRecordingNumber[folderID]) {
+						highestUsedAudioRecordingNumber[folderID] = thisSlot;
 					}
 				}
-				else if (!staticFNO.altname[0]) {
-					break; /* Break on end of dir */
-				}
 			}
-			// f_closedir(&staticDIR);
 		}
 
 		highestUsedAudioRecordingNumberNeedsReChecking[folderID] = false;
@@ -527,18 +546,22 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		return true;
 	}
 
-	// Look up one proposed name in the (already-open) alternate load dir; on a hit, fill effectiveFilePointer /
-	// usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the now-non-alternate location).
+	// Look up one proposed name in the (known-to-exist) alternate load dir by full path; on a hit, fill
+	// effectiveFilePointer / usingAlternateLocation (and, for SYNTH/KIT presets, rewrite filePath to the
+	// now-non-alternate location).
 	const auto tryAlternateName = [&](const std::string& proposedFileName) -> bool {
-		const char* proposedFileNamePointer = proposedFileName.c_str();
-		if (create_name(&alternateLoadDir, &proposedFileNamePointer) != FR_OK) { // Can only fail if name too weird.
+		std::string candidate = alternateAudioFileLoadPath;
+		candidate.append("/");
+		candidate.append(proposedFileName);
+		auto opened = deluge::io::File::open(candidate, DELUGE_FILE_READ);
+		if (!opened.has_value()) {
 			return false;
 		}
-		if (dir_find(&alternateLoadDir) != FR_OK) {
+		auto sz = opened->size();
+		if (!sz.has_value()) {
 			return false;
 		}
-		effectiveFilePointer.sclust = ld_clust(&fileSystem, alternateLoadDir.dir);
-		effectiveFilePointer.objsize = ld_dword(alternateLoadDir.dir + DIR_FileSize);
+		effectiveFilePointer.objsize = *sz;
 		usingAlternateLocation = alternateAudioFileLoadPath;
 		usingAlternateLocation.append("/");
 		usingAlternateLocation.append(proposedFileName);
@@ -568,16 +591,18 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		return tryAlternateName(getFileNameFromEndOfPath(filePath.c_str())) ? AltResult::Found : AltResult::NotFound;
 	};
 
-	// Open the file at its regular path; on success fill effectiveFilePointer. Returns the FatFS result.
-	const auto tryRegularPath = [&]() -> FRESULT {
-		FIL fil;
-		const FRESULT result = f_open(&fil, filePath.c_str(), FA_READ);
-		if (result == FR_OK) {
-			effectiveFilePointer.sclust = fil.obj.sclust;
-			effectiveFilePointer.objsize = fil.obj.objsize;
-			f_close(&fil);
+	// Open the file at its regular path; on success fill effectiveFilePointer.objsize. Returns whether it opened.
+	const auto tryRegularPath = [&]() -> bool {
+		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
+		if (!opened.has_value()) {
+			return false;
 		}
-		return result;
+		auto sz = opened->size();
+		if (!sz.has_value()) {
+			return false;
+		}
+		effectiveFilePointer.objsize = *sz;
+		return true; // File auto-closes on scope exit (RAII)
 	};
 
 	// If we already know the alternate dir exists there's a high chance the file is in it, so try that first and
@@ -590,18 +615,18 @@ bool AudioFileManager::resolveFilePointer(std::string& filePath, FilePointer* su
 		case AltResult::HardError:
 			return false;
 		case AltResult::NotFound:
-			if (tryRegularPath() == FR_OK) {
+			if (tryRegularPath()) {
 				return true;
 			}
 		}
 	}
 	else {
-		if (tryRegularPath() == FR_OK) {
+		if (tryRegularPath()) {
 			return true;
 		}
 		// Regular path failed — if an alternate dir might exist, open it and search there.
 		if (alternateLoadDirStatus == AlternateLoadDirStatus::MIGHT_EXIST) {
-			if (f_opendir(&alternateLoadDir, alternateAudioFileLoadPath.c_str()) != FR_OK) {
+			if (!deluge::io::Directory::open(alternateAudioFileLoadPath.c_str()).has_value()) {
 				alternateLoadDirStatus = AlternateLoadDirStatus::NOT_FOUND;
 				*error = Error::FILE_UNREADABLE;
 				return false;
@@ -887,12 +912,23 @@ void card_init_fill(void*) {
 } // namespace
 
 void AudioFileManager::reinitEjectedCard() {
-	if (cardEjected) {
-		Error error = StorageManager::initSD();
-		if (error == Error::NONE) {
-			cardEjected = false;
-		}
+	if (!cardEjected) {
+		return;
 	}
+	if (!StorageManager::checkSDPresent()) {
+		return; // Card still not back - keep retrying on the next slowRoutine tick.
+	}
+
+	// Card's back: rebuild efatfs against the (possibly new) card - drop the stale FS mounted
+	// against the old card and reset the four handle tables - then explicitly re-validate the
+	// resident samples. We can't route this through initSD(): deluge_efatfs_remount() leaves
+	// deluge_efatfs_is_mounted() reading true, so initSD()'s !wasMounted->mounted transition gate
+	// (which is what fires firstCardRead()) would never trip on a swap.
+	if (!deluge_efatfs_remount()) {
+		return; // Remount failed (e.g. unreadable card) - stay ejected, retry next tick.
+	}
+	cardEjected = false;
+	firstCardRead(); // cardReadOnce is already true here, so this routes to cardReinserted().
 }
 
 void AudioFileManager::slowRoutine() {

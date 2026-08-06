@@ -50,6 +50,7 @@
 
 #include <new>
 #include <string.h>
+#include <strings.h>
 
 extern "C" {
 #include "fatfs/diskio.h"
@@ -330,34 +331,38 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 	// recordings will be much smaller
 	if (highestUsedAudioRecordingNumberNeedsReChecking[folderID]) {
 
-		auto maybeDIR = staticDIR.open(audioRecordingFolderNames[folderID]);
-		if (maybeDIR) {
-			staticDIR = *maybeDIR;
-
+		// Local RAII handle (not a shared FatFS::Directory global) -- the port selector picks efatfs or
+		// C-FatFS underneath; the destructor closes it on every return path below.
+		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
+		if (dir.has_value()) {
 			while (true) {
-				/* Read a directory item */
-				staticFNO = D_TRY_CATCH(staticDIR.read(), error, {
+				std::optional<DelugeDirEntry> entry = D_TRY_CATCH(dir->read(), error, {
 					return Error::SD_CARD; // error if invalid
 				});
 
-				if (__builtin_expect((*(uint32_t*)staticFNO.altname & 0x00FFFFFF) == 0x00434552, 1)) { // "REC"
-					if (*(uint32_t*)&staticFNO.altname[8] == 0x5641572E) {                             // ".WAV"
+				if (!entry.has_value()) {
+					break; // Break on end of dir
+				}
+				if (entry->is_directory) {
+					continue;
+				}
 
-						int32_t thisSlot = memToUIntOrError(&staticFNO.altname[3], &staticFNO.altname[8]);
-						if (thisSlot == -1) {
-							continue;
-						}
+				// Match REC?????.WAV (5 digits), case-insensitive. The recorder only ever writes
+				// exactly this 8.3-clean shape (see the `filePath.append(...)` block below), so the
+				// long name always equals what the old code read as the FAT short name.
+				const char* name = entry->name;
+				size_t len = strlen(name);
+				if (len == 12 && strncasecmp(name, "REC", 3) == 0 && strncasecmp(name + 8, ".WAV", 4) == 0) {
+					int32_t thisSlot = memToUIntOrError(name + 3, name + 8);
+					if (thisSlot == -1) {
+						continue;
+					}
 
-						if (thisSlot > highestUsedAudioRecordingNumber[folderID]) {
-							highestUsedAudioRecordingNumber[folderID] = thisSlot;
-						}
+					if (thisSlot > highestUsedAudioRecordingNumber[folderID]) {
+						highestUsedAudioRecordingNumber[folderID] = thisSlot;
 					}
 				}
-				else if (!staticFNO.altname[0]) {
-					break; /* Break on end of dir */
-				}
 			}
-			// f_closedir(&staticDIR);
 		}
 
 		highestUsedAudioRecordingNumberNeedsReChecking[folderID] = false;

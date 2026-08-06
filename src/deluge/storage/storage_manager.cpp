@@ -63,8 +63,6 @@ FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory
 }
 
 FirmwareVersion song_firmware_version = FirmwareVersion::current();
-FILINFO staticFNO;
-FatFS::Directory staticDIR;
 PLACE_SDRAM_BSS XMLSerializer smSerializer;
 PLACE_SDRAM_BSS XMLDeserializer smDeserializer;
 PLACE_SDRAM_BSS JsonSerializer smJsonSerializer;

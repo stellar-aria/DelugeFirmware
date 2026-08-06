@@ -124,9 +124,8 @@ void deluge_file_invalidate_cache(void);
 
 /// The embedded-fatfs (Rust `efatfs_streaming`) task-context file/directory
 /// C-ABI. `deluge::io::File`/`Directory` (file.cpp) route to these instead of
-/// the `deluge_file_*`/`deluge_dir_*` functions above whenever
-/// `deluge_streaming_efatfs_active()` (declared in streaming_fill.h) is true;
-/// every non-efatfs BSP/config links the `__attribute__((weak))` fallback in
+/// the `deluge_file_*`/`deluge_dir_*` functions above unconditionally; every
+/// non-efatfs BSP/config links the `__attribute__((weak))` fallback in
 /// `async_fill.cpp` (always false/no-op), so these symbols always link
 /// regardless of backend. Implemented in `efatfs_fs.rs` (device) /
 /// `efatfs_host_shim.rs` (host), both composing the storage-generic

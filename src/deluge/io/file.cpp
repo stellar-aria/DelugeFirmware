@@ -1,7 +1,5 @@
 #include "io/file.hpp"
 
-#include "libdeluge/streaming_fill.h" // deluge_streaming_efatfs_active
-
 #include <cstdint>
 
 namespace deluge::io {
@@ -128,213 +126,113 @@ DelugeStatus to_deluge_status(Status status) {
 }
 
 std::expected<File, Status> File::open(std::string_view path, DelugeFileOpenMode mode) {
-	if (deluge_streaming_efatfs_active()) {
-		uint32_t handle = 0;
-		if (!deluge_efatfs_file_open(path.data(), static_cast<uint8_t>(mode), &handle)) {
-			return std::unexpected(Status::ERR);
-		}
-		return File(box_file_handle(handle));
+	uint32_t handle = 0;
+	if (!deluge_efatfs_file_open(path.data(), static_cast<uint8_t>(mode), &handle)) {
+		return std::unexpected(Status::ERR);
 	}
-	DelugeFile* handle = nullptr;
-	DelugeStatus status = deluge_file_open(path.data(), mode, &handle);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
-	}
-	return File(handle);
+	return File(box_file_handle(handle));
 }
 
 std::expected<std::span<std::byte>, Status> File::read(std::span<std::byte> buffer) {
 	uint32_t out_read = 0;
-	if (deluge_streaming_efatfs_active()) {
-		// EOF-honest read (the true short count, never zero-padded) -- the
-		// efatfs backend for this port method.
-		if (!deluge_efatfs_file_read_exact(unbox_file_handle(handle_), buffer.data(),
-		                                   static_cast<uint32_t>(buffer.size()), &out_read)) {
-			return std::unexpected(Status::ERR);
-		}
-		return buffer.subspan(0, out_read);
-	}
-	DelugeStatus status = deluge_file_read(handle_, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_read);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	// EOF-honest read (the true short count, never zero-padded) -- the
+	// efatfs backend for this port method.
+	if (!deluge_efatfs_file_read_exact(unbox_file_handle(handle_), buffer.data(), static_cast<uint32_t>(buffer.size()),
+	                                   &out_read)) {
+		return std::unexpected(Status::ERR);
 	}
 	return buffer.subspan(0, out_read);
 }
 
 std::expected<uint32_t, Status> File::write(std::span<const std::byte> buffer) {
 	uint32_t out_written = 0;
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_file_write(unbox_file_handle(handle_), buffer.data(), static_cast<uint32_t>(buffer.size()),
-		                              &out_written)) {
-			return std::unexpected(Status::ERR);
-		}
-		return out_written;
-	}
-	DelugeStatus status = deluge_file_write(handle_, buffer.data(), static_cast<uint32_t>(buffer.size()), &out_written);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_file_write(unbox_file_handle(handle_), buffer.data(), static_cast<uint32_t>(buffer.size()),
+	                              &out_written)) {
+		return std::unexpected(Status::ERR);
 	}
 	return out_written;
 }
 
 std::expected<void, Status> File::seek(uint32_t offset) {
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_file_seek(unbox_file_handle(handle_), offset)) {
-			return std::unexpected(Status::ERR);
-		}
-		return {};
-	}
-	DelugeStatus status = deluge_file_seek(handle_, offset);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_file_seek(unbox_file_handle(handle_), offset)) {
+		return std::unexpected(Status::ERR);
 	}
 	return {};
 }
 
 std::expected<uint32_t, Status> File::size() {
 	uint32_t out_size = 0;
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_file_size(unbox_file_handle(handle_), &out_size)) {
-			return std::unexpected(Status::ERR);
-		}
-		return out_size;
-	}
-	DelugeStatus status = deluge_file_size(handle_, &out_size);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_file_size(unbox_file_handle(handle_), &out_size)) {
+		return std::unexpected(Status::ERR);
 	}
 	return out_size;
 }
 
 std::expected<void, Status> File::close() {
-	if (deluge_streaming_efatfs_active()) {
-		deluge_efatfs_file_close(unbox_file_handle(handle_));
-		handle_ = nullptr; // matters even on error: don't let the destructor double-close
-		return {};
-	}
-	DelugeStatus status = deluge_file_close(handle_);
+	deluge_efatfs_file_close(unbox_file_handle(handle_));
 	handle_ = nullptr; // matters even on error: don't let the destructor double-close
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
-	}
 	return {};
 }
 
 std::expected<Directory, Status> Directory::open(std::string_view path) {
-	if (deluge_streaming_efatfs_active()) {
-		uint32_t handle = 0;
-		if (!deluge_efatfs_dir_open(path.data(), &handle)) {
-			return std::unexpected(Status::ERR);
-		}
-		return Directory(box_dir_handle(handle));
+	uint32_t handle = 0;
+	if (!deluge_efatfs_dir_open(path.data(), &handle)) {
+		return std::unexpected(Status::ERR);
 	}
-	DelugeDir* handle = nullptr;
-	DelugeStatus status = deluge_dir_open(path.data(), &handle);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
-	}
-	return Directory(handle);
+	return Directory(box_dir_handle(handle));
 }
 
 std::expected<std::optional<DelugeDirEntry>, Status> Directory::read() {
-	if (deluge_streaming_efatfs_active()) {
-		DelugeDirEntry entry{};
-		bool has_entry = false;
-		uint32_t modified = 0;
-		uint8_t attrs = 0;
-		if (!deluge_efatfs_dir_read(unbox_dir_handle(handle_), entry.name, DELUGE_MAX_FILENAME, &entry.is_directory,
-		                            &entry.size, &modified, &attrs, &has_entry)) {
-			return std::unexpected(Status::ERR);
-		}
-		if (!has_entry) {
-			return std::nullopt;
-		}
-		entry.modified_time = unpack_fat_datetime(modified);
-		entry.is_read_only = (attrs & kFatAttrReadOnly) != 0;
-		entry.is_hidden = (attrs & kFatAttrHidden) != 0;
-		entry.is_system = (attrs & kFatAttrSystem) != 0;
-		entry.is_archive = (attrs & kFatAttrArchive) != 0;
-		return entry;
-	}
 	DelugeDirEntry entry{};
 	bool has_entry = false;
-	DelugeStatus status = deluge_dir_read(handle_, &entry, &has_entry);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	uint32_t modified = 0;
+	uint8_t attrs = 0;
+	if (!deluge_efatfs_dir_read(unbox_dir_handle(handle_), entry.name, DELUGE_MAX_FILENAME, &entry.is_directory,
+	                            &entry.size, &modified, &attrs, &has_entry)) {
+		return std::unexpected(Status::ERR);
 	}
 	if (!has_entry) {
 		return std::nullopt;
 	}
+	entry.modified_time = unpack_fat_datetime(modified);
+	entry.is_read_only = (attrs & kFatAttrReadOnly) != 0;
+	entry.is_hidden = (attrs & kFatAttrHidden) != 0;
+	entry.is_system = (attrs & kFatAttrSystem) != 0;
+	entry.is_archive = (attrs & kFatAttrArchive) != 0;
 	return entry;
 }
 
 std::expected<void, Status> Directory::close() {
-	if (deluge_streaming_efatfs_active()) {
-		deluge_efatfs_dir_close(unbox_dir_handle(handle_));
-		handle_ = nullptr; // matters even on error: don't let the destructor double-close
-		return {};
-	}
-	DelugeStatus status = deluge_dir_close(handle_);
+	deluge_efatfs_dir_close(unbox_dir_handle(handle_));
 	handle_ = nullptr; // matters even on error: don't let the destructor double-close
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
-	}
 	return {};
 }
 
 std::expected<void, Status> mkdir(std::string_view path) {
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_mkdir(path.data())) {
-			return std::unexpected(Status::ERR);
-		}
-		return {};
-	}
-	DelugeStatus status = deluge_file_mkdir(path.data());
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_mkdir(path.data())) {
+		return std::unexpected(Status::ERR);
 	}
 	return {};
 }
 
 std::expected<void, Status> unlink(std::string_view path) {
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_unlink(path.data())) {
-			return std::unexpected(Status::ERR);
-		}
-		return {};
-	}
-	DelugeStatus status = deluge_file_unlink(path.data());
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_unlink(path.data())) {
+		return std::unexpected(Status::ERR);
 	}
 	return {};
 }
 
 std::expected<void, Status> rename(std::string_view old_path, std::string_view new_path) {
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_rename(old_path.data(), new_path.data())) {
-			return std::unexpected(Status::ERR);
-		}
-		return {};
-	}
-	DelugeStatus status = deluge_file_rename(old_path.data(), new_path.data());
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_rename(old_path.data(), new_path.data())) {
+		return std::unexpected(Status::ERR);
 	}
 	return {};
 }
 
 std::expected<void, Status> set_time(std::string_view path, DelugeTimestamp timestamp) {
-	if (deluge_streaming_efatfs_active()) {
-		if (!deluge_efatfs_set_time(path.data(), timestamp.year, timestamp.month, timestamp.day, timestamp.hour,
-		                            timestamp.minute, timestamp.second)) {
-			return std::unexpected(Status::ERR);
-		}
-		return {};
-	}
-	DelugeStatus status = deluge_file_set_time(path.data(), timestamp);
-	if (status != DELUGE_OK) {
-		return std::unexpected(to_status(status));
+	if (!deluge_efatfs_set_time(path.data(), timestamp.year, timestamp.month, timestamp.day, timestamp.hour,
+	                            timestamp.minute, timestamp.second)) {
+		return std::unexpected(Status::ERR);
 	}
 	return {};
 }

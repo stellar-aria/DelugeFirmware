@@ -20,15 +20,14 @@
 /// `_close` / `_read_at`), the `libdeluge/file_io.h` file/dir/path-op symbols
 /// (`deluge_efatfs_file_*`, `deluge_efatfs_dir_*`, `deluge_efatfs_mkdir`/`_unlink`/`_rename`/
 /// `_set_time`), and the `libdeluge/stream_io.h` stream-write symbols (`deluge_efatfs_stream_*`)
-/// — overriding the `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time. This
-/// TU also owns the host selector `deluge_streaming_efatfs_active()` (strong, → true below),
-/// which is what routes `deluge::io::File`/`Directory`/`OutputStream` (file.cpp/stream.cpp) onto
-/// this passthrough instead of the C-FatFS `f_*` path on the C-host sim.
+/// — overriding the `__attribute__((weak))` no-op fallbacks in async_fill.cpp at link time. These
+/// are what `deluge::io::File`/`Directory`/`OutputStream` (file.cpp/stream.cpp) call unconditionally
+/// on the C-host sim.
 ///
 /// Why this exists: `SampleStream::open_read_stream` (sample_stream.cpp) is efatfs-only — there
 /// is no C-FatFS fallback for the streaming-read path at all, on any BSP. `deluge::io`'s
-/// task-context surface (file.cpp/stream.cpp) does have a C-FatFS fallback, but with the selector
-/// here forced true it always prefers this passthrough on the C-host. The host-sim
+/// task-context surface (file.cpp/stream.cpp) calls the efatfs C-ABI unconditionally too, so this
+/// passthrough is what backs it on the C-host. The host-sim
 /// `deluge_render`/`deluge_loadcheck`/`deluge_host` link no Rust efatfs provider (that only exists
 /// on the Rust/Embassy BSP), so without this file every streamed sample would fail to open and
 /// every task-context file operation would no-op. This gives the host sim a real backend for both
@@ -286,14 +285,6 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 		filled += static_cast<uint32_t>(n);
 	}
 	*out_read = count;
-	return true;
-}
-
-// Route deluge::io's task-context path (file.cpp/stream.cpp) to the efatfs C-ABI on the C-host sim —
-// i.e. to the passthrough bodies above — overriding the weak-false stub in async_fill.cpp. The
-// streaming-read path was already reaching the passthrough; this brings task-context files, directories,
-// and stream-writes onto it too. (Phase C deletes this selector once it is unconditionally true.)
-bool deluge_streaming_efatfs_active(void) {
 	return true;
 }
 

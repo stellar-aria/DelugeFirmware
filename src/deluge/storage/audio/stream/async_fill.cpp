@@ -151,18 +151,13 @@ __attribute__((weak)) bool deluge_efatfs_read_at(uint32_t /*handle*/, uint32_t /
 	return false; // No efatfs handle table on this BSP/config.
 }
 
-__attribute__((weak)) bool deluge_streaming_efatfs_active(void) {
-	return false;
-}
-
 // Weak fallbacks for the task-context efatfs file/directory C-ABI
 // (`include/libdeluge/file_io.h`). The Rust Embassy BSP provides the real
 // definitions (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it
 // links this crate with the `efatfs_streaming` feature; every other
 // BSP/config resolves these instead. `deluge::io::File`/`Directory`
-// (file.cpp) only ever call these when `deluge_streaming_efatfs_active()` is
-// true, so a BSP without the real symbols never reaches them at runtime --
-// these exist purely so the link succeeds.
+// (file.cpp) call these unconditionally, so a BSP without the real symbols
+// still links but every call fails -- these exist purely so the link succeeds.
 __attribute__((weak)) bool deluge_efatfs_file_open(const char* /*path*/, uint8_t /*mode*/, uint32_t* /*out_handle*/) {
 	return false;
 }
@@ -255,9 +250,8 @@ __attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t
 // (`include/libdeluge/stream_io.h`). The Rust Embassy BSP provides the real definitions
 // (`efatfs_fs.rs` device / `efatfs_host_shim.rs` host) whenever it links this crate with the
 // `efatfs_streaming` feature; every other BSP/config resolves these instead. `deluge::io::Stream`
-// (stream.cpp) only ever calls these when `deluge_streaming_efatfs_active()` is true, so a BSP
-// without the real symbols never reaches them at runtime -- these exist purely so the link
-// succeeds.
+// (stream.cpp) calls these unconditionally, so a BSP without the real symbols still links but every
+// call fails -- these exist purely so the link succeeds.
 __attribute__((weak)) bool deluge_efatfs_stream_open(const char* /*path*/, uint8_t /*mode*/, uint32_t* /*out_handle*/) {
 	return false;
 }

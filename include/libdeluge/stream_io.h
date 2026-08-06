@@ -124,11 +124,10 @@ DelugeStatus deluge_stream_sector_of(DelugeStream* stream, uint32_t cluster_inde
 
 /// The embedded-fatfs (Rust `efatfs_streaming`) persistent stream-write C-ABI.
 /// `deluge::io::Stream` (stream.cpp) routes recorder writes through these instead of the
-/// `deluge_stream_*` functions above whenever `deluge_streaming_efatfs_active()` (declared in
-/// streaming_fill.h) is true; every non-efatfs BSP/config links the `__attribute__((weak))`
-/// fallback in `async_fill.cpp` (always false/no-op), so these symbols always link regardless of
-/// backend. Implemented in `efatfs_fs.rs` (device) / `efatfs_host_shim.rs` (host), both composing
-/// the storage-generic `efatfs_core::write_context_noflush`/`flush_context`/
+/// `deluge_stream_*` functions above unconditionally; every non-efatfs BSP/config links the
+/// `__attribute__((weak))` fallback in `async_fill.cpp` (always false/no-op), so these symbols
+/// always link regardless of backend. Implemented in `efatfs_fs.rs` (device) / `efatfs_host_shim.rs`
+/// (host), both composing the storage-generic `efatfs_core::write_context_noflush`/`flush_context`/
 /// `read_at_via_context` primitives -- see those files' doc comments for the handle-table/locking
 /// discipline.
 ///

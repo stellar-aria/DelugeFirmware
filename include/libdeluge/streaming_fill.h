@@ -181,16 +181,6 @@ void deluge_efatfs_close(uint32_t handle);
 ///         must treat it as a read error. Every non-efatfs BSP/config links the weak no-op fallback.
 bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uint32_t count, uint32_t* out_read);
 
-/// @brief Whether the embedded-fatfs streaming READ path (cargo feature `efatfs_streaming`) owns
-///        the read on this build/BSP.
-///
-/// A runtime getter, mirroring deluge_streaming_async_active: the C++ `deluge_app` is built once by
-/// CMake and linked into whichever BSP, so a Rust cargo feature can't reach a C++ preprocessor
-/// define. True only on the Rust/Embassy BSP with `efatfs_streaming` enabled; every other
-/// BSP/config links the `__attribute__((weak))` fallback in `async_fill.cpp`, which returns false.
-/// @return true if the efatfs streaming read path is active on this build/BSP.
-bool deluge_streaming_efatfs_active(void);
-
 /// @brief Per-asset geometry the native Rust fill task reads directly.
 ///
 /// Registered by `deluge_streaming_set_fill_context` at sample-load, and read back through

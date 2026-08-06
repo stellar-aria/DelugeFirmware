@@ -907,12 +907,23 @@ void card_init_fill(void*) {
 } // namespace
 
 void AudioFileManager::reinitEjectedCard() {
-	if (cardEjected) {
-		Error error = StorageManager::initSD();
-		if (error == Error::NONE) {
-			cardEjected = false;
-		}
+	if (!cardEjected) {
+		return;
 	}
+	if (!StorageManager::checkSDPresent()) {
+		return; // Card still not back - keep retrying on the next slowRoutine tick.
+	}
+
+	// Card's back: rebuild efatfs against the (possibly new) card - drop the stale FS mounted
+	// against the old card and reset the four handle tables - then explicitly re-validate the
+	// resident samples. We can't route this through initSD(): deluge_efatfs_remount() leaves
+	// deluge_efatfs_is_mounted() reading true, so initSD()'s !wasMounted->mounted transition gate
+	// (which is what fires firstCardRead()) would never trip on a swap.
+	if (!deluge_efatfs_remount()) {
+		return; // Remount failed (e.g. unreadable card) - stay ejected, retry next tick.
+	}
+	cardEjected = false;
+	firstCardRead(); // cardReadOnce is already true here, so this routes to cardReinserted().
 }
 
 void AudioFileManager::slowRoutine() {

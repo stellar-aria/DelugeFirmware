@@ -116,6 +116,23 @@ DSTATUS disk_status(BYTE pdrv) {
 	return host_sd_open();
 }
 
+// block_device.h — the app's native (non-FatFS) card-detect/init entry points,
+// backed by the same lazily-opened DELUGE_SD_IMAGE as disk_status above.
+// deluge_block_ready/deluge_block_init live here (rather than host_bsp.c,
+// where the rest of the block_device.h stubs are) because they need
+// host_sd_open()'s static state.
+DelugeStatus deluge_block_init(uint8_t unit) {
+	(void)unit;
+	DSTATUS status = host_sd_open();
+	return (status & (STA_NODISK | STA_NOINIT)) ? DELUGE_ERR_NODEV : DELUGE_OK;
+}
+
+bool deluge_block_ready(uint8_t unit) {
+	(void)unit;
+	DSTATUS status = host_sd_open();
+	return !(status & (STA_NODISK | STA_NOINIT));
+}
+
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
 	(void)pdrv;
 	if (host_img_fd < 0) {

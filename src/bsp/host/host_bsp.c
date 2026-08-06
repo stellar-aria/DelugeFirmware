@@ -299,14 +299,11 @@ void deluge_board_unlock_data_cache(void) {
 uint8_t deluge_block_sd_unit(void) {
 	return 0;
 }
-DelugeStatus deluge_block_init(uint8_t unit) {
-	(void)unit;
-	return DELUGE_ERR_NODEV;
-}
-bool deluge_block_ready(uint8_t unit) {
-	(void)unit;
-	return false;
-}
+// deluge_block_init/deluge_block_ready are defined in host_platform.c, backed
+// by the real DELUGE_SD_IMAGE-backed disk (host_sd_open()/host_img_fd) that
+// disk_status/deluge_block_read/deluge_block_write already use there — a stub
+// here would always report "not ready" and silently defeat SD-image-backed
+// host runs (initSD -> SD_CARD_NOT_PRESENT).
 uint32_t deluge_block_sector_count(uint8_t unit) {
 	(void)unit;
 	return 0;

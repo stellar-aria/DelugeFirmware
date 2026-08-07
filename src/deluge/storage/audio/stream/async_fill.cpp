@@ -166,32 +166,35 @@ __attribute__((weak)) void deluge_file_invalidate_cache(void) {
 // links this crate with the `efatfs_streaming` feature; every other
 // BSP/config resolves these instead. `deluge::io::File`/`Directory`
 // (file.cpp) call these unconditionally, so a BSP without the real symbols
-// still links but every call fails -- these exist purely so the link succeeds.
-__attribute__((weak)) bool deluge_efatfs_file_open(const char* /*path*/, uint8_t /*mode*/, uint32_t* /*out_handle*/) {
-	return false;
+// still links but every call fails -- these exist purely so the link
+// succeeds. The 13 fallible ops report DELUGE_ERR_NODEV ("no such device"):
+// there is no efatfs handle table on this BSP/config at all.
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_open(const char* /*path*/, uint8_t /*mode*/,
+                                                           uint32_t* /*out_handle*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_read(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
-                                                   uint32_t* /*out_read*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_read(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
+                                                           uint32_t* /*out_read*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_read_exact(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
-                                                         uint32_t* /*out_read*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_read_exact(uint32_t /*handle*/, void* /*dst*/, uint32_t /*count*/,
+                                                                 uint32_t* /*out_read*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_write(uint32_t /*handle*/, const void* /*src*/, uint32_t /*count*/,
-                                                    uint32_t* /*out_written*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_write(uint32_t /*handle*/, const void* /*src*/,
+                                                            uint32_t /*count*/, uint32_t* /*out_written*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_seek(uint32_t /*handle*/, uint32_t /*offset*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_seek(uint32_t /*handle*/, uint32_t /*offset*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_size(uint32_t /*handle*/, uint32_t* /*out_size*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_size(uint32_t /*handle*/, uint32_t* /*out_size*/) {
+	return DELUGE_ERR_NODEV;
 }
 
 __attribute__((weak)) bool deluge_efatfs_stats(uint32_t* /*out_free_clusters*/, uint32_t* /*out_total_clusters*/) {
@@ -214,45 +217,45 @@ __attribute__((weak)) bool deluge_efatfs_cluster_size(uint32_t* /*out_bytes*/) {
 	return false;
 }
 
-__attribute__((weak)) bool deluge_efatfs_file_truncate(uint32_t /*handle*/, uint32_t /*new_len*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_file_truncate(uint32_t /*handle*/, uint32_t /*new_len*/) {
+	return DELUGE_ERR_NODEV;
 }
 
 __attribute__((weak)) void deluge_efatfs_file_close(uint32_t /*handle*/) {
 	// No task-context file table on this BSP/config.
 }
 
-__attribute__((weak)) bool deluge_efatfs_dir_open(const char* /*path*/, uint32_t* /*out_handle*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_dir_open(const char* /*path*/, uint32_t* /*out_handle*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_dir_read(uint32_t /*handle*/, char* /*out_name*/, uint32_t /*out_name_cap*/,
-                                                  bool* /*out_is_dir*/, uint32_t* /*out_size*/,
-                                                  uint32_t* /*out_modified*/, uint8_t* /*out_attrs*/,
-                                                  bool* /*out_has_entry*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_dir_read(uint32_t /*handle*/, char* /*out_name*/,
+                                                          uint32_t /*out_name_cap*/, bool* /*out_is_dir*/,
+                                                          uint32_t* /*out_size*/, uint32_t* /*out_modified*/,
+                                                          uint8_t* /*out_attrs*/, bool* /*out_has_entry*/) {
+	return DELUGE_ERR_NODEV;
 }
 
 __attribute__((weak)) void deluge_efatfs_dir_close(uint32_t /*handle*/) {
 	// No dir-cursor table on this BSP/config.
 }
 
-__attribute__((weak)) bool deluge_efatfs_mkdir(const char* /*path*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_mkdir(const char* /*path*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_unlink(const char* /*path*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_unlink(const char* /*path*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_rename(const char* /*old_path*/, const char* /*new_path*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_rename(const char* /*old_path*/, const char* /*new_path*/) {
+	return DELUGE_ERR_NODEV;
 }
 
-__attribute__((weak)) bool deluge_efatfs_set_time(const char* /*path*/, uint16_t /*year*/, uint8_t /*month*/,
-                                                  uint8_t /*day*/, uint8_t /*hour*/, uint8_t /*minute*/,
-                                                  uint8_t /*second*/) {
-	return false;
+__attribute__((weak)) DelugeStatus deluge_efatfs_set_time(const char* /*path*/, uint16_t /*year*/, uint8_t /*month*/,
+                                                          uint8_t /*day*/, uint8_t /*hour*/, uint8_t /*minute*/,
+                                                          uint8_t /*second*/) {
+	return DELUGE_ERR_NODEV;
 }
 
 // Weak fallbacks for the persistent stream-write efatfs C-ABI

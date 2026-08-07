@@ -154,26 +154,26 @@ void mock_file_io_reset() {
 
 extern "C" {
 
-bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+DelugeStatus deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
 	std::string p(path);
 	if (static_cast<DelugeFileOpenMode>(mode) == DELUGE_FILE_READ) {
 		auto it = g_entries.find(p);
 		if (it == g_entries.end() || it->second.is_directory) {
-			return false;
+			return DELUGE_ERR_NOT_FOUND;
 		}
 		*out_handle = allocate_slot(g_open_files, g_open_files_gen, OpenFile{p, 0});
-		return true;
+		return DELUGE_OK;
 	}
 	// DELUGE_FILE_WRITE_CREATE / DELUGE_FILE_WRITE_CREATE_NEW: create, truncating if it exists.
 	g_entries[p] = MockEntry{};
 	*out_handle = allocate_slot(g_open_files, g_open_files_gen, OpenFile{p, 0});
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+DelugeStatus deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	auto& entry = g_entries.at(file->path);
 	uint32_t available =
@@ -186,13 +186,13 @@ bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_
 	}
 	file->position += real;
 	*out_read = count;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+DelugeStatus deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	auto& entry = g_entries.at(file->path);
 	uint32_t available =
@@ -201,13 +201,13 @@ bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, u
 	std::memcpy(dst, entry.data.data() + file->position, real);
 	file->position += real;
 	*out_read = real;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
+DelugeStatus deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	auto& entry = g_entries.at(file->path);
 	if (file->position + count > entry.data.size()) {
@@ -216,41 +216,41 @@ bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, 
 	std::memcpy(entry.data.data() + file->position, src, count);
 	file->position += count;
 	*out_written = count;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
+DelugeStatus deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	file->position = offset;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
+DelugeStatus deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	*out_size = static_cast<uint32_t>(g_entries.at(file->path).data.size());
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
+DelugeStatus deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
 	auto* file = checkout(g_open_files, g_open_files_gen, handle);
 	if (file == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	g_entries.at(file->path).data.resize(new_len);
-	return true;
+	return DELUGE_OK;
 }
 
 void deluge_efatfs_file_close(uint32_t handle) {
 	release_slot(g_open_files, g_open_files_gen, handle);
 }
 
-bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
+DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 	std::string prefix(path);
 	if (!prefix.empty() && prefix.back() != '/') {
 		prefix += '/';
@@ -265,18 +265,19 @@ bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 		}
 	}
 	*out_handle = allocate_slot(g_open_dirs, g_open_dirs_gen, std::move(dir));
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
-                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, bool* out_has_entry) {
+DelugeStatus deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
+                                    uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs,
+                                    bool* out_has_entry) {
 	auto* dir = checkout(g_open_dirs, g_open_dirs_gen, handle);
 	if (dir == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	if (dir->index >= dir->children.size()) {
 		*out_has_entry = false;
-		return true;
+		return DELUGE_OK;
 	}
 	const auto& child = dir->children[dir->index++];
 	std::strncpy(out_name, child.name.c_str(), out_name_cap - 1);
@@ -286,57 +287,57 @@ bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_c
 	*out_modified = pack_fat_datetime(child.entry.modified_time);
 	*out_attrs = pack_fat_attrs(child.entry);
 	*out_has_entry = true;
-	return true;
+	return DELUGE_OK;
 }
 
 void deluge_efatfs_dir_close(uint32_t handle) {
 	release_slot(g_open_dirs, g_open_dirs_gen, handle);
 }
 
-bool deluge_efatfs_mkdir(const char* path) {
+DelugeStatus deluge_efatfs_mkdir(const char* path) {
 	std::string p(path);
 	auto it = g_entries.find(p);
 	if (it != g_entries.end()) {
 		// embedded-fatfs's create_dir is idempotent: calling it on an existing
 		// directory succeeds (unlike C-FatFS's f_mkdir, which reports EXIST).
 		// A pre-existing FILE at this path is still a hard conflict.
-		return it->second.is_directory;
+		return it->second.is_directory ? DELUGE_OK : DELUGE_ERR_EXISTS;
 	}
 	g_entries[p] = MockEntry{.is_directory = true};
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_unlink(const char* path) {
+DelugeStatus deluge_efatfs_unlink(const char* path) {
 	std::string p(path);
 	auto it = g_entries.find(p);
 	if (it == g_entries.end()) {
-		return false;
+		return DELUGE_ERR_NOT_FOUND;
 	}
 	g_entries.erase(it);
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_rename(const char* old_path, const char* new_path) {
+DelugeStatus deluge_efatfs_rename(const char* old_path, const char* new_path) {
 	std::string o(old_path), n(new_path);
 	auto it = g_entries.find(o);
 	if (it == g_entries.end()) {
-		return false;
+		return DELUGE_ERR_NOT_FOUND;
 	}
 	g_entries[n] = std::move(it->second);
 	g_entries.erase(it);
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
-                            uint8_t second) {
+DelugeStatus deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour,
+                                    uint8_t minute, uint8_t second) {
 	std::string p(path);
 	auto it = g_entries.find(p);
 	if (it == g_entries.end()) {
-		return false;
+		return DELUGE_ERR_NOT_FOUND;
 	}
 	it->second.modified_time =
 	    DelugeTimestamp{.year = year, .month = month, .day = day, .hour = hour, .minute = minute, .second = second};
-	return true;
+	return DELUGE_OK;
 }
 
 } // extern "C"

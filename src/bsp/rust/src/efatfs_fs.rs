@@ -28,6 +28,12 @@ use embedded_fatfs::{DefaultTimeProvider, FileSystem, FsOptions, LossyOemCpConve
 
 use crate::efatfs_core::{self, DirHandleTable, HandleTable, OpenOutcome, TaskFileTable};
 use crate::fat_block_device::SdBlockDevice;
+use crate::sys::{
+    DelugeStatus, DelugeStatus_DELUGE_ERR_BUSY as DELUGE_ERR_BUSY,
+    DelugeStatus_DELUGE_ERR_IO as DELUGE_ERR_IO,
+    DelugeStatus_DELUGE_ERR_NO_FILESYSTEM as DELUGE_ERR_NO_FILESYSTEM,
+    DelugeStatus_DELUGE_ERR_PARAM as DELUGE_ERR_PARAM, DelugeStatus_DELUGE_OK as DELUGE_OK,
+};
 
 type Storage = StreamSlice<BufStream<SdBlockDevice, 512>>;
 pub type Fs = FileSystem<Storage, DefaultTimeProvider, LossyOemCpConverter>;
@@ -161,8 +167,10 @@ static HANDLES: Mutex<CriticalSectionRawMutex, HandleTable<{ efatfs_core::MAX_HA
 pub async fn open(path: &str) -> OpenOutcome {
     // Open + detach under the FS mutex only; never touch HANDLES here (keeps the
     // FS→HANDLES order that pairs deadlock-free with read_at's HANDLES→FS).
-    let Some(Some(ctx)) = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await
-    else {
+    // `open_context` now reports a granular `DelugeStatus`, but this streaming-read
+    // bridge's contract is still bare success/failure (see `streaming_fill.h`), so
+    // every open_context error collapses to `NotFound` here regardless of which one it was.
+    let Some(Ok(ctx)) = with_fs(async |fs| efatfs_core::open_context(fs, path).await).await else {
         return OpenOutcome::NotFound;
     };
     match HANDLES.lock().await.insert(ctx) {
@@ -321,22 +329,26 @@ static DIR_HANDLES: Mutex<CriticalSectionRawMutex, DirHandleTable> =
 
 /// `DelugeFileOpenMode` mode selector matching `file_io.h`'s C enum's implicit
 /// declaration-order values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW.
-async fn task_file_open(path: &str, mode: u8) -> Option<u32> {
+/// `Err(DELUGE_ERR_NO_FILESYSTEM)` if the volume isn't mounted,
+/// `Err(DELUGE_ERR_PARAM)` for an unrecognized `mode` or a full [`TASK_FILES`]
+/// table, otherwise the granular open/create error from `efatfs_core`.
+async fn task_file_open(path: &str, mode: u8) -> Result<u32, DelugeStatus> {
     let ctx = with_fs(async |fs| match mode {
         0 => efatfs_core::open_context(fs, path).await,
         1 => efatfs_core::create_context(fs, path, false).await,
         2 => efatfs_core::create_context(fs, path, true).await,
-        _ => None,
+        _ => Err(DELUGE_ERR_PARAM),
     })
-    .await??;
-    TASK_FILES.lock().await.insert(ctx)
+    .await
+    .ok_or(DELUGE_ERR_NO_FILESYSTEM)??;
+    TASK_FILES.lock().await.insert(ctx).ok_or(DELUGE_ERR_IO) // table full
 }
 
 /// Fill-semantics read (zero-pads a short tail at EOF, like [`read_at`]) at the
 /// handle's current position, advancing it by `dst.len()` on success.
-async fn task_file_read(handle: u32, dst: &mut [u8]) -> bool {
+async fn task_file_read(handle: u32, dst: &mut [u8]) -> Result<(), DelugeStatus> {
     let Some((generation, ctx, pos)) = TASK_FILES.lock().await.checkout(handle) else {
-        return false;
+        return Err(DELUGE_ERR_PARAM);
     };
     let result = with_fs(async |fs| efatfs_core::read_context(fs, ctx, pos, dst).await).await;
     match result {
@@ -345,9 +357,10 @@ async fn task_file_read(handle: u32, dst: &mut [u8]) -> bool {
                 .lock()
                 .await
                 .commit(handle, generation, newctx, pos + dst.len() as u32);
-            filled
+            if filled { Ok(()) } else { Err(DELUGE_ERR_IO) }
         }
-        _ => false,
+        Some(None) => Err(DELUGE_ERR_IO),
+        None => Err(DELUGE_ERR_NO_FILESYSTEM),
     }
 }
 
@@ -355,52 +368,75 @@ async fn task_file_read(handle: u32, dst: &mut [u8]) -> bool {
 /// port's `File::read` (`file.cpp`). Returns the TRUE byte count (may be less
 /// than `dst.len()` at EOF, never zero-padded), advancing the position by that
 /// count.
-async fn task_file_read_exact(handle: u32, dst: &mut [u8]) -> Option<usize> {
-    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
-    let (newctx, n) =
-        with_fs(async |fs| efatfs_core::read_context_exact(fs, ctx, pos, dst).await).await??;
+async fn task_file_read_exact(handle: u32, dst: &mut [u8]) -> Result<usize, DelugeStatus> {
+    let (generation, ctx, pos) = TASK_FILES
+        .lock()
+        .await
+        .checkout(handle)
+        .ok_or(DELUGE_ERR_PARAM)?;
+    let (newctx, n) = with_fs(async |fs| efatfs_core::read_context_exact(fs, ctx, pos, dst).await)
+        .await
+        .ok_or(DELUGE_ERR_NO_FILESYSTEM)?
+        .ok_or(DELUGE_ERR_IO)?;
     TASK_FILES
         .lock()
         .await
         .commit(handle, generation, newctx, pos + n as u32);
-    Some(n)
+    Ok(n)
 }
 
 /// Write at the handle's current position, advancing it by the bytes actually
 /// written.
-async fn task_file_write(handle: u32, src: &[u8]) -> Option<usize> {
-    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
-    let (newctx, n) =
-        with_fs(async |fs| efatfs_core::write_context(fs, ctx, pos, src).await).await??;
+async fn task_file_write(handle: u32, src: &[u8]) -> Result<usize, DelugeStatus> {
+    let (generation, ctx, pos) = TASK_FILES
+        .lock()
+        .await
+        .checkout(handle)
+        .ok_or(DELUGE_ERR_PARAM)?;
+    let (newctx, n) = with_fs(async |fs| efatfs_core::write_context(fs, ctx, pos, src).await)
+        .await
+        .ok_or(DELUGE_ERR_NO_FILESYSTEM)?
+        .ok_or(DELUGE_ERR_IO)?;
     TASK_FILES
         .lock()
         .await
         .commit(handle, generation, newctx, pos + n as u32);
-    Some(n)
+    Ok(n)
 }
 
 /// Set the handle's cursor position directly. No FS access needed.
-async fn task_file_seek(handle: u32, offset: u32) -> bool {
-    TASK_FILES.lock().await.seek(handle, offset)
+async fn task_file_seek(handle: u32, offset: u32) -> Result<(), DelugeStatus> {
+    if TASK_FILES.lock().await.seek(handle, offset) {
+        Ok(())
+    } else {
+        Err(DELUGE_ERR_PARAM)
+    }
 }
 
 /// File length in bytes. Leaves the handle's position untouched.
-async fn task_file_size(handle: u32) -> Option<u32> {
-    let (generation, ctx, pos) = TASK_FILES.lock().await.checkout(handle)?;
-    let (newctx, size) = with_fs(async |fs| efatfs_core::size_context(fs, ctx).await).await??;
+async fn task_file_size(handle: u32) -> Result<u32, DelugeStatus> {
+    let (generation, ctx, pos) = TASK_FILES
+        .lock()
+        .await
+        .checkout(handle)
+        .ok_or(DELUGE_ERR_PARAM)?;
+    let (newctx, size) = with_fs(async |fs| efatfs_core::size_context(fs, ctx).await)
+        .await
+        .ok_or(DELUGE_ERR_NO_FILESYSTEM)?
+        .ok_or(DELUGE_ERR_IO)?;
     TASK_FILES
         .lock()
         .await
         .commit(handle, generation, newctx, pos);
-    Some(size)
+    Ok(size)
 }
 
 /// Truncate to `new_len` bytes. Leaves the handle's position untouched (matches
 /// POSIX `ftruncate`'s file-offset-unchanged convention -- a subsequent read at
 /// a now-past-EOF position simply returns 0 bytes).
-async fn task_file_truncate(handle: u32, new_len: u32) -> bool {
+async fn task_file_truncate(handle: u32, new_len: u32) -> Result<(), DelugeStatus> {
     let Some((generation, ctx, pos)) = TASK_FILES.lock().await.checkout(handle) else {
-        return false;
+        return Err(DELUGE_ERR_PARAM);
     };
     let result = with_fs(async |fs| efatfs_core::truncate_context(fs, ctx, new_len).await).await;
     match result {
@@ -409,9 +445,10 @@ async fn task_file_truncate(handle: u32, new_len: u32) -> bool {
                 .lock()
                 .await
                 .commit(handle, generation, newctx, pos);
-            true
+            Ok(())
         }
-        _ => false,
+        Some(None) => Err(DELUGE_ERR_IO),
+        None => Err(DELUGE_ERR_NO_FILESYSTEM),
     }
 }
 
@@ -420,9 +457,11 @@ async fn task_file_close(handle: u32) {
     TASK_FILES.lock().await.remove(handle);
 }
 
-async fn task_dir_open(path: &str) -> Option<u32> {
-    let cursor = with_fs(async |fs| efatfs_core::readdir_open(fs, path).await).await??;
-    DIR_HANDLES.lock().await.insert(cursor)
+async fn task_dir_open(path: &str) -> Result<u32, DelugeStatus> {
+    let cursor = with_fs(async |fs| efatfs_core::readdir_open(fs, path).await)
+        .await
+        .ok_or(DELUGE_ERR_NO_FILESYSTEM)??;
+    DIR_HANDLES.lock().await.insert(cursor).ok_or(DELUGE_ERR_IO) // table full
 }
 
 /// Outcome of advancing a [`DirCursor`](efatfs_core) past zero or more
@@ -442,24 +481,24 @@ enum NextFit {
 /// NUL-terminated buffer" edge (a name of exactly 256 UTF-8 bytes fits the
 /// former, not the latter).
 ///
-/// Outer `None`: bad handle or an FS error (`with_fs` returned `None`, or a
-/// mid-walk error the `?` inside propagates) -- the C-ABI reports this as
-/// `false`. Inner `None`: end of directory -- `deluge_dir_read`'s existing
-/// contract ("no more entries" is not an error). `Some(Some(info))`: a fitting
-/// entry.
+/// `Err(DELUGE_ERR_PARAM)`: bad handle. `Ok(None)`: end of directory --
+/// `deluge_dir_read`'s existing contract ("no more entries" is not an error).
+/// `Ok(Some(info))`: a fitting entry.
 async fn task_dir_read(
     handle: u32,
     max_name_bytes: usize,
-) -> Option<Option<efatfs_core::DirEntryInfo>> {
+) -> Result<Option<efatfs_core::DirEntryInfo>, DelugeStatus> {
     let mut dir_table = DIR_HANDLES.lock().await;
-    let cursor = dir_table.get_mut(handle)?;
+    let cursor = dir_table.get_mut(handle).ok_or(DELUGE_ERR_PARAM)?;
     // `readdir_next` is FS-free (it only walks the in-memory snapshot
     // `cursor` already holds), so this does not route through `with_fs` --
     // doing so would serialize an in-memory directory-page read behind the
     // single FS mutex, and thus behind any in-flight streaming SD read, for
     // no reason.
     let next = loop {
-        match efatfs_core::readdir_next(cursor)? {
+        // `readdir_next`'s outer `None` cannot occur for a snapshot cursor today (see its
+        // doc) -- IO is the generic fallback if a future non-snapshot cursor ever hits it.
+        match efatfs_core::readdir_next(cursor).ok_or(DELUGE_ERR_IO)? {
             None => break NextFit::Eof,
             Some(info) => {
                 if info.name.len() >= max_name_bytes {
@@ -469,7 +508,7 @@ async fn task_dir_read(
             }
         }
     };
-    Some(match next {
+    Ok(match next {
         NextFit::Eof => None,
         NextFit::Found(info) => Some(info),
     })
@@ -492,24 +531,27 @@ pub extern "C" fn deluge_efatfs_file_open(
     path: *const c_char,
     mode: u8,
     out_handle: *mut u32,
-) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() || out_handle.is_null() {
-        return false;
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if path.is_null() || out_handle.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     // SAFETY: `path` is a NUL-terminated C string valid for the duration of this call.
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
     match crate::fiber::block_on_fiber(task_file_open(path, mode)) {
-        Some(h) => {
+        Ok(h) => {
             // SAFETY: `out_handle` is non-null (checked above), owned by the caller.
             unsafe {
                 *out_handle = h;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
@@ -521,20 +563,24 @@ pub extern "C" fn deluge_efatfs_file_read(
     dst: *mut u8,
     count: u32,
     out_read: *mut u32,
-) -> bool {
-    if !crate::fiber::on_fiber() || dst.is_null() || out_read.is_null() {
-        return false;
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if dst.is_null() || out_read.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
     let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
-    if crate::fiber::block_on_fiber(task_file_read(handle, buf)) {
-        // SAFETY: `out_read` is non-null (checked above).
-        unsafe {
-            *out_read = count;
+    match crate::fiber::block_on_fiber(task_file_read(handle, buf)) {
+        Ok(()) => {
+            // SAFETY: `out_read` is non-null (checked above).
+            unsafe {
+                *out_read = count;
+            }
+            DELUGE_OK
         }
-        true
-    } else {
-        false
+        Err(st) => st,
     }
 }
 
@@ -546,21 +592,24 @@ pub extern "C" fn deluge_efatfs_file_read_exact(
     dst: *mut u8,
     count: u32,
     out_read: *mut u32,
-) -> bool {
-    if !crate::fiber::on_fiber() || dst.is_null() || out_read.is_null() {
-        return false;
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if dst.is_null() || out_read.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     // SAFETY: `dst` points at `count` writable bytes owned by the caller for this call.
     let buf = unsafe { core::slice::from_raw_parts_mut(dst, count as usize) };
     match crate::fiber::block_on_fiber(task_file_read_exact(handle, buf)) {
-        Some(n) => {
+        Ok(n) => {
             // SAFETY: `out_read` is non-null (checked above).
             unsafe {
                 *out_read = n as u32;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
@@ -572,58 +621,70 @@ pub extern "C" fn deluge_efatfs_file_write(
     src: *const u8,
     count: u32,
     out_written: *mut u32,
-) -> bool {
-    if !crate::fiber::on_fiber() || src.is_null() || out_written.is_null() {
-        return false;
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if src.is_null() || out_written.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     // SAFETY: `src` points at `count` readable bytes owned by the caller for this call.
     let buf = unsafe { core::slice::from_raw_parts(src, count as usize) };
     match crate::fiber::block_on_fiber(task_file_write(handle, buf)) {
-        Some(n) => {
+        Ok(n) => {
             // SAFETY: `out_written` is non-null (checked above).
             unsafe {
                 *out_written = n as u32;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
 /// C-ABI: move the handle's cursor to an absolute byte offset.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_file_seek(handle: u32, offset: u32) -> bool {
+pub extern "C" fn deluge_efatfs_file_seek(handle: u32, offset: u32) -> DelugeStatus {
     if !crate::fiber::on_fiber() {
-        return false;
+        return DELUGE_ERR_BUSY;
     }
-    crate::fiber::block_on_fiber(task_file_seek(handle, offset))
+    match crate::fiber::block_on_fiber(task_file_seek(handle, offset)) {
+        Ok(()) => DELUGE_OK,
+        Err(st) => st,
+    }
 }
 
 /// C-ABI: total file size in bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_file_size(handle: u32, out_size: *mut u32) -> bool {
-    if !crate::fiber::on_fiber() || out_size.is_null() {
-        return false;
+pub extern "C" fn deluge_efatfs_file_size(handle: u32, out_size: *mut u32) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if out_size.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     match crate::fiber::block_on_fiber(task_file_size(handle)) {
-        Some(sz) => {
+        Ok(sz) => {
             // SAFETY: `out_size` is non-null (checked above).
             unsafe {
                 *out_size = sz;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
 /// C-ABI: truncate to `new_len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_file_truncate(handle: u32, new_len: u32) -> bool {
+pub extern "C" fn deluge_efatfs_file_truncate(handle: u32, new_len: u32) -> DelugeStatus {
     if !crate::fiber::on_fiber() {
-        return false;
+        return DELUGE_ERR_BUSY;
     }
-    crate::fiber::block_on_fiber(task_file_truncate(handle, new_len))
+    match crate::fiber::block_on_fiber(task_file_truncate(handle, new_len)) {
+        Ok(()) => DELUGE_OK,
+        Err(st) => st,
+    }
 }
 
 /// C-ABI: close a task-context file handle.
@@ -636,24 +697,30 @@ pub extern "C" fn deluge_efatfs_file_close(handle: u32) {
 
 /// C-ABI: open `path` as a directory for iteration.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_dir_open(path: *const c_char, out_handle: *mut u32) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() || out_handle.is_null() {
-        return false;
+pub extern "C" fn deluge_efatfs_dir_open(
+    path: *const c_char,
+    out_handle: *mut u32,
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if path.is_null() || out_handle.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     // SAFETY: `path` is a NUL-terminated C string valid for the duration of this call.
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
     match crate::fiber::block_on_fiber(task_dir_open(path)) {
-        Some(h) => {
+        Ok(h) => {
             // SAFETY: `out_handle` is non-null (checked above), owned by the caller.
             unsafe {
                 *out_handle = h;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
@@ -672,9 +739,11 @@ pub extern "C" fn deluge_efatfs_dir_read(
     out_modified: *mut u32,
     out_attrs: *mut u8,
     out_has: *mut bool,
-) -> bool {
-    if !crate::fiber::on_fiber()
-        || out_name.is_null()
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if out_name.is_null()
         || out_name_cap == 0
         || out_is_dir.is_null()
         || out_size.is_null()
@@ -682,17 +751,17 @@ pub extern "C" fn deluge_efatfs_dir_read(
         || out_attrs.is_null()
         || out_has.is_null()
     {
-        return false;
+        return DELUGE_ERR_PARAM;
     }
     match crate::fiber::block_on_fiber(task_dir_read(handle, out_name_cap as usize)) {
-        Some(None) => {
+        Ok(None) => {
             // SAFETY: `out_has` is non-null (checked above).
             unsafe {
                 *out_has = false;
             }
-            true
+            DELUGE_OK
         }
-        Some(Some(info)) => {
+        Ok(Some(info)) => {
             let name_bytes = info.name.as_bytes();
             // SAFETY: `task_dir_read` only returns entries with
             // `name.len() < out_name_cap`, so `name_bytes.len() + 1 <= out_name_cap`;
@@ -709,9 +778,9 @@ pub extern "C" fn deluge_efatfs_dir_read(
                 *out_attrs = info.attrs;
                 *out_has = true;
             }
-            true
+            DELUGE_OK
         }
-        None => false,
+        Err(st) => st,
     }
 }
 
@@ -801,51 +870,70 @@ pub extern "C" fn deluge_efatfs_cluster_size(out_bytes: *mut u32) -> bool {
 
 /// C-ABI: create a directory.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_mkdir(path: *const c_char) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() {
-        return false;
+pub extern "C" fn deluge_efatfs_mkdir(path: *const c_char) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if path.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
-    crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::mkdir(fs, path).await))
-        .flatten()
-        .is_some()
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::mkdir(fs, path).await)) {
+        Some(Ok(())) => DELUGE_OK,
+        Some(Err(st)) => st,
+        None => DELUGE_ERR_NO_FILESYSTEM,
+    }
 }
 
 /// C-ABI: delete a file or empty directory.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_unlink(path: *const c_char) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() {
-        return false;
+pub extern "C" fn deluge_efatfs_unlink(path: *const c_char) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if path.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
-    crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::unlink(fs, path).await))
-        .flatten()
-        .is_some()
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::unlink(fs, path).await)) {
+        Some(Ok(())) => DELUGE_OK,
+        Some(Err(st)) => st,
+        None => DELUGE_ERR_NO_FILESYSTEM,
+    }
 }
 
 /// C-ABI: rename/move a file or directory.
 #[unsafe(no_mangle)]
-pub extern "C" fn deluge_efatfs_rename(old_path: *const c_char, new_path: *const c_char) -> bool {
-    if !crate::fiber::on_fiber() || old_path.is_null() || new_path.is_null() {
-        return false;
+pub extern "C" fn deluge_efatfs_rename(
+    old_path: *const c_char,
+    new_path: *const c_char,
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if old_path.is_null() || new_path.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     let old = match unsafe { CStr::from_ptr(old_path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
     let new = match unsafe { CStr::from_ptr(new_path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
-    crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::rename(fs, old, new).await))
-        .flatten()
-        .is_some()
+    match crate::fiber::block_on_fiber(with_fs(async |fs| efatfs_core::rename(fs, old, new).await))
+    {
+        Some(Ok(())) => DELUGE_OK,
+        Some(Err(st)) => st,
+        None => DELUGE_ERR_NO_FILESYSTEM,
+    }
 }
 
 /// C-ABI: set a file or directory's last-modified timestamp (decomposed
@@ -860,20 +948,25 @@ pub extern "C" fn deluge_efatfs_set_time(
     hour: u8,
     minute: u8,
     second: u8,
-) -> bool {
-    if !crate::fiber::on_fiber() || path.is_null() {
-        return false;
+) -> DelugeStatus {
+    if !crate::fiber::on_fiber() {
+        return DELUGE_ERR_BUSY;
+    }
+    if path.is_null() {
+        return DELUGE_ERR_PARAM;
     }
     let path = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return DELUGE_ERR_PARAM,
     };
     let packed = efatfs_core::pack_timestamp(year, month, day, hour, minute, second);
-    crate::fiber::block_on_fiber(with_fs(async |fs| {
+    match crate::fiber::block_on_fiber(with_fs(async |fs| {
         efatfs_core::set_time(fs, path, packed).await
-    }))
-    .flatten()
-    .is_some()
+    })) {
+        Some(Ok(())) => DELUGE_OK,
+        Some(Err(st)) => st,
+        None => DELUGE_ERR_NO_FILESYSTEM,
+    }
 }
 
 // --- Persistent stream-write handle table -------------------------------------
@@ -903,14 +996,18 @@ static STREAM_WRITE_CTX: Mutex<
 /// `DelugeStreamMode` mode selector matching `stream_io.h`'s C enum's implicit declaration-order
 /// values: 0 = READ, 1 = WRITE_CREATE, 2 = WRITE_CREATE_NEW, 3 = WRITE_APPEND.
 async fn stream_open(path: &str, mode: u8) -> Option<u32> {
+    // `open_context`/`create_context` now report a granular `DelugeStatus`, but
+    // this persistent stream-write bridge's contract (`stream_io.h`) is still
+    // bare success/failure, so `.ok()` collapses it back to `Option` here.
     let ctx = with_fs(async |fs| match mode {
         0 => efatfs_core::open_context(fs, path).await,
         1 => efatfs_core::create_context(fs, path, false).await,
         2 => efatfs_core::create_context(fs, path, true).await,
         3 => efatfs_core::open_context(fs, path).await, // append: open existing, no truncation
-        _ => None,
+        _ => Err(DELUGE_ERR_PARAM),
     })
-    .await??;
+    .await?
+    .ok()?;
     STREAM_WRITE_CTX.lock().await.insert(ctx)
 }
 

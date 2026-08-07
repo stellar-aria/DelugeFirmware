@@ -37,11 +37,10 @@ describe free_functions("deluge::io free functions", $ {
 	});
 
 	it("unlink on a missing path fails", _ {
-		// Bare-bool efatfs C-ABI: only a coarse Status::ERR is reportable, not
-		// NOT_FOUND. See the comment on File::open's missing-file case.
 		mock_file_io_reset();
 		auto result = deluge::io::unlink("missing.txt");
 		expect(result.has_value()).to_equal(false);
+		expect(result.error()).to_equal(deluge::io::Status::NOT_FOUND);
 	});
 
 	it("set_time updates a file's stored modification time", _ {
@@ -54,12 +53,11 @@ describe free_functions("deluge::io free functions", $ {
 	});
 
 	it("set_time on a missing path fails", _ {
-		// Bare-bool efatfs C-ABI: only a coarse Status::ERR is reportable, not
-		// NOT_FOUND. See the comment on File::open's missing-file case.
 		mock_file_io_reset();
 		DelugeTimestamp ts{};
 		auto result = deluge::io::set_time("missing.txt", ts);
 		expect(result.has_value()).to_equal(false);
+		expect(result.error()).to_equal(deluge::io::Status::NOT_FOUND);
 	});
 });
 

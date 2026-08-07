@@ -19,6 +19,23 @@
 #[path = "../../src/efatfs_core.rs"]
 mod efatfs_core;
 
+// `efatfs_core.rs`'s `use crate::sys::{DelugeStatus, ...}` expects the real
+// libdeluge bindgen output the BSP crate provides (`target_os = "none"` or
+// `feature = "host_app"`) -- this test binary is a standalone crate with
+// neither, so it needs its own stand-in, the same values
+// `include/libdeluge/types.h`'s `DelugeStatus` pins.
+#[allow(non_upper_case_globals)]
+mod sys {
+    pub type DelugeStatus = i8;
+    pub const DelugeStatus_DELUGE_ERR_PARAM: DelugeStatus = -2;
+    pub const DelugeStatus_DELUGE_ERR_IO: DelugeStatus = -5;
+    pub const DelugeStatus_DELUGE_ERR_NOT_FOUND: DelugeStatus = -8;
+    pub const DelugeStatus_DELUGE_ERR_EXISTS: DelugeStatus = -9;
+    pub const DelugeStatus_DELUGE_ERR_NO_SPACE: DelugeStatus = -10;
+    pub const DelugeStatus_DELUGE_ERR_NO_FILESYSTEM: DelugeStatus = -11;
+    pub const DelugeStatus_DELUGE_ERR_NOT_EMPTY: DelugeStatus = -14;
+}
+
 use aligned::{Aligned, A4};
 use block_device_adapters::BufStream;
 use block_device_driver::BlockDevice;

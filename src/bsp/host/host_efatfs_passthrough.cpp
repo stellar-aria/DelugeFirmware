@@ -186,6 +186,26 @@ DirSlot* dir_slot(uint32_t handle) {
 	return s.dir != nullptr ? &s : nullptr;
 }
 
+// Map the current `errno` (set by a just-failed POSIX call) onto the granular DelugeStatus codes
+// the efatfs C-ABI's 13 fallible file/dir/path ops report. Anything not called out explicitly falls
+// back to DELUGE_ERR_IO, matching a generic hardware/transport failure.
+DelugeStatus errno_to_status() {
+	switch (errno) {
+	case ENOENT:
+		return DELUGE_ERR_NOT_FOUND;
+	case EEXIST:
+		return DELUGE_ERR_EXISTS;
+	case ENOTEMPTY:
+		return DELUGE_ERR_NOT_EMPTY;
+	case ENOSPC:
+		return DELUGE_ERR_NO_SPACE;
+	case EINVAL:
+		return DELUGE_ERR_PARAM;
+	default:
+		return DELUGE_ERR_IO;
+	}
+}
+
 // Pack a broken-down local time into FAT (dos_date << 16) | dos_time, matching efatfs pack_fat_datetime.
 // Note the 2-second resolution (sec / 2).
 uint32_t pack_fat_datetime(const struct tm& t) {
@@ -286,13 +306,13 @@ bool deluge_efatfs_read_at(uint32_t handle, uint32_t byte_offset, void* dst, uin
 	return true;
 }
 
-bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+DelugeStatus deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
 	if (path == nullptr || out_handle == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	std::string full = resolve_root_relative(path);
 	if (full.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	int flags = 0;
 	switch (mode) {
@@ -306,7 +326,7 @@ bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handl
 		flags = O_RDWR | O_CREAT | O_EXCL;
 		break;
 	default:
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	if (mode != DELUGE_FILE_READ) {
 		mkdir_parents(full); // WRITE modes auto-create missing parent dirs (efatfs create_context)
@@ -319,23 +339,23 @@ bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handl
 		}
 	}
 	if (fd < 0) {
-		return false;
+		return errno_to_status();
 	}
 	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {
 		if (g_files[i].fd < 0) {
 			g_files[i] = {fd, 0};
 			*out_handle = i + 1;
-			return true;
+			return DELUGE_OK;
 		}
 	}
 	close(fd);
-	return false;
+	return DELUGE_ERR_IO; // handle table full
 }
 
-bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+DelugeStatus deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr || dst == nullptr || out_read == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	auto* buf = static_cast<uint8_t*>(dst);
 	uint32_t filled = 0;
@@ -349,19 +369,19 @@ bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_
 			if (errno == EINTR) {
 				continue;
 			}
-			return false;
+			return errno_to_status();
 		}
 		filled += static_cast<uint32_t>(n);
 	}
 	s->pos += count;   // FILL semantics: advance by the full requested count
 	*out_read = count; // always the full count on success
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
+DelugeStatus deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr || dst == nullptr || out_read == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	auto* buf = static_cast<uint8_t*>(dst);
 	uint32_t got = 0;
@@ -374,19 +394,19 @@ bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, u
 			if (errno == EINTR) {
 				continue;
 			}
-			return false;
+			return errno_to_status();
 		}
 		got += static_cast<uint32_t>(n);
 	}
 	s->pos += got; // advance by the true bytes read
 	*out_read = got;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
+DelugeStatus deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr || src == nullptr || out_written == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	const auto* buf = static_cast<const uint8_t*>(src);
 	uint32_t done = 0;
@@ -396,8 +416,8 @@ bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, 
 			if (errno == EINTR) {
 				continue;
 			}
-			return false; // hard I/O error (e.g. ENOSPC/EIO/EBADF): propagate as failure, matching
-			              // the read paths and the device efatfs's write-error behaviour
+			return errno_to_status(); // hard I/O error (e.g. ENOSPC/EIO/EBADF): propagate as failure,
+			                          // matching the read paths and the device efatfs's write-error behaviour
 		}
 		if (n == 0) {
 			break;
@@ -406,29 +426,29 @@ bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, 
 	}
 	s->pos += done;
 	*out_written = done;
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
+DelugeStatus deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	s->pos = offset; // absolute; no FS access (matches efatfs TaskFileTable::seek)
-	return true;
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
+DelugeStatus deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr || out_size == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	struct stat st{};
 	if (fstat(s->fd, &st) != 0) {
-		return false;
+		return errno_to_status();
 	}
 	*out_size = static_cast<uint32_t>(st.st_size); // cursor untouched
-	return true;
+	return DELUGE_OK;
 }
 
 bool deluge_efatfs_stats(uint32_t* out_free_clusters, uint32_t* out_total_clusters) {
@@ -486,17 +506,20 @@ bool deluge_efatfs_cluster_size(uint32_t* out_bytes) {
 	return true;
 }
 
-bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
+DelugeStatus deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
 	FileSlot* s = file_slot(handle);
 	if (s == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	struct stat st{};
 	if (fstat(s->fd, &st) != 0) {
-		return false;
+		return errno_to_status();
 	}
 	uint32_t clamped = std::min<uint32_t>(new_len, static_cast<uint32_t>(st.st_size)); // shrink-only
-	return ftruncate(s->fd, clamped) == 0;                                             // cursor untouched
+	if (ftruncate(s->fd, clamped) != 0) {                                              // cursor untouched
+		return errno_to_status();
+	}
+	return DELUGE_OK;
 }
 
 void deluge_efatfs_file_close(uint32_t handle) {
@@ -508,9 +531,9 @@ void deluge_efatfs_file_close(uint32_t handle) {
 	s->fd = -1;
 }
 
-bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
+DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 	if (out_handle == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	// Empty/null path opens the volume root (DELUGE_SD_ROOT) directly.
 	std::string full;
@@ -522,30 +545,31 @@ bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 		full = resolve_root_relative(path);
 	}
 	if (full.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	DIR* d = opendir(full.c_str());
 	if (d == nullptr) {
-		return false;
+		return errno_to_status();
 	}
 	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {
 		if (g_dirs[i].dir == nullptr) {
 			g_dirs[i].dir = d;
 			g_dirs[i].path = full;
 			*out_handle = i + 1;
-			return true;
+			return DELUGE_OK;
 		}
 	}
 	closedir(d);
-	return false;
+	return DELUGE_ERR_IO; // handle table full
 }
 
-bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
-                            uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, bool* out_has_entry) {
+DelugeStatus deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
+                                    uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs,
+                                    bool* out_has_entry) {
 	DirSlot* s = dir_slot(handle);
 	if (s == nullptr || out_name == nullptr || out_is_dir == nullptr || out_size == nullptr || out_modified == nullptr
 	    || out_attrs == nullptr || out_has_entry == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	while (dirent* e = readdir(s->dir)) {
 		if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
@@ -577,10 +601,10 @@ bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_c
 		}
 		*out_attrs = attrs;
 		*out_has_entry = true;
-		return true;
+		return DELUGE_OK;
 	}
 	*out_has_entry = false; // end of directory: success, not an error
-	return true;
+	return DELUGE_OK;
 }
 
 void deluge_efatfs_dir_close(uint32_t handle) {
@@ -593,71 +617,83 @@ void deluge_efatfs_dir_close(uint32_t handle) {
 	s->path.clear();
 }
 
-bool deluge_efatfs_mkdir(const char* path) {
+DelugeStatus deluge_efatfs_mkdir(const char* path) {
 	if (path == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	std::string full = resolve_root_relative(path);
 	if (full.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	for (size_t i = 1; i <= full.size(); i++) {
 		if (i == full.size() || full[i] == '/') {
 			std::string prefix = full.substr(0, i);
 			if (!prefix.empty() && mkdir(prefix.c_str(), 0777) != 0 && errno != EEXIST) {
-				return false;
+				return errno_to_status();
 			}
 		}
 	}
 	struct stat st{};
-	return stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+	if (stat(full.c_str(), &st) != 0) {
+		return errno_to_status();
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		return DELUGE_ERR_EXISTS; // path exists but names a file, not a directory
+	}
+	return DELUGE_OK; // idempotent: an already-existing directory is success too
 }
 
-bool deluge_efatfs_unlink(const char* path) {
+DelugeStatus deluge_efatfs_unlink(const char* path) {
 	if (path == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	std::string full = resolve_root_relative(path);
 	if (full.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	if (::unlink(full.c_str()) == 0) {
-		return true;
+		return DELUGE_OK;
 	}
 	if (errno == EISDIR || errno == EPERM) {
-		return ::rmdir(full.c_str()) == 0; // empty-dir removal (rmdir fails if non-empty)
+		if (::rmdir(full.c_str()) == 0) { // empty-dir removal (rmdir fails if non-empty)
+			return DELUGE_OK;
+		}
+		return errno_to_status();
 	}
-	return false;
+	return errno_to_status();
 }
 
-bool deluge_efatfs_rename(const char* old_path, const char* new_path) {
+DelugeStatus deluge_efatfs_rename(const char* old_path, const char* new_path) {
 	if (old_path == nullptr || new_path == nullptr) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	std::string from = resolve_root_relative(old_path);
 	std::string to = resolve_root_relative(new_path);
 	if (from.empty() || to.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	struct stat st{};
 	if (stat(to.c_str(), &st) == 0) {
-		return false; // efatfs rename fails if the destination exists; POSIX would overwrite
+		return DELUGE_ERR_EXISTS; // efatfs rename fails if the destination exists; POSIX would overwrite
 	}
-	return ::rename(from.c_str(), to.c_str()) == 0;
+	if (::rename(from.c_str(), to.c_str()) != 0) {
+		return errno_to_status();
+	}
+	return DELUGE_OK;
 }
 
-bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
-                            uint8_t second) {
+DelugeStatus deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint8_t day, uint8_t hour,
+                                    uint8_t minute, uint8_t second) {
 	if (path == nullptr || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
-		return false; // range-validate like efatfs (rejects out-of-range before touching the FS)
+		return DELUGE_ERR_PARAM; // range-validate like efatfs (rejects out-of-range before touching the FS)
 	}
 	std::string full = resolve_root_relative(path);
 	if (full.empty()) {
-		return false;
+		return DELUGE_ERR_IO; // no DELUGE_SD_ROOT passthrough root configured
 	}
 	struct stat st{};
 	if (stat(full.c_str(), &st) != 0) {
-		return false; // missing file: fail (efatfs open_file first), NOT a silent no-op
+		return errno_to_status(); // missing file: fail (efatfs open_file first), NOT a silent no-op
 	}
 	struct tm tmv{};
 	tmv.tm_year = static_cast<int>(year) - 1900;
@@ -669,10 +705,13 @@ bool deluge_efatfs_set_time(const char* path, uint16_t year, uint8_t month, uint
 	tmv.tm_isdst = -1;
 	time_t mt = mktime(&tmv);
 	if (mt == static_cast<time_t>(-1)) {
-		return false;
+		return DELUGE_ERR_PARAM;
 	}
 	struct timeval times[2] = {{mt, 0}, {mt, 0}};
-	return utimes(full.c_str(), times) == 0;
+	if (utimes(full.c_str(), times) != 0) {
+		return errno_to_status();
+	}
+	return DELUGE_OK;
 }
 
 bool deluge_efatfs_stream_open(const char* path, uint8_t mode, uint32_t* out_handle) {

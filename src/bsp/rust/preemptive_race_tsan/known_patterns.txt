@@ -1,11 +1,25 @@
 # Lens 2 (Task 9) TSan classifier: KNOWN, pre-existing, BROAD debt patterns.
 #
-# One extended-regex PATTERN per line (matched with `grep -E` against a normalized TSan
-# finding's FULL stack block — every frame of both racing accesses, from the `WARNING:
-# ThreadSanitizer: data race` line through the terminating `SUMMARY:` line, one frame per
-# grep input line — not just the one-line SUMMARY; see run.sh's `normalize()` and the block
-# extraction above it). A pattern matches if it matches ANY frame in the block. Blank lines
-# and `#` comments are ignored.
+# One extended-regex PATTERN per line (matched with `grep -E`). Blank lines and `#` comments
+# are ignored.
+#
+# MATCHING TIER — read this before adding a pattern: by DEFAULT a pattern is matched only
+# against the finding's RACE SITE (the normalized one-line `SUMMARY: ThreadSanitizer:` text,
+# same as TSan's own summary — see run.sh's `classify_block()`). Prefix a line with `DEEP `
+# (e.g. `DEEP src/lib/printf\.c` below) to instead match it against EVERY frame of both racing
+# accesses' full stacks (WARNING line through SUMMARY line). DEEP is a deliberate, rare
+# opt-in, NOT the default: on the audio thread almost every finding's stack passes through the
+# same call-graph-root ancestors (`AudioEngine::routine()`/`routine_task()`,
+# `deluge_app_render`, ...), so a broad file/subsystem pattern marked DEEP would match nearly
+# any audio-thread finding regardless of where the race actually is — silently absorbing a
+# genuinely new race that merely happens to run on that thread (this exact bug shipped in
+# commit 4a42871dd and was caught in review the same day; see the R4 Task 8 class-1/class-2
+# notes below for the concrete evidence and the fix). Only mark a pattern DEEP when you have
+# verified, via full backtrace, that its target frame is unambiguously the SAME finding in
+# EVERY observed instance, AND that the target is a leaf/access frame for that finding (never
+# a call-graph-root ancestor of unrelated work) — `src/lib/printf.c` below is the one
+# currently-justified case.
+#
 # Order matters: run.sh checks `open_findings_patterns.txt` FIRST, so a line matching both
 # (e.g. `loader.cpp:82` below, which is inside a file this list's broad `loader\.cpp`-style
 # reasoning would otherwise also catch) is correctly bucketed as an open finding, not here.
@@ -52,9 +66,15 @@ src/deluge/model/instrument/kit\.cpp
 src/deluge/model/output\.cpp
 # Debug-only allocator bookkeeping (MEM_GUARD's live-alloc-count tracking) and the host-only
 # shared C stdio scratch buffer (two threads' D_PRINTLN sharing one vsnprintf buffer — a host
-# logging artifact, not firmware behaviour).
+# logging artifact, not firmware behaviour). printf.c is DEEP (see the class-2 note in the
+# 2026-08-06 section below): the shared-buffer access itself is always a printf.c leaf frame
+# on at least one side of the race, but TSan sometimes picks the OTHER thread's frame — a
+# bare, source-free runtime intercept — as the SUMMARY site, so a SITE-only match would miss
+# it. DEEP is safe here specifically because printf.c's frames are always leaf/access frames
+# for THIS finding class, never a call-graph-root ancestor of unrelated work (unlike the
+# broad SITE-only file patterns above, which must not be DEEP for exactly that reason).
 src/deluge/memory/alloc_metadata\.cpp
-src/lib/printf\.c
+DEEP src/lib/printf\.c
 # loader.cpp's ONE admission-guard read of AudioEngine::audioRoutineLocked (already covered,
 # as the WRITE side, by the audio_engine.cpp pattern above) — deliberately NOT covered by a
 # broad `storage/audio/stream/` pattern (that would also swallow the genuinely-new recorder/
@@ -77,11 +97,29 @@ src/deluge/storage/audio/stream/loader\.cpp:82:32 in deluge::audio::stream::load
 # race at a DIFFERENT line in these files will still correctly surface as
 # UNCATALOGUED, unlike the broad-file convention used elsewhere in this catalog.
 
-# TLSF allocator (crates/deluge_alloc/src/tlsf.rs): audio-thread voice
-# allocation racing recorder cluster-table growth in the shared heap. Ten
-# specific known sites pinned by line number, plus the two generic
-# core::ptr::read/write<*mut BlockHeader> monomorphizations they lower to.
-crates/deluge_alloc/src/tlsf\.rs:(269|276|277|314|317|348|68|92):[0-9]+ in <deluge_alloc::tlsf::(Tlsf|BlockHeader)>
+# TLSF allocator (crates/deluge_alloc/src/tlsf.rs): concurrent, unsynchronized malloc/free
+# calls into the SAME shared TLSF heap from two threads (audio-thread voice allocation,
+# recorder cluster-table growth, and other allocation sites) racing each other on the
+# allocator's own internal free-list/block-header state. WIDENED to a file-wide pattern
+# 2026-08-06 (this fix round): started as 8 pinned exact lines (R1, 2026-07-22), grew to 10
+# (R4 Task 8, 2026-08-06, +80/+446), then a SINGLE additional fresh run in this fix round
+# surfaced 6 MORE distinct exact lines (293, 295, 306, 309, 342, 96) not in that list --
+# confirming (unlike loader.cpp/clip.cpp/song.cpp/playback_handler.h, which have stayed
+# stable) this is NOT a file where line-pinning scales: the race is fundamentally "any two
+# concurrent Tlsf::malloc/free calls", so which internal helper (search_suitable,
+# remove_free_block, split, use_block, BlockHeader::size/set_prev_used, ...) happens to be
+# executing at the exact moment of the race varies with allocation size and free-list state,
+# not with anything a maintainer controls. Verified via full-stack backtrace on every new
+# instance (all reached via deluge_alloc -> Tlsf::malloc -> use_block -> {remove_free_block,
+# split} -> BlockHeader::{size,set_prev_used,...}, from EITHER GeneralMemoryAllocator::
+# checkEverythingOk's heap walk or a live allocate/free call on a fast_allocator<T> pool) --
+# same architectural gap, a different exact internal line each time. SITE-only (not DEEP) is
+# still safe here: unlike AudioEngine::routine()/deluge_app_render, tlsf.rs's functions are
+# leaf allocator internals, never a call-graph-root ancestor of unrelated work, so a new race
+# whose OWN site lands in this file is, by construction, the same "allocator not
+# thread-safe" gap, not a different bug hiding behind an ancestor. Includes the two generic
+# core::ptr::read/write<*mut BlockHeader> monomorphizations the accessors lower to.
+crates/deluge_alloc/src/tlsf\.rs
 core::ptr::(read|write)::<\*mut deluge_alloc::tlsf::BlockHeader>
 
 # Playback/song-transport: audio-thread tick (processCurrentPos / clock-active
@@ -110,42 +148,54 @@ src/deluge/gui/waveform/waveform_renderer\.cpp:69[14]:33 in WaveformRenderer::ad
 # stack of any instance). Cataloged per decision 2026-08-06 -- recorded, not
 # suppressed. Four classes:
 #
-#   1. TLSF allocator (see the pinned line-list below) -- two more exact sites
+#   1. TLSF allocator (see the tlsf.rs entry above) -- two more exact sites
 #      (Tlsf::check at 446, BlockHeader::is_prev_free at 80) than the R1 list,
 #      same heap-walk-vs-allocation race, verified via full-stack backtrace
 #      (GeneralMemoryAllocator::checkEverythingOk -> AudioEngine::routine()).
+#      CORRECTION (2026-08-06 fix round): the original version of this note
+#      (commit 4a42871dd) claimed these matched via full-block matching
+#      against the broad `audio_engine\.cpp` pattern -- WRONG. A review caught
+#      that under full-block matching, `audio_engine\.cpp` (and every other
+#      broad file pattern in this catalog) matches whenever that file is
+#      ANYWHERE in either racing stack, including as a call-graph-ROOT
+#      ancestor of totally unrelated audio-thread work (deluge_app_render ->
+#      AudioEngine::routine()/routine_task() sit above nearly everything the
+#      audio thread does) -- so these two TLSF sites were being silently
+#      absorbed via an unrelated ancestor frame, not via their own site, and
+#      a genuinely new race sharing that same ancestor chain would have been
+#      absorbed the same way. Fixed by reverting broad file patterns (this
+#      one included) to SITE-only matching (the one-line SUMMARY, as before
+#      f4c700b98). These two sites were initially re-pinned by exact line
+#      number; a same-day re-verification run (see the tlsf.rs entry above)
+#      then surfaced 6 MORE distinct exact lines in a single extra run,
+#      which is what drove tlsf.rs's WIDENED-to-file-wide pattern -- so these
+#      two sites, and the newer six, all now match via that file-wide entry.
 #
-#   2. The debug-log shared C stdio scratch buffer (src/lib/printf.c pattern,
-#      line 53 above) racing itself between logDebug/Debug::println call
-#      sites on two threads. Verified via full-stack backtrace on every
-#      instance this run (grep the run logs' "#1" frames): always
-#      logDebug/print.cpp/log.cpp <-> printf.c's _out_rev/_vsnprintf/_ftoa.
-#      The wrinkle: on some runs TSan chose the OTHER thread's frame (the
-#      generic runtime interceptor itself, which carries no file/line) as the
-#      one-line SUMMARY site. That no longer matters -- run.sh (2026-08-06)
-#      now classifies each finding on its FULL stack block (every frame of
-#      BOTH racing accesses, WARNING line through SUMMARY line), and every
-#      instance of this class has been verified to carry a src/lib/printf.c
-#      frame somewhere in that block, so the plain printf.c pattern above
-#      matches it directly regardless of which single frame TSan happened to
-#      pick as the SUMMARY site. Two narrow, already-observed interceptor
-#      symbols are kept below as belt-and-suspenders documentation of the
-#      exact non-printf.c-named frames this class has produced; they are
-#      redundant with the printf.c match today, not load-bearing:
-core::ffi::c_str::strlen::runtime
-library/core/src/str/validations\.rs:23[23]:52 in core::str::validations::run_utf8_validation
-#      REMOVED 2026-08-06 (full-block-matching follow-up): the bare
-#      ` in __tsan_memcpy$` / ` in strlen$` SUMMARY-line patterns that used to
-#      sit here (added by f4c700b98, needed only because run.sh classified on
-#      the one-line SUMMARY). They were dangerously broad -- a bare, generic
-#      compiler-intrinsic name with no file/subsystem info -- and, once
-#      matched against a real R4 storage/cluster memcpy race's SUMMARY line
-#      (also often a bare __tsan_memcpy top frame), would have silently
-#      absorbed it as "known noise" instead of failing the gate. Full-block
-#      matching removes the need for them: this class's real printf.c frame
-#      is now visible to the classifier even when it isn't the SUMMARY frame,
-#      so a genuinely new bare-memcpy/strlen race elsewhere (no printf.c frame
-#      anywhere in its block) now correctly falls through to UNCATALOGUED.
+#   2. The debug-log shared C stdio scratch buffer (src/lib/printf.c, marked
+#      DEEP above) racing itself between logDebug/Debug::println call sites
+#      on two threads. Verified via full-stack backtrace on every instance
+#      this run (grep the run logs' "#1" frames): always logDebug/print.cpp/
+#      log.cpp <-> printf.c's _out_rev/_vsnprintf/_ftoa. The wrinkle: on some
+#      runs TSan chose the OTHER thread's frame (a generic, source-free
+#      runtime intercept -- `strlen`, `__tsan_memcpy`, ...) as the one-line
+#      SUMMARY site, which a plain SITE-only printf.c pattern can't see.
+#      DEEP is the (2026-08-06 fix-round) answer: a pattern marked DEEP is
+#      checked against every frame of BOTH racing stacks, not just the site,
+#      so the printf.c pattern matches this class regardless of which frame
+#      TSan picked as SUMMARY -- WITHOUT reintroducing a broad bare-
+#      intrinsic-name pattern (` in __tsan_memcpy$` / ` in strlen$`, deleted
+#      by the prior 4a42871dd commit for being exactly that kind of
+#      ancestor/generic-name over-match risk). The difference: DEEP printf.c
+#      is a precise, already-verified-safe target (see the printf.c catalog
+#      entry's own note for why); a DEEP bare-intrinsic-name pattern would
+#      not be, which is why one is restored here and the other stays deleted.
+#      Two narrow, already-observed interceptor symbols are also marked DEEP
+#      below as belt-and-suspenders documentation of the exact non-printf.c-
+#      named frames this class has produced; they are redundant with the
+#      printf.c DEEP match today (every observed instance carries a printf.c
+#      frame on at least one side), not load-bearing:
+DEEP core::ffi::c_str::strlen::runtime
+DEEP library/core/src/str/validations\.rs:23[23]:52 in core::str::validations::run_utf8_validation
 #
 #   3. Song-model object-graph CONSTRUCTION/TEARDOWN during a live song swap
 #      (LoadSongUI::performLoad() building a brand-new Song's full DSP/param
@@ -179,3 +229,21 @@ src/deluge/memory/heaps\.cpp
 #      WaveformRenderer flag-read class as the pinned entry above, one line
 #      earlier (691 vs. 694) this run; folded into that entry's column-4
 #      character class above rather than a separate line.
+#
+# --- Surfaced during the 2026-08-06 fix-round re-verification run (site-anchoring the
+#     catalog after the ancestor-absorption bug in commit 4a42871dd) ---
+#
+#   5. View UI-touch/mod-knob state during a live song swap: View::
+#      pretendModKnobsUntouchedForAWhile() (view.cpp:1930), written on the UI/fiber
+#      thread via LoadSongUI::performLoad() -> setUIForLoadedSong() -> ArrangerView::
+#      opened()/focusRegained() -> View::setActiveModControllableTimelineCounter(),
+#      racing the audio thread's read of the SAME state directly inside
+#      deluge_app_render (audio_engine.cpp:620) while the OLD song is still rendering.
+#      The SAME "song swap isn't preemption-safe" architectural gap as class 3 above,
+#      just touching a `gui/views/` UI-state file that wasn't yet in that pattern
+#      list. Added as its own directory pattern (not folded into class 3's list)
+#      since `gui/views/` is a different subsystem (UI/input) than class 3's DSP/
+#      model-graph files; ArrangerView (the ancestor in this stack) never appears as
+#      a call-graph-root the way AudioEngine::routine() does, so SITE-only matching
+#      here carries the same low ancestor-absorption risk as the rest of this file:
+src/deluge/gui/views/

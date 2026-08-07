@@ -421,3 +421,63 @@ fn fat32_dotdot_cluster_probe() {
         "embedded-fatfs should write 0 into '..' under root (BUG-B, Task 6B)"
     );
 }
+
+// --- Card-reinsert / swap proxy ---------------------------------------------
+//
+// R4 Phase C Task 8's gate asks for a "mount -> op -> remount against a
+// second image -> op succeeds" scenario, to the extent the host shim can
+// model a card swap. The host has no card-detect line (that's a BSP/hardware
+// concept -- `deluge_block_ready`, per the project-model notes -- and is
+// untestable here), but `RamDisk::load_bytes` IS the host-level equivalent of
+// "different physical bytes are now behind the block device": it replaces
+// the whole backing image `FileBlockDevice`/`BufStream` read/write through,
+// exactly as a real card swap replaces what's behind the SD controller. This
+// proves `efatfs_core`'s open/mount path has no cross-mount state (cached FAT
+// sectors, directory cursors, a stale generation) that would corrupt or wedge
+// against a SECOND, geometrically-different image (FAT32 -> FAT16: different
+// FAT type, different total size, different cluster size) mounted right after
+// the first. The genuinely device-only part -- the actual electrical
+// card-detect transition and re-initializing the SPI/SD controller -- is
+// deferred to the on-device ear-check (see the R4 Phase C gate report).
+#[test]
+fn reinsert_second_image_remount_and_op_succeeds() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Mount the FIRST image (FAT32) and do a real op: read a known file.
+    let fat32_path =
+        std::env::var("SP0_FAT32").expect("run mk_fixture.sh; set SP0_FAT32=/tmp/fat32.img");
+    RamDisk::load(&fat32_path);
+    let e1 = EFatFs::mount();
+    assert_eq!(
+        e1.read_file("SAMPLES/hello.txt"),
+        tree_file("SAMPLES/hello.txt"),
+        "op on the first image (pre-swap) must succeed and read the first image's content"
+    );
+    drop(e1); // no held locator survives the swap -- UI/storage identify files by path.
+
+    // "Reinsert": the backing bytes are swapped out from under the block
+    // device for a SECOND, geometrically-different image (FAT16, not FAT32)
+    // -- `RamDisk::load` replaces `DISK` wholesale, exactly as a real card
+    // swap replaces what a fresh `f_mount`-equivalent open would read.
+    let fat16_path =
+        std::env::var("SP0_FAT16").expect("run mk_fixture.sh; set SP0_FAT16=/tmp/fat16.img");
+    RamDisk::load(&fat16_path);
+
+    // A fresh mount + op against the NEW image must succeed and see the
+    // SECOND image's content -- not wedge, not silently keep serving the
+    // first image's stale directory/FAT state.
+    let e2 = EFatFs::mount();
+    assert_eq!(
+        e2.read_file("SAMPLES/hello.txt"),
+        tree_file("SAMPLES/hello.txt"),
+        "op after the swap must succeed and read the SECOND image's content"
+    );
+    // The FAT16 fixture has no huge.bin (mk_fixture.sh: FAT16 image can't
+    // hold it) -- confirms this really is walking the FAT16 image's own
+    // directory structure, not a cached/stale FAT32 view.
+    assert!(
+        !e2.exists("SAMPLES/huge.bin"),
+        "post-swap mount must reflect the SECOND image's own directory tree, \
+         not a leftover view of the first image"
+    );
+}

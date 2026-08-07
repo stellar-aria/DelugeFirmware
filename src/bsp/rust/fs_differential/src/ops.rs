@@ -1,11 +1,9 @@
-//! Filesystem-op result types shared across the C-FatFS and embedded-fatfs
-//! backends.
+//! Filesystem-op result types this harness's `EFatFs` backend presents.
 //!
-//! `Entry` is the directory-listing entry type both backends' `read_dir`
-//! return. `FsOps` is the common interface `diff::compare_read` walks both
-//! backends through.
+//! `Entry` is the directory-listing entry type `read_dir` returns. `FsOps`
+//! is the interface `diff::compare_read` walks a backend through -- either a
+//! live `EFatFs` mount or a hardcoded `diff::Captured` known-good literal.
 use crate::efatfs::EFatFs;
-use crate::fatfs_c::CFatFs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -14,21 +12,12 @@ pub struct Entry {
     pub is_dir: bool,
 }
 
-/// Common read/enumerate surface both FatFS backends present, so
-/// `diff::compare_read` can walk either one through a single `&dyn FsOps`
-/// without caring which concrete stack it's driving.
+/// Common read/enumerate surface a backend presents, so `diff::compare_read`
+/// can walk it through a single `&dyn FsOps` (live mount or known-good
+/// literal alike).
 pub trait FsOps {
     fn read_file(&self, path: &str) -> Vec<u8>;
     fn read_dir(&self, path: &str) -> Vec<Entry>; // sorted by name
-}
-
-impl FsOps for CFatFs {
-    fn read_file(&self, path: &str) -> Vec<u8> {
-        CFatFs::read_file(self, path)
-    }
-    fn read_dir(&self, path: &str) -> Vec<Entry> {
-        CFatFs::read_dir(self, path)
-    }
 }
 
 impl FsOps for EFatFs {
@@ -40,12 +29,10 @@ impl FsOps for EFatFs {
     }
 }
 
-/// A single write-path operation the differential replays
-/// identically on both backends, each against its own copy of the same
-/// starting image (see `diff::replay_and_compare`). Covers the write-path
-/// primitives the Deluge's own file I/O actually exercises: create a
-/// directory, write a new (possibly multi-cluster) file, extend an existing
-/// file (potentially across a cluster boundary), rename, and delete.
+/// A single write-path operation covering the write-path primitives the
+/// Deluge's own file I/O actually exercises: create a directory, write a
+/// new (possibly multi-cluster) file, extend an existing file (potentially
+/// across a cluster boundary), rename, and delete.
 #[derive(Debug, Clone)]
 pub enum Op {
     Mkdir(String),
@@ -55,11 +42,10 @@ pub enum Op {
     Rename(String, String),
 }
 
-/// Write-path surface both backends present, mirroring `FsOps` for reads.
-/// `&mut self` because both backends wrap real mutable filesystem state (a
-/// mounted C FatFS volume / an `embedded_fatfs::FileSystem`) even though the
-/// actual bytes land in the shared `DISK` RAM image (`ram_disk.rs`), not in
-/// `self` itself.
+/// Write-path surface a backend presents, mirroring `FsOps` for reads.
+/// `&mut self` because the backend wraps real mutable filesystem state (an
+/// `embedded_fatfs::FileSystem`) even though the actual bytes land in the
+/// shared `DISK` RAM image (`ram_disk.rs`), not in `self` itself.
 pub trait FsOpsMut: FsOps {
     /// Create a directory. `path`'s parent must already exist.
     fn mkdir(&mut self, path: &str);
@@ -83,24 +69,6 @@ pub trait FsOpsMut: FsOps {
             Op::Delete(p) => self.delete(p),
             Op::Rename(a, b) => self.rename(a, b),
         }
-    }
-}
-
-impl FsOpsMut for CFatFs {
-    fn mkdir(&mut self, path: &str) {
-        CFatFs::mkdir(self, path)
-    }
-    fn write_new(&mut self, path: &str, bytes: &[u8]) {
-        CFatFs::write_new(self, path, bytes)
-    }
-    fn append(&mut self, path: &str, bytes: &[u8]) {
-        CFatFs::append(self, path, bytes)
-    }
-    fn delete(&mut self, path: &str) {
-        CFatFs::delete(self, path)
-    }
-    fn rename(&mut self, from: &str, to: &str) {
-        CFatFs::rename(self, from, to)
     }
 }
 

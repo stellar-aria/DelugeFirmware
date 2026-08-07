@@ -42,11 +42,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
+#include <string>
+#include <strings.h> // strcasecmp
+#include <sys/stat.h>
 #include <unistd.h>
 
-extern "C" {
-#include "fatfs/ff.h"
-}
 #if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/asan_interface.h>
 #include <sanitizer/lsan_interface.h>
@@ -149,33 +150,46 @@ int g_songLoadReps = -1; // -1 = not yet read, 0 = disabled
 uint32_t g_songPollCount = 0;
 bool g_songLoadDone = false;
 
+// `dir` is SD-relative (e.g. "SONGS/problem_songs"), matching the convention host_efatfs_passthrough.cpp's
+// resolve_root_relative() expects. The card is a plain host directory now (DELUGE_SD_ROOT), so walk it with
+// POSIX readdir/stat directly rather than going through the efatfs C-ABI — this is a host-only dev harness.
 void collectXmlPaths(const char* dir, int depth) {
 	if (depth > 6 || g_numSongPaths >= kMaxSongPaths) {
 		return;
 	}
-	DIR dp;
-	if (f_opendir(&dp, dir) != FR_OK) {
+	const char* root = std::getenv("DELUGE_SD_ROOT");
+	if (root == nullptr || root[0] == '\0') {
 		return;
 	}
-	FILINFO fno;
-	while (f_readdir(&dp, &fno) == FR_OK && fno.fname[0] != 0) {
-		if (fno.fname[0] == '.' || (fno.fattrib & AM_SYS) || (fno.fattrib & AM_HID)) {
+	std::string physicalDir = std::string(root) + "/" + dir;
+	DIR* dp = opendir(physicalDir.c_str());
+	if (dp == nullptr) {
+		return;
+	}
+	while (struct dirent* entry = readdir(dp)) {
+		const char* name = entry->d_name;
+		if (name[0] == '.') { // skips ".", "..", and dotfiles — matches the old AM_HID/AM_SYS skip
 			continue;
 		}
 		char child[256];
-		snprintf(child, sizeof(child), "%s/%s", dir, fno.fname);
-		if (fno.fattrib & AM_DIR) {
+		snprintf(child, sizeof(child), "%s/%s", dir, name);
+		std::string physicalChild = physicalDir + "/" + name;
+		struct stat st{};
+		if (stat(physicalChild.c_str(), &st) != 0) {
+			continue;
+		}
+		if (S_ISDIR(st.st_mode)) {
 			collectXmlPaths(child, depth + 1);
 		}
 		else {
-			size_t n = strlen(fno.fname);
-			if (n > 4 && strcasecmp(fno.fname + n - 4, ".XML") == 0 && g_numSongPaths < kMaxSongPaths) {
+			size_t n = strlen(name);
+			if (n > 4 && strcasecmp(name + n - 4, ".XML") == 0 && g_numSongPaths < kMaxSongPaths) {
 				strncpy(g_songPaths[g_numSongPaths], child, sizeof(g_songPaths[0]) - 1);
 				g_numSongPaths++;
 			}
 		}
 	}
-	f_closedir(&dp);
+	closedir(dp);
 }
 
 void loadOneSong(const char* fullPath) {

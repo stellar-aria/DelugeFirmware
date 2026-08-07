@@ -101,7 +101,8 @@ const CARD_INSERTED: DelugeCardEvent = 1;
 #[cfg(not(target_os = "none"))]
 const CARD_EJECTED: DelugeCardEvent = 2;
 
-// FatFS diskio status/result codes (src/fatfs/diskio.h).
+// FatFs diskio status/result codes (ChaN's FatFs `diskio.h` convention; no longer
+// vendored in this tree, but these numeric values are the de-facto standard).
 const STA_NOINIT: u8 = 0x01;
 const STA_NODISK: u8 = 0x02;
 const STA_PROTECT: u8 = 0x04;
@@ -341,6 +342,28 @@ pub extern "C" fn disk_status(pdrv: u8) -> u8 {
         return STA_NOINIT;
     }
     0
+}
+
+/// block_device.h — true if the card is present and initialised. A safe
+/// superset of the app's old `!(disk_status(unit) & STA_NODISK)` card-detect
+/// check: this also folds in `STA_NOINIT`, which is fine because the app's
+/// `initSD` immediately requires full readiness for the mount that follows
+/// anyway (see `storage_manager.cpp`'s `initSD`/`checkSDInitialized`).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_ready(unit: u8) -> bool {
+    if unit != 0 {
+        return false;
+    }
+    status_bits() & (STA_NOINIT | STA_NODISK) == 0
+}
+
+/// Host: mirrors `disk_status` above — the file-backed disk image is always
+/// ready once openable, no controller bring-up or card-detect to model.
+#[cfg(not(target_os = "none"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_block_ready(unit: u8) -> bool {
+    unit == 0
 }
 
 #[unsafe(no_mangle)]

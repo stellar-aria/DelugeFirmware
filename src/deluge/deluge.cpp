@@ -76,8 +76,6 @@
 
 namespace encoders = deluge::hid::encoders;
 
-extern "C" void disk_timerproc(UINT msPassed);
-
 Song* currentSong = nullptr;
 Song* preLoadedSong = nullptr;
 
@@ -103,8 +101,6 @@ void batteryLEDBlink() {
 }
 
 void inputRoutine() {
-	disk_timerproc(UI_MS_PER_REFRESH);
-
 	// Check if mono output cable plugged in
 	bool outputPluggedInL = deluge_signal_read(DELUGE_SIGNAL_LINE_OUT_DETECT_L);
 	bool outputPluggedInR = deluge_signal_read(DELUGE_SIGNAL_LINE_OUT_DETECT_R);

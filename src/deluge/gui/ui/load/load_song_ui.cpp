@@ -444,8 +444,8 @@ gotErrorAfterCreatingSong:
 	}
 	AudioEngine::logAction("read new song from file");
 
-	FRESULT success = activeDeserializer->closeWriter();
-	if (success != FR_OK) {
+	bool success = activeDeserializer->closeWriter();
+	if (!success) {
 		display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_ERROR_LOADING_SONG));
 		goto fail;
 	}
@@ -633,66 +633,6 @@ void LoadSongUI::exitThisUI() {
 	currentUIMode = UI_MODE_NONE;
 	close();
 }
-
-// Returns error
-/*
-int32_t LoadSongUI::findNextFile(int32_t offset) {
-
-    //currentFileExists = true;
-    int16_t slotToSearchFrom = currentSlot;
-    int8_t subSlotToSearchFrom = currentSubSlot;
-    char const* nameToSearchFrom = enteredText.get();
-
-    std::string newName;
-    bool doingSecondTry = false;
-
-doSearch:
-
-    int32_t result = StorageManager::findNextFile(offset,
-            &currentSlot, &currentSubSlot, &newName, &currentFileIsFolder,
-            slotToSearchFrom, subSlotToSearchFrom, nameToSearchFrom,
-            "SONG", currentDir.get(), &currentFilePointer, true, 255, NULL, numberEditPos);
-
-
-    if (result == Error::NO_FURTHER_FILES_THIS_DIRECTION) {
-
-        if (doingSecondTry) {
-            // Error - no files at all!
-            currentSlot = 0;
-            currentSubSlot = -1;
-            enteredText.clear();
-            enteredTextEditPos = 0;
-            //currentFileExists = false;
-            return Error::NONE;
-        }
-
-        doingSecondTry = true;
-
-        if (offset >= 0) {
-            slotToSearchFrom = -1;
-            subSlotToSearchFrom = -1;
-            nameToSearchFrom = NULL;
-        }
-        else {
-            slotToSearchFrom = numInstrumentSlots;
-            subSlotToSearchFrom = -1;
-            nameToSearchFrom = "~";
-        }
-        goto doSearch;
-    }
-    else if (result) {
-        return result;
-    }
-
-
-    enteredTextEditPos = getHowManyCharsAreTheSame(enteredText.get(), newName.get());
-    enteredText.set(&newName);
-    currentFilename.set(&newName); // This will only get used in the case of a folder, so it's ok(ish) that we're
-ignoring the file extension.
-
-    return Error::NONE;
-}
-*/
 
 void LoadSongUI::currentFileChanged(int32_t movementDirection) {
 

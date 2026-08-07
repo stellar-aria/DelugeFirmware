@@ -28,10 +28,6 @@
 #include <cstdint>
 #include <memory>
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 class Song;
 class StereoSample;
 class Instrument;
@@ -145,7 +141,7 @@ void routineWithClusterLoading();
 void runRoutine();
 
 void init();
-void previewSample(std::string_view path, FilePointer* filePointer, bool shouldActuallySound);
+void previewSample(std::string_view path, bool shouldActuallySound);
 void stopAnyPreviewing();
 
 void songSwapAboutToHappen();

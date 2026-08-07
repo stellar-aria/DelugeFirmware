@@ -19,7 +19,7 @@ describe dir_ops("passthrough directories", $ {
 		deluge_efatfs_file_close(fh);
 
 		uint32_t dh = 0;
-		expect(deluge_efatfs_dir_open("D", &dh)).to_equal(true);
+		expect(deluge_efatfs_dir_open("D", &dh)).to_equal(DELUGE_OK);
 		int count = 0;
 		bool saw_a = false;
 		while (true) {
@@ -28,7 +28,8 @@ describe dir_ops("passthrough directories", $ {
 			uint32_t size = 999, mtime = 0;
 			uint8_t attrs = 0;
 			bool has = false;
-			expect(deluge_efatfs_dir_read(dh, name, sizeof name, &is_dir, &size, &mtime, &attrs, &has)).to_equal(true);
+			expect(deluge_efatfs_dir_read(dh, name, sizeof name, &is_dir, &size, &mtime, &attrs, &has))
+			    .to_equal(DELUGE_OK);
 			if (!has) break;
 			count++;
 			std::string n(name);

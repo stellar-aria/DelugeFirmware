@@ -30,9 +30,9 @@ namespace deluge::storage {
 /// (inline). Post-op work must live inside the op. `await` (a blocking, result-
 /// returning variant) is a later rung; this seam is `run`-only.
 ///
-/// This is the one enforced entry point for the single-owner discipline the
-/// async-SD reentrancy proof (tests/fatfs_stress/RESULTS.md) showed is
-/// load-bearing. See docs/superpowers/specs/2026-07-17-async-sd-staging-ladder-roadmap.md.
+/// This is the one enforced entry point for the single-owner discipline an
+/// async-SD reentrancy stress proof showed is load-bearing. See
+/// docs/superpowers/specs/2026-07-17-async-sd-staging-ladder-roadmap.md.
 struct Owner {
 	/// @brief Queue `fn(ctx)` on the owner. C-ABI-shaped for existing call sites.
 	/// @param fn  The op to run.

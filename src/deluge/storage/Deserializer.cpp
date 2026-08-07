@@ -16,7 +16,6 @@
  */
 
 #include "definitions_cxx.hpp"
-#include "fatfs/fatfs.hpp"
 #include "gui/ui/sound_editor.h"
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
@@ -41,11 +40,6 @@
 #include "util/try.h"
 #include "version.h"
 #include <string.h>
-
-extern "C" {
-#include "fatfs/diskio.h"
-#include "fatfs/ff.h"
-}
 
 /*******************************************************************************
 

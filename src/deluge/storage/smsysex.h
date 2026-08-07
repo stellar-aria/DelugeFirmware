@@ -3,6 +3,7 @@
 #include "storage/storage_manager.h"
 
 #include "io/file.hpp"
+#include "storage/fs_status.h"
 #include <optional>
 
 struct FILdata;
@@ -23,8 +24,8 @@ struct FileOpParams {
 	bool hasTimestamp() const { return date != 0 || time != 0; }
 };
 
-FILdata* openFIL(const char* fPath, bool forWrite, FRESULT* eCode);
-FRESULT closeFIL(FILdata* fd);
+FILdata* openFIL(const char* fPath, bool forWrite, deluge::storage::FsWireStatus* eCode);
+deluge::storage::FsWireStatus closeFIL(FILdata* fd);
 FILdata* findEmptyFIL();
 
 void noteSessionIdUse(uint8_t msgId);
@@ -43,7 +44,7 @@ void writeBlock(MIDICable& cable, JsonDeserializer& reader);
 void getDirEntries(MIDICable& cable, JsonDeserializer& reader);
 void deleteFile(MIDICable& cable, JsonDeserializer& reader);
 void createDirectory(MIDICable& cable, JsonDeserializer& reader);
-FRESULT createPathDirectories(std::string& path, std::optional<DelugeTimestamp> timestamp);
+deluge::storage::FsWireStatus createPathDirectories(std::string& path, std::optional<DelugeTimestamp> timestamp);
 void rename(MIDICable& cable, JsonDeserializer& reader);
 void updateTime(MIDICable& cable, JsonDeserializer& reader);
 void copyFile(MIDICable& cable, JsonDeserializer& reader);
@@ -54,7 +55,7 @@ uint32_t decodeDataFromReader(JsonDeserializer& reader, uint8_t* dest, uint32_t 
 
 // Helper functions for file operations
 bool parseFileOpParams(JsonDeserializer& reader, FileOpParams& params);
-FRESULT performFileCopy(const FileOpParams& params);
+deluge::storage::FsWireStatus performFileCopy(const FileOpParams& params);
 void setFileTimestamp(std::string_view path, uint32_t date, uint32_t time);
 
 } // namespace smSysex

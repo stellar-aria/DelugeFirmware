@@ -5,12 +5,13 @@
 
 // clang-format off
 describe free_functions("deluge::io free functions", $ {
-	it("mkdir succeeds, then reports EXISTS on a repeat", _ {
+	it("mkdir is idempotent -- a repeat succeeds", _ {
+		// embedded-fatfs's create_dir is idempotent (unlike C-FatFS's f_mkdir,
+		// which reports EXIST on a repeat); callers needing "already exists"
+		// detection use an explicit Directory::open/File::open existence check.
 		mock_file_io_reset();
 		expect(deluge::io::mkdir("SONGS")).to_have_value();
-		auto again = deluge::io::mkdir("SONGS");
-		expect(again.has_value()).to_equal(false);
-		expect(again.error()).to_equal(deluge::io::Status::EXISTS);
+		expect(deluge::io::mkdir("SONGS")).to_have_value();
 	});
 
 	it("unlink removes a file", _ {
@@ -35,7 +36,7 @@ describe free_functions("deluge::io free functions", $ {
 		expect(new_opened.has_value()).to_equal(true);
 	});
 
-	it("unlink on a missing path reports NOT_FOUND", _ {
+	it("unlink on a missing path returns NOT_FOUND", _ {
 		mock_file_io_reset();
 		auto result = deluge::io::unlink("missing.txt");
 		expect(result.has_value()).to_equal(false);
@@ -51,7 +52,7 @@ describe free_functions("deluge::io free functions", $ {
 		expect(deluge::io::set_time("a.txt", ts)).to_have_value();
 	});
 
-	it("set_time on a missing path reports NOT_FOUND", _ {
+	it("set_time on a missing path returns NOT_FOUND", _ {
 		mock_file_io_reset();
 		DelugeTimestamp ts{};
 		auto result = deluge::io::set_time("missing.txt", ts);

@@ -597,7 +597,7 @@ void SampleBrowser::renderPreviewForTarget(const PreviewTarget& target) {
 	}
 
 	// previewSample always resolves target.path fresh, the same as any other path-based open.
-	AudioEngine::previewSample(target.path, nullptr, shouldActuallySound);
+	AudioEngine::previewSample(target.path, shouldActuallySound);
 
 	if (autoLoadEnabled && getCurrentClip()->type != ClipType::AUDIO) {
 		// Feature: if Load has been toggled on, then the file will be auto-loaded into the current instrument
@@ -753,7 +753,7 @@ Error SampleBrowser::claimAudioFileForInstrument(bool makeWaveTableWorkAtAllCost
 	holder->filePath = getCurrentFilePath();
 
 	return holder->loadFile(soundEditor.currentSource->sampleControls.isCurrentlyReversed(), true, true,
-	                        CLUSTER_ENQUEUE, nullptr, makeWaveTableWorkAtAllCosts);
+	                        CLUSTER_ENQUEUE, makeWaveTableWorkAtAllCosts);
 }
 
 Error SampleBrowser::claimAudioFileForAudioClip() {
@@ -1307,7 +1307,7 @@ removeReasonsFromSamplesAndGetOut:
 		// The port's directory entries don't expose a cluster locator, so resolve fresh by path,
 		// the same as any other open.
 		auto* newSample = static_cast<Sample*>(
-		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, nullptr, AudioFileType::SAMPLE));
+		    audioFileManager.getAudioFileFromFilename(filePath, true, &error, AudioFileType::SAMPLE));
 		if (error != Error::NONE || newSample == nullptr) {
 			// Clean up any samples we loaded in this folder load attempt
 			goto removeReasonsFromSamplesAndGetOut;

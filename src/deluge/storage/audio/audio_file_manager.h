@@ -23,10 +23,6 @@
 #include <array>
 #include <cstdint>
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 class Sample;
 class SampleCache;
 #include <string>
@@ -86,8 +82,8 @@ public:
 	AudioFileVector audioFiles;
 
 	void init();
-	AudioFile* getAudioFileFromFilename(std::string& fileName, bool mayReadCard, Error* error, FilePointer* filePointer,
-	                                    AudioFileType type, bool makeWaveTableWorkAtAllCosts = false);
+	AudioFile* getAudioFileFromFilename(std::string& fileName, bool mayReadCard, Error* error, AudioFileType type,
+	                                    bool makeWaveTableWorkAtAllCosts = false);
 
 	bool ensureEnoughMemoryForOneMoreAudioFile();
 
@@ -155,13 +151,12 @@ private:
 	uint32_t clusterSizeAtBoot{0};
 
 	void cardReinserted();
-	// Resolve a not-already-resident audio file to an on-card FilePointer: use `suppliedFilePointer` if given,
-	// else search the alternate load dir (long then short name) and/or the regular path via FatFS. Sets
-	// `effectiveFilePointer` (+ `usingAlternateLocation`, and may rewrite `filePath` for preset alternates) and
-	// returns true on success; returns false on not-found / card-unavailable (with `*error` set, except the
-	// !mayReadCard case which leaves it untouched, as before).
-	bool resolveFilePointer(std::string& filePath, FilePointer* suppliedFilePointer, bool mayReadCard,
-	                        std::string& usingAlternateLocation, FilePointer& effectiveFilePointer, Error* error);
+	// Resolve a not-already-resident audio file's size by path: search the alternate load dir (long then
+	// short name) and/or the regular path. Sets `sizeBytes` (+ `usingAlternateLocation`, and may rewrite
+	// `filePath` for preset alternates) and returns true on success; returns false on not-found /
+	// card-unavailable (with `*error` set, except the !mayReadCard case which leaves it untouched, as before).
+	bool resolveFileSize(std::string& filePath, bool mayReadCard, std::string& usingAlternateLocation,
+	                     uint64_t& sizeBytes, Error* error);
 	// Convert an already-in-memory Sample into a WaveTable (the caller wanted a wavetable but only the Sample
 	// form is resident). Returns the new WaveTable (held by no reason), or nullptr with `*error` set if it
 	// can't be a wavetable (stereo, or not wavetable-looking unless insisted) or alloc/setup fails.
@@ -170,20 +165,20 @@ private:
 	///        into audioFiles, and finalize.
 	///
 	/// Sample: FAT-walk the cluster table and raw header parse via FileByteSource. WaveTable: parse + setup
-	/// via FileByteSource. The file-resolution that produced @p effectiveFilePointer / @p
+	/// via FileByteSource. The file-resolution that produced @p sizeBytes / @p
 	/// usingAlternateLocation is the caller's job.
 	/// @param filePath                   The file's (nominal/display) path.
 	/// @param usingAlternateLocation     Alternate-load-dir path segment the bytes actually live at, or
 	///                                   empty if resolved at `filePath` directly.
-	/// @param effectiveFilePointer       The resolved on-card file pointer to load from.
+	/// @param sizeBytes                  The resolved on-card file's size, in bytes.
 	/// @param type                       Which concrete AudioFile subclass to build.
 	/// @param makeWaveTableWorkAtAllCosts Force wavetable interpretation even without the tag/length hints
 	///                                    that normally identify one.
 	/// @param error                      Set on failure.
 	/// @return The loaded object, held by no reason (the caller leases it), or nullptr with @p error set.
 	AudioFile* buildAudioFileFromCard(const std::string& filePath, const std::string& usingAlternateLocation,
-	                                  FilePointer& effectiveFilePointer, AudioFileType type,
-	                                  bool makeWaveTableWorkAtAllCosts, Error* error);
+	                                  uint64_t sizeBytes, AudioFileType type, bool makeWaveTableWorkAtAllCosts,
+	                                  Error* error);
 };
 
 extern AudioFileManager audioFileManager;

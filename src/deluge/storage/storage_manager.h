@@ -19,7 +19,6 @@
 
 #include "definitions_cxx.hpp"
 #include "extern.h"
-#include "fatfs/fatfs.hpp"
 #include "io/file.hpp"
 #include "libdeluge/scheduler.h" // isSDRoutineActive()
 #include "model/sync.h"
@@ -27,10 +26,6 @@
 
 #include <cstdint>
 #include <optional>
-
-extern "C" {
-#include "fatfs/ff.h"
-}
 
 extern void deleteOldSongBeforeLoadingNew();
 
@@ -58,10 +53,11 @@ public:
 
 	std::optional<deluge::io::File> file;
 	char* fileClusterBuffer;
-	UINT currentReadBufferEndPos{};
+	uint32_t currentReadBufferEndPos{};
 	int32_t fileReadBufferCurrentPos{};
 
-	FRESULT closeWriter();
+	/// @return true on success, false on failure.
+	bool closeWriter();
 
 	bool peekChar(char* thisChar);
 	bool readChar(char* thisChar);
@@ -94,7 +90,8 @@ public:
 	void writeByte(int8_t b);
 	void writeBlock(uint8_t* block, uint32_t size);
 	void writeChars(char const* output);
-	FRESULT closeWriter();
+	/// @return true on success, false on failure.
+	bool closeWriter();
 
 	char* getBufferPtr() { return writeClusterBuffer; }
 	int32_t bytesWritten();

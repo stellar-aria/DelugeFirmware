@@ -138,10 +138,10 @@ heapless = { version = "0.8", default-features = false }
 # (unlike `lens1_vt_sim`, where both are opt-in — see that Cargo.toml's
 # `efatfs_streaming` comment for the reproducible hang it found under its own
 # discrete-event driver): this package's whole point is to boot the app with
-# `deluge_streaming_async_active()`/`deluge_streaming_efatfs_active()` TRUE
-# (the Rust async cluster-fill task owning the loader queue, reading through
-# the embedded-fatfs shim) — a plain/legacy-C++-fill boot would defeat the
-# purpose of standing this package up at all.
+# `deluge_streaming_async_active()` TRUE (the Rust async cluster-fill task
+# owning the loader queue, reading through the embedded-fatfs shim) — a
+# plain/legacy-C++-fill boot would defeat the purpose of standing this
+# package up at all.
 default = [
     "host_app",
     "async_streaming_loader",

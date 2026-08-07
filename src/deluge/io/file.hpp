@@ -10,8 +10,7 @@
 
 namespace deluge::io {
 
-/// A real enum class over DelugeStatus's C enum, matching the existing
-/// FatFS::Error precedent (src/fatfs/fatfs.hpp) for wrapping a C error code
+/// A real enum class over DelugeStatus's C enum, wrapping the C error code
 /// as a type-safe C++ one.
 enum class Status {
 	OK,
@@ -28,6 +27,7 @@ enum class Status {
 	NO_FILESYSTEM,
 	WRITE_PROTECTED,
 	NO_MEMORY,
+	NOT_EMPTY,
 };
 
 Status to_status(DelugeStatus status);
@@ -41,9 +41,9 @@ public:
 	File& operator=(File&& other) noexcept {
 		if (this != &other) {
 			if (handle_) {
-				// Route through close() (not deluge_file_close directly) so the
-				// efatfs/C-FatFS backend selector lives in exactly one place -- see
-				// file.cpp's close().
+				// Route through close() (not deluge_efatfs_file_close directly) so
+				// the unbox + "handle_ = nullptr" bookkeeping lives in exactly one
+				// place -- see file.cpp's close().
 				(void)close();
 			}
 			handle_ = other.handle_;

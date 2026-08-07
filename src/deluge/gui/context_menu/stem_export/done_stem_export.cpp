@@ -20,10 +20,6 @@
 #include "gui/l10n/l10n.h"
 #include "hid/display/display.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 namespace deluge::gui::context_menu {
 
 DoneStemExport doneStemExport{};

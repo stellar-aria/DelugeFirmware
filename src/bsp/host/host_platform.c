@@ -22,175 +22,69 @@
 /// headless (no SD card, no USB). The memory-map boundary symbols live in
 /// host_bsp.c alongside the rest of memory.h.
 
-// 64-bit file offsets even under -m32, so disk images >2GB work (pread64/pwrite64).
-// Must precede the first system header include.
-#define _FILE_OFFSET_BITS 64
-
 #include "board_config.h"           // TRIGGER_CLOCK_INPUT_NUM_TIMES_STORED
-#include "diskio.h"                 // FatFS DSTATUS/DRESULT/STA_*/RES_*
 #include "libdeluge/block_device.h" // DelugeStatus, DELUGE_ERR_*
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 // ===========================================================================
-// FatFS disk backend (RZA1/diskio.c on target). On host the "SD card" is a FAT
-// disk-IMAGE file named by env DELUGE_SD_IMAGE: the five porting callbacks read/
-// write 512-byte sectors against it, so the app sees a normal FAT volume (song
-// load, on-demand sample-cluster streaming, stem writes — all unchanged). When
-// the env is unset we keep the historical no-disk behaviour, so a plain run
-// still boots the default no-SD patch. The app provides disk_read/disk_write
-// (the LBA_t-facing wrappers, audio_file_manager.cpp); they call down into
-// deluge_block_read/deluge_block_write below, which do the real I/O.
+// SD card presence + block device (RZA1/diskio.c on target). On host the "SD
+// card" is a plain directory named by env DELUGE_SD_ROOT: task-context file
+// I/O (song load, sample streaming, stem/recorder writes) goes through
+// host_efatfs_passthrough.cpp, which opens files under that same directory —
+// so deluge_block_ready/deluge_block_init report presence directly from
+// DELUGE_SD_ROOT, agreeing with what the passthrough actually serves. The
+// plain sector-addressed block device below (deluge_block_read/_write) has no
+// reader left on host: the app's storage calls go through the efatfs C-ABI
+// (host_efatfs_passthrough.cpp) or the POSIX-backed passthrough, never raw
+// sectors. Kept as no-op stubs purely to satisfy `block_device.h`'s C-ABI
+// shape (declared there, defined here) in case a future caller needs it.
 // ===========================================================================
 
-#define HOST_SECTOR_SIZE 512u
-
-static int host_img_fd = -1;
-static uint32_t host_img_sectors = 0;
-static int host_img_writable = 0;
-static int host_img_tried = 0; // open attempted (success or failure) — don't retry
-
-// Lazily open the image on the first disk_initialize/disk_status. Returns the
-// DSTATUS bits to report.
-static DSTATUS host_sd_open(void) {
-	if (host_img_fd >= 0) {
-		return host_img_writable ? 0 : STA_PROTECT;
+// True iff DELUGE_SD_ROOT is set and names an existing directory.
+static bool host_sd_root_present(void) {
+	const char* root = getenv("DELUGE_SD_ROOT");
+	if (root == NULL || root[0] == '\0') {
+		return false;
 	}
-	if (host_img_tried) {
-		return STA_NODISK | STA_NOINIT; // no image configured, or open failed
-	}
-	host_img_tried = 1;
-
-	const char* path = getenv("DELUGE_SD_IMAGE");
-	if (path == NULL || path[0] == '\0') {
-		return STA_NODISK | STA_NOINIT;
-	}
-
-	int writable = 1;
-	int fd = open(path, O_RDWR);
-	if (fd < 0) {
-		fd = open(path, O_RDONLY);
-		writable = 0;
-	}
-	if (fd < 0) {
-		fprintf(stderr, "[host-sd] cannot open DELUGE_SD_IMAGE '%s'\n", path);
-		return STA_NODISK | STA_NOINIT;
-	}
-
 	struct stat st;
-	if (fstat(fd, &st) != 0 || st.st_size < (off_t)HOST_SECTOR_SIZE) {
-		fprintf(stderr, "[host-sd] not a usable image: '%s'\n", path);
-		close(fd);
-		return STA_NODISK | STA_NOINIT;
-	}
-
-	host_img_fd = fd;
-	host_img_writable = writable;
-	host_img_sectors = (uint32_t)(st.st_size / HOST_SECTOR_SIZE);
-	fprintf(stderr, "[host-sd] mounted '%s' (%u sectors, %s)\n", path, host_img_sectors, writable ? "rw" : "ro");
-	return host_img_writable ? 0 : STA_PROTECT;
+	return stat(root, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 // Set while the SD routine is mid-access on target; nothing toggles it on host
 // (synchronous I/O, no reentrancy), but it is read app-wide.
 uint8_t currentlyAccessingCard = 0;
 
-DSTATUS disk_initialize(BYTE pdrv) {
-	if (pdrv != 0) {
-		return STA_NOINIT;
-	}
-	return host_sd_open();
+// block_device.h — the app's native (non-FatFS) card-detect/init entry points.
+// deluge_block_ready/deluge_block_init live here (rather than host_bsp.c,
+// where the rest of the block_device.h stubs are) because they need this
+// file's DELUGE_SD_ROOT presence check, mirroring the passthrough it agrees with.
+DelugeStatus deluge_block_init(uint8_t unit) {
+	(void)unit;
+	return host_sd_root_present() ? DELUGE_OK : DELUGE_ERR_NODEV;
 }
 
-DSTATUS disk_status(BYTE pdrv) {
-	if (pdrv != 0) {
-		return STA_NOINIT;
-	}
-	if (host_img_fd >= 0) {
-		return host_img_writable ? 0 : STA_PROTECT;
-	}
-	return host_sd_open();
-}
-
-DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
-	(void)pdrv;
-	if (host_img_fd < 0) {
-		return RES_NOTRDY;
-	}
-	switch (cmd) {
-	case CTRL_SYNC:
-		fsync(host_img_fd);
-		return RES_OK;
-	case GET_SECTOR_COUNT:
-		*(LBA_t*)buff = host_img_sectors;
-		return RES_OK;
-	case GET_SECTOR_SIZE:
-		*(WORD*)buff = (WORD)HOST_SECTOR_SIZE;
-		return RES_OK;
-	case GET_BLOCK_SIZE:
-		*(DWORD*)buff = 1; // erase block size unknown / irrelevant for an image
-		return RES_OK;
-	default:
-		return RES_PARERR;
-	}
-}
-
-void disk_timerproc(UINT msPassed) {
-	(void)msPassed;
+bool deluge_block_ready(uint8_t unit) {
+	(void)unit;
+	return host_sd_root_present();
 }
 
 DelugeStatus deluge_block_read(uint8_t unit, uint8_t* dst, uint32_t sector, uint32_t count) {
 	(void)unit;
-	if (host_img_fd < 0) {
-		return DELUGE_ERR_NODEV;
-	}
-	if ((uint64_t)sector + count > host_img_sectors) {
-		return DELUGE_ERR_PARAM;
-	}
-	size_t total = (size_t)count * HOST_SECTOR_SIZE;
-	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
-	size_t done = 0;
-	while (done < total) {
-		ssize_t n = pread(host_img_fd, dst + done, total - done, base + (off_t)done);
-		if (n <= 0) {
-			return DELUGE_ERR_IO;
-		}
-		done += (size_t)n;
-	}
-	return DELUGE_OK;
+	(void)dst;
+	(void)sector;
+	(void)count;
+	return DELUGE_ERR_NODEV;
 }
 
 DelugeStatus deluge_block_write(uint8_t unit, const uint8_t* src, uint32_t sector, uint32_t count) {
 	(void)unit;
-	if (host_img_fd < 0) {
-		return DELUGE_ERR_NODEV;
-	}
-	if (!host_img_writable) {
-		return DELUGE_ERR_WRITE_PROTECTED;
-	}
-	if ((uint64_t)sector + count > host_img_sectors) {
-		return DELUGE_ERR_PARAM;
-	}
-	size_t total = (size_t)count * HOST_SECTOR_SIZE;
-	off_t base = (off_t)sector * HOST_SECTOR_SIZE;
-	size_t done = 0;
-	while (done < total) {
-		ssize_t n = pwrite(host_img_fd, src + done, total - done, base + (off_t)done);
-		if (n <= 0) {
-			return DELUGE_ERR_IO;
-		}
-		done += (size_t)n;
-	}
-	return DELUGE_OK;
-}
-
-// Fixed timestamp (2024-01-01 00:00:00) in FatFS packed form. No RTC on host.
-DWORD get_fattime(void) {
-	return ((DWORD)(2024 - 1980) << 25) | ((DWORD)1 << 21) | ((DWORD)1 << 16);
+	(void)src;
+	(void)sector;
+	(void)count;
+	return DELUGE_ERR_NODEV;
 }
 
 // ===========================================================================

@@ -26,9 +26,8 @@
 // `readdir_open`'s snapshot `Vec` needs `alloc` -- this module
 // compiles both `no_std` (device) and `std` (host_app / fs_differential's
 // `#[path]` include), and `extern crate` visibility is per-module in Rust
-// 2018+, so this can't rely on another module's `extern crate alloc;`
-// (`bench_fs.rs` declares its own for the same reason). Harmless under a
-// `std` build too -- `alloc` is always in the sysroot there.
+// 2018+, so this can't rely on another module's `extern crate alloc;`.
+// Harmless under a `std` build too -- `alloc` is always in the sysroot there.
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -40,6 +39,22 @@ use embedded_fatfs::{
 // impls are the public `embedded_io_async` ones, so bring those into scope to
 // drive the fill loop / absolute seek below.
 use embedded_io_async::{Read as _, Seek as _, SeekFrom, Write as _};
+
+// `crate::sys` is always the real bindgen output (from `include/libdeluge/*.h`)
+// wherever this module is compiled: either `target_os = "none"` (device) or
+// `feature = "host_app"` (host, C++ app linked in) -- see main.rs's `mod sys`
+// cfg gates and this module's own `mod efatfs_core` gate. So, unlike modules
+// compiled on a plain (non-`host_app`) host build, there's no hand-mirrored
+// `sys_host` stand-in to keep in sync here.
+use crate::sys::{
+    DelugeStatus, DelugeStatus_DELUGE_ERR_EXISTS as DELUGE_ERR_EXISTS,
+    DelugeStatus_DELUGE_ERR_IO as DELUGE_ERR_IO,
+    DelugeStatus_DELUGE_ERR_NO_FILESYSTEM as DELUGE_ERR_NO_FILESYSTEM,
+    DelugeStatus_DELUGE_ERR_NO_SPACE as DELUGE_ERR_NO_SPACE,
+    DelugeStatus_DELUGE_ERR_NOT_EMPTY as DELUGE_ERR_NOT_EMPTY,
+    DelugeStatus_DELUGE_ERR_NOT_FOUND as DELUGE_ERR_NOT_FOUND,
+    DelugeStatus_DELUGE_ERR_PARAM as DELUGE_ERR_PARAM,
+};
 
 /// Max concurrent streamed-READ files (the [`HANDLES`](crate::efatfs_fs)
 /// table). One resident [`Sample`](crate) holds one of these for its whole
@@ -239,18 +254,23 @@ where
 }
 
 /// Open `path` over `fs` and detach it to a [`FileContext`] (open → `close`).
-/// `None` if the open failed.
+/// `Err` (mapped via [`error_to_status`]) if the open failed -- e.g.
+/// `DELUGE_ERR_NOT_FOUND` for a missing path.
 pub async fn open_context<IO, TP, OCC>(
     fs: &FileSystem<IO, TP, OCC>,
     path: &str,
-) -> Option<FileContext>
+) -> Result<FileContext, DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
     OCC: OemCpConverter,
 {
-    let f = fs.root_dir().open_file(path).await.ok()?;
-    f.close().await.ok()
+    let f = fs
+        .root_dir()
+        .open_file(path)
+        .await
+        .map_err(|e| error_to_status(&e))?;
+    f.close().await.map_err(|e| error_to_status(&e))
 }
 
 /// Re-attach a `File` from `ctx`, seek to absolute `byte_offset`, fill `dst`,
@@ -478,8 +498,8 @@ where
 // `create_context` is the one exception: it opens/creates the file, then
 // detaches it to a `FileContext` exactly like `open_context` does, so its
 // caller gets a handle to install into the table. Every crate error maps to
-// `None`; the device layer (`efatfs_fs.rs`) decides how to surface
-// that as a task-context result code.
+// a granular `DelugeStatus` via `error_to_status`; the device layer
+// (`efatfs_fs.rs`) surfaces that directly as the task-context result code.
 
 /// Create `path`, returning a detached [`FileContext`] for the new file --
 /// mirrors [`open_context`]'s open→`close()` detach, but via `create_file`
@@ -491,7 +511,7 @@ where
 /// WRITE_CREATE its "starts empty" semantics, matching `EFatFs::write_new`'s
 /// create+truncate pairing).
 ///
-/// `exclusive == true` is WRITE_CREATE_NEW: `None` if `path` already exists.
+/// `exclusive == true` is WRITE_CREATE_NEW: `Err(DELUGE_ERR_EXISTS)` if `path` already exists.
 /// embedded-fatfs has no atomic create-if-absent primitive (`Dir::create_file`
 /// always opens-or-creates), so this checks `Dir::exists` first -- a
 /// check-then-create race is unreachable here: task-context file ops are
@@ -502,7 +522,7 @@ pub async fn create_context<IO, TP, OCC>(
     fs: &FileSystem<IO, TP, OCC>,
     path: &str,
     exclusive: bool,
-) -> Option<FileContext>
+) -> Result<FileContext, DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
@@ -511,33 +531,42 @@ where
     let root = fs.root_dir();
     // Ensure the parent directory path exists (mkdir -p) FIRST — before the exclusive existence
     // check below, which itself errors (not `Ok(false)`) on a path whose parent is missing.
-    // embedded-fatfs' create_file requires the parent, returning NotFound otherwise, but the efatfs
-    // C-ABI reports only success/failure as a bool — losing the NOT_FOUND distinction portable
-    // callers (e.g. SampleRecorder writing into a fresh SAMPLES/RESAMPLE folder) rely on to create
-    // the parent and retry. Creating it here makes write-create "just work" for a nested path, on
-    // device and host alike; mkdir no-ops an already-existing parent.
+    // embedded-fatfs' create_file requires the parent, returning NotFound otherwise -- creating it
+    // here makes write-create "just work" for a nested path (e.g. SampleRecorder writing into a
+    // fresh SAMPLES/RESAMPLE folder), on device and host alike; mkdir no-ops an already-existing
+    // parent.
     if let Some(slash) = path.rfind('/') {
         if slash > 0 {
             mkdir(fs, &path[..slash]).await?;
         }
     }
-    if exclusive && root.exists(path).await.ok()? {
-        return None;
+    if exclusive && root.exists(path).await.map_err(|e| error_to_status(&e))? {
+        return Err(DELUGE_ERR_EXISTS);
     }
-    let mut f = root.create_file(path).await.ok()?;
-    f.truncate().await.ok()?;
-    f.close().await.ok()
+    let mut f = root
+        .create_file(path)
+        .await
+        .map_err(|e| error_to_status(&e))?;
+    f.truncate().await.map_err(|e| error_to_status(&e))?;
+    f.close().await.map_err(|e| error_to_status(&e))
 }
 
-/// Delete the file or empty directory at `path`. `None` on any FS error
-/// (including a non-existent path or a non-empty directory).
-pub async fn unlink<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, path: &str) -> Option<()>
+/// Delete the file or empty directory at `path`. `Err` (mapped via
+/// [`error_to_status`]) on any FS error -- `DELUGE_ERR_NOT_FOUND` for a
+/// non-existent path, `DELUGE_ERR_NOT_EMPTY` for a non-empty directory.
+pub async fn unlink<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    path: &str,
+) -> Result<(), DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
     OCC: OemCpConverter,
 {
-    fs.root_dir().remove(path).await.ok()
+    fs.root_dir()
+        .remove(path)
+        .await
+        .map_err(|e| error_to_status(&e))
 }
 
 /// Free + total cluster counts of the mounted volume.
@@ -562,7 +591,8 @@ where
 }
 
 /// Create the directory at `path`, creating any missing parent directories too
-/// (`mkdir -p` semantics). `None` on any FS error.
+/// (`mkdir -p` semantics). `Err` (mapped via [`error_to_status`]) on any FS
+/// error, e.g. `DELUGE_ERR_EXISTS` if a FILE already occupies `path`.
 ///
 /// `embedded-fatfs`' `create_dir` requires the immediate parent to already exist
 /// (it returns `NotFound` otherwise) but is idempotent on an already-existing
@@ -573,7 +603,10 @@ where
 /// fresh card) can create it — but the efatfs C-ABI reports only success/failure
 /// as a bool, losing that distinction. Making mkdir recursive here restores the
 /// expected behaviour uniformly for every efatfs caller, device and host alike.
-pub async fn mkdir<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, path: &str) -> Option<()>
+pub async fn mkdir<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    path: &str,
+) -> Result<(), DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
@@ -585,43 +618,54 @@ where
     // an existing dir, so re-creating shared ancestors is harmless.
     for (idx, ch) in path.char_indices() {
         if ch == '/' && idx > 0 && !path[..idx].ends_with('/') {
-            root.create_dir(&path[..idx]).await.ok()?;
+            root.create_dir(&path[..idx])
+                .await
+                .map_err(|e| error_to_status(&e))?;
         }
     }
-    root.create_dir(path).await.ok()?;
-    Some(())
+    root.create_dir(path)
+        .await
+        .map_err(|e| error_to_status(&e))?;
+    Ok(())
 }
 
 /// Rename/move `old` to `new`, both paths relative to the volume root.
-/// `None` on any FS error, including `new` already existing.
-pub async fn rename<IO, TP, OCC>(fs: &FileSystem<IO, TP, OCC>, old: &str, new: &str) -> Option<()>
+/// `Err` (mapped via [`error_to_status`]) on any FS error, including
+/// `DELUGE_ERR_EXISTS` for `new` already existing.
+pub async fn rename<IO, TP, OCC>(
+    fs: &FileSystem<IO, TP, OCC>,
+    old: &str,
+    new: &str,
+) -> Result<(), DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
     OCC: OemCpConverter,
 {
     let root = fs.root_dir();
-    root.rename(old, &root, new).await.ok()
+    root.rename(old, &root, new)
+        .await
+        .map_err(|e| error_to_status(&e))
 }
 
 /// Set `path`'s modified-time directory-entry field from `timestamp`, a
-/// packed 32-bit FAT date/time exactly matching C-FatFS's `get_fattime()` /
-/// `FILINFO::fdate,ftime` convention this codebase already uses elsewhere
-/// (`src/fatfs/ff.c`'s `GET_FATTIME()`): the high 16 bits are the DOS date
+/// packed 32-bit FAT date/time matching the standard FatFs `get_fattime()` /
+/// `FILINFO::fdate,ftime` convention: the high 16 bits are the DOS date
 /// (`(year-1980)<<9 | month<<5 | day`), the low 16 bits are the DOS time
 /// (`hour<<11 | min<<5 | sec/2`) -- i.e. the same halves `Date`/`Time` encode,
 /// concatenated as `(date << 16) | time`.
 ///
 /// `File::set_modified` only updates the in-memory entry (same caveat as
 /// `write_context`'s doc comment); `close()`'s flush is what persists it.
-/// `None` on any FS error, or if `timestamp` decodes to an out-of-range
+/// `Err` (mapped via [`error_to_status`]) on any FS error -- `DELUGE_ERR_PARAM`
+/// if `timestamp` decodes to an out-of-range
 /// date/time component (`Date`/`Time` panic on out-of-range fields, so this
 /// validates by hand instead of decoding blind).
 pub async fn set_time<IO, TP, OCC>(
     fs: &FileSystem<IO, TP, OCC>,
     path: &str,
     timestamp: u32,
-) -> Option<()>
+) -> Result<(), DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
@@ -636,10 +680,14 @@ where
     let min = (dos_time >> 5) & 0x3F;
     let sec = (dos_time & 0x1F) * 2;
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
-        return None;
+        return Err(DELUGE_ERR_PARAM);
     }
 
-    let mut f = fs.root_dir().open_file(path).await.ok()?;
+    let mut f = fs
+        .root_dir()
+        .open_file(path)
+        .await
+        .map_err(|e| error_to_status(&e))?;
     #[allow(deprecated)]
     // embedded-fatfs deprecates set_modified in favor of a custom TimeProvider;
     // task-context callers (deluge's `fileSetTimeDate`/rename-with-timestamp
@@ -649,8 +697,8 @@ where
         Date::new(year, month, day),
         Time::new(hour, min, sec, 0),
     ));
-    f.close().await.ok()?;
-    Some(())
+    f.close().await.map_err(|e| error_to_status(&e))?;
+    Ok(())
 }
 
 // --- Directory enumeration --------------------------------------------------
@@ -713,12 +761,13 @@ fn pack_fat_datetime(dt: DateTime) -> u32 {
 /// yields for non-root directories -- C-FatFS's `f_readdir` never surfaces
 /// those, so this matches its enumeration surface (same filter
 /// `fs_differential::efatfs::EFatFs::read_dir` already applies). `path`
-/// empty (or all `/`) opens the volume root. `None` on any FS error,
-/// including `path` not naming a directory.
+/// empty (or all `/`) opens the volume root. `Err` (mapped via
+/// [`error_to_status`]) on any FS error, including `path` not naming a
+/// directory.
 pub async fn readdir_open<IO, TP, OCC>(
     fs: &FileSystem<IO, TP, OCC>,
     path: &str,
-) -> Option<DirCursor>
+) -> Result<DirCursor, DelugeStatus>
 where
     IO: ReadWriteSeek,
     TP: TimeProvider,
@@ -728,12 +777,12 @@ where
     let dir = if path.trim_matches('/').is_empty() {
         root
     } else {
-        root.open_dir(path).await.ok()?
+        root.open_dir(path).await.map_err(|e| error_to_status(&e))?
     };
     let mut iter = dir.iter();
     let mut entries = Vec::new();
     while let Some(r) = iter.next().await {
-        let e = r.ok()?;
+        let e = r.map_err(|e| error_to_status(&e))?;
         let name = e.file_name();
         if name == "." || name == ".." {
             continue;
@@ -759,7 +808,7 @@ where
         };
         entries.push(info);
     }
-    Some(DirCursor { entries, idx: 0 })
+    Ok(DirCursor { entries, idx: 0 })
 }
 
 /// Advance `cursor` and return the next entry. Outer `Option` is an FS
@@ -974,5 +1023,28 @@ impl DirHandleTable {
         if let Some(slot) = self.slots.get_mut(handle as usize) {
             slot.cursor = None;
         }
+    }
+}
+
+/// Map an embedded-fatfs `Error` to the C-ABI `DelugeStatus` so the efatfs
+/// wrappers can report granular NOT_FOUND/EXISTS/NOT_EMPTY/NO_SPACE instead of
+/// a bare bool.
+pub fn error_to_status<E>(err: &embedded_fatfs::Error<E>) -> DelugeStatus {
+    use embedded_fatfs::Error;
+    match err {
+        Error::NotFound => DELUGE_ERR_NOT_FOUND,
+        Error::AlreadyExists => DELUGE_ERR_EXISTS,
+        Error::DirectoryIsNotEmpty => DELUGE_ERR_NOT_EMPTY,
+        Error::NotEnoughSpace => DELUGE_ERR_NO_SPACE,
+        Error::CorruptedFileSystem => DELUGE_ERR_NO_FILESYSTEM,
+        Error::InvalidInput
+        | Error::InvalidFileNameLength
+        | Error::UnsupportedFileNameCharacter => DELUGE_ERR_PARAM,
+        Error::Io(_) => DELUGE_ERR_IO,
+        // `Error<T>` is `#[non_exhaustive]` and also carries `UnexpectedEof`/
+        // `WriteZero` (embedded_io_async read/write plumbing, not a granular
+        // FS-op failure) -- collapse those, and any future variant, to a
+        // generic I/O error.
+        _ => DELUGE_ERR_IO,
     }
 }

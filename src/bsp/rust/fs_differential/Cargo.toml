@@ -27,6 +27,3 @@ aligned = "0.4"
 # uses `heapless::String<256>` for `DirEntryInfo::name` -- same version pin as
 # `deluge-bsp-rust`'s Cargo.toml.
 heapless = { version = "0.8", default-features = false }
-
-[build-dependencies]
-cc = "1"

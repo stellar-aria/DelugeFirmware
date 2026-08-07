@@ -25,10 +25,6 @@
 #include "storage/audio/audio_file_holder.h"
 #include "util/c_string.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 class Sample;
 
 class SampleHolder : public AudioFileHolder {

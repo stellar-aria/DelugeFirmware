@@ -21,10 +21,6 @@
 #include "gui/ui/ui.h"
 #include "hid/button.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 class SampleRecorder;
 
 class AudioRecorder final : public UI {

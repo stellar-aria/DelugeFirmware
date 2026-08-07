@@ -6,9 +6,14 @@
 # not suppressed)" — kept visible in every run's summary, distinct from the broad
 # pre-existing baseline in known_patterns.txt.
 #
-# One extended-regex PATTERN per line (grep -E). IMPORTANT: run.sh matches each race by its
-# normalized TSan SUMMARY LINE — the top-frame "... in <function>" — NOT the full stack. So a
-# pattern must name the symbol that appears as the race's TOP frame, not a deeper caller.
+# One extended-regex PATTERN per line (grep -E). By DEFAULT run.sh matches a pattern only
+# against the race's normalized one-line SUMMARY (its top/site frame) — same as TSan's own
+# summary. Prefix a line with `DEEP ` to instead match it against every frame of both racing
+# accesses' full stacks; see known_patterns.txt's header for the full DEEP-tag rationale (in
+# short: DEEP is a rare, deliberately-verified opt-in, not a way to write a broader pattern —
+# a broad pattern marked DEEP can match an unrelated finding via a shared ancestor frame, e.g.
+# every fiber/audio-thread finding shares call-graph-root ancestors). None of the patterns
+# below are currently DEEP; all three are already specific function-name SITE matches.
 #
 # ── STATUS (2026-07-19): the SampleRecorder/SampleStream recorder-hand-off races formerly
 #    listed here are FIXED — see docs/dev/known-concurrency-bugs.md (B2 table_ realloc UAF;

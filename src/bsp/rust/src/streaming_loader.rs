@@ -74,17 +74,6 @@ pub extern "C" fn deluge_streaming_async_active() -> bool {
     cfg!(feature = "async_streaming_loader")
 }
 
-/// Whether the embedded-fatfs streaming READ path owns the read on this build.
-/// Like [`deluge_streaming_async_active`], the return value is the only thing
-/// that depends on the cargo feature — the symbol itself must always exist so
-/// the C++ call site (`streaming_fill.h`) links regardless of config. See that
-/// header's `deluge_streaming_efatfs_active` doc for the C-side contract; the
-/// real `deluge_efatfs_open`/`_close` bridge lives in `efatfs_fs.rs`.
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_streaming_efatfs_active() -> bool {
-    cfg!(feature = "efatfs_streaming")
-}
-
 /// Wake [`streaming_fill_task`] out of its idle wait. Safe to call whether or
 /// not the task exists yet — [`Signal::signal`] just records "latest value
 /// pending"; a `Signal` nobody is waiting on drops the previous pending value

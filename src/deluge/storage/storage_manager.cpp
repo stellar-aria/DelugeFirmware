@@ -17,7 +17,6 @@
 
 #include "storage/storage_manager.h"
 #include "definitions_cxx.hpp"
-#include "fatfs/fatfs.hpp"
 #include "gui/ui/sound_editor.h"
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
@@ -53,13 +52,7 @@
 #include "libdeluge/display.h"
 
 extern "C" {
-#include "fatfs/diskio.h"
-#include "fatfs/ff.h"
 #include <scheduler_api.h>
-
-FRESULT f_readdir_get_filepointer(DIR* dp,      /* Pointer to the open directory object */
-                                  FILINFO* fno, /* Pointer to file information to return */
-                                  FilePointer* filePointer);
 }
 
 FirmwareVersion song_firmware_version = FirmwareVersion::current();
@@ -227,8 +220,7 @@ Error StorageManager::initSD() {
 	// If there's no card present, we're in trouble - check this first, before touching the
 	// filesystem, so callers get SD_CARD_NOT_PRESENT (not a generic mount failure) when the card
 	// is simply absent. This is the BSP's card-detect line, not a FatFS/efatfs concept.
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	if (status & STA_NODISK) {
+	if (!deluge_block_ready(deluge_block_sd_unit())) {
 		return Error::SD_CARD_NOT_PRESENT;
 	}
 
@@ -248,14 +240,12 @@ Error StorageManager::initSD() {
 }
 
 bool StorageManager::checkSDPresent() {
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	bool present = !(status & STA_NODISK);
+	bool present = deluge_block_ready(deluge_block_sd_unit());
 	return present;
 }
 
 bool StorageManager::checkSDInitialized() {
-	DSTATUS status = disk_status(deluge_block_sd_unit());
-	return !(status & STA_NOINIT);
+	return deluge_block_ready(deluge_block_sd_unit());
 }
 
 Error StorageManager::openInstrumentFile(OutputType outputType, char const* path) {
@@ -305,12 +295,12 @@ Error StorageManager::loadInstrumentFromFile(Song* song, InstrumentClip* clip, O
 
 	error = newInstrument->readFromFile(smDeserializer, song, clip, 0);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
+	if (error != Error::NONE || !fileSuccess) {
 		D_PRINTLN("reading instrument file failed -  %s", name->c_str());
-		if (!fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -404,12 +394,12 @@ Error StorageManager::loadMidiDeviceDefinitionFile(MIDIInstrument* midiInstrumen
 
 	error = midiInstrument->readDeviceDefinitionFile(smDeserializer, false);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
+	if (error != Error::NONE || !fileSuccess) {
 		D_PRINTLN("reading midi device definition file failed -  %s", fileName->c_str());
-		if (!fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -458,11 +448,11 @@ Error StorageManager::loadPatternFile(char const* path, std::string* fileName, b
 	error = instrumentClipView.pasteNotesFromFile(smDeserializer, overwriteExisting, noScaling, previewOnly,
 	                                              selectedDrumOnly);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
-		if (!fileSuccess) {
+	if (error != Error::NONE || !fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -486,11 +476,11 @@ Error StorageManager::loadFavouriteFile(char const* path, std::string* fileName)
 
 	error = favouritesManager.loadFavouritesFromFile(smDeserializer);
 
-	FRESULT fileSuccess = activeDeserializer->closeWriter();
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
-	if (error != Error::NONE || fileSuccess != FR_OK) {
-		if (!fileSuccess) {
+	if (error != Error::NONE || !fileSuccess) {
+		if (fileSuccess) {
 			error = Error::SD_CARD;
 		}
 
@@ -523,7 +513,7 @@ Error StorageManager::loadSynthToDrum(Song* song, InstrumentClip* clip, bool may
 
 	error = newDrum->readFromFile(smDeserializer, song, clip, 0);
 
-	bool fileSuccess = activeDeserializer->closeWriter() == FR_OK;
+	bool fileSuccess = activeDeserializer->closeWriter();
 
 	// If that somehow didn't work...
 	if (error != Error::NONE || !fileSuccess) {
@@ -815,7 +805,7 @@ bool FileReader::readFileCluster() {
 	if (!result) {
 		return false;
 	}
-	currentReadBufferEndPos = static_cast<UINT>(result->size());
+	currentReadBufferEndPos = static_cast<uint32_t>(result->size());
 
 	// If error or we reached end of file
 	if (!currentReadBufferEndPos) {
@@ -873,13 +863,13 @@ void FileReader::readDone() {
 	}
 }
 
-FRESULT FileReader::closeWriter() {
+bool FileReader::closeWriter() {
 	if (memoryBased) {
-		return FRESULT::FR_OK;
+		return true;
 	}
 	auto result = file->close();
 	file.reset();
-	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
+	return result.has_value();
 }
 
 FileWriter::FileWriter() {
@@ -906,19 +896,19 @@ void FileWriter::resetWriter() {
 	fileAccessFailedDuringWrite = false;
 }
 
-FRESULT FileWriter::closeWriter() {
+bool FileWriter::closeWriter() {
 	if (memoryBased) {
 		if (fileWriteBufferCurrentPos < bufferSize) {
 			writeClusterBuffer[fileWriteBufferCurrentPos] = 0;
-			return FRESULT::FR_OK;
+			return true;
 		}
 		else {
-			return FRESULT::FR_INT_ERR;
+			return false;
 		}
 	}
 	auto result = file->close();
 	file.reset();
-	return result ? FRESULT::FR_OK : FRESULT::FR_DISK_ERR;
+	return result.has_value();
 }
 
 void FileWriter::writeBlock(uint8_t* block, uint32_t size) {
@@ -999,8 +989,8 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 		return Error::WRITE_FAIL;
 	}
 
-	FRESULT result = closeWriter();
-	if (result) {
+	bool result = closeWriter();
+	if (!result) {
 		return Error::WRITE_FAIL;
 	}
 
@@ -1045,7 +1035,7 @@ Error FileWriter::closeAfterWriting(char const* path, char const* beginningStrin
 
 	if (path) {
 		result = closeWriter();
-		if (result) {
+		if (!result) {
 			return Error::WRITE_FAIL;
 		}
 	}

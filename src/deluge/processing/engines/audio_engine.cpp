@@ -1394,14 +1394,14 @@ void registerSideChainHit(int32_t strength) {
 	sideChainHitPending = combineHitStrengths(strength, sideChainHitPending);
 }
 
-void previewSample(std::string_view path, FilePointer* filePointer, bool shouldActuallySound) {
+void previewSample(std::string_view path, bool shouldActuallySound) {
 	stopAnyPreviewing();
 	MultisampleRange* range = (MultisampleRange*)sampleForPreview->sources[0].getOrCreateFirstRange();
 	if (!range) {
 		return;
 	}
 	range->sampleHolder.filePath.assign(path);
-	Error error = range->sampleHolder.loadFile(false, true, true, CLUSTER_LOAD_IMMEDIATELY, filePointer);
+	Error error = range->sampleHolder.loadFile(false, true, true, CLUSTER_LOAD_IMMEDIATELY);
 
 	if (error != Error::NONE) {
 		display->displayError(error); // Rare, shouldn't cause later problems.

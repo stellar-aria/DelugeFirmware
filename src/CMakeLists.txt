@@ -9,7 +9,6 @@ add_subdirectory(deluge)     # deluge_app: the portable application (platform-ag
 add_subdirectory(bsp)
 add_subdirectory(RZA1)
 add_subdirectory(RTT)
-add_subdirectory(fatfs)
 add_subdirectory(NE10)
 add_subdirectory(lib)
 

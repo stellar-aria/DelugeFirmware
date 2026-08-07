@@ -29,7 +29,7 @@ describe file("deluge::io::File", $ {
 		expect(std::string(buf, 5)).to_equal("hello");
 	});
 
-	it("returns Status::NOT_FOUND opening a missing file", _ {
+	it("returns NOT_FOUND opening a missing file", _ {
 		mock_file_io_reset();
 		auto opened = deluge::io::File::open("missing.txt", DELUGE_FILE_READ);
 		expect(opened.has_value()).to_equal(false);

@@ -21,10 +21,6 @@
 #include "hid/display/display.h"
 #include "processing/stem_export/stem_export.h"
 
-extern "C" {
-#include "fatfs/ff.h"
-}
-
 namespace deluge::gui::context_menu {
 
 CancelStemExport cancelStemExport{};

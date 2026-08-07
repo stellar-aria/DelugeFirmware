@@ -332,13 +332,19 @@ DelugeStatus deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* o
 		mkdir_parents(full); // WRITE modes auto-create missing parent dirs (efatfs create_context)
 	}
 	int fd = open(full.c_str(), flags, 0666);
+	// Capture errno before case_insensitive_retry's opendir/readdir/closedir can clobber it,
+	// so a genuinely-missing READ open reports NOT_FOUND (via ENOENT) rather than whatever those
+	// libc calls last left in errno.
+	int open_errno = errno;
 	if (fd < 0 && mode == DELUGE_FILE_READ) {
 		std::string retry = case_insensitive_retry(full);
 		if (!retry.empty()) {
 			fd = open(retry.c_str(), O_RDONLY);
+			open_errno = errno;
 		}
 	}
 	if (fd < 0) {
+		errno = open_errno;
 		return errno_to_status();
 	}
 	for (uint32_t i = 0; i < kMaxAuxHandles; i++) {

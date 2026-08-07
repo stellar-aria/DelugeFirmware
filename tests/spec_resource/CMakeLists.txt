@@ -5,6 +5,9 @@
 # i686 to match the -m32 test build) and drives the resource manager through its C
 # ABI (crates/deluge_resource/include/deluge_resource.h) with a mock Source.
 #
+# deluge_resource's masking discipline calls the interrupt-masking C ABI on every
+# acquire/release, so the shared host bodies for it are linked in too.
+#
 include(FetchContent)
 FetchContent_Declare(CppSpec
   URL https://github.com/toroidal-code/cppspec/archive/refs/heads/main.tar.gz
@@ -14,14 +17,14 @@ FetchContent_MakeAvailable(CppSpec)
 function(create_specs_driver driver_name spec_dir)
   file(GLOB_RECURSE spec_sources RELATIVE ${spec_dir} ${spec_dir}/*_spec.cpp)
   create_test_sourcelist(specs ${driver_name}.cpp ${spec_sources})
-  add_executable(${driver_name} ${specs})
+  add_executable(${driver_name} ${specs} ../32bit_unit_tests/mocks/mock_critical_section.cpp)
   target_link_libraries(${driver_name} PRIVATE c++spec deluge_rust_rs
     # System libs the Rust std staticlib references.
     pthread dl m)
   target_include_directories(${driver_name} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/../../crates/deluge_resource/include # deluge_resource.h
-    ${CMAKE_CURRENT_LIST_DIR}/../../include                        # libdeluge/alloc.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../include                        # libdeluge/alloc.h, libdeluge/system.h
   )
   set_target_properties(${driver_name} PROPERTIES
     CXX_STANDARD 26

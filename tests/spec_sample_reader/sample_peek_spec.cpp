@@ -27,12 +27,29 @@ constexpr uint32_t kClusterSize = 64;                          // bytes
 constexpr uint32_t kStride = 2;                                // byte_depth 2 * num_channels 1
 constexpr uint32_t kFramesPerCluster = kClusterSize / kStride; // 32
 
+// A chunk's manager backing is a real `StreamedChunk`: a header (carrying, among other fields, the
+// payload base `deluge_sample_peek` resolves through) followed by a front guard, and only then the
+// cluster payload. So the backing is sized for all three, and construct defers to the same
+// `deluge_streaming_chunk_construct` production registers before touching any payload byte -- a
+// seeded `payload == backing` stand-in would leave peek reading its pointer out of payload bytes.
+// Mirrors the Rust reader crate's own `real_chunk_construct`/`BACKING_SIZE` harness (reader.rs).
+//
+// `+ 7` is the trailing slack `deluge_sample_fill::native_finish` always touches; rounded up to a
+// 16-byte multiple to match the slab's slot alignment. Derived from the real offset rather than a
+// hand-rounded literal, so this never drifts out of sync with `StreamedChunk`'s own layout.
+inline uint32_t backing_size() {
+	uint32_t unrounded = deluge_streamed_chunk_payload_offset() + kClusterSize + 7;
+	return (unrounded + 15) & ~15u;
+}
+
 // Deterministic per-cluster ramp -- byte `i` of cluster `index` is `(index*kClusterSize + i) mod
 // 256` -- the same synthetic-fixture shape the Rust reader crate's own tests use
 // (`expected_cluster_bytes` in reader.rs), so a resident-and-ready cluster's peeked bytes are
 // independently verifiable here.
-extern "C" inline void ramp_construct(void* /*ctx*/, void* /*owner*/, uint32_t index, void* dest) {
-	auto* bytes = static_cast<uint8_t*>(dest);
+extern "C" inline void ramp_construct(void* ctx, void* owner, uint32_t index, void* dest) {
+	deluge_streaming_chunk_construct(ctx, owner, index, dest);
+
+	auto* bytes = static_cast<uint8_t*>(dest) + deluge_streamed_chunk_payload_offset();
 	uint32_t base = index * kClusterSize;
 	for (uint32_t i = 0; i < kClusterSize; i++) {
 		bytes[i] = static_cast<uint8_t>(base + i);
@@ -69,11 +86,11 @@ public:
 		deluge_streaming_set_fill_context(mgr_, asset_, ctx);
 
 		// Cluster 0: resident and ready.
-		void* c0 = deluge_resource_request(mgr_, asset_, /*index=*/0, kClusterSize);
+		void* c0 = deluge_resource_request(mgr_, asset_, /*index=*/0, backing_size());
 		deluge_resource_mark_ready(mgr_, c0);
 
 		// Cluster 1: resident, deliberately left NOT ready (no mark_ready call).
-		deluge_resource_request(mgr_, asset_, /*index=*/1, kClusterSize);
+		deluge_resource_request(mgr_, asset_, /*index=*/1, backing_size());
 
 		// Cluster 2 is never requested at all -- absent.
 	}

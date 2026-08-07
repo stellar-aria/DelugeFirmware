@@ -30,12 +30,16 @@ struct MockEntry {
 
 std::map<std::string, MockEntry> g_entries;
 
-// Open file/directory handle tables, keyed by the `uint32_t` slot handed back
-// to callers -- mirrors the real efatfs backend's TaskFileTable/DirHandleTable
-// convention (lowest free slot starting at 0; see file.cpp's box_file_handle
-// doc). deluge::io::File/Directory box these into their opaque
-// DelugeFile*/DelugeDir* by adding 1, so slot 0 is a perfectly valid handle
-// here -- this table doesn't need to reserve it for anything.
+// Open file/directory handle tables, keyed by a packed `uint32_t` handle
+// `(generation << 16) | slot_index` handed back to callers -- mirrors the
+// real efatfs backend's generation-guarded Slot/HandleTable in
+// efatfs_core.rs (lowest free slot starting at 0), so a handle whose slot
+// was freed and later reused for something else fails `checkout` cleanly
+// instead of silently aliasing. deluge::io::File/Directory box these into
+// their opaque DelugeFile*/DelugeDir* by adding 1 (file.cpp's
+// box_file_handle doc); a packed handle of 0 (slot 0, generation 0) boxes to
+// a non-null 1 just like any other value, so this table doesn't need to
+// reserve either slot 0 or generation 0 for anything.
 
 struct OpenFile {
 	std::string path;
@@ -52,18 +56,55 @@ struct OpenDir {
 };
 
 std::vector<std::optional<OpenFile>> g_open_files;
+std::vector<uint32_t> g_open_files_gen;
 std::vector<std::optional<OpenDir>> g_open_dirs;
+std::vector<uint32_t> g_open_dirs_gen;
 
+// Claims the lowest free slot in `table`, bumping that slot's generation
+// (parallel `gens`, indexed the same as `table`) and returning the packed
+// handle `(generation << 16) | index`. Mirrors efatfs_core.rs's
+// Slot::generation, bumped on every claim so a handle from a prior tenant of
+// this index can never alias the new occupant.
 template <typename T>
-uint32_t allocate_slot(std::vector<std::optional<T>>& table, T value) {
+uint32_t allocate_slot(std::vector<std::optional<T>>& table, std::vector<uint32_t>& gens, T value) {
 	for (size_t i = 0; i < table.size(); ++i) {
 		if (!table[i]) {
 			table[i] = std::move(value);
-			return static_cast<uint32_t>(i);
+			gens[i] += 1;
+			return (gens[i] << 16) | static_cast<uint32_t>(i);
 		}
 	}
 	table.push_back(std::move(value));
-	return static_cast<uint32_t>(table.size() - 1);
+	gens.push_back(1);
+	return (1u << 16) | static_cast<uint32_t>(table.size() - 1);
+}
+
+// Returns the live entry for `handle`, or nullptr if the slot is out of
+// range, free, or its generation no longer matches (a stale handle whose
+// slot was reused). Mirrors efatfs_core.rs's Slot/checkout generation guard
+// so a bad handle fails cleanly instead of aborting the test binary.
+template <typename T>
+T* checkout(std::vector<std::optional<T>>& table, std::vector<uint32_t>& gens, uint32_t handle) {
+	uint32_t index = handle & 0xFFFFu;
+	uint32_t gen = handle >> 16;
+	if (index >= table.size() || !table[index].has_value() || gens[index] != gen) {
+		return nullptr;
+	}
+	return &table[index].value();
+}
+
+// Frees `handle`'s slot and bumps its generation, invalidating any copies of
+// this handle still held elsewhere. No-op if `handle` doesn't check out (bad,
+// freed, or stale) -- close on a bad handle is a silent no-op, matching the
+// real backend.
+template <typename T>
+void release_slot(std::vector<std::optional<T>>& table, std::vector<uint32_t>& gens, uint32_t handle) {
+	if (checkout(table, gens, handle) == nullptr) {
+		return;
+	}
+	uint32_t index = handle & 0xFFFFu;
+	table[index].reset();
+	gens[index] += 1;
 }
 
 // FAT attribute bits (mirrors file.cpp's kFatAttr* constants -- see
@@ -106,7 +147,9 @@ uint8_t pack_fat_attrs(const MockEntry& entry) {
 void mock_file_io_reset() {
 	g_entries.clear();
 	g_open_files.clear();
+	g_open_files_gen.clear();
 	g_open_dirs.clear();
+	g_open_dirs_gen.clear();
 }
 
 extern "C" {
@@ -118,74 +161,93 @@ bool deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handl
 		if (it == g_entries.end() || it->second.is_directory) {
 			return false;
 		}
-		*out_handle = allocate_slot(g_open_files, OpenFile{p, 0});
+		*out_handle = allocate_slot(g_open_files, g_open_files_gen, OpenFile{p, 0});
 		return true;
 	}
 	// DELUGE_FILE_WRITE_CREATE / DELUGE_FILE_WRITE_CREATE_NEW: create, truncating if it exists.
 	g_entries[p] = MockEntry{};
-	*out_handle = allocate_slot(g_open_files, OpenFile{p, 0});
+	*out_handle = allocate_slot(g_open_files, g_open_files_gen, OpenFile{p, 0});
 	return true;
 }
 
 bool deluge_efatfs_file_read(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
-	auto& file = g_open_files.at(handle).value();
-	auto& entry = g_entries.at(file.path);
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
+	}
+	auto& entry = g_entries.at(file->path);
 	uint32_t available =
-	    entry.data.size() > file.position ? static_cast<uint32_t>(entry.data.size()) - file.position : 0;
+	    entry.data.size() > file->position ? static_cast<uint32_t>(entry.data.size()) - file->position : 0;
 	uint32_t real = count < available ? count : available;
-	std::memcpy(dst, entry.data.data() + file.position, real);
+	std::memcpy(dst, entry.data.data() + file->position, real);
 	if (real < count) {
 		// Fill semantics: zero-pad a short tail at real EOF.
 		std::memset(static_cast<uint8_t*>(dst) + real, 0, count - real);
 	}
-	file.position += real;
+	file->position += real;
 	*out_read = count;
 	return true;
 }
 
 bool deluge_efatfs_file_read_exact(uint32_t handle, void* dst, uint32_t count, uint32_t* out_read) {
-	auto& file = g_open_files.at(handle).value();
-	auto& entry = g_entries.at(file.path);
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
+	}
+	auto& entry = g_entries.at(file->path);
 	uint32_t available =
-	    entry.data.size() > file.position ? static_cast<uint32_t>(entry.data.size()) - file.position : 0;
+	    entry.data.size() > file->position ? static_cast<uint32_t>(entry.data.size()) - file->position : 0;
 	uint32_t real = count < available ? count : available;
-	std::memcpy(dst, entry.data.data() + file.position, real);
-	file.position += real;
+	std::memcpy(dst, entry.data.data() + file->position, real);
+	file->position += real;
 	*out_read = real;
 	return true;
 }
 
 bool deluge_efatfs_file_write(uint32_t handle, const void* src, uint32_t count, uint32_t* out_written) {
-	auto& file = g_open_files.at(handle).value();
-	auto& entry = g_entries.at(file.path);
-	if (file.position + count > entry.data.size()) {
-		entry.data.resize(file.position + count);
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
 	}
-	std::memcpy(entry.data.data() + file.position, src, count);
-	file.position += count;
+	auto& entry = g_entries.at(file->path);
+	if (file->position + count > entry.data.size()) {
+		entry.data.resize(file->position + count);
+	}
+	std::memcpy(entry.data.data() + file->position, src, count);
+	file->position += count;
 	*out_written = count;
 	return true;
 }
 
 bool deluge_efatfs_file_seek(uint32_t handle, uint32_t offset) {
-	g_open_files.at(handle).value().position = offset;
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
+	}
+	file->position = offset;
 	return true;
 }
 
 bool deluge_efatfs_file_size(uint32_t handle, uint32_t* out_size) {
-	auto& file = g_open_files.at(handle).value();
-	*out_size = static_cast<uint32_t>(g_entries.at(file.path).data.size());
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
+	}
+	*out_size = static_cast<uint32_t>(g_entries.at(file->path).data.size());
 	return true;
 }
 
 bool deluge_efatfs_file_truncate(uint32_t handle, uint32_t new_len) {
-	auto& file = g_open_files.at(handle).value();
-	g_entries.at(file.path).data.resize(new_len);
+	auto* file = checkout(g_open_files, g_open_files_gen, handle);
+	if (file == nullptr) {
+		return false;
+	}
+	g_entries.at(file->path).data.resize(new_len);
 	return true;
 }
 
 void deluge_efatfs_file_close(uint32_t handle) {
-	g_open_files.at(handle).reset();
+	release_slot(g_open_files, g_open_files_gen, handle);
 }
 
 bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
@@ -202,18 +264,21 @@ bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 			}
 		}
 	}
-	*out_handle = allocate_slot(g_open_dirs, std::move(dir));
+	*out_handle = allocate_slot(g_open_dirs, g_open_dirs_gen, std::move(dir));
 	return true;
 }
 
 bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_cap, bool* out_is_dir,
                             uint32_t* out_size, uint32_t* out_modified, uint8_t* out_attrs, bool* out_has_entry) {
-	auto& dir = g_open_dirs.at(handle).value();
-	if (dir.index >= dir.children.size()) {
+	auto* dir = checkout(g_open_dirs, g_open_dirs_gen, handle);
+	if (dir == nullptr) {
+		return false;
+	}
+	if (dir->index >= dir->children.size()) {
 		*out_has_entry = false;
 		return true;
 	}
-	const auto& child = dir.children[dir.index++];
+	const auto& child = dir->children[dir->index++];
 	std::strncpy(out_name, child.name.c_str(), out_name_cap - 1);
 	out_name[out_name_cap - 1] = 0;
 	*out_is_dir = child.entry.is_directory;
@@ -225,7 +290,7 @@ bool deluge_efatfs_dir_read(uint32_t handle, char* out_name, uint32_t out_name_c
 }
 
 void deluge_efatfs_dir_close(uint32_t handle) {
-	g_open_dirs.at(handle).reset();
+	release_slot(g_open_dirs, g_open_dirs_gen, handle);
 }
 
 bool deluge_efatfs_mkdir(const char* path) {

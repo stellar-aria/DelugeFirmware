@@ -23,7 +23,8 @@
 # destructors on the assumption the process exits once).
 #
 # Usage:
-#   sweep.sh                 # build (unless NO_BUILD=1), run the margin sweep + control A
+#   sweep.sh                 # build (unless NO_BUILD=1); selftest precondition, then margin sweep + control A
+#   sweep.sh selftest          # --selftest-block + --selftest-block-nested only
 #   sweep.sh margin           # margin sweep only
 #   sweep.sh control-a        # negative control A only
 #
@@ -32,6 +33,7 @@
 #   BLOCKS           audio blocks per run (~3ms/block)          (default: 20000, ~58s virtual)
 #   OVERHEAD_US       fixed sim_latency command overhead         (default: 500)
 #   NO_BUILD=1       skip `cargo build --release`
+#   SELFTEST_IMAGE   shared SD backing file for `selftest`      (default: /tmp/deluge-lens1-selftest-shared.img)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +42,7 @@ BIN="$HERE/target/release/lens1-vt-sim"
 FIXTURE="${FIXTURE:-cordae}"
 BLOCKS="${BLOCKS:-20000}"
 OVERHEAD_US="${OVERHEAD_US:-500}"
+SELFTEST_IMAGE="${SELFTEST_IMAGE:-/tmp/deluge-lens1-selftest-shared.img}"
 CMD="${1:-all}"
 
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
@@ -66,6 +69,74 @@ run_point() {
 
 field() { # field <LENS1_RESULT line> <name>
     echo "$1" | grep -oP "(?<=$2=)[0-9]+"
+}
+
+# --- Selftest precondition ------------------------------------------------------------
+# Lens 1 was once never in any implementer's build target, and it silently stopped
+# linking for a long stretch as a result — this script's own reason to exist. The
+# `--selftest-block`/`--selftest-block-nested` modes (main.rs) are the harness's proof
+# that a modeled SD read completes under a non-yielding spin, but they have the
+# IDENTICAL exposure today: runnable, but wired into no script. Running both here,
+# FIRST, closes that gap and fails fast (before the margin sweep burns 15 latency
+# points) if the sim_block/preempt seam ever breaks.
+#
+# Neither mode mounts a filesystem or reads anything but raw sector 0 — unlike the
+# real scenario, which needs `sd_image::pack_golden_fixture`'s ~2.5GB FAT32 image
+# built from the local golden corpus (and hard-asserts without one), these two modes
+# only need a backing FILE at DELUGE_SD_IMAGE for deluge-bsp's host `sd.rs` to open;
+# content is irrelevant, and it auto-extends anything smaller than its own 8 MiB
+# default. So `pack_selftest_image` below packs a tiny, plain (non-FAT) file ONCE at a
+# predictable, non-per-PID path — not `sd_image::pack_image`'s
+# `deluge-streaming-scenario-<pid>.img` naming under `temp_dir()`, which is never
+# cleaned up (see that function's doc comment) and is exactly the leak that caused an
+# 11GiB /tmp incident during this branch's own development (17 sweep processes x
+# ~573MB each). Pointing DELUGE_SD_IMAGE at the SAME shared file for both selftest
+# invocations below means this precondition adds ONE small file to /tmp, reused on
+# every future `sweep.sh` run, instead of leaking a fresh multi-hundred-MB image per
+# invocation.
+pack_selftest_image() {
+    if [[ -f "$SELFTEST_IMAGE" ]]; then
+        echo "sweep.sh: reusing shared selftest image at $SELFTEST_IMAGE" >&2
+        return
+    fi
+    echo "sweep.sh: packing shared selftest image at $SELFTEST_IMAGE (8 MiB, no golden corpus needed)" >&2
+    truncate -s 8M "$SELFTEST_IMAGE"
+}
+
+run_selftest() {
+    echo "=== Selftest: non-yielding block_on over a modeled SD read (both modes) ===" >&2
+    pack_selftest_image
+    local ok=1 rc log_block log_nested
+    log_block="$(mktemp)"
+    log_nested="$(mktemp)"
+
+    if DELUGE_SD_IMAGE="$SELFTEST_IMAGE" timeout 60 "$BIN" --selftest-block \
+        >"$log_block" 2>&1; then
+        echo "  --selftest-block:        PASS" >&2
+    else
+        rc=$?
+        echo "  --selftest-block:        FAIL (exit $rc) — see $log_block" >&2
+        tail -n 20 "$log_block" >&2
+        ok=0
+    fi
+
+    if DELUGE_SD_IMAGE="$SELFTEST_IMAGE" timeout 60 "$BIN" --selftest-block-nested \
+        >"$log_nested" 2>&1; then
+        echo "  --selftest-block-nested: PASS" >&2
+    else
+        rc=$?
+        echo "  --selftest-block-nested: FAIL (exit $rc) — see $log_nested" >&2
+        tail -n 20 "$log_nested" >&2
+        ok=0
+    fi
+
+    if [[ "$ok" -eq 1 ]]; then
+        echo "SELFTEST: PASS" >&2
+        rm -f "$log_block" "$log_nested"
+    else
+        echo "SELFTEST: FAIL — the sim_block/preempt seam this whole harness depends on is broken" >&2
+        exit 1
+    fi
 }
 
 # --- Margin sweep --------------------------------------------------------------------
@@ -117,15 +188,18 @@ run_control_a() {
 }
 
 case "$CMD" in
+    selftest) run_selftest ;;
     margin) run_margin_sweep ;;
     control-a) run_control_a ;;
     all)
+        run_selftest
+        echo >&2
         run_margin_sweep
         echo >&2
         run_control_a
         ;;
     *)
-        echo "usage: sweep.sh [margin|control-a]" >&2
+        echo "usage: sweep.sh [selftest|margin|control-a]" >&2
         exit 2
         ;;
 esac

@@ -83,6 +83,14 @@ mod clock;
 // (mirrors `../src/main.rs`'s identical `host_app`-gated declaration).
 extern crate deluge_resource;
 
+// These crates export only `#[no_mangle] extern "C"` ABI symbols that the C++ app calls;
+// nothing in Rust references them, so without `extern crate` rustc/lld would drop the whole
+// rlib and the link would fail with undefined `deluge_sample_*`. Mirrors
+// `../../golden_vt_render/src/main.rs`'s identical block.
+extern crate deluge_sample_reader;
+extern crate deluge_sample_source;
+extern crate deluge_sample_stream;
+
 /// Real bindgen'd libdeluge C-ABI types (see `build.rs`).
 #[allow(
     non_upper_case_globals,

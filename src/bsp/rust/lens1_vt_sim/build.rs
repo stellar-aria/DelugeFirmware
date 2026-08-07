@@ -26,6 +26,21 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
     println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
 
+    // No C++ caller of `deluge_sample_stream_*` is reachable from this harness, so ordinary
+    // lazy `.a` extraction would never pull the object in, and `--gc-sections` would prune
+    // each `#[no_mangle]` function's section even if it did. Force each ABI entry point as a
+    // link root.
+    for sym in [
+        "deluge_sample_stream_open",
+        "deluge_sample_stream_close",
+        "deluge_sample_stream_set_geometry",
+        "deluge_sample_stream_get_asset_id",
+        "deluge_sample_stream_set_asset_id",
+        "deluge_sample_stream_read_at",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+
     println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
     let build_dir = env::var("DELUGE_HOSTAPP_BUILD_DIR")
         .map(PathBuf::from)
@@ -42,7 +57,7 @@ fn main() {
     }
 
     let mut objs = Vec::new();
-    collect_objs(&app_objs_dir, &mut objs);
+    collect_objs(&app_objs_dir, &app_objs_dir, &repo_root, &mut objs);
     objs.sort();
     for o in &objs {
         println!("cargo:rerun-if-changed={}", o.display());
@@ -146,12 +161,37 @@ fn hash_objs_content(objs: &[PathBuf]) -> u64 {
     hasher.finish()
 }
 
-fn collect_objs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+/// Walks `dir` (recursively) collecting every `.o`/`.obj` under `base` (the
+/// `deluge_app.dir` root, constant across the recursion — needed to compute each
+/// object's path relative to it). Skips orphans: `ninja` never removes a `.o` left
+/// behind by a `.cpp` that was since deleted or relocated, and archiving a stale
+/// object drags in references to symbols that no longer exist anywhere in the tree
+/// — exactly what cost a long detour before this filter existed (see
+/// `task-0-brief.md`). Each object's source lives under `<repo_root>/src/deluge/`
+/// at the same relative subpath with the trailing `.o`/`.obj` stripped; if that
+/// source file is gone, the object is an orphan and is skipped (with a
+/// `cargo:warning=` naming it) instead of being archived.
+fn collect_objs(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    repo_root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+) {
     for entry in fs::read_dir(dir).unwrap() {
         let p = entry.unwrap().path();
         if p.is_dir() {
-            collect_objs(&p, out);
+            collect_objs(base, &p, repo_root, out);
         } else if p.extension().is_some_and(|e| e == "obj" || e == "o") {
+            let rel = p.strip_prefix(base).unwrap();
+            let src_path = repo_root.join("src/deluge").join(rel.with_extension(""));
+            if !src_path.is_file() {
+                println!(
+                    "cargo:warning=lens1_vt_sim: skipping orphan object {} (source {} no longer exists)",
+                    p.display(),
+                    src_path.display()
+                );
+                continue;
+            }
             out.push(p);
         }
     }

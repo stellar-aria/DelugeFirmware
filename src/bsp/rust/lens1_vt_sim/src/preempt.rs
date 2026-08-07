@@ -11,7 +11,7 @@
 //! and this is precisely what `embassy_executor::InterruptExecutor::on_interrupt()` does on
 //! device (poll executor B while executor A's `poll()` sits on the stack). It is NOT the
 //! reentrant same-executor poll that `raw::Executor::poll` forbids.
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use embassy_executor::raw;
 // Brings `PeekableMockDriver::now()` (the `embassy_time_driver::Driver` trait method used
@@ -34,6 +34,27 @@ static HP_PENDED: AtomicBool = AtomicBool::new(false);
 static IN_HP: AtomicBool = AtomicBool::new(false);
 
 static mut HP: Option<&'static raw::Executor> = None;
+
+/// Counts every call to [`progress_hook`] — i.e. every hook-driven advance
+/// (`HP_EXEC` doing work OR the virtual clock being pushed to the next deadline).
+/// `Relaxed` is fine: this is diagnostic only, and the whole harness is
+/// single-threaded (see this module's doc comment).
+///
+/// Exists so a selftest that spins on [`crate::sim_block::block_on`] can assert the
+/// completion it observed actually came from the hook mechanism under test, rather
+/// than some other means (e.g. a future edit that swaps `block_on` for a plain
+/// `.await` under an already-running executor, which would let the surrounding
+/// driver loop advance the clock to the same virtual instant with the hook never
+/// invoked at all — see `selftest.rs`'s module doc for the exact failure this
+/// guards against).
+static HOOK_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of [`HOOK_INVOCATIONS`] for callers that want to assert it advanced
+/// across some span (e.g. `hook_invocations() before` ... spin ... `hook_invocations()
+/// after`, asserting `after > before`).
+pub fn hook_invocations() -> u64 {
+    HOOK_INVOCATIONS.load(Ordering::Relaxed)
+}
 
 /// Record a pend against the executor identified by `context`.
 pub fn note_pend(context: *mut ()) {
@@ -117,6 +138,12 @@ pub fn pump_hp() -> bool {
 /// and the timeline checksum stay correct regardless of which of the two call sites moved
 /// the clock. Never advance the clock directly here.
 pub fn progress_hook() -> Progress {
+    // Counts the call, not just a successful outcome: `HOOK_INVOCATIONS`'s job is to prove
+    // the hook mechanism itself ran, and it is invoked whether or not this particular call
+    // found anything to do (see `Progress::Stalled` below) — a caller asserting it advanced
+    // across a whole spin cares that the hook fired at all, not how many of those calls were
+    // individually productive.
+    HOOK_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
     if pump_hp() {
         return Progress::Advanced;
     }

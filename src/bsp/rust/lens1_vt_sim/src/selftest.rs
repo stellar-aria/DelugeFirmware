@@ -39,6 +39,7 @@
 //! spawning the nested task, for the identical reason.
 use embassy_time::{Duration, Instant};
 
+use crate::preempt;
 use crate::{sd, sim_block};
 
 /// Read one sector under a non-yielding block and assert that the modeled read took
@@ -59,11 +60,30 @@ fn read_and_assert_modeled_latency() -> Result<(Duration, usize), String> {
     let mut buf = [0u8; 512];
     let expected = sd::sim_latency::latency_for(buf.len());
     let t0 = Instant::now();
+    // Snapshot BEFORE the spin, not just checked for non-zero after: see the
+    // `hooks_before == hooks_after` check below for why a plain "ran at least once
+    // ever" read (with no baseline) would not catch the failure this guards against.
+    let hooks_before = preempt::hook_invocations();
 
     sim_block::block_on(async { sd::locked_read_sectors(0, 1, &mut buf).await })
         .map_err(|e| format!("modeled read failed: {e:?}"))?;
 
     let elapsed = Instant::now() - t0;
+    let hooks_after = preempt::hook_invocations();
+    // Proves the completion actually came from the hook-driven spin under test, not merely
+    // that the virtual clock landed on the right instant by some other means (e.g. a future
+    // edit that swaps `sim_block::block_on` for a plain `.await` under an already-polling
+    // executor: the outer driver loop would still advance the clock to 525us and the elapsed
+    // check below would still pass, with `preempt::progress_hook` never invoked at all).
+    if hooks_after <= hooks_before {
+        return Err(format!(
+            "modeled read completed in {}us virtual time WITHOUT the progress hook ever firing \
+             (hook_invocations stayed at {hooks_before}) — the non-yielding spin completed by \
+             some other means, so this selftest is no longer proving what it claims. Check that \
+             the read still goes through `sim_block::block_on` rather than a plain `.await`.",
+            elapsed.as_micros(),
+        ));
+    }
     if elapsed != expected {
         return Err(format!(
             "modeled read completed in {}us virtual time, but `sim_latency::latency_for({})` \

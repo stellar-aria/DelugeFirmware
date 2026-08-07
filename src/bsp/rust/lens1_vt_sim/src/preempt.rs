@@ -29,6 +29,9 @@ pub const HP_TAG: usize = 2;
 
 static MAIN_PENDED: AtomicBool = AtomicBool::new(false);
 static HP_PENDED: AtomicBool = AtomicBool::new(false);
+/// Reentrancy guard for [`pump_hp`] — enforces this module's doc-comment claim that
+/// `HP_EXEC` is never polled from within itself. See `pump_hp`'s doc comment.
+static IN_HP: AtomicBool = AtomicBool::new(false);
 
 static mut HP: Option<&'static raw::Executor> = None;
 
@@ -49,10 +52,6 @@ pub fn clear_main_pended() {
     MAIN_PENDED.store(false, Ordering::SeqCst);
 }
 
-pub fn hp_pended() -> bool {
-    HP_PENDED.load(Ordering::SeqCst)
-}
-
 /// Stash `HP_EXEC` and install the `sim_block` progress hook. Call once at start-up,
 /// before any task is spawned.
 pub fn init(hp: &'static raw::Executor) {
@@ -65,27 +64,58 @@ pub fn init(hp: &'static raw::Executor) {
 }
 
 /// Poll `HP_EXEC` to quiescence. Returns whether it made any pend (i.e. did work).
+///
+/// # Reentrancy
+///
+/// Panics if called while an outer `pump_hp` call is already on the stack (via `IN_HP`).
+/// This enforces the module doc's claim that `HP_EXEC` is never polled from within itself:
+/// `raw::Executor::poll`'s own doc says calling it reentrantly on the SAME executor is UB
+/// (the run queue is mutated non-reentrantly, and a task whose future is already
+/// `&mut`-borrowed by the outer poll could be re-polled). The only way to hit this today
+/// would be an `HP_EXEC`-resident task itself calling `sim_block::block_on` — which installs
+/// this same `progress_hook` — while ITS OWN `hp.poll()` is already on the stack; not
+/// reachable yet (Phase 0 hosts only `sim_latency::pump`, which never calls `block_on`), but
+/// exactly the failure mode R5a Phase 1 introduces once `streaming_fill_task` (storage I/O,
+/// the prime candidate for `block_on`) moves onto `HP_EXEC` too. A panic is more honest than
+/// a silent `false`: silently returning would hide the bug this guard exists to catch.
 pub fn pump_hp() -> bool {
     // SAFETY: see `init` — set once before use, read only on the single thread.
     let Some(hp) = (unsafe { *core::ptr::addr_of!(HP) }) else {
         return false;
     };
+    assert!(
+        !IN_HP.swap(true, Ordering::SeqCst),
+        "preempt::pump_hp: reentrant HP_EXEC poll — a task running ON HP_EXEC triggered the \
+         progress hook, which tried to poll HP_EXEC while HP_EXEC's own poll() was already on \
+         the stack. See this function's and the module's doc comments."
+    );
     let mut did_work = false;
     loop {
-        HP_PENDED.store(false, Ordering::SeqCst);
-        // SAFETY: HP_EXEC is never polled from within itself — only from the driver loop
-        // and from `progress_hook`, which runs inside a MAIN-executor task. See module doc.
+        // `swap`, not `store`: a pend that arrived before this call (e.g. `sim_latency::pump`
+        // waking on its `Signal` right before `pump_hp` runs, then going straight to
+        // `Pending` on `Timer::after` without raising a further pend) is real work this call
+        // performs by polling it — `store(false)` would discard that fact and make the
+        // common case under-report, biasing the underrun margin this harness measures.
+        did_work |= HP_PENDED.swap(false, Ordering::SeqCst);
+        // SAFETY: HP_EXEC is never polled from within itself — enforced by the `IN_HP` guard
+        // above, not merely asserted in prose.
         unsafe { hp.poll() };
         if !HP_PENDED.load(Ordering::SeqCst) {
             break;
         }
         did_work = true;
     }
+    IN_HP.store(false, Ordering::SeqCst);
     did_work
 }
 
 /// The `sim_block` progress hook: give the higher-priority executor a chance to run, and
 /// if it had nothing to do, advance virtual time to the next scheduled deadline.
+///
+/// Clock advances made here go through `crate::advance_to` — the SAME helper the driver
+/// loop's own advance step uses — so the watchdog mirrors, the virtual-time budget check,
+/// and the timeline checksum stay correct regardless of which of the two call sites moved
+/// the clock. Never advance the clock directly here.
 pub fn progress_hook() -> Progress {
     if pump_hp() {
         return Progress::Advanced;
@@ -94,9 +124,15 @@ pub fn progress_hook() -> Progress {
     match driver.peek_next_deadline() {
         Some(next) => {
             let now = driver.now();
-            if next > now {
-                driver.advance_ticks(next - now);
+            if next <= now {
+                // Cannot happen given `clock.rs`'s `peek_next_deadline` doc (it only ever
+                // returns a deadline strictly greater than `now`), but if that invariant
+                // ever changes, doing nothing here must not be reported as progress: an
+                // unbounded spin must stay wedge-detectable via `sim_block`'s `stalled`
+                // counter, not silently reset it.
+                return Progress::Stalled;
             }
+            crate::advance_to(driver, next);
             // Let the freshly-woken HP tasks (e.g. `sim_latency::pump`) actually run.
             pump_hp();
             Progress::Advanced

@@ -7,13 +7,15 @@
 //!
 //! # Executor + clock
 //!
-//! `embassy_executor::raw::Executor` + a custom `AtomicBool` `__pender` + a
-//! `PeekableMockDriver` ([`clock`] — the same discrete-event shape prototyped
-//! in `../spike_mock_clock/`). The driver loop: poll the executor to quiescence,
-//! peek the next due deadline, jump the virtual clock to exactly that deadline,
-//! repeat. No `platform-std`/`executor-thread` embassy-executor feature is
-//! enabled (see `Cargo.toml`), so there is exactly one `__pender` in this binary
-//! and it is ours.
+//! Two `embassy_executor::raw::Executor` instances — MAIN (this file's driver loop) and
+//! `HP_EXEC` (Task 2's host emulation of a device interrupt executor, see [`preempt`]) —
+//! plus a custom context-routed `__pender` (two `AtomicBool` flags, one per executor, see
+//! `preempt::note_pend`) and a `PeekableMockDriver` ([`clock`] — the same discrete-event
+//! shape prototyped in `../spike_mock_clock/`). The driver loop: poll MAIN to quiescence,
+//! draining `HP_EXEC` alongside it (`preempt::pump_hp`), peek the next due deadline, jump
+//! the virtual clock to exactly that deadline, repeat. No `platform-std`/`executor-thread`
+//! embassy-executor feature is enabled (see `Cargo.toml`), so there is no executor-supplied
+//! `__pender` in this binary — both instances share the one below, and it is ours.
 //!
 //! # The boot livelock (see `sd.rs`'s `sim_latency::off_fiber_instant` doc
 //! comment for the full mechanism)
@@ -31,9 +33,15 @@
 //! which is inside `block_on`'s spin loop): nothing else can be polled until
 //! that whole call stack unwinds. Lens 2 (`../src/main.rs`'s `host_app` block)
 //! sidesteps this by running `pump` on a second real OS thread — not available
-//! here (single-threaded, virtual clock; a real thread would reintroduce
-//! wall-clock waiting and a second executor outside this loop's quiescence
-//! check, defeating determinism).
+//! here (single-threaded, virtual clock; a real *thread* would reintroduce
+//! wall-clock waiting and a second executor OUTSIDE this loop's quiescence
+//! check, defeating determinism). A second *executor* driven from INSIDE that
+//! same quiescence check, on the same OS thread, is exactly what `HP_EXEC`
+//! (`preempt`) is: it never waits on anything wall-clock, and the driver loop
+//! still polls it to quiescence every pass, so determinism is preserved. This
+//! is why `sim_block`/`preempt` exist — see their module docs for the fuller
+//! mechanism (Task 2, R5a Phase 0), and R5a Phase 1's plan to move
+//! `streaming_fill_task` there too.
 //!
 //! Fix: `sd.rs`'s `sim_latency::set_off_fiber_instant` (a small, additive,
 //! off-by-default change to that SHARED file) makes an off-fiber modeled
@@ -50,8 +58,9 @@
 //! coroutine YIELD — not a busy spin: it suspends the fiber and returns control
 //! to whoever called `fiber::worker_poll()`, which `.await`s normally
 //! afterwards) — modeled latency applies there exactly as it does for Lens 2,
-//! driven correctly by this binary's own single executor via the SAME
-//! `sim_latency::pump` task, spawned once at boot.
+//! driven correctly by the SAME `sim_latency::pump` task, spawned once at
+//! boot — now on `HP_EXEC`, not MAIN (Task 2; see `preempt`'s module doc for
+//! why moving it there, rather than off-thread, keeps this deterministic).
 //!
 //! # Reused shared substrate
 //!
@@ -61,11 +70,14 @@
 //! `audio_host.rs`, `scenario.rs`, `sd_image.rs`) — a second, independently
 //! configured COMPILATION of the same source (this package's own `mod
 //! sys`/Cargo features), not a fork: a change to any of these files is picked
-//! up by both packages. The only shared-file BEHAVIOR changes are the two
-//! small, additive, off-by-default hooks this file calls below
+//! up by both packages. The shared-file BEHAVIOR changes this file makes are
+//! the two small, additive, off-by-default hooks called below
 //! (`sd::sim_latency::set_off_fiber_instant`,
-//! `scheduler::set_audio_period_override_us`) — both documented at their
-//! definitions in `sd.rs`/`scheduler.rs`.
+//! `scheduler::set_audio_period_override_us` — both documented at their
+//! definitions in `sd.rs`/`scheduler.rs`), plus a third as of Task 2:
+//! `preempt::init` calls `sim_block::set_progress_hook` and
+//! `sim_block::set_spin_budget(10_000)` (overriding that shared file's own
+//! `100_000` default) — see `sim_block.rs`'s and `preempt.rs`'s module docs.
 #![feature(impl_trait_in_assoc_type)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -270,6 +282,61 @@ fn pender(context: *mut ()) {
     preempt::note_pend(context);
 }
 
+/// Mirrors of driver-loop state, published for the watchdog thread (spawned in `main`, below)
+/// AND for `preempt::progress_hook` via [`advance_to`] — module-level (not `main`-local, as
+/// they were pre-Task-2) because `preempt` is a different module and needs a real path to
+/// them. `progress_hook` can now ALSO move the virtual clock (Task 2's `HP_EXEC` emulation),
+/// so these must be the sole source of truth for anything printed about the timeline — never
+/// shadow them with a same-named local that could drift out of sync (that drift is exactly
+/// what put stale numbers in the in-loop WEDGED diagnostic before this fix).
+static QUIESCENCE_PASSES: AtomicU64 = AtomicU64::new(0);
+static ADVANCES: AtomicU64 = AtomicU64::new(0);
+static VIRTUAL_NOW_US: AtomicU64 = AtomicU64::new(0);
+// `u64::MAX` is the "no outstanding timer" sentinel — never a real deadline (ticks are
+// microseconds; a scenario running that long is not a case this harness needs to represent).
+static NEXT_DEADLINE_US: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Running checksum of every `next` deadline the clock has ever advanced to, from either
+/// call site (see [`advance_to`]). Without this, `NEXT_DEADLINE_US` and `VIRTUAL_NOW_US` are
+/// equal by construction (both get the same `next`), so the wedge fingerprint's "five"
+/// printed fields collapse to fewer genuinely independent scalars than they look like; this
+/// adds a real per-step timeline checksum instead. Rotate-xor: O(1), no RNG, no wall clock,
+/// and order-sensitive (unlike a plain xor/sum), so it also detects a REORDERING of advances,
+/// not just a different multiset of `next` values.
+static TIMELINE_HASH: AtomicU64 = AtomicU64::new(0);
+/// The virtual-time budget in ticks (`main`'s `budget_ticks`, from `LENS1_VIRTUAL_BUDGET_MS`)
+/// — set once in `main`, before the driver loop starts (i.e. before anything can be polled
+/// and reach `progress_hook`), so [`advance_to`] can enforce the same ceiling for BOTH call
+/// sites. `u64::MAX` here would mean "no budget enforced yet"; `main` always sets a real
+/// value first, so this sentinel is purely defensive.
+static BUDGET_TICKS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Jump the virtual clock forward to `next`, enforcing the virtual-time budget and updating
+/// every watchdog mirror plus the timeline checksum — the ONE place either the driver loop's
+/// own advance step or `preempt::progress_hook`'s advance step may move the clock, so the two
+/// call sites can never let the mirrors drift apart. `next` must be a real deadline (i.e.
+/// `driver.peek_next_deadline()` returned `Some(next)`), not checked again here.
+fn advance_to(driver: &clock::PeekableMockDriver, next: u64) {
+    // Stored before the budget check (matching the original single-call-site behaviour) so
+    // the watchdog sees the over-budget deadline even on the `hard_exit` path below.
+    NEXT_DEADLINE_US.store(next, Ordering::Relaxed);
+    let budget_ticks = BUDGET_TICKS.load(Ordering::Relaxed);
+    if next > budget_ticks {
+        log::error!(
+            "lens1-vt-sim: virtual-time budget ({budget_ticks}us) exhausted before the \
+             scenario completed (next deadline at {next}us) — scenario wedged"
+        );
+        hard_exit(2);
+    }
+    let now = driver.now();
+    if next > now {
+        driver.advance_ticks(next - now);
+    }
+    VIRTUAL_NOW_US.store(next, Ordering::Relaxed);
+    let h = TIMELINE_HASH.load(Ordering::Relaxed);
+    TIMELINE_HASH.store(h.rotate_left(7) ^ next, Ordering::Relaxed);
+    ADVANCES.fetch_add(1, Ordering::Relaxed);
+}
+
 fn main() {
     // NOTE for anyone chasing "why did RUST_LOG=trace print nothing": `deluge-bsp`/`rza1l-hal`
     // (pulled in for their `sd`/`pic` host surface) both request `log`'s `release_max_level_off`
@@ -417,9 +484,10 @@ fn main() {
     // on. See `preempt`'s module doc.
     hp_spawner.spawn(sd::sim_latency::pump().unwrap());
     spawner.spawn(boot_task().unwrap());
-    // The async cluster-fill task, on the SAME executor `boot_task`'s
-    // worker-fiber pump loop and the C++ enqueue path run on (this binary has
-    // only the one executor — see the module doc's "Executor + clock").
+    // On `spawner` (MAIN), the SAME executor `boot_task`'s worker-fiber pump
+    // loop and the C++ enqueue path run on — NOT `HP_EXEC` (see the module
+    // doc's "Executor + clock"); R5a Phase 1 is what moves this task there,
+    // per `preempt::init`'s doc comment above.
     // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the
     // loader queue only once `deluge_streaming_async_active()` reports true
     // (i.e. only under this feature); inert otherwise.
@@ -439,6 +507,10 @@ fn main() {
     // --- Discrete-event driver loop -----------------------------------------
     let driver = clock::PeekableMockDriver::get();
     let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
+    // Published before the loop below starts (i.e. before anything can be polled and reach
+    // `preempt::progress_hook`), so `advance_to` can enforce this ceiling for both the
+    // driver loop's own advance step AND `progress_hook`'s — see `BUDGET_TICKS`'s doc.
+    BUDGET_TICKS.store(budget_ticks, Ordering::Relaxed);
     let wall_start = std::time::Instant::now();
     // Wall-clock deadline for the loop below — `wall_timeout_s` (a REAL-time
     // budget for this whole loop), never `step_timeout_s` (a per-step VIRTUAL
@@ -449,16 +521,10 @@ fn main() {
     // exceeded) is ever reached — this bounds REAL time spent stuck there
     // instead.
     let wall_deadline = wall_start + std::time::Duration::from_secs(wall_timeout_s);
-    // Mirrors of loop state, published for the watchdog thread spawned just
-    // below: it must never touch `driver` (see that thread's doc comment) or
-    // this function's stack locals, only plain `'static` atomics.
-    static QUIESCENCE_PASSES: AtomicU64 = AtomicU64::new(0);
-    static ADVANCES: AtomicU64 = AtomicU64::new(0);
-    static VIRTUAL_NOW_US: AtomicU64 = AtomicU64::new(0);
-    // `u64::MAX` is the "no outstanding timer" sentinel — never a real
-    // deadline (ticks are microseconds; a scenario running that long is not
-    // a case this harness needs to represent).
-    static NEXT_DEADLINE_US: AtomicU64 = AtomicU64::new(u64::MAX);
+    // `QUIESCENCE_PASSES`/`ADVANCES`/`VIRTUAL_NOW_US`/`NEXT_DEADLINE_US`/`TIMELINE_HASH`
+    // (module-level, above `main`) mirror loop state for the watchdog thread spawned just
+    // below: it must never touch `driver` (see that thread's doc comment) or this function's
+    // stack locals, only plain `'static` atomics.
     // Set right after the loop below breaks on success, before anything that
     // could itself run long (the `RESULT` lock, final logging, `hard_exit(0)`).
     // Without this the watchdog is unconditional: on a HEALTHY run whose
@@ -515,13 +581,14 @@ fn main() {
             "lens1-vt-sim: WEDGED (watchdog) — wall-clock wall timeout ({wall_timeout_s}s) \
              exceeded; the main thread never returned to its own in-loop check (see report for \
              why): virtual t={}us quiescence_passes={} advances={} next_deadline={} \
-             on_fiber_reads={} on_fiber_writes={}",
+             on_fiber_reads={} on_fiber_writes={} timeline_hash={}",
             VIRTUAL_NOW_US.load(Ordering::Relaxed),
             QUIESCENCE_PASSES.load(Ordering::Relaxed),
             ADVANCES.load(Ordering::Relaxed),
             NEXT_DEADLINE_US.load(Ordering::Relaxed),
             sd::stats::on_fiber_reads(),
             sd::stats::on_fiber_writes(),
+            TIMELINE_HASH.load(Ordering::Relaxed),
         );
         // Belt-and-suspenders against the two `hard_exit` call sites racing
         // each other's `exit_group` on the success path (see `DISARMED`'s
@@ -531,8 +598,12 @@ fn main() {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         hard_exit(2);
     });
+    // `quiescence_passes` stays a plain local: only this loop ever increments it (unaffected
+    // by `preempt::progress_hook`), so mirroring it into `QUIESCENCE_PASSES` right below has
+    // no drift risk. There is no equivalent local for `advances` — `progress_hook` can ALSO
+    // advance the clock (via `advance_to`), so `ADVANCES` (module-level) is read directly
+    // everywhere below instead of being shadowed by a local that could go stale.
     let mut quiescence_passes = 0u64;
-    let mut advances = 0u64;
     loop {
         loop {
             preempt::clear_main_pended();
@@ -556,15 +627,20 @@ fn main() {
                 // `peek_next_deadline`: it pops-and-wakes any timer already
                 // due, so the value below is the deadline AFTER firing those,
                 // not a pure peek.
+                // Reads `ADVANCES` (not a local) since `preempt::progress_hook` can also
+                // have advanced the clock mid-`executor.poll()`, above — see `advance_to`'s
+                // doc comment; a locally-tracked count would silently lie here.
+                let advances_now = ADVANCES.load(Ordering::Relaxed);
                 println!(
                     "lens1-vt-sim: WEDGED — wall-clock wall timeout ({wall_timeout_s}s) exceeded \
                      inside the quiescence loop (scenario not making progress): virtual \
-                     t={}us quiescence_passes={quiescence_passes} advances={advances} \
-                     next_deadline={:?} on_fiber_reads={} on_fiber_writes={}",
+                     t={}us quiescence_passes={quiescence_passes} advances={advances_now} \
+                     next_deadline={:?} on_fiber_reads={} on_fiber_writes={} timeline_hash={}",
                     driver.now(),
                     driver.peek_next_deadline(),
                     sd::stats::on_fiber_reads(),
                     sd::stats::on_fiber_writes(),
+                    TIMELINE_HASH.load(Ordering::Relaxed),
                 );
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 hard_exit(2);
@@ -579,8 +655,9 @@ fn main() {
         if DONE.load(Ordering::Acquire) {
             log::info!(
                 "lens1-vt-sim: scenario task completed at virtual t={}us ({quiescence_passes} \
-                 quiescence passes, {advances} clock advances)",
+                 quiescence passes, {} clock advances)",
                 driver.now(),
+                ADVANCES.load(Ordering::Relaxed),
             );
             break;
         }
@@ -591,19 +668,10 @@ fn main() {
             );
             hard_exit(2);
         };
-        NEXT_DEADLINE_US.store(next, Ordering::Relaxed);
-        if next > budget_ticks {
-            log::error!(
-                "lens1-vt-sim: virtual-time budget ({budget_ms}ms) exhausted before the scenario \
-                 completed (next deadline at {next}us > budget {budget_ticks}us) — scenario wedged"
-            );
-            hard_exit(2);
-        }
-        let now = driver.now();
-        driver.advance_ticks(next - now);
-        VIRTUAL_NOW_US.store(next, Ordering::Relaxed);
-        advances += 1;
-        ADVANCES.store(advances, Ordering::Relaxed);
+        // `budget_ticks` enforcement + all mirror/checksum updates live in `advance_to` now
+        // (shared with `preempt::progress_hook`'s own advance step) — see its doc comment.
+        advance_to(driver, next);
+        let advances = ADVANCES.load(Ordering::Relaxed);
         if advances.is_multiple_of(20_000) {
             log::info!(
                 "lens1-vt-sim: progress: virtual t={}us advances={advances} passes={quiescence_passes} \

@@ -215,6 +215,9 @@ mod services;
 /// signals.h — board GPIO signals, battery, MIDI/gate timer.
 #[cfg(target_os = "none")]
 mod signals;
+/// The blocking-I/O seam: a plain non-yielding block on device, and on host a spin driven
+/// by a harness-registered progress hook. See the module doc for why host needs the hook.
+mod sim_block;
 /// The async cluster-fill task (R1) and its selector/wakeup C ABI (R2.1): drains
 /// the resource manager's loader queue on this executor, awaiting the SD read
 /// instead of running it inline on the fiber as the old C++ `loader::pump()`

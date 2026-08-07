@@ -88,6 +88,7 @@ use embassy_time_driver::Driver as _;
 
 mod clock;
 mod preempt;
+mod selftest;
 
 // Link-only: the host-built C++ `deluge_app` object closure (build.rs) calls the
 // deluge_resource_* residency C ABI and the deluge_{alloc,slab_*,heap_*}
@@ -493,6 +494,42 @@ fn main() {
     // (i.e. only under this feature); inert otherwise.
     #[cfg(feature = "async_streaming_loader")]
     spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
+
+    // Phase 0's load-bearing proof (Task 3): a modeled SD read driven by a NON-YIELDING
+    // `sim_block::block_on`, completing because `preempt::progress_hook` pumps `HP_EXEC`
+    // (where `sim_latency::pump` was just spawned, above) and advances the virtual clock.
+    // Runs as a mode of this binary — rather than a `#[test]` — because the sim's C++
+    // global state cannot be set up twice in one process (see `sweep.sh`'s doc + this
+    // file's own module doc). Placed here: after `preempt::init`/the `pump` spawn, before
+    // the scenario spawn (and before the driver loop below, which never gets a chance to
+    // run in this mode).
+    if std::env::args().any(|a| a == "--selftest-block") {
+        // Undo the boot-livelock escape hatch set above (`set_off_fiber_instant(true)`)
+        // for THIS call only: the selftest calls `sd::locked_read_sectors` directly from
+        // `main`, i.e. off-fiber (no fiber exists yet — `boot_task` hasn't even been
+        // polled), which is exactly the condition that escape hatch exempts from
+        // modeling. Left at `true` here, the read would take the synchronous real-read
+        // branch and complete in zero virtual time on the FIRST poll — vacuously
+        // "passing" without ever exercising `sim_block::block_on`'s hook-driven spin at
+        // all. `false` routes the read through `sim_latency::modeled_read`, which is the
+        // actual mechanism this selftest exists to prove. No restore needed: every path
+        // out of this block is a `hard_exit`.
+        #[cfg(feature = "sim_latency")]
+        sd::sim_latency::set_off_fiber_instant(false);
+        // Let `sim_latency::pump` reach its `REQUEST.wait()` before we issue a transfer —
+        // see `selftest`'s module doc and this crate's "CRITICAL SEQUENCING DETAIL".
+        preempt::pump_hp();
+        match selftest::block_on_modeled_read() {
+            Ok(()) => {
+                log::info!("selftest: PASSED");
+                hard_exit(0);
+            }
+            Err(e) => {
+                log::error!("selftest: FAILED — {e}");
+                hard_exit(2);
+            }
+        }
+    }
 
     let song_path_static: &'static str = Box::leak(song_path.into_boxed_str());
     let cfg = scenario::ScenarioConfig {

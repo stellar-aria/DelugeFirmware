@@ -275,6 +275,22 @@ async fn scenario_runner(cfg: scenario::ScenarioConfig, done: &'static AtomicBoo
 
 static RESULT: std::sync::Mutex<Option<scenario::ScenarioResult>> = std::sync::Mutex::new(None);
 
+/// Runs [`selftest::block_on_modeled_read_nested`] and stashes its result — the task
+/// `main`'s `--selftest-block-nested` mode spawns onto MAIN specifically so it is polled
+/// with `executor.poll()` already on the stack (see that mode's block, and `selftest.rs`'s
+/// module doc for the mechanism this is meant to exercise). Mirrors [`scenario_runner`]'s
+/// static-result-plus-`done`-flag shape, not a new mechanism.
+#[embassy_executor::task]
+async fn nested_selftest_task(done: &'static AtomicBool) {
+    let result = selftest::block_on_modeled_read_nested();
+    *NESTED_SELFTEST_RESULT.lock().unwrap() = Some(result);
+    done.store(true, Ordering::Release);
+}
+
+/// See [`nested_selftest_task`].
+static NESTED_SELFTEST_RESULT: std::sync::Mutex<Option<Result<(), String>>> =
+    std::sync::Mutex::new(None);
+
 /// Our own pender: no thread, no parking — just flags the driver loop polls itself between
 /// `raw::Executor::poll()` calls. Routes by the context pointer each executor was created
 /// with, so MAIN and HP pends stay distinguishable (see `preempt`).
@@ -472,28 +488,44 @@ fn main() {
     let hp_spawner = hp_executor.spawner();
     scheduler::set_spawner(spawner);
 
+    // `--selftest-block-nested` (below) needs this before anything else is spawned: that
+    // mode deliberately spawns NOTHING from the real app's task set below except
+    // `sim_latency::pump` — the point of that mode is to isolate the nesting variable (a
+    // task's own spin, called while MAIN's `executor.poll()` is already on the stack), and
+    // `boot_task`'s own (also off-fiber, so also modeled once `off_fiber_instant` is
+    // cleared below) SD activity would otherwise race the selftest's single sector-0 read
+    // on the same `SD_BUS` lock (`sd.rs`'s `locked_read_sectors`) and could break its
+    // exact-latency assertion for a reason that has nothing to do with nesting.
+    let nested_selftest = std::env::args().any(|a| a == "--selftest-block-nested");
+
     // Same BSP task set `deluge-bsp-rust`'s host_app boot block spawns (minus
     // the audio-thread split — see module doc: with `scheduler::set_audio_spawner`
     // never called, the priority-0 audio task falls back to this single spawner
     // automatically, the documented fallback path in `scheduler.rs`'s `claim`).
-    spawner.spawn(control::pic_pump().unwrap());
-    spawner.spawn(control::pad_render().unwrap());
-    spawner.spawn(control::encoder_wake_pump().unwrap());
-    spawner.spawn(display::oled_render().unwrap());
+    // Skipped for `--selftest-block-nested` — see `nested_selftest`'s doc comment above.
+    if !nested_selftest {
+        spawner.spawn(control::pic_pump().unwrap());
+        spawner.spawn(control::pad_render().unwrap());
+        spawner.spawn(control::encoder_wake_pump().unwrap());
+        spawner.spawn(display::oled_render().unwrap());
+    }
     // On HP_EXEC, not the main executor: a non-yielding `sim_block::block_on` must be able
     // to drive this task to completion, and it cannot re-enter the executor it is running
-    // on. See `preempt`'s module doc.
+    // on. See `preempt`'s module doc. Needed by the real run AND both selftest modes
+    // (`--selftest-block` and `--selftest-block-nested`), so this stays unconditional.
     hp_spawner.spawn(sd::sim_latency::pump().unwrap());
-    spawner.spawn(boot_task().unwrap());
-    // On `spawner` (MAIN), the SAME executor `boot_task`'s worker-fiber pump
-    // loop and the C++ enqueue path run on — NOT `HP_EXEC` (see the module
-    // doc's "Executor + clock"); R5a Phase 1 is what moves this task there,
-    // per `preempt::init`'s doc comment above.
-    // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the
-    // loader queue only once `deluge_streaming_async_active()` reports true
-    // (i.e. only under this feature); inert otherwise.
-    #[cfg(feature = "async_streaming_loader")]
-    spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
+    if !nested_selftest {
+        spawner.spawn(boot_task().unwrap());
+        // On `spawner` (MAIN), the SAME executor `boot_task`'s worker-fiber pump
+        // loop and the C++ enqueue path run on — NOT `HP_EXEC` (see the module
+        // doc's "Executor + clock"); R5a Phase 1 is what moves this task there,
+        // per `preempt::init`'s doc comment above.
+        // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the
+        // loader queue only once `deluge_streaming_async_active()` reports true
+        // (i.e. only under this feature); inert otherwise.
+        #[cfg(feature = "async_streaming_loader")]
+        spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
+    }
 
     // Published here — before the `--selftest-block` branch below, which can reach
     // `preempt::progress_hook` (via `sim_block::block_on`) just as the driver loop further
@@ -543,6 +575,89 @@ fn main() {
             }
             Err(e) => {
                 log::error!("selftest: FAILED — {e}");
+                hard_exit(2);
+            }
+        }
+    }
+
+    // Phase 0's NESTED proof (Task 3b, added after Task 3's review): the identical
+    // modeled-read/assert body as `--selftest-block` above
+    // (`selftest::read_and_assert_modeled_latency`, shared by both), but called from INSIDE
+    // a task while MAIN's own `executor.poll()` is already on the stack — the shape every
+    // Phase 2 production call site actually uses, and also the shape of the original boot
+    // livelock (see `selftest.rs`'s module doc). The ONLY difference from `--selftest-block`
+    // is this nesting: same read, same exact-latency assertion, same
+    // `off_fiber_instant(false)`/pre-`pump_hp()` discipline.
+    //
+    // Unlike `--selftest-block`, this mode DOES have to poll MAIN's `executor` (that is the
+    // whole point), so it runs its own minimal driver loop below rather than falling through
+    // to the real scenario's — that loop's post-loop success path is specific to
+    // `scenario::ScenarioResult` and cannot be reused for a `Result<(), String>`. The loop
+    // itself mirrors the shape of the real driver loop further down (poll to quiescence,
+    // pump HP_EXEC, check a `DONE` flag, else advance to the next deadline) — not a new
+    // mechanism, just the same shape scoped to this mode's own task/result statics.
+    if nested_selftest {
+        // See the sibling call in the `--selftest-block` branch above for why this must be
+        // `false`: with `off_fiber_instant(true)` (this file's default, set above) the read
+        // would take the synchronous branch and complete on the very first poll — no
+        // `sim_block::block_on` spin at all, and the nested shape this mode exists to prove
+        // would never be exercised.
+        sd::sim_latency::set_off_fiber_instant(false);
+        // Same pre-pump discipline as the non-nested mode, and for the same reason — see
+        // `selftest.rs`'s module doc ("Why `main` pumps `HP_EXEC` once before issuing the
+        // transfer").
+        preempt::pump_hp();
+
+        static NESTED_DONE: AtomicBool = AtomicBool::new(false);
+        spawner.spawn(nested_selftest_task(&NESTED_DONE).unwrap());
+
+        let driver = clock::PeekableMockDriver::get();
+        loop {
+            loop {
+                preempt::clear_main_pended();
+                // SAFETY: single-threaded, never called reentrantly. This is the stack
+                // shape under test: `nested_selftest_task`'s own `sim_block::block_on` spin
+                // (and the `preempt::progress_hook`/`advance_to` calls it makes on every
+                // `Pending` poll) all run INSIDE this `executor.poll()` call, with this
+                // task's future `&mut`-borrowed by it the whole time.
+                unsafe { executor.poll() };
+                let hp_did_work = preempt::pump_hp();
+                if !preempt::main_pended() && !hp_did_work {
+                    break;
+                }
+            }
+            if NESTED_DONE.load(Ordering::Acquire) {
+                break;
+            }
+            let Some(next) = driver.peek_next_deadline() else {
+                log::error!(
+                    "lens1-vt-sim: no task has an outstanding timer — nested selftest wedged \
+                     (deadlock)"
+                );
+                hard_exit(2);
+            };
+            // Enforces `BUDGET_TICKS` (already published above, before either selftest
+            // branch) and keeps the watchdog mirrors in sync — see `advance_to`'s doc
+            // comment. This loop's own wedges are also caught by `sim_block::block_on`'s
+            // own spin-budget assertion inside the nested task itself; this outer
+            // `peek_next_deadline`/`advance_to` step only fires between polls of that task,
+            // i.e. once it's already returned control here (e.g. after it completes, or if
+            // this loop's own — not the nested spin's — deadline bookkeeping goes wrong).
+            advance_to(driver, next);
+        }
+
+        match NESTED_SELFTEST_RESULT
+            .lock()
+            .unwrap()
+            .take()
+            .expect("nested selftest task set NESTED_DONE without stashing a result")
+        {
+            Ok(()) => {
+                log::info!("selftest: PASSED (nested)");
+                hard_exit(0);
+            }
+            Err(e) => {
+                log::error!("selftest: FAILED (nested) — {e}");
                 hard_exit(2);
             }
         }

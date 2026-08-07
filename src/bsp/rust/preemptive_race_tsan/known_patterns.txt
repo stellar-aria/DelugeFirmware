@@ -96,4 +96,74 @@ src/deluge/playback/playback_handler\.h:223:46 in PlaybackHandler::isEitherClock
 # module-level bool flags, same class as the audio_engine.cpp pattern above
 # but in two different files (pinned per-site, not file-wide).
 src/deluge/gui/ui/audio_recorder\.cpp:154:29 in AudioRecorder::beginOutputRecording
-src/deluge/gui/waveform/waveform_renderer\.cpp:694:33 in WaveformRenderer::advanceOverviewScan
+src/deluge/gui/waveform/waveform_renderer\.cpp:69[14]:33 in WaveformRenderer::advanceOverviewScan
+
+# --- Surfaced during R4 Phase C (delete C-FatFS) Task 8 gate, 2026-08-06 ---
+# 5 runs x 500 blocks, cordae fixture. Full-stack-attributed to PRE-EXISTING
+# classes; 0/4 classes (29 distinct summary lines) touch R4's storage/cluster/
+# loader/recorder/mount surface (no storage/, cluster, loader.cpp beyond the
+# already-pinned line 58, recorder, mount, or efatfs frame in either racing
+# stack of any instance). Cataloged per decision 2026-08-06 -- recorded, not
+# suppressed. Four classes:
+#
+#   1. TLSF allocator (see the pinned line-list below) -- two more exact sites
+#      (Tlsf::check at 446, BlockHeader::is_prev_free at 80) than the R1 list,
+#      same heap-walk-vs-allocation race, verified via full-stack backtrace
+#      (GeneralMemoryAllocator::checkEverythingOk -> AudioEngine::routine()).
+#
+#   2. The debug-log shared C stdio scratch buffer (src/lib/printf.c pattern,
+#      line 53 above) racing itself between logDebug/Debug::println call
+#      sites on two threads. Verified via full-stack backtrace on every
+#      instance this run (grep the run logs' "#1" frames): always
+#      logDebug/print.cpp/log.cpp <-> printf.c's _out_rev/_vsnprintf/_ftoa.
+#      The NEW wrinkle: on THIS run TSan chose the OTHER thread's frame (the
+#      generic runtime interceptor itself, which carries no file/line) as the
+#      SUMMARY site, so the existing printf.c pattern -- which matches the
+#      file-bearing side -- doesn't catch it. Matched here by interceptor
+#      name/Rust-str-validation-site instead:
+core::ffi::c_str::strlen::runtime
+ in strlen$
+ in __tsan_memcpy$
+library/core/src/str/validations\.rs:23[23]:52 in core::str::validations::run_utf8_validation
+#      CAVEAT for a future reviewer: these three patterns key off generic
+#      runtime-intercepted function names that carry NO file/subsystem info in
+#      the SUMMARY line itself (run.sh only classifies the one-line SUMMARY,
+#      not the full stack) -- every instance observed on 2026-08-06 was
+#      verified (via full-stack backtrace) to be the printf.c log-buffer
+#      class, but a hypothetical FUTURE genuinely-new strlen/memcpy race
+#      elsewhere (including on a storage path) would also match. If this
+#      pattern ever needs to earn back specificity, the fix is a run.sh change
+#      to classify on the full stack, not just the SUMMARY line.
+#
+#   3. Song-model object-graph CONSTRUCTION/TEARDOWN during a live song swap
+#      (LoadSongUI::performLoad() building a brand-new Song's full DSP/param
+#      object graph -- ParamManager, GlobalEffectable(ForSong), Sound,
+#      SoundInstrument, ModControllableAudio, ModFXProcessor, AutoParam, and
+#      their owned compressor/delay/filter DSP components -- while the OLD
+#      song's audio graph is still rendering on the audio thread) racing the
+#      audio thread's read of the corresponding old-song state, PLUS the
+#      backing heap zero-fill (deluge::memory::heaps.cpp's alloc_fast/
+#      finalize) for that construction. Verified via full-stack backtrace:
+#      every instance's other-thread frame lands in GlobalEffectable::
+#      createDelayWorkingState/setupFilterSetConfig, Delay::isActive,
+#      FilterSet::reset, or ParamManager::destructAndForgetParamCollections --
+#      all reachable only from LoadSongUI::performLoad()'s Song construction,
+#      the SAME architectural gap already covered above by the deluge.cpp/
+#      arpeggiator.cpp/kit.cpp/output.cpp file-wide patterns, just touching
+#      deeper per-Song owned-object constructors this run (new exact leaf
+#      sites, not a new class):
+src/deluge/model/song/song\.(cpp|h)
+src/deluge/model/global_effectable/
+src/deluge/model/mod_controllable/
+src/deluge/modulation/params/param_manager\.cpp
+src/deluge/modulation/automation/auto_param\.cpp
+src/deluge/processing/sound/
+src/deluge/dsp/compressor/
+src/deluge/dsp/delay/
+src/deluge/dsp/(\.\./dsp/)?filter/
+src/deluge/memory/heaps\.cpp
+#
+#   4. WaveformRenderer::advanceOverviewScan -- same AudioRecorder/
+#      WaveformRenderer flag-read class as the pinned entry above, one line
+#      earlier (691 vs. 694) this run; folded into that entry's column-4
+#      character class above rather than a separate line.

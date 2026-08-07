@@ -495,6 +495,18 @@ fn main() {
     #[cfg(feature = "async_streaming_loader")]
     spawner.spawn(streaming_loader::streaming_fill_task().unwrap());
 
+    // Published here — before the `--selftest-block` branch below, which can reach
+    // `preempt::progress_hook` (via `sim_block::block_on`) just as the driver loop further
+    // down does — so `advance_to` can enforce this ceiling for BOTH callers from the very
+    // first clock advance either one makes. Left at the later spot (just before the driver
+    // loop) this stayed `u64::MAX` (no budget enforced) AND the wall-clock watchdog thread
+    // (spawned alongside it, also further down) didn't exist yet, during the selftest's
+    // entire run: today harmless (Phase 0 hosts only `sim_latency::pump` on `HP_EXEC`, which
+    // arms exactly one timer per request and can't spin unboundedly), but this plan's own
+    // binding constraint is "every spin must be wedge-detectable" — see `BUDGET_TICKS`'s doc.
+    let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
+    BUDGET_TICKS.store(budget_ticks, Ordering::Relaxed);
+
     // Phase 0's load-bearing proof (Task 3): a modeled SD read driven by a NON-YIELDING
     // `sim_block::block_on`, completing because `preempt::progress_hook` pumps `HP_EXEC`
     // (where `sim_latency::pump` was just spawned, above) and advances the virtual clock.
@@ -513,11 +525,16 @@ fn main() {
         // "passing" without ever exercising `sim_block::block_on`'s hook-driven spin at
         // all. `false` routes the read through `sim_latency::modeled_read`, which is the
         // actual mechanism this selftest exists to prove. No restore needed: every path
-        // out of this block is a `hard_exit`.
-        #[cfg(feature = "sim_latency")]
+        // out of this block is a `hard_exit`. Unconditional, matching the sibling call
+        // above (`set_off_fiber_instant(true)`) rather than `#[cfg]`-gating this one: the
+        // whole package already requires `sim_latency` to build (that sibling call has
+        // never been gated either), so a feature gate here would be redundant, not
+        // defensive.
         sd::sim_latency::set_off_fiber_instant(false);
         // Let `sim_latency::pump` reach its `REQUEST.wait()` before we issue a transfer —
-        // see `selftest`'s module doc and this crate's "CRITICAL SEQUENCING DETAIL".
+        // see `selftest`'s module doc ("Why `main` pumps `HP_EXEC` once before issuing the
+        // transfer") for why this is good discipline even though `Signal`'s latching
+        // behavior means it isn't strictly required for correctness here.
         preempt::pump_hp();
         match selftest::block_on_modeled_read() {
             Ok(()) => {
@@ -543,11 +560,10 @@ fn main() {
 
     // --- Discrete-event driver loop -----------------------------------------
     let driver = clock::PeekableMockDriver::get();
-    let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
-    // Published before the loop below starts (i.e. before anything can be polled and reach
-    // `preempt::progress_hook`), so `advance_to` can enforce this ceiling for both the
-    // driver loop's own advance step AND `progress_hook`'s — see `BUDGET_TICKS`'s doc.
-    BUDGET_TICKS.store(budget_ticks, Ordering::Relaxed);
+    // `BUDGET_TICKS` is already published (see above, before the `--selftest-block`
+    // branch) — both call sites of `advance_to` (the loop below and
+    // `preempt::progress_hook`) have had a real ceiling in effect from before anything
+    // was ever spawned or polled.
     let wall_start = std::time::Instant::now();
     // Wall-clock deadline for the loop below — `wall_timeout_s` (a REAL-time
     // budget for this whole loop), never `step_timeout_s` (a per-step VIRTUAL

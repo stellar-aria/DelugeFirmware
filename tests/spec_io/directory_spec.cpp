@@ -8,10 +8,10 @@
 describe directory("deluge::io::Directory", $ {
 	it("iterates direct children, ending with nullopt", _ {
 		mock_file_io_reset();
-		deluge_file_mkdir("SONGS");
+		deluge_efatfs_mkdir("SONGS");
 		auto f = deluge::io::File::open("SONGS/a.xml", DELUGE_FILE_WRITE_CREATE);
 		(void)f->close();
-		deluge_file_mkdir("SONGS/sub");
+		deluge_efatfs_mkdir("SONGS/sub");
 
 		auto dir = deluge::io::Directory::open("SONGS");
 		// Directory is move-only, so std::expected<Directory, Status> can't be
@@ -36,7 +36,7 @@ describe directory("deluge::io::Directory", $ {
 
 	it("an empty directory reads nullopt immediately", _ {
 		mock_file_io_reset();
-		deluge_file_mkdir("EMPTY");
+		deluge_efatfs_mkdir("EMPTY");
 		auto dir = deluge::io::Directory::open("EMPTY");
 		expect(dir.has_value()).to_equal(true);
 		auto entry = dir->read();
@@ -46,7 +46,7 @@ describe directory("deluge::io::Directory", $ {
 
 	it("is move-only: moving leaves the source unable to double-close", _ {
 		mock_file_io_reset();
-		deluge_file_mkdir("SONGS");
+		deluge_efatfs_mkdir("SONGS");
 		auto opened = deluge::io::Directory::open("SONGS");
 		deluge::io::Directory moved = std::move(*opened);
 		auto closed = moved.close();
@@ -55,7 +55,7 @@ describe directory("deluge::io::Directory", $ {
 
 	it("propagates size through Directory::read", _ {
 		mock_file_io_reset();
-		deluge_file_mkdir("SONGS");
+		deluge_efatfs_mkdir("SONGS");
 		auto f = deluge::io::File::open("SONGS/big.wav", DELUGE_FILE_WRITE_CREATE);
 		std::byte buf[10]{};
 		(void)f->write(buf);

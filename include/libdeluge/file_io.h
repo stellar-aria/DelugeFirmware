@@ -48,39 +48,14 @@ typedef struct DelugeDir DelugeDir;
 /// terminator (FAT LFN max is 255 characters).
 #define DELUGE_MAX_FILENAME 256
 
-/// @brief Mode a file is opened in via deluge_file_open.
+/// @brief Mode a file is opened in via deluge_efatfs_file_open.
 typedef enum DelugeFileOpenMode : uint8_t {
 	DELUGE_FILE_READ,             ///< open an existing file for reading
 	DELUGE_FILE_WRITE_CREATE,     ///< create the file, truncating if it exists
 	DELUGE_FILE_WRITE_CREATE_NEW, ///< create the file; fails with DELUGE_ERR_EXISTS if it already exists
 } DelugeFileOpenMode;
 
-/// Set a file or directory's last-modified timestamp. [task]
-DelugeStatus deluge_file_set_time(const char* path, DelugeTimestamp timestamp);
-
-/// Open `path`. On success, `*out` is a handle the caller must eventually
-/// pass to `deluge_file_close`. [task]
-DelugeStatus deluge_file_open(const char* path, DelugeFileOpenMode mode, DelugeFile** out);
-
-/// Read up to `count` bytes into `dst`. `*out_read` is the number of bytes
-/// actually read (may be less than `count` at end of file). [task]
-DelugeStatus deluge_file_read(DelugeFile* file, void* dst, uint32_t count, uint32_t* out_read);
-
-/// Write `count` bytes from `src`. `*out_written` is the number of bytes
-/// actually written. [task]
-DelugeStatus deluge_file_write(DelugeFile* file, const void* src, uint32_t count, uint32_t* out_written);
-
-/// Move the file position to an absolute byte offset. [task]
-DelugeStatus deluge_file_seek(DelugeFile* file, uint32_t offset);
-
-/// Total size of the file, in bytes. [task]
-DelugeStatus deluge_file_size(DelugeFile* file, uint32_t* out_size);
-
-/// Close a file opened with `deluge_file_open`. `file` is invalid after this
-/// call regardless of the returned status. [task]
-DelugeStatus deluge_file_close(DelugeFile* file);
-
-/// One directory entry returned by `deluge_dir_read`.
+/// One directory entry returned by `deluge_efatfs_dir_read`.
 typedef struct DelugeDirEntry {
 	char name[DELUGE_MAX_FILENAME];
 	bool is_directory;
@@ -92,27 +67,6 @@ typedef struct DelugeDirEntry {
 	bool is_archive;
 } DelugeDirEntry;
 
-/// Open `path` as a directory for iteration. [task]
-DelugeStatus deluge_dir_open(const char* path, DelugeDir** out);
-
-/// Read the next directory entry. If there are no more entries,
-/// `*out_has_entry` is set to `false` and the call still returns
-/// `DELUGE_OK` (end of directory is not an error). [task]
-DelugeStatus deluge_dir_read(DelugeDir* dir, DelugeDirEntry* out, bool* out_has_entry);
-
-/// Close a directory opened with `deluge_dir_open`. [task]
-DelugeStatus deluge_dir_close(DelugeDir* dir);
-
-/// Create a directory. Returns `DELUGE_ERR_EXISTS` if `path` already exists
-/// (matches the existing app idiom of treating that as non-fatal). [task]
-DelugeStatus deluge_file_mkdir(const char* path);
-
-/// Delete a file or empty directory. [task]
-DelugeStatus deluge_file_unlink(const char* path);
-
-/// Rename/move a file or directory. [task]
-DelugeStatus deluge_file_rename(const char* old_path, const char* new_path);
-
 /// Invalidates any internal caching this boundary maintains for directory
 /// contents. Call this after performing a filesystem write through some
 /// mechanism OTHER than this boundary's own write functions (mkdir/unlink/
@@ -123,21 +77,20 @@ DelugeStatus deluge_file_rename(const char* old_path, const char* new_path);
 void deluge_file_invalidate_cache(void);
 
 /// The embedded-fatfs (Rust `efatfs_streaming`) task-context file/directory
-/// C-ABI. `deluge::io::File`/`Directory` (file.cpp) route to these instead of
-/// the `deluge_file_*`/`deluge_dir_*` functions above unconditionally; every
-/// non-efatfs BSP/config links the `__attribute__((weak))` fallback in
-/// `async_fill.cpp` (always false/no-op), so these symbols always link
-/// regardless of backend. Implemented in `efatfs_fs.rs` (device) /
-/// `efatfs_host_shim.rs` (host), both composing the storage-generic
-/// `efatfs_core` primitives -- see those files' doc comments for the handle-
-/// table/locking discipline. Every handle-taking function's handle is an
-/// opaque `u32` boxed into the corresponding `DelugeFile*`/`DelugeDir*`
-/// pointer (cast, not dereferenced), the same convention the streaming
-/// handle uses.
+/// C-ABI. `deluge::io::File`/`Directory` (file.cpp) route to these
+/// unconditionally; every non-efatfs BSP/config links the
+/// `__attribute__((weak))` fallback in `async_fill.cpp` (always false/no-op),
+/// so these symbols always link regardless of backend. Implemented in
+/// `efatfs_fs.rs` (device) / `efatfs_host_shim.rs` (host), both composing the
+/// storage-generic `efatfs_core` primitives -- see those files' doc comments
+/// for the handle-table/locking discipline. Every handle-taking function's
+/// handle is an opaque `u32` boxed into the corresponding
+/// `DelugeFile*`/`DelugeDir*` pointer (cast, not dereferenced), the same
+/// convention the streaming handle uses.
 ///
-/// Unlike `deluge_file_*`, these are `bool` (not `DelugeStatus`): the Rust side
-/// has no notion of `DelugeStatus`'s finer-grained error codes, only
-/// success/failure. `file.cpp` maps `false` to `Status::ERR`.
+/// These are `bool` (not `DelugeStatus`): the Rust side has no notion of
+/// `DelugeStatus`'s finer-grained error codes, only success/failure.
+/// `file.cpp` maps `false` to `Status::ERR`.
 
 /// @brief Open a task-context file.
 ///
@@ -249,7 +202,7 @@ bool deluge_efatfs_dir_open(const char* path, uint32_t* out_handle);
 /// @brief Read the next directory entry's fields into the caller's out-params
 ///        (mirrors `DelugeDirEntry`'s fields). If there are no more entries,
 ///        `*out_has_entry` is set to `false` and the call still returns `true`
-///        (end of directory is not an error, matching deluge_dir_read). An
+///        (end of directory is not an error). An
 ///        entry whose name doesn't fit in DELUGE_MAX_FILENAME bytes
 ///        (including the NUL) is skipped internally -- never truncated into
 ///        `out_name` -- so this never fails the whole enumeration over one

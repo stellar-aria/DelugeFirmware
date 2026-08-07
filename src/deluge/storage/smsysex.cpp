@@ -61,7 +61,9 @@ namespace {
 // Status::NOT_FOUND can't distinguish the original FR_NO_FILE from FR_NO_PATH (both already
 // collapsed into DELUGE_ERR_NOT_FOUND at the boundary's original design); this always
 // produces NoFile. Status::UNSUPPORTED has no real FRESULT analog; InvalidParameter is the
-// closest fit.
+// closest fit. Status::NOT_EMPTY maps onto the original FRESULT's own FR_DENIED (7, already
+// FsWireStatus::Denied above) — FatFS used that same code for "the target directory is not
+// empty", so this isn't a new wire value, just a second Status producing an existing one.
 FsWireStatus toWireStatus(deluge::io::Status status) {
 	switch (status) {
 	case deluge::io::Status::OK:
@@ -90,6 +92,8 @@ FsWireStatus toWireStatus(deluge::io::Status status) {
 		return FsWireStatus::WriteProtected;
 	case deluge::io::Status::NO_MEMORY:
 		return FsWireStatus::NotEnoughCore;
+	case deluge::io::Status::NOT_EMPTY:
+		return FsWireStatus::Denied;
 	}
 	return FsWireStatus::DiskErr; // unreachable while the switch above stays exhaustive
 }

@@ -75,6 +75,7 @@ use embassy_time::Duration;
 use embassy_time_driver::Driver as _;
 
 mod clock;
+mod preempt;
 
 // Link-only: the host-built C++ `deluge_app` object closure (build.rs) calls the
 // deluge_resource_* residency C ABI and the deluge_{alloc,slab_*,heap_*}
@@ -145,6 +146,8 @@ mod sd;
 mod sd_image;
 #[path = "../../src/services.rs"]
 mod services;
+#[path = "../../src/sim_block.rs"]
+mod sim_block;
 /// Mirrors `../../src/main.rs`'s `mod streaming_loader` — the
 /// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
 /// symbols (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
@@ -259,13 +262,12 @@ async fn scenario_runner(cfg: scenario::ScenarioConfig, done: &'static AtomicBoo
 
 static RESULT: std::sync::Mutex<Option<scenario::ScenarioResult>> = std::sync::Mutex::new(None);
 
-/// Our own pender: no thread, no parking — just a flag the driver loop polls
-/// itself between `raw::Executor::poll()` calls.
-static PENDED: AtomicBool = AtomicBool::new(false);
-
+/// Our own pender: no thread, no parking — just flags the driver loop polls itself between
+/// `raw::Executor::poll()` calls. Routes by the context pointer each executor was created
+/// with, so MAIN and HP pends stay distinguishable (see `preempt`).
 #[unsafe(export_name = "__pender")]
-fn pender(_context: *mut ()) {
-    PENDED.store(true, Ordering::SeqCst);
+fn pender(context: *mut ()) {
+    preempt::note_pend(context);
 }
 
 fn main() {
@@ -387,12 +389,19 @@ fn main() {
     // "compute-budget" knob).
     scheduler::set_audio_period_override_us(audio_block_us, 0);
 
-    // SAFETY: `raw::Executor` needs `&'static`; leaking a Box is the standard
-    // pattern for a `fn main` that doesn't itself run forever
-    // (`embassy_executor::Executor::run`'s own doc uses the same pattern).
+    // SAFETY: `raw::Executor` needs `&'static`; leaking a Box is the standard pattern for a
+    // `fn main` that doesn't itself run forever (`embassy_executor::Executor::run`'s own doc
+    // uses the same pattern).
     let executor: &'static raw::Executor =
-        Box::leak(Box::new(raw::Executor::new(std::ptr::null_mut())));
+        Box::leak(Box::new(raw::Executor::new(preempt::MAIN_TAG as *mut ())));
+    // HP_EXEC: the host emulation of the device's preemptive interrupt executor. Phase 0
+    // hosts only `sim_latency::pump` here — the task a non-yielding spin must be able to
+    // drive. R5a Phase 1 additionally moves `streaming_fill_task` onto it.
+    let hp_executor: &'static raw::Executor =
+        Box::leak(Box::new(raw::Executor::new(preempt::HP_TAG as *mut ())));
+    preempt::init(hp_executor);
     let spawner = executor.spawner();
+    let hp_spawner = hp_executor.spawner();
     scheduler::set_spawner(spawner);
 
     // Same BSP task set `deluge-bsp-rust`'s host_app boot block spawns (minus
@@ -403,7 +412,10 @@ fn main() {
     spawner.spawn(control::pad_render().unwrap());
     spawner.spawn(control::encoder_wake_pump().unwrap());
     spawner.spawn(display::oled_render().unwrap());
-    spawner.spawn(sd::sim_latency::pump().unwrap());
+    // On HP_EXEC, not the main executor: a non-yielding `sim_block::block_on` must be able
+    // to drive this task to completion, and it cannot re-enter the executor it is running
+    // on. See `preempt`'s module doc.
+    hp_spawner.spawn(sd::sim_latency::pump().unwrap());
     spawner.spawn(boot_task().unwrap());
     // The async cluster-fill task, on the SAME executor `boot_task`'s
     // worker-fiber pump loop and the C++ enqueue path run on (this binary has
@@ -523,7 +535,7 @@ fn main() {
     let mut advances = 0u64;
     loop {
         loop {
-            PENDED.store(false, Ordering::SeqCst);
+            preempt::clear_main_pended();
             // SAFETY: single-threaded, never called reentrantly.
             unsafe { executor.poll() };
             quiescence_passes += 1;
@@ -557,7 +569,9 @@ fn main() {
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 hard_exit(2);
             }
-            if !PENDED.load(Ordering::SeqCst) {
+            // Give HP_EXEC a turn too, so it reaches quiescence alongside MAIN.
+            let hp_did_work = preempt::pump_hp();
+            if !preempt::main_pended() && !hp_did_work {
                 break;
             }
         }

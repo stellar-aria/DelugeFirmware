@@ -27,6 +27,7 @@ enum class Status {
 	NO_FILESYSTEM,
 	WRITE_PROTECTED,
 	NO_MEMORY,
+	NOT_EMPTY,
 };
 
 Status to_status(DelugeStatus status);

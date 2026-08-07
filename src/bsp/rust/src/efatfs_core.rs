@@ -40,6 +40,22 @@ use embedded_fatfs::{
 // drive the fill loop / absolute seek below.
 use embedded_io_async::{Read as _, Seek as _, SeekFrom, Write as _};
 
+// `crate::sys` is always the real bindgen output (from `include/libdeluge/*.h`)
+// wherever this module is compiled: either `target_os = "none"` (device) or
+// `feature = "host_app"` (host, C++ app linked in) -- see main.rs's `mod sys`
+// cfg gates and this module's own `mod efatfs_core` gate. So, unlike modules
+// compiled on a plain (non-`host_app`) host build, there's no hand-mirrored
+// `sys_host` stand-in to keep in sync here.
+use crate::sys::{
+    DelugeStatus, DelugeStatus_DELUGE_ERR_EXISTS as DELUGE_ERR_EXISTS,
+    DelugeStatus_DELUGE_ERR_IO as DELUGE_ERR_IO,
+    DelugeStatus_DELUGE_ERR_NO_FILESYSTEM as DELUGE_ERR_NO_FILESYSTEM,
+    DelugeStatus_DELUGE_ERR_NO_SPACE as DELUGE_ERR_NO_SPACE,
+    DelugeStatus_DELUGE_ERR_NOT_EMPTY as DELUGE_ERR_NOT_EMPTY,
+    DelugeStatus_DELUGE_ERR_NOT_FOUND as DELUGE_ERR_NOT_FOUND,
+    DelugeStatus_DELUGE_ERR_PARAM as DELUGE_ERR_PARAM,
+};
+
 /// Max concurrent streamed-READ files (the [`HANDLES`](crate::efatfs_fs)
 /// table). One resident [`Sample`](crate) holds one of these for its whole
 /// lifetime (see `SampleStream::open_read_stream`), so this bounds how many
@@ -972,5 +988,28 @@ impl DirHandleTable {
         if let Some(slot) = self.slots.get_mut(handle as usize) {
             slot.cursor = None;
         }
+    }
+}
+
+/// Map an embedded-fatfs `Error` to the C-ABI `DelugeStatus` so the efatfs
+/// wrappers can report granular NOT_FOUND/EXISTS/NOT_EMPTY/NO_SPACE instead of
+/// a bare bool. (Unused until the wrappers are converted in a later task.)
+pub fn error_to_status<E>(err: &embedded_fatfs::Error<E>) -> DelugeStatus {
+    use embedded_fatfs::Error;
+    match err {
+        Error::NotFound => DELUGE_ERR_NOT_FOUND,
+        Error::AlreadyExists => DELUGE_ERR_EXISTS,
+        Error::DirectoryIsNotEmpty => DELUGE_ERR_NOT_EMPTY,
+        Error::NotEnoughSpace => DELUGE_ERR_NO_SPACE,
+        Error::CorruptedFileSystem => DELUGE_ERR_NO_FILESYSTEM,
+        Error::InvalidInput
+        | Error::InvalidFileNameLength
+        | Error::UnsupportedFileNameCharacter => DELUGE_ERR_PARAM,
+        Error::Io(_) => DELUGE_ERR_IO,
+        // `Error<T>` is `#[non_exhaustive]` and also carries `UnexpectedEof`/
+        // `WriteZero` (embedded_io_async read/write plumbing, not a granular
+        // FS-op failure) -- collapse those, and any future variant, to a
+        // generic I/O error.
+        _ => DELUGE_ERR_IO,
     }
 }

@@ -85,6 +85,8 @@ Status to_status(DelugeStatus status) {
 		return Status::WRITE_PROTECTED;
 	case DELUGE_ERR_NO_MEMORY:
 		return Status::NO_MEMORY;
+	case DELUGE_ERR_NOT_EMPTY:
+		return Status::NOT_EMPTY;
 	}
 	return Status::ERR; // unreachable while the switch above stays exhaustive
 }
@@ -119,6 +121,8 @@ DelugeStatus to_deluge_status(Status status) {
 		return DELUGE_ERR_WRITE_PROTECTED;
 	case Status::NO_MEMORY:
 		return DELUGE_ERR_NO_MEMORY;
+	case Status::NOT_EMPTY:
+		return DELUGE_ERR_NOT_EMPTY;
 	}
 	return DELUGE_ERR; // unreachable while the switch above stays exhaustive
 }

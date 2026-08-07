@@ -44,6 +44,7 @@ typedef enum DelugeStatus : int8_t {
 	DELUGE_ERR_NO_FILESYSTEM = -11,   ///< media present but has no valid filesystem
 	DELUGE_ERR_WRITE_PROTECTED = -12, ///< media is read-only / locked
 	DELUGE_ERR_NO_MEMORY = -13,       ///< RAM allocation failed (distinct from NO_SPACE, which is storage/disk space)
+	DELUGE_ERR_NOT_EMPTY = -14,       ///< directory not empty
 } DelugeStatus;
 
 /// A portable, timezone-free timestamp — matches FAT DOS date/time's own

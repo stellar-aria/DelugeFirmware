@@ -18,9 +18,8 @@ public:
 	Stream& operator=(Stream&& other) noexcept {
 		if (this != &other) {
 			if (handle_) {
-				// Route through close() (not deluge_stream_close directly) so the efatfs/C-FatFS
-				// backend selector lives in exactly one place -- see stream.cpp's close(). Calling
-				// deluge_stream_close directly on an efatfs-boxed handle would be a backend mismatch.
+				// Route through close() rather than the raw C-ABI so the handle teardown
+				// lives in exactly one place -- see stream.cpp's close().
 				(void)close();
 			}
 			handle_ = other.handle_;

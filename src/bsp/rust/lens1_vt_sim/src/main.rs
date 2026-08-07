@@ -291,6 +291,37 @@ async fn nested_selftest_task(done: &'static AtomicBool) {
 static NESTED_SELFTEST_RESULT: std::sync::Mutex<Option<Result<(), String>>> =
     std::sync::Mutex::new(None);
 
+/// Exists ONLY to arm a real, embassy-registered `Timer` on MAIN with a deadline strictly
+/// inside `--selftest-block-nested`'s spin window (100us, vs. the modeled read's own
+/// 525us at the default throughput/overhead) — see that mode's block in `main`. Without
+/// this, that mode's only outstanding timer belongs to `sim_latency::pump` on `HP_EXEC`, so
+/// `advance_to`'s pop-and-wake can only ever touch an HP waker — the brief's named hazard
+/// ("if `advance_to` wakes a MAIN timer while a MAIN task's future is `&mut`-borrowed by
+/// the outer `executor.poll()`, the resulting interleaving is untested") would go
+/// completely unexercised.
+///
+/// This task's `Timer::after` deadline (100us) fires from INSIDE `nested_selftest_task`'s
+/// own non-yielding spin — `advance_to(driver, 100)`, called from `progress_hook` deep in
+/// that spin, pops-and-wakes it, which re-enqueues THIS task onto MAIN's real embassy run
+/// queue via the genuine waker/`__pender` path, while that same run queue is already being
+/// iterated (for `nested_selftest_task`) by the `executor.poll()` call this wake reenters.
+/// Spawn ORDER matters for this to land inside the spin rather than before it:
+/// `embassy_executor::raw`'s run queue is a LIFO stack (see its own `run_queue.rs` doc,
+/// "batches will be iterated in reverse order as they were enqueued"), and a single
+/// `executor.poll()` call drains the WHOLE queue in one batch — so this task must be
+/// spawned AFTER `nested_selftest_task` (making it the most-recently-pushed, hence
+/// FIRST-polled of the two) so its `Timer::after` is armed before `nested_selftest_task`'s
+/// poll begins its long non-yielding run and blocks the rest of that same `poll()` batch.
+///
+/// Never resumed after that one wake: this mode's driver loop exits as soon as
+/// `nested_selftest_task` completes (same `executor.poll()` batch or very next one), so
+/// this task's second poll — which would just observe `Ready` and return — is never
+/// reached. That's fine: arming the timer and taking the one wake is the entire point.
+#[embassy_executor::task]
+async fn nested_selftest_timer_task() {
+    embassy_time::Timer::after(embassy_time::Duration::from_micros(100)).await;
+}
+
 /// Our own pender: no thread, no parking — just flags the driver loop polls itself between
 /// `raw::Executor::poll()` calls. Routes by the context pointer each executor was created
 /// with, so MAIN and HP pends stay distinguishable (see `preempt`).
@@ -491,11 +522,20 @@ fn main() {
     // `--selftest-block-nested` (below) needs this before anything else is spawned: that
     // mode deliberately spawns NOTHING from the real app's task set below except
     // `sim_latency::pump` — the point of that mode is to isolate the nesting variable (a
-    // task's own spin, called while MAIN's `executor.poll()` is already on the stack), and
-    // `boot_task`'s own (also off-fiber, so also modeled once `off_fiber_instant` is
-    // cleared below) SD activity would otherwise race the selftest's single sector-0 read
-    // on the same `SD_BUS` lock (`sd.rs`'s `locked_read_sectors`) and could break its
-    // exact-latency assertion for a reason that has nothing to do with nesting.
+    // task's own spin, called while MAIN's `executor.poll()` is already on the stack).
+    // The decisive reason to skip `boot_task` here, not just a "cleaner measurement"
+    // preference: its mount reaches SD through the HOOKLESS `embassy_futures::block_on`
+    // (`sd.rs:47`'s import, used by `deluge_block_read`'s host body at `sd.rs:616`) rather
+    // than `sim_block::block_on` — with `off_fiber_instant(false)` (set below, required for
+    // this selftest to mean anything), nothing could ever pump `sim_latency::pump`'s
+    // `Timer` for THAT call path, so spawning `boot_task` here would not merely perturb the
+    // measurement, it would reproduce the original boot livelock outright (100% CPU,
+    // virtual clock frozen) and this mode would never reach its assertion at all. A lesser,
+    // secondary reason: even if that livelock didn't exist, `boot_task`'s own SD activity
+    // would race the selftest's single sector-0 read on the same `SD_BUS` lock (`sd.rs`'s
+    // `locked_read_sectors`) and could perturb its exact-latency assertion for a reason
+    // that has nothing to do with nesting. Do NOT "restore realism" by re-adding these
+    // spawns without addressing the hookless-`block_on` livelock first.
     let nested_selftest = std::env::args().any(|a| a == "--selftest-block-nested");
 
     // Same BSP task set `deluge-bsp-rust`'s host_app boot block spawns (minus
@@ -538,6 +578,108 @@ fn main() {
     // binding constraint is "every spin must be wedge-detectable" — see `BUDGET_TICKS`'s doc.
     let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
     BUDGET_TICKS.store(budget_ticks, Ordering::Relaxed);
+
+    // Wall-clock deadline + watchdog thread, published/spawned HERE — before EITHER
+    // selftest branch below, not just before the real driver loop further down — for the
+    // identical reason `BUDGET_TICKS` moved up (see its own comment just above):
+    // `--selftest-block-nested` runs its own driver loop (further down) that calls
+    // `unsafe { executor.poll() }` just like the real one does, and until this moved here
+    // that mode had NO wall-clock guard at all (`LENS1_WALL_TIMEOUT_S` had no effect on it)
+    // — a MAIN/HP task pair that kept re-pending on every fast poll with no clock advance
+    // and no `sim_block::block_on` spin in play would have spun at 100% CPU past this
+    // process's own wall budget, bounded only by an external `timeout`. `--selftest-block`
+    // (the non-nested mode) never calls `executor.poll()` at all, so this is harmless for
+    // it — inert until a `poll()` call actually happens.
+    let wall_start = std::time::Instant::now();
+    // Wall-clock deadline for the loop below — `wall_timeout_s` (a REAL-time
+    // budget for this whole loop), never `step_timeout_s` (a per-step VIRTUAL
+    // bound belonging to `scenario.rs`; see its doc comment above). A task
+    // pair that keeps re-pending on every `executor.poll()` never breaks out
+    // of the inner quiescence loop, so neither of that loop's sibling
+    // `hard_exit(2)` wedge paths (no outstanding timer / virtual budget
+    // exceeded) is ever reached — this bounds REAL time spent stuck there
+    // instead.
+    let wall_deadline = wall_start + std::time::Duration::from_secs(wall_timeout_s);
+    // `QUIESCENCE_PASSES`/`ADVANCES`/`VIRTUAL_NOW_US`/`NEXT_DEADLINE_US`/`TIMELINE_HASH`
+    // (module-level, above `main`) mirror loop state for the watchdog thread spawned just
+    // below: it must never touch `driver` (see that thread's doc comment) or this function's
+    // stack locals, only plain `'static` atomics.
+    // Set right after the real driver loop (further down) breaks on success, or right
+    // before either selftest branch's own `hard_exit`, before anything that could itself
+    // run long (the `RESULT` lock, final logging, `hard_exit(0)`). Without this the
+    // watchdog is unconditional: on a HEALTHY run whose total wall time (booting +
+    // simulating + this post-loop tail) happens to reach `wall_timeout_s`, it fires anyway
+    // and reports a wedge that never happened — observed as a real failure mode of
+    // `sweep.sh`'s longer fixtures before this flag was added (see the report for this fix
+    // round). In practice neither selftest branch below needs to touch it explicitly: both
+    // reach their own `hard_exit` within microseconds of virtual/wall time of entering this
+    // function, so there is no realistic path to `wall_deadline` before they exit.
+    static DISARMED: AtomicBool = AtomicBool::new(false);
+    // A second, independent OS thread that unconditionally fires at
+    // `wall_deadline` (unless disarmed) REGARDLESS of whether the main thread
+    // ever returns to the in-loop check further down. Necessary, not just defensive:
+    // this harness's own module doc (top of file, "The boot livelock") already
+    // documents that a single `executor.poll()` call can itself never return —
+    // `embassy_futures::block_on`'s poll loop has no waker use and no deadline
+    // check of its own — in which case control never comes back to increment
+    // `quiescence_passes` at all, and the in-loop check can never run.
+    // Confirmed directly on the `cordae` fixture while building this guard: an
+    // instrumented build showed `quiescence_passes` stall for good partway
+    // through startup (a few hundred microseconds of wall time in, deep inside
+    // `executor.poll()`) while the process kept burning ~100% CPU — i.e. stuck
+    // inside one non-yielding call, not spinning across many fast ones. See
+    // the report for the full readout and hypothesis.
+    //
+    // Deliberately reads ONLY the atomics above, never `driver.now()` /
+    // `driver.peek_next_deadline()`: both go through
+    // `critical_section::with`, i.e. a blocking `Mutex::lock()` whose
+    // reentrancy allowance is a THREAD-LOCAL flag — safe for the main thread
+    // to re-enter its own critical section, but a genuine cross-thread lock
+    // for this watchdog thread. If a future wedge ever spun *inside* that
+    // critical section (or suspended a fiber while holding it), this thread
+    // would block on `lock()` forever and the guard would silently fail
+    // (unbounded hang again). Today's `cordae` wedge happens not to hold that
+    // lock — which is why a driver-call version of this watchdog "worked" in
+    // an earlier fix round — but that was luck, not a property of the design.
+    // `peek_next_deadline()` specifically also mutates the timer queue it
+    // reports on (`clock.rs`'s `next_expiration` pops-and-wakes anything
+    // already due), so a cross-thread caller would race the executor and can
+    // destroy the very evidence — an already-due, never-polled timer — that
+    // this diagnostic exists to surface.
+    std::thread::spawn(move || {
+        std::thread::sleep(wall_deadline.saturating_duration_since(std::time::Instant::now()));
+        if DISARMED.load(Ordering::Acquire) {
+            return;
+        }
+        // `println!`, not `log::error!`: a release build is built with
+        // `log/release_max_level_off` (additive across `rza1l-hal`/
+        // `deluge-bsp`), which compiles out `log::` macro bodies entirely —
+        // exactly the build that hangs. Reuses the same field set as the
+        // periodic progress log and the in-loop check below so all three
+        // diagnostics stay comparable (`next_deadline`'s `u64::MAX` sentinel
+        // prints as a large number rather than `None`/`Some(..)` here, since
+        // it comes from a plain atomic rather than `Option<u64>`).
+        println!(
+            "lens1-vt-sim: WEDGED (watchdog) — wall-clock wall timeout ({wall_timeout_s}s) \
+             exceeded; the main thread never returned to its own in-loop check (see report for \
+             why): virtual t={}us quiescence_passes={} advances={} next_deadline={} \
+             on_fiber_reads={} on_fiber_writes={} timeline_hash={}",
+            VIRTUAL_NOW_US.load(Ordering::Relaxed),
+            QUIESCENCE_PASSES.load(Ordering::Relaxed),
+            ADVANCES.load(Ordering::Relaxed),
+            NEXT_DEADLINE_US.load(Ordering::Relaxed),
+            sd::stats::on_fiber_reads(),
+            sd::stats::on_fiber_writes(),
+            TIMELINE_HASH.load(Ordering::Relaxed),
+        );
+        // Belt-and-suspenders against the two `hard_exit` call sites racing
+        // each other's `exit_group` on the success path (see `DISARMED`'s
+        // doc comment): `hard_exit` below already flushes both streams
+        // itself, but flushing here too means this thread's diagnostic is on
+        // its way to the OS before it does anything else.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        hard_exit(2);
+    });
 
     // Phase 0's load-bearing proof (Task 3): a modeled SD read driven by a NON-YIELDING
     // `sim_block::block_on`, completing because `preempt::progress_hook` pumps `HP_EXEC`
@@ -610,6 +752,10 @@ fn main() {
 
         static NESTED_DONE: AtomicBool = AtomicBool::new(false);
         spawner.spawn(nested_selftest_task(&NESTED_DONE).unwrap());
+        // Spawned SECOND, deliberately — see [`nested_selftest_timer_task`]'s doc comment
+        // for why this order (not the reverse) is what lands its `Timer::after` inside
+        // `nested_selftest_task`'s spin window rather than before it starts.
+        spawner.spawn(nested_selftest_timer_task().unwrap());
 
         let driver = clock::PeekableMockDriver::get();
         loop {
@@ -675,97 +821,10 @@ fn main() {
 
     // --- Discrete-event driver loop -----------------------------------------
     let driver = clock::PeekableMockDriver::get();
-    // `BUDGET_TICKS` is already published (see above, before the `--selftest-block`
-    // branch) — both call sites of `advance_to` (the loop below and
-    // `preempt::progress_hook`) have had a real ceiling in effect from before anything
-    // was ever spawned or polled.
-    let wall_start = std::time::Instant::now();
-    // Wall-clock deadline for the loop below — `wall_timeout_s` (a REAL-time
-    // budget for this whole loop), never `step_timeout_s` (a per-step VIRTUAL
-    // bound belonging to `scenario.rs`; see its doc comment above). A task
-    // pair that keeps re-pending on every `executor.poll()` never breaks out
-    // of the inner quiescence loop, so neither of that loop's sibling
-    // `hard_exit(2)` wedge paths (no outstanding timer / virtual budget
-    // exceeded) is ever reached — this bounds REAL time spent stuck there
-    // instead.
-    let wall_deadline = wall_start + std::time::Duration::from_secs(wall_timeout_s);
-    // `QUIESCENCE_PASSES`/`ADVANCES`/`VIRTUAL_NOW_US`/`NEXT_DEADLINE_US`/`TIMELINE_HASH`
-    // (module-level, above `main`) mirror loop state for the watchdog thread spawned just
-    // below: it must never touch `driver` (see that thread's doc comment) or this function's
-    // stack locals, only plain `'static` atomics.
-    // Set right after the loop below breaks on success, before anything that
-    // could itself run long (the `RESULT` lock, final logging, `hard_exit(0)`).
-    // Without this the watchdog is unconditional: on a HEALTHY run whose
-    // total wall time (booting + simulating + this post-loop tail) happens to
-    // reach `wall_timeout_s`, it fires anyway and reports a wedge that never
-    // happened — observed as a real failure mode of `sweep.sh`'s longer
-    // fixtures before this flag was added (see the report for this fix round).
-    static DISARMED: AtomicBool = AtomicBool::new(false);
-    // A second, independent OS thread that unconditionally fires at
-    // `wall_deadline` (unless disarmed) REGARDLESS of whether the main thread
-    // ever returns to the in-loop check below. Necessary, not just defensive:
-    // this harness's own module doc (top of file, "The boot livelock") already
-    // documents that a single `executor.poll()` call can itself never return —
-    // `embassy_futures::block_on`'s poll loop has no waker use and no deadline
-    // check of its own — in which case control never comes back to increment
-    // `quiescence_passes` at all, and the in-loop check can never run.
-    // Confirmed directly on the `cordae` fixture while building this guard: an
-    // instrumented build showed `quiescence_passes` stall for good partway
-    // through startup (a few hundred microseconds of wall time in, deep inside
-    // `executor.poll()`) while the process kept burning ~100% CPU — i.e. stuck
-    // inside one non-yielding call, not spinning across many fast ones. See
-    // the report for the full readout and hypothesis.
-    //
-    // Deliberately reads ONLY the atomics above, never `driver.now()` /
-    // `driver.peek_next_deadline()`: both go through
-    // `critical_section::with`, i.e. a blocking `Mutex::lock()` whose
-    // reentrancy allowance is a THREAD-LOCAL flag — safe for the main thread
-    // to re-enter its own critical section, but a genuine cross-thread lock
-    // for this watchdog thread. If a future wedge ever spun *inside* that
-    // critical section (or suspended a fiber while holding it), this thread
-    // would block on `lock()` forever and the guard would silently fail
-    // (unbounded hang again). Today's `cordae` wedge happens not to hold that
-    // lock — which is why a driver-call version of this watchdog "worked" in
-    // an earlier fix round — but that was luck, not a property of the design.
-    // `peek_next_deadline()` specifically also mutates the timer queue it
-    // reports on (`clock.rs`'s `next_expiration` pops-and-wakes anything
-    // already due), so a cross-thread caller would race the executor and can
-    // destroy the very evidence — an already-due, never-polled timer — that
-    // this diagnostic exists to surface.
-    std::thread::spawn(move || {
-        std::thread::sleep(wall_deadline.saturating_duration_since(std::time::Instant::now()));
-        if DISARMED.load(Ordering::Acquire) {
-            return;
-        }
-        // `println!`, not `log::error!`: a release build is built with
-        // `log/release_max_level_off` (additive across `rza1l-hal`/
-        // `deluge-bsp`), which compiles out `log::` macro bodies entirely —
-        // exactly the build that hangs. Reuses the same field set as the
-        // periodic progress log and the in-loop check below so all three
-        // diagnostics stay comparable (`next_deadline`'s `u64::MAX` sentinel
-        // prints as a large number rather than `None`/`Some(..)` here, since
-        // it comes from a plain atomic rather than `Option<u64>`).
-        println!(
-            "lens1-vt-sim: WEDGED (watchdog) — wall-clock wall timeout ({wall_timeout_s}s) \
-             exceeded; the main thread never returned to its own in-loop check (see report for \
-             why): virtual t={}us quiescence_passes={} advances={} next_deadline={} \
-             on_fiber_reads={} on_fiber_writes={} timeline_hash={}",
-            VIRTUAL_NOW_US.load(Ordering::Relaxed),
-            QUIESCENCE_PASSES.load(Ordering::Relaxed),
-            ADVANCES.load(Ordering::Relaxed),
-            NEXT_DEADLINE_US.load(Ordering::Relaxed),
-            sd::stats::on_fiber_reads(),
-            sd::stats::on_fiber_writes(),
-            TIMELINE_HASH.load(Ordering::Relaxed),
-        );
-        // Belt-and-suspenders against the two `hard_exit` call sites racing
-        // each other's `exit_group` on the success path (see `DISARMED`'s
-        // doc comment): `hard_exit` below already flushes both streams
-        // itself, but flushing here too means this thread's diagnostic is on
-        // its way to the OS before it does anything else.
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        hard_exit(2);
-    });
+    // `BUDGET_TICKS` AND the wall-clock watchdog thread are both already live (see above,
+    // before either selftest branch) — both call sites of `advance_to` (the loop below and
+    // `preempt::progress_hook`) have had a real ceiling in effect, and the watchdog has been
+    // running, from before anything was ever spawned or polled.
     // `quiescence_passes` stays a plain local: only this loop ever increments it (unaffected
     // by `preempt::progress_hook`), so mirroring it into `QUIESCENCE_PASSES` right below has
     // no drift risk. There is no equivalent local for `advances` — `progress_hook` can ALSO

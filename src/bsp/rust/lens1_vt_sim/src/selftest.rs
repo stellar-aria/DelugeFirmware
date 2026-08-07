@@ -51,8 +51,11 @@ use crate::{sd, sim_block};
 ///
 /// Shared by both [`block_on_modeled_read`] and [`block_on_modeled_read_nested`] — see this
 /// module's doc comment — so the two modes cannot drift apart on anything but the calling
-/// context.
-fn read_and_assert_modeled_latency() -> Result<Duration, String> {
+/// context. Returns `(elapsed, bytes)` rather than just `elapsed` so callers can log the
+/// ACTUAL transfer size their `sim_latency::latency_for` comparison was made against,
+/// rather than a hardcoded literal that would silently go stale if this function's buffer
+/// size ever changed.
+fn read_and_assert_modeled_latency() -> Result<(Duration, usize), String> {
     let mut buf = [0u8; 512];
     let expected = sd::sim_latency::latency_for(buf.len());
     let t0 = Instant::now();
@@ -72,17 +75,17 @@ fn read_and_assert_modeled_latency() -> Result<Duration, String> {
             expected.as_micros(),
         ));
     }
-    Ok(elapsed)
+    Ok((elapsed, buf.len()))
 }
 
 /// Read one sector under a non-yielding [`sim_block::block_on`] called directly from `main`
 /// — no `executor.poll()` on the stack. See this module's doc comment.
 pub fn block_on_modeled_read() -> Result<(), String> {
-    let elapsed = read_and_assert_modeled_latency()?;
+    let (elapsed, bytes) = read_and_assert_modeled_latency()?;
     log::info!(
         "selftest: non-yielding block_on over a modeled read, called directly from `main` \
          (no executor.poll() on the stack), completed in {}us virtual time (matches \
-         sim_latency::latency_for(512) exactly)",
+         sim_latency::latency_for({bytes}) exactly)",
         elapsed.as_micros(),
     );
     Ok(())
@@ -94,11 +97,11 @@ pub fn block_on_modeled_read() -> Result<(), String> {
 /// what could break it; see `main.rs`'s `--selftest-block-nested` mode for how the caller
 /// gets this call onto that stack (a MAIN task, polled by the driver loop).
 pub fn block_on_modeled_read_nested() -> Result<(), String> {
-    let elapsed = read_and_assert_modeled_latency()?;
+    let (elapsed, bytes) = read_and_assert_modeled_latency()?;
     log::info!(
         "selftest: non-yielding block_on over a modeled read, called from INSIDE a task \
          under MAIN's executor.poll(), completed in {}us virtual time (matches \
-         sim_latency::latency_for(512) exactly)",
+         sim_latency::latency_for({bytes}) exactly)",
         elapsed.as_micros(),
     );
     Ok(())

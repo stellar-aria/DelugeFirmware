@@ -758,6 +758,12 @@ fn main() {
         spawner.spawn(nested_selftest_timer_task().unwrap());
 
         let driver = clock::PeekableMockDriver::get();
+        // Mirrors the real driver loop's own `quiescence_passes` (further down): without
+        // this, the watchdog thread spawned above reads `QUIESCENCE_PASSES` (still at its
+        // initial 0) if it ever fires during this mode, and reports `quiescence_passes=0` —
+        // indistinguishable from "never polled at all", the single most diagnostic field in
+        // the wedge report.
+        let mut quiescence_passes = 0u64;
         loop {
             loop {
                 preempt::clear_main_pended();
@@ -767,6 +773,8 @@ fn main() {
                 // `Pending` poll) all run INSIDE this `executor.poll()` call, with this
                 // task's future `&mut`-borrowed by it the whole time.
                 unsafe { executor.poll() };
+                quiescence_passes += 1;
+                QUIESCENCE_PASSES.store(quiescence_passes, Ordering::Relaxed);
                 let hp_did_work = preempt::pump_hp();
                 if !preempt::main_pended() && !hp_did_work {
                     break;

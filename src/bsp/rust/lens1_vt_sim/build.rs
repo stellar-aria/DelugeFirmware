@@ -88,18 +88,30 @@ fn main() {
     // closure. The floor is set comfortably below the current healthy count
     // (356 objects, 0 skipped, verified while fixing this) so it tolerates
     // ordinary future source deletions but not a systemic one.
+    //
+    // Unconditional — NOT gated on `!skipped.is_empty()`. An interrupted/truncated
+    // `ninja` (e.g. killed mid-build) can leave a build tree with a handful of valid
+    // objects and ZERO orphans (nothing to skip; the missing objects were never
+    // written at all, so `collect_objs` never even sees a path to reject). Gating this
+    // floor on skips existing let exactly that case sail through: 50 surviving objects,
+    // 0 skipped, archived anyway — producing the very undefined-symbol wall this guard
+    // exists to explain, with no explanation attached.
     const MIN_SURVIVING_OBJECTS: usize = 300;
-    if !skipped.is_empty() && objs.len() < MIN_SURVIVING_OBJECTS {
+    if objs.len() < MIN_SURVIVING_OBJECTS {
         panic!(
-            "lens1_vt_sim: orphan-object filter skipped {} of {} objects under {}, leaving only \
-             {} — below the sanity floor of {MIN_SURVIVING_OBJECTS}. This almost certainly means \
+            "lens1_vt_sim: only {} of {} objects under {} survived the orphan-object filter — \
+             below the sanity floor of {MIN_SURVIVING_OBJECTS}. This means one of two things: \
+             (1) {} objects were skipped as orphans, which almost certainly means \
              DELUGE_HOSTAPP_BUILD_DIR points at a build tree that doesn't match this checkout, or \
-             the filter's src/deluge-relative path derivation is wrong for this tree's layout —\
-             NOT that this many sources were legitimately deleted. Skipped objects: {:#?}",
-            skipped.len(),
+             the filter's src/deluge-relative path derivation is wrong for this tree's layout; or \
+             (2) few/no objects were skipped but the build tree itself is truncated or incomplete \
+             (e.g. an interrupted `ninja`), so most objects were never produced in the first place. \
+             Either way this is NOT a case of that many sources being legitimately deleted. \
+             Skipped objects: {:#?}",
+            objs.len(),
             objs.len() + skipped.len(),
             app_objs_dir.display(),
-            objs.len(),
+            skipped.len(),
             skipped,
         );
     }

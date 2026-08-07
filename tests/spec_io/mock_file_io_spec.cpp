@@ -127,6 +127,102 @@ describe mock_file_io("the file_io.h mock backing", $ {
 		expect(saw_dir).to_equal(true);
 		deluge_efatfs_dir_close(d);
 	});
+
+	// Defensive specs for the generation-guarded handle table (mock_file_io.cpp's
+	// checkout/release_slot): a bad, freed, or stale handle must fail cleanly
+	// (return false) rather than abort the process. Before the handle table was
+	// generation-guarded, these calls used to `.at().value()` a freed slot and
+	// crash the whole test binary -- a passing run here, with the new cases'
+	// names actually appearing in the output, is the proof.
+
+	it("read after close fails cleanly, does not abort", _ {
+		mock_file_io_reset();
+		uint32_t h = 0;
+		expect(deluge_efatfs_file_open("a.txt", DELUGE_FILE_WRITE_CREATE, &h)).to_equal(true);
+		deluge_efatfs_file_close(h);
+
+		char buf[4] = {};
+		uint32_t read = 0;
+		expect(deluge_efatfs_file_read(h, buf, 4, &read)).to_equal(false);
+	});
+
+	it("write/seek/size after close fail cleanly, do not abort", _ {
+		mock_file_io_reset();
+		uint32_t h = 0;
+		expect(deluge_efatfs_file_open("a.txt", DELUGE_FILE_WRITE_CREATE, &h)).to_equal(true);
+		deluge_efatfs_file_close(h);
+
+		const char* msg = "x";
+		uint32_t written = 0;
+		expect(deluge_efatfs_file_write(h, msg, 1, &written)).to_equal(false);
+		expect(deluge_efatfs_file_seek(h, 0)).to_equal(false);
+		uint32_t size = 0;
+		expect(deluge_efatfs_file_size(h, &size)).to_equal(false);
+	});
+
+	it("a never-allocated handle fails cleanly, does not abort", _ {
+		mock_file_io_reset();
+		char buf[4] = {};
+		uint32_t read = 0;
+		expect(deluge_efatfs_file_read(0xDEADBEEF, buf, 4, &read)).to_equal(false);
+		uint32_t size = 0;
+		expect(deluge_efatfs_file_size(0xDEADBEEF, &size)).to_equal(false);
+
+		// A small, plausible-looking handle is equally bad: the table is empty,
+		// so any index is out of range regardless of how "reasonable" it looks.
+		expect(deluge_efatfs_file_read(0, buf, 4, &read)).to_equal(false);
+		expect(deluge_efatfs_file_size(1, &size)).to_equal(false);
+	});
+
+	it("a stale handle after slot reuse does not alias the new occupant", _ {
+		mock_file_io_reset();
+		uint32_t hA = 0;
+		expect(deluge_efatfs_file_open("a.txt", DELUGE_FILE_WRITE_CREATE, &hA)).to_equal(true);
+		const char* msgA = "AAAA";
+		uint32_t written = 0;
+		expect(deluge_efatfs_file_write(hA, msgA, 4, &written)).to_equal(true);
+		deluge_efatfs_file_close(hA);
+
+		// b.txt's open reuses a.txt's freed slot, with a bumped generation.
+		uint32_t hB = 0;
+		expect(deluge_efatfs_file_open("b.txt", DELUGE_FILE_WRITE_CREATE, &hB)).to_equal(true);
+		expect(hB).not_().to_equal(hA);
+		const char* msgB = "BBBB";
+		expect(deluge_efatfs_file_write(hB, msgB, 4, &written)).to_equal(true);
+
+		// The stale hA must fail, not silently read b.txt's bytes through the
+		// reused slot.
+		char buf[4] = {};
+		uint32_t read = 0;
+		expect(deluge_efatfs_file_read(hA, buf, 4, &read)).to_equal(false);
+
+		// hB itself is unaffected: reopened for read, it still sees its own bytes.
+		deluge_efatfs_file_close(hB);
+		uint32_t hB2 = 0;
+		expect(deluge_efatfs_file_open("b.txt", DELUGE_FILE_READ, &hB2)).to_equal(true);
+		char buf2[4] = {};
+		uint32_t read2 = 0;
+		expect(deluge_efatfs_file_read_exact(hB2, buf2, 4, &read2)).to_equal(true);
+		expect(std::string(buf2, 4)).to_equal("BBBB");
+		deluge_efatfs_file_close(hB2);
+	});
+
+	it("dir handle after close fails cleanly, does not abort", _ {
+		mock_file_io_reset();
+		deluge_efatfs_mkdir("SONGS");
+		uint32_t d = 0;
+		expect(deluge_efatfs_dir_open("SONGS", &d)).to_equal(true);
+		deluge_efatfs_dir_close(d);
+
+		char name[DELUGE_MAX_FILENAME] = {};
+		bool is_dir = false;
+		uint32_t size = 0;
+		uint32_t modified = 0;
+		uint8_t attrs = 0;
+		bool has_entry = true;
+		expect(deluge_efatfs_dir_read(d, name, DELUGE_MAX_FILENAME, &is_dir, &size, &modified, &attrs, &has_entry))
+		    .to_equal(false);
+	});
 });
 
 CPPSPEC_SPEC(mock_file_io)

@@ -305,14 +305,31 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120_000);
+    // A per-STEP VIRTUAL-time bound: `scenario.rs`'s `wait_for` compares this
+    // against the mocked `embassy_time::Instant`, not the wall clock (see its
+    // callers at `scenario.rs:165,182,194,224,233`). Do NOT also use this for
+    // any wall-clock deadline below — the two are unrelated units that happen
+    // to share a name, and conflating them (as an earlier version of this
+    // guard did) makes the driver-loop watchdog's firing time depend on this
+    // scenario-tuning knob instead of on real host speed.
     let step_timeout_s: u64 = std::env::var("LENS1_STEP_TIMEOUT_S")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
+    // A whole-process WALL-clock budget for the driver loop below (Steps 8-9 of
+    // `task-0-brief.md`) — real time, never compared against virtual time or
+    // against `step_timeout_s` above. PROVISIONAL default: 300s was picked
+    // generously because no fixture we have completes yet (`cordae` wedges),
+    // so there is no healthy run to measure a real ceiling against. Re-size
+    // this once a fixture reaches the post-loop success path.
+    let wall_timeout_s: u64 = std::env::var("LENS1_WALL_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
     log::info!(
         "lens1-vt-sim: fixture={fixture} song={song_path} target_blocks={target_blocks} \
          throughput_bps={throughput_bps} overhead_us={overhead_us} audio_block_us={audio_block_us} \
-         budget_ms={budget_ms}"
+         budget_ms={budget_ms} wall_timeout_s={wall_timeout_s}"
     );
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same tooling
@@ -411,52 +428,95 @@ fn main() {
     let driver = clock::PeekableMockDriver::get();
     let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
     let wall_start = std::time::Instant::now();
-    // Wall-clock deadline for the loop below, distinct from `budget_ticks`
-    // (VIRTUAL time — see the doc comment on `budget_ms` above): a task pair
-    // that keeps re-pending on every `executor.poll()` never breaks out of the
-    // inner quiescence loop, so neither of that loop's sibling `hard_exit(2)`
-    // wedge paths (no outstanding timer / virtual budget exceeded) is ever
-    // reached — this bounds REAL time spent stuck there instead.
-    let wall_deadline = wall_start + std::time::Duration::from_secs(step_timeout_s);
-    // Mirrors of the loop-local counters below, published for the watchdog
-    // thread spawned just below: it cannot read this function's stack
-    // locals, only `'static` state.
+    // Wall-clock deadline for the loop below — `wall_timeout_s` (a REAL-time
+    // budget for this whole loop), never `step_timeout_s` (a per-step VIRTUAL
+    // bound belonging to `scenario.rs`; see its doc comment above). A task
+    // pair that keeps re-pending on every `executor.poll()` never breaks out
+    // of the inner quiescence loop, so neither of that loop's sibling
+    // `hard_exit(2)` wedge paths (no outstanding timer / virtual budget
+    // exceeded) is ever reached — this bounds REAL time spent stuck there
+    // instead.
+    let wall_deadline = wall_start + std::time::Duration::from_secs(wall_timeout_s);
+    // Mirrors of loop state, published for the watchdog thread spawned just
+    // below: it must never touch `driver` (see that thread's doc comment) or
+    // this function's stack locals, only plain `'static` atomics.
     static QUIESCENCE_PASSES: AtomicU64 = AtomicU64::new(0);
     static ADVANCES: AtomicU64 = AtomicU64::new(0);
+    static VIRTUAL_NOW_US: AtomicU64 = AtomicU64::new(0);
+    // `u64::MAX` is the "no outstanding timer" sentinel — never a real
+    // deadline (ticks are microseconds; a scenario running that long is not
+    // a case this harness needs to represent).
+    static NEXT_DEADLINE_US: AtomicU64 = AtomicU64::new(u64::MAX);
+    // Set right after the loop below breaks on success, before anything that
+    // could itself run long (the `RESULT` lock, final logging, `hard_exit(0)`).
+    // Without this the watchdog is unconditional: on a HEALTHY run whose
+    // total wall time (booting + simulating + this post-loop tail) happens to
+    // reach `wall_timeout_s`, it fires anyway and reports a wedge that never
+    // happened — observed as a real failure mode of `sweep.sh`'s longer
+    // fixtures before this flag was added (see the report for this fix round).
+    static DISARMED: AtomicBool = AtomicBool::new(false);
     // A second, independent OS thread that unconditionally fires at
-    // `wall_deadline` REGARDLESS of whether the main thread ever returns to
-    // the in-loop check below. Necessary, not just defensive: this harness's
-    // own module doc (top of file, "The boot livelock") already documents
-    // that a single `executor.poll()` call can itself never return —
-    // `embassy_futures::block_on`'s poll loop has no waker use and no
-    // deadline check of its own — in which case control never comes back to
-    // increment `quiescence_passes` at all, and the in-loop check can never
-    // run. Confirmed directly on the `cordae` fixture while building this
-    // guard: an instrumented build showed `quiescence_passes` stall for good
-    // partway through startup (a few hundred microseconds of wall time in,
-    // deep inside `executor.poll()`) while the process kept burning ~100% CPU
-    // — i.e. stuck inside one non-yielding call, not spinning across many
-    // fast ones. See the report for the full readout and hypothesis.
+    // `wall_deadline` (unless disarmed) REGARDLESS of whether the main thread
+    // ever returns to the in-loop check below. Necessary, not just defensive:
+    // this harness's own module doc (top of file, "The boot livelock") already
+    // documents that a single `executor.poll()` call can itself never return —
+    // `embassy_futures::block_on`'s poll loop has no waker use and no deadline
+    // check of its own — in which case control never comes back to increment
+    // `quiescence_passes` at all, and the in-loop check can never run.
+    // Confirmed directly on the `cordae` fixture while building this guard: an
+    // instrumented build showed `quiescence_passes` stall for good partway
+    // through startup (a few hundred microseconds of wall time in, deep inside
+    // `executor.poll()`) while the process kept burning ~100% CPU — i.e. stuck
+    // inside one non-yielding call, not spinning across many fast ones. See
+    // the report for the full readout and hypothesis.
+    //
+    // Deliberately reads ONLY the atomics above, never `driver.now()` /
+    // `driver.peek_next_deadline()`: both go through
+    // `critical_section::with`, i.e. a blocking `Mutex::lock()` whose
+    // reentrancy allowance is a THREAD-LOCAL flag — safe for the main thread
+    // to re-enter its own critical section, but a genuine cross-thread lock
+    // for this watchdog thread. If a future wedge ever spun *inside* that
+    // critical section (or suspended a fiber while holding it), this thread
+    // would block on `lock()` forever and the guard would silently fail
+    // (unbounded hang again). Today's `cordae` wedge happens not to hold that
+    // lock — which is why a driver-call version of this watchdog "worked" in
+    // an earlier fix round — but that was luck, not a property of the design.
+    // `peek_next_deadline()` specifically also mutates the timer queue it
+    // reports on (`clock.rs`'s `next_expiration` pops-and-wakes anything
+    // already due), so a cross-thread caller would race the executor and can
+    // destroy the very evidence — an already-due, never-polled timer — that
+    // this diagnostic exists to surface.
     std::thread::spawn(move || {
         std::thread::sleep(wall_deadline.saturating_duration_since(std::time::Instant::now()));
+        if DISARMED.load(Ordering::Acquire) {
+            return;
+        }
         // `println!`, not `log::error!`: a release build is built with
         // `log/release_max_level_off` (additive across `rza1l-hal`/
         // `deluge-bsp`), which compiles out `log::` macro bodies entirely —
         // exactly the build that hangs. Reuses the same field set as the
         // periodic progress log and the in-loop check below so all three
-        // diagnostics stay comparable.
+        // diagnostics stay comparable (`next_deadline`'s `u64::MAX` sentinel
+        // prints as a large number rather than `None`/`Some(..)` here, since
+        // it comes from a plain atomic rather than `Option<u64>`).
         println!(
-            "lens1-vt-sim: WEDGED (watchdog) — wall-clock step timeout ({step_timeout_s}s) \
+            "lens1-vt-sim: WEDGED (watchdog) — wall-clock wall timeout ({wall_timeout_s}s) \
              exceeded; the main thread never returned to its own in-loop check (see report for \
-             why): virtual t={}us quiescence_passes={} advances={} next_deadline={:?} \
+             why): virtual t={}us quiescence_passes={} advances={} next_deadline={} \
              on_fiber_reads={} on_fiber_writes={}",
-            driver.now(),
+            VIRTUAL_NOW_US.load(Ordering::Relaxed),
             QUIESCENCE_PASSES.load(Ordering::Relaxed),
             ADVANCES.load(Ordering::Relaxed),
-            driver.peek_next_deadline(),
+            NEXT_DEADLINE_US.load(Ordering::Relaxed),
             sd::stats::on_fiber_reads(),
             sd::stats::on_fiber_writes(),
         );
+        // Belt-and-suspenders against the two `hard_exit` call sites racing
+        // each other's `exit_group` on the success path (see `DISARMED`'s
+        // doc comment): `hard_exit` below already flushes both streams
+        // itself, but flushing here too means this thread's diagnostic is on
+        // its way to the OS before it does anything else.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         hard_exit(2);
     });
     let mut quiescence_passes = 0u64;
@@ -476,8 +536,16 @@ fn main() {
             // the watchdog thread spawned above is for.
             if quiescence_passes.is_multiple_of(4096) && std::time::Instant::now() >= wall_deadline
             {
+                // Unlike the watchdog thread, this runs on the SAME thread as
+                // `executor.poll()`, so calling `driver.peek_next_deadline()`
+                // here cannot cross-thread-deadlock — worst case it re-enters
+                // a critical section this thread already holds. It still has
+                // the side effect documented on `clock.rs`'s
+                // `peek_next_deadline`: it pops-and-wakes any timer already
+                // due, so the value below is the deadline AFTER firing those,
+                // not a pure peek.
                 println!(
-                    "lens1-vt-sim: WEDGED — wall-clock step timeout ({step_timeout_s}s) exceeded \
+                    "lens1-vt-sim: WEDGED — wall-clock wall timeout ({wall_timeout_s}s) exceeded \
                      inside the quiescence loop (scenario not making progress): virtual \
                      t={}us quiescence_passes={quiescence_passes} advances={advances} \
                      next_deadline={:?} on_fiber_reads={} on_fiber_writes={}",
@@ -486,6 +554,7 @@ fn main() {
                     sd::stats::on_fiber_reads(),
                     sd::stats::on_fiber_writes(),
                 );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
                 hard_exit(2);
             }
             if !PENDED.load(Ordering::SeqCst) {
@@ -508,6 +577,7 @@ fn main() {
             );
             hard_exit(2);
         };
+        NEXT_DEADLINE_US.store(next, Ordering::Relaxed);
         if next > budget_ticks {
             log::error!(
                 "lens1-vt-sim: virtual-time budget ({budget_ms}ms) exhausted before the scenario \
@@ -517,6 +587,7 @@ fn main() {
         }
         let now = driver.now();
         driver.advance_ticks(next - now);
+        VIRTUAL_NOW_US.store(next, Ordering::Relaxed);
         advances += 1;
         ADVANCES.store(advances, Ordering::Relaxed);
         if advances.is_multiple_of(20_000) {
@@ -529,6 +600,10 @@ fn main() {
             );
         }
     }
+    // Disarm before anything else on the success path (the `RESULT` lock,
+    // final logging, `hard_exit(0)`) can itself take enough wall time to
+    // reach `wall_deadline` — see `DISARMED`'s doc comment above.
+    DISARMED.store(true, Ordering::Release);
     let wall_elapsed = wall_start.elapsed();
     log::info!("lens1-vt-sim: wall-clock elapsed: {wall_elapsed:?}");
 

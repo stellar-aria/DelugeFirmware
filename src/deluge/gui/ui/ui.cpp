@@ -49,6 +49,10 @@ void UI::graphicsRoutine() {
 	}
 }
 
+void UI::displayOrLanguageChanged() {
+	renderUIsForOled();
+}
+
 void UI::close() {
 	closeUI(this);
 }

@@ -85,6 +85,18 @@ const Colour defaultClipSectionColours[] = {RGB::fromHue(102), // bright light b
                                             green.forTail(),
                                             magenta.forTail()};
 
+// Manual clip launch doesn't pre-arm an outgoing active audio clip when another clip is launching on the same output;
+// doLaunch() stops it when the incoming clip takes that output. Section launch keeps the same pre-launch state for
+// active audio clips on outputs that the target section will take.
+static ArmState
+getSectionLaunchStopArmStateForActiveClip(Clip* clip, const deluge::fast_set<Output*>& outputsTakenBySectionLaunch) {
+	if (clip->type == ClipType::AUDIO && outputsTakenBySectionLaunch.contains(clip->output)) {
+		return ArmState::OFF;
+	}
+
+	return ArmState::ON_NORMAL;
+}
+
 Session::Session() {
 	cancelAllLaunchScheduling();
 	lastSectionArmed = REALLY_OUT_OF_RANGE;
@@ -1258,7 +1270,7 @@ void Session::armSectionWhenNeitherClockActive(ModelStack* modelStack, int32_t s
 	for (int32_t c = 0; c < std::ssize(modelStack->song->sessionClips); c++) {
 		Clip* clip = modelStack->song->sessionClips[c];
 
-		if (clip->section == section && !clip->activeIfNoSolo) {
+		if (clip->section == section && clip->launchStyle != LaunchStyle::FILL && !clip->activeIfNoSolo) {
 			clip->activeIfNoSolo = true;
 
 			ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
@@ -1343,7 +1355,7 @@ void Session::armClipsAlongWithExistingLaunching(ArmState armState, uint8_t sect
 	{
 		for (int l = 0; l < std::ssize(currentSong->sessionClips); l++) {
 			Clip* thisClip = currentSong->sessionClips[l];
-			if (thisClip->section == section) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL) {
 				// If we're arming a section, we know there's no soloing or armed Clips, so that's easy.
 				// Only arm if it's not playing
 				if (!thisClip->activeIfNoSolo) {
@@ -1368,7 +1380,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 	{
 		for (int c = 0; c < std::ssize(currentSong->sessionClips); c++) {
 			Clip* thisClip = currentSong->sessionClips[c];
-			if (thisClip->section == section) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL) {
 				thisClip->activeIfNoSolo = true;
 				currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip)); // Very inefficient
 			}
@@ -1417,7 +1429,8 @@ void Session::userWantsToArmClipsToStartOrSolo(uint8_t section, Clip* clip, bool
 		for (int32_t c = 0; c < std::ssize(currentSong->sessionClips); c++) {
 			Clip* thisClip = currentSong->sessionClips[c];
 
-			if (thisClip->section == section && thisClip->loopLength > longestStartingClipLength) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL
+			    && thisClip->loopLength > longestStartingClipLength) {
 				longestStartingClipLength = thisClip->loopLength;
 			}
 		}
@@ -1626,6 +1639,36 @@ void Session::armClipsToStartOrSoloWithQuantization(uint32_t pos, uint32_t quant
 	// late-start
 	else {
 		deluge::fast_set<Output*> outputsWeHavePickedAClipFor;
+		deluge::fast_set<Output*> outputsTakenBySectionLaunch;
+
+		// Look ahead before the main arming pass so active audio clips can stay unarmed if this section launch will
+		// replace them on the same output. That matches manual clip launch, where doLaunch() stops the old clip when
+		// the incoming clip takes the output.
+		for (int32_t c = std::ssize(currentSong->sessionClips) - 1; c >= 0; c--) {
+			Clip* sectionClip = currentSong->sessionClips[c];
+
+			// Clips outside the launched section are not incoming clips for this section launch.
+			if (sectionClip->section != section) {
+				continue;
+			}
+
+			// Fill clips are skipped by normal section launch, so they cannot take an output here.
+			if (sectionClip->launchStyle == LaunchStyle::FILL) {
+				continue;
+			}
+
+			// doLaunch() only records inactive armed clips as taking an output; already-active clips keep playing.
+			if (currentSong->isClipActive(sectionClip)) {
+				continue;
+			}
+
+			// doLaunch() also excludes pending overdubs that clone the output from its output-takeover list.
+			if (sectionClip->isPendingOverdub && sectionClip->willCloneOutputForOverdub()) {
+				continue;
+			}
+
+			outputsTakenBySectionLaunch.insert(sectionClip->output);
+		}
 
 		// Ok, we're going to do a big complex thing where we traverse just once (or occasionally twice) through all
 		// sessionClips. Reverse order so behaviour of this new code is the same as the old code
@@ -1659,7 +1702,10 @@ void Session::armClipsToStartOrSoloWithQuantization(uint32_t pos, uint32_t quant
 						for (int32_t d = std::ssize(currentSong->sessionClips) - 1; d > c; d--) {
 							Clip* thatClip = currentSong->sessionClips[d];
 							if (thatClip->output == output) {
-								thatClip->armState = thatClip->activeIfNoSolo ? ArmState::ON_NORMAL : ArmState::OFF;
+								thatClip->armState = thatClip->activeIfNoSolo
+								                         ? getSectionLaunchStopArmStateForActiveClip(
+								                               thatClip, outputsTakenBySectionLaunch)
+								                         : ArmState::OFF;
 							}
 						}
 
@@ -1704,7 +1750,8 @@ weWantThisClipInactive:
 
 					// If it's active, arm it to stop
 					else if (thisClip->activeIfNoSolo) {
-						thisClip->armState = ArmState::ON_NORMAL;
+						thisClip->armState =
+						    getSectionLaunchStopArmStateForActiveClip(thisClip, outputsTakenBySectionLaunch);
 					}
 
 					// Or if it's already inactive...
@@ -1740,7 +1787,8 @@ weWantThisClipInactive:
 						// If we've already picked a Clip for this same Output, we definitely don't want this one
 						// remaining active, so arm it to stop
 						if (outputsWeHavePickedAClipFor.contains(thisClip->output)) {
-							thisClip->armState = ArmState::ON_NORMAL;
+							thisClip->armState =
+							    getSectionLaunchStopArmStateForActiveClip(thisClip, outputsTakenBySectionLaunch);
 						}
 					}
 				}

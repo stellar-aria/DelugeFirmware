@@ -1900,7 +1900,9 @@ unknownTag:
 						}
 
 						if (id < kMaxNumSections) {
-							if (channel < 16 && note < 128) {
+							// channel may be a plain channel (0-15), an MPE zone (16-17), or CC-encoded
+							// (channel + IS_A_CC) — see LearnedMIDI::channelOrZone.
+							if (channel < IS_A_PC && note < 128) {
 								sections[id].launchMIDICommand.cable = cable;
 								sections[id].launchMIDICommand.channelOrZone = channel;
 								sections[id].launchMIDICommand.noteOrCC = note;
@@ -3519,6 +3521,9 @@ void Song::deleteOutput(Output* output) {
 }
 
 void Song::moveInstrumentToHibernationList(Instrument* instrument) {
+
+	// Hibernated instruments stay allocated but leave the active output list, so audio tracks must stop targeting them.
+	clearRecordingFromReferencesTo(instrument);
 
 	removeOutputFromMainList(instrument);
 

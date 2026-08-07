@@ -36,6 +36,7 @@
 #include "storage/storage_manager.h"
 #include "util/misc.h"
 #include <algorithm>
+#include <new>
 #include <strings.h>
 
 #pragma GCC diagnostic push
@@ -499,6 +500,25 @@ void writeDevicesToFile() {
 }
 
 bool successfullyReadDevicesFromFile = false; // We'll only do this one time
+
+void factoryReset(bool showPopup) {
+	if (showPopup) {
+		display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_RESET_MIDI_DEVICES));
+	}
+
+	// May give an error (e.g. no such file), but there is no real consequence from that.
+	(void)deluge::io::unlink(MIDI_DEVICES_XML);
+
+	new (&upstreamUSBMIDICable1) MIDICableUSBUpstream{0, false, true};
+	new (&upstreamUSBMIDICable2) MIDICableUSBUpstream{1, true, false};
+	new (&upstreamUSBMIDICable3) MIDICableUSBUpstream{2, false, false};
+	new (&dinMIDIPorts) MIDICableDINPorts{};
+
+	recountSmallestMPEZones();
+	anyChangesToSave = false;
+	successfullyReadDevicesFromFile = false;
+	readDevicesFromFile();
+}
 
 void readDevicesFromFile() {
 	// Owner-audit exemption: this runs once at boot, before the storage-owner worker pump is

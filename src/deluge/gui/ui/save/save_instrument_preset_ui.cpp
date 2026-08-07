@@ -91,8 +91,22 @@ bool SaveInstrumentPresetUI::opened() {
 	case OutputType::NONE:;
 	}
 
-	// not used for midi
-	filePrefix = (outputTypeToLoad == OutputType::SYNTH) ? "SYNT" : "KIT";
+	// set file prefix
+	switch (outputTypeToLoad) {
+	case OutputType::SYNTH:
+		filePrefix = "SYNT";
+		break;
+	case OutputType::KIT:
+		filePrefix = "KIT";
+		break;
+	// explicit fallthrough cases
+	case OutputType::MIDI_OUT:
+		filePrefix = "MIDI";
+		break;
+	case OutputType::CV:
+	case OutputType::AUDIO:
+	case OutputType::NONE:;
+	}
 
 	// The listing dispatches asynchronously; return optimistically here. onBrowserOpened() runs
 	// the blinkLed tail once the listing succeeds. Failure goes through the base
@@ -111,11 +125,21 @@ bool SaveInstrumentPresetUI::opened() {
 }
 
 void SaveInstrumentPresetUI::onBrowserOpened() {
-	if (outputTypeToLoad == OutputType::SYNTH) {
+	// blink led of the type of instrument we're saving
+	switch (outputTypeToLoad) {
+	case OutputType::SYNTH:
 		indicator_leds::blinkLed(IndicatorLED::SYNTH);
-	}
-	else {
+		break;
+	case OutputType::KIT:
 		indicator_leds::blinkLed(IndicatorLED::KIT);
+		break;
+	case OutputType::MIDI_OUT:
+		indicator_leds::blinkLed(IndicatorLED::MIDI);
+		break;
+	// no LED for these; they never reach the preset save UI
+	case OutputType::CV:
+	case OutputType::AUDIO:
+	case OutputType::NONE:;
 	}
 }
 

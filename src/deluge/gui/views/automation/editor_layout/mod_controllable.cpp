@@ -362,37 +362,7 @@ void AutomationEditorLayoutModControllable::getAutomationParameterName(Clip* cli
 		}
 	}
 	else {
-		if (clip->lastSelectedParamID == CC_NUMBER_NONE) {
-			parameterName.append(deluge::l10n::get(deluge::l10n::String::STRING_FOR_NO_PARAM));
-		}
-		else if (clip->lastSelectedParamID == CC_NUMBER_PITCH_BEND) {
-			parameterName.append(deluge::l10n::get(deluge::l10n::String::STRING_FOR_PITCH_BEND));
-		}
-		else if (clip->lastSelectedParamID == CC_NUMBER_AFTERTOUCH) {
-			parameterName.append(deluge::l10n::get(deluge::l10n::String::STRING_FOR_CHANNEL_PRESSURE));
-		}
-		else if (clip->lastSelectedParamID == CC_EXTERNAL_MOD_WHEEL || clip->lastSelectedParamID == CC_NUMBER_Y_AXIS) {
-			parameterName.append(deluge::l10n::get(deluge::l10n::String::STRING_FOR_MOD_WHEEL));
-		}
-		else {
-			MIDIInstrument* midiInstrument = (MIDIInstrument*)clip->output;
-			bool appendedName = false;
-
-			if (clip->lastSelectedParamID >= 0 && clip->lastSelectedParamID < kNumRealCCNumbers) {
-				std::string_view name = midiInstrument->getNameFromCC(clip->lastSelectedParamID);
-				// if we have a name for this midi cc set by the user, display that instead of the cc number
-				if (!name.empty()) {
-					parameterName.append(name.data());
-					appendedName = true;
-				}
-			}
-
-			// if we don't have a midi cc name set, draw CC number instead
-			if (!appendedName) {
-				parameterName.append("CC ");
-				deluge::string::appendInt(parameterName, clip->lastSelectedParamID);
-			}
-		}
+		((MIDIInstrument*)clip->output)->appendCCName(parameterName, clip->lastSelectedParamID);
 	}
 }
 

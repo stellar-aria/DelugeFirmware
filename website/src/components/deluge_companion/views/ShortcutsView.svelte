@@ -240,7 +240,7 @@
         <SelectedFiltersBar />
         {#if !isCompactControlPanel}
           <div class="dc-panel-search-wrap">
-            <SearchView autoFocus={false} enableGlobalFocusShortcut={true} variant="toolbar" />
+            <SearchView autoFocus={false} variant="toolbar" />
           </div>
         {/if}
         <ViewFilter />
@@ -392,7 +392,7 @@
   }
 
   .dc-control-panel-content.open .dc-control-panel-shell {
-    height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
+    height: auto;
     max-height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
   }
 
@@ -430,7 +430,7 @@
     }
 
     .dc-control-panel.dc-mobile-panel-open .dc-control-panel-content.open .dc-control-panel-shell {
-      height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
+      height: auto;
       max-height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
     }
   }
@@ -456,7 +456,7 @@
     }
 
     .dc-control-panel.dc-mobile-panel-open .dc-control-panel-content.open .dc-control-panel-shell {
-      height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
+      height: auto;
       max-height: calc(100dvh - var(--sl-nav-height, 3.5rem) - 11.75rem);
     }
   }

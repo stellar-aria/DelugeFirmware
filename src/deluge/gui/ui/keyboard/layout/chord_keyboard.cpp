@@ -241,11 +241,17 @@ void KeyboardLayoutChord::handleControlButton(int32_t x, int32_t y) {
 	// 	}
 	// }
 	if (x == kDisplayWidth - 1 && y == kDisplayHeight - 1) {
-		mode = ChordKeyboardMode::ROW;
+		if (mode != ChordKeyboardMode::ROW) {
+			mode = ChordKeyboardMode::ROW;
+			keyboardScreen.requestRendering();
+		}
 		display->displayPopup("Chord Row Mode");
 	}
 	else if (x == kDisplayWidth - 1 && y == kDisplayHeight - 2) {
-		mode = ChordKeyboardMode::COLUMN;
+		if (mode != ChordKeyboardMode::COLUMN) {
+			mode = ChordKeyboardMode::COLUMN;
+			keyboardScreen.requestRendering();
+		}
 		display->displayPopup("Chord Column Mode");
 	}
 }

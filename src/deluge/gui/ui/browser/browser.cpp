@@ -633,15 +633,8 @@ setEnteredTextAndUseFoundFile:
 				}
 useFoundFile:
 				scrollPosVertical = fileIndexSelected;
-				if (display->getNumBrowserAndMenuLines() > 1) {
-					int32_t lastAllowed = static_cast<int32_t>(fileItems.size()) - display->getNumBrowserAndMenuLines();
-					if (scrollPosVertical > lastAllowed) {
-						scrollPosVertical = lastAllowed;
-						if (scrollPosVertical < 0) {
-							scrollPosVertical = 0;
-						}
-					}
-				}
+				// Starting in the middle or end of a short folder should still fill as many display rows as possible.
+				clampFileSelectionAndScroll();
 
 				goto everythingFinalized;
 			}
@@ -728,9 +721,13 @@ Error Browser::getUnusedSlot(OutputType outputType, std::string* newName, char c
 
 	Error error;
 	// Names always carry the prefix now, on both displays, so there is one search key.
-	char filenameToStartAt[6]; // thingName is max 4 chars.
-	strcpy(filenameToStartAt, thingName);
-	strcat(filenameToStartAt, ":"); // Colon is the first character after the digits.
+	// Sean: thingName is usually max 4 chars (e.g. SONG, SYNT, KIT), but can be longer
+	// - e.g. "PATTERN" with pattern browser or "MIDIDEVICE" with midi device definition browser.
+	// it's used for proposing the file name and on 7SEG if you type a # it will prefix it
+	uint8_t buffer_size = 20;
+	char filenameToStartAt[buffer_size];
+	strncpy(filenameToStartAt, thingName, buffer_size - 2); // Leave 2 chars for "colon + null terminator"
+	strcat(filenameToStartAt, ":");                         // Colon is the first character after the digits.
 	error = readFileItemsFromFolderAndMemory(currentSong, outputType, getThingName(outputType), filenameToStartAt, NULL,
 	                                         false, Availability::ANY, CATALOG_SEARCH_LEFT);
 
@@ -929,12 +926,13 @@ Error Browser::finishSelectEncoderAction(int32_t newFileIndex, int8_t offset) {
 	}
 
 	fileIndexSelected = newFileIndex;
-
-	if (scrollPosVertical > fileIndexSelected) {
-		scrollPosVertical = fileIndexSelected;
-	}
-	else if (scrollPosVertical < fileIndexSelected - NUM_FILES_ON_SCREEN + 1) {
-		scrollPosVertical = fileIndexSelected - NUM_FILES_ON_SCREEN + 1;
+	// A fast turn may be delivered as a multi-file offset; after a folder-window re-read, that offset can still
+	// overshoot.
+	clampFileSelectionAndScroll(false);
+	if (fileIndexSelected == -1) {
+		// allowNoFileSelection=false only leaves -1 when there are no cached files at all,
+		// so there is no selection to reconcile -- not an error.
+		return Error::NONE;
 	}
 
 	enteredTextEditPos = 0;
@@ -1006,18 +1004,6 @@ bool Browser::predictExtendedText() {
 	arrivedAtFileByTyping = true;
 	shouldInterpretNoteNames = shouldInterpretNoteNamesForThisBrowser;
 	octaveStartsFromA = false;
-
-	// Names always carry the file prefix, but on 7SEG the user only ever sees and types the number ("185"). When
-	// typing begins with a digit, treat the prefix as implicitly typed - otherwise "1" would match nothing. The typed
-	// portion of enteredText is [0, enteredTextEditPos), so the prefix has to go *into* enteredText and be counted,
-	// not merely prepended to the search key.
-	if (filePrefix && enteredTextEditPos > 0 && !enteredText.empty()) {
-		if (enteredText[0] >= '0' && enteredText[0] <= '9') {
-			int32_t prefixLength = strlen(filePrefix);
-			enteredText.insert(0, filePrefix);
-			enteredTextEditPos += prefixLength;
-		}
-	}
 
 	// Captured by value (not the FileItem*, which readFileItemsFromFolderAndMemory()/doNewRead below can
 	// invalidate by reallocating fileItems) so we can tell after the search whether we landed on a
@@ -1113,10 +1099,8 @@ notFound:
 
 	fileIndexSelected = i;
 
-	// Move scroll only if found item is completely offscreen.
-	if (scrollPosVertical > i || scrollPosVertical < i - (OLED_HEIGHT_CHARS - 1) + 1) {
-		scrollPosVertical = i;
-	}
+	// Typing/prediction can land on a cached item without needing to move the viewport unless it is offscreen.
+	clampFileSelectionAndScroll();
 
 	error = setEnteredTextFromCurrentFilename();
 	if (error != Error::NONE) {
@@ -1153,6 +1137,8 @@ void Browser::currentFileDeleted() {
 	else {
 		setEnteredTextFromCurrentFilename();
 	}
+	// Deleting the last visible item can leave the top row past the new end of the list.
+	clampFileSelectionAndScroll();
 	currentFileChanged(0);
 }
 
@@ -1175,16 +1161,21 @@ void Browser::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) {
 	bool isSelectedIndex = true;
 	char const* displayName;
 	int32_t o;
+	// Use the display contract for browser/menu rows instead of assuming the OLED character-grid height.
+	int32_t visibleRows = display->getNumBrowserAndMenuLines();
+	if (visibleRows < 1) {
+		visibleRows = 1;
+	}
 
 	// If we're currently typing a filename which doesn't (yet?) have a file...
 	if (fileIndexSelected == -1) {
 		displayName = enteredText.c_str();
-		o = OLED_HEIGHT_CHARS; // Make sure below loop doesn't keep looping.
+		o = visibleRows; // Make sure below loop doesn't keep looping.
 		goto drawAFile;
 	}
 
 	else {
-		for (o = 0; o < OLED_HEIGHT_CHARS - 1; o++) {
+		for (o = 0; o < visibleRows; o++) {
 			{
 				int32_t i = o + scrollPosVertical;
 
@@ -1232,6 +1223,62 @@ searchForChar:
 
 			yPixel += kTextSpacingY;
 		}
+	}
+}
+
+void Browser::clampFileSelectionAndScroll(bool allowNoFileSelection) {
+	int32_t numFileItems = static_cast<int32_t>(fileItems.size());
+	if (numFileItems <= 0) {
+		// No cached files means there is no real selection, and the viewport must reset to the top.
+		fileIndexSelected = -1;
+		scrollPosVertical = 0;
+		return;
+	}
+
+	if (fileIndexSelected >= numFileItems) {
+		// A large encoder offset can overshoot the freshly cached window; land on the last cached item instead.
+		fileIndexSelected = numFileItems - 1;
+	}
+	else if (fileIndexSelected < 0) {
+		// -1 is valid only while typing a new name; encoder browsing must stay on a real cached file.
+		fileIndexSelected = allowNoFileSelection ? -1 : 0;
+	}
+
+	// Fast encoder turns can arrive as multi-file jumps after the cached folder window has been re-read.
+	// Keep both the selection and the visible window inside the files we actually have.
+	int32_t visibleRows = display->getNumBrowserAndMenuLines();
+	if (visibleRows < 1) {
+		// Defensive fallback for mock or future displays; the scroll math needs at least one visible row.
+		visibleRows = 1;
+	}
+	int32_t lastAllowedScroll = numFileItems - visibleRows;
+	if (lastAllowedScroll < 0) {
+		// Short folders cannot fill every row, so their top visible row is always the first item.
+		lastAllowedScroll = 0;
+	}
+
+	if (fileIndexSelected == -1) {
+		// While typing a new name, the rendered row is enteredText rather than an item from fileItems.
+		scrollPosVertical = 0;
+		return;
+	}
+
+	if (scrollPosVertical > fileIndexSelected) {
+		// The selected item is above the current viewport; move it to the first visible row.
+		scrollPosVertical = fileIndexSelected;
+	}
+	else if (scrollPosVertical < fileIndexSelected - visibleRows + 1) {
+		// The selected item is below the current viewport; move it to the last visible row.
+		scrollPosVertical = fileIndexSelected - visibleRows + 1;
+	}
+
+	if (scrollPosVertical > lastAllowedScroll) {
+		// Keep the viewport from starting so low that the bottom browser rows would be blank.
+		scrollPosVertical = lastAllowedScroll;
+	}
+	if (scrollPosVertical < 0) {
+		// Short-folder and typing cases can make the intermediate top row negative; clamp back to the start.
+		scrollPosVertical = 0;
 	}
 }
 

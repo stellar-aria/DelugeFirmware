@@ -17,6 +17,7 @@
 
 #include "settings.h"
 #include "devSysexSetting.h"
+#include "hid/display/oled_canvas/canvas.h"
 #include "setting.h"
 #include "shift_is_sticky.h"
 #include <array>
@@ -24,6 +25,18 @@
 extern deluge::gui::menu_item::runtime_feature::Setting runtimeFeatureSettingMenuItem;
 
 namespace deluge::gui::menu_item::runtime_feature {
+
+// The RoundedCorners toggle additionally pushes its value into the Canvas drawing flag,
+// so the low-level primitives don't have to read runtime feature settings themselves.
+class RoundedCornersSettingToggle final : public SettingToggle {
+public:
+	using SettingToggle::SettingToggle;
+	void writeCurrentValue() override {
+		SettingToggle::writeCurrentValue();
+		hid::display::oled_canvas::Canvas::roundedCornersEnabled =
+		    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RoundedCorners);
+	}
+};
 
 // Generic menu item instances
 SettingToggle menuDrumRandomizer(RuntimeFeatureSettingType::DrumRandomizer);
@@ -48,6 +61,7 @@ SettingToggle menuAlternativeTapTempoBehaviour(RuntimeFeatureSettingType::Altern
 SettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
 SettingToggle menuTrimFromStartOfAudioClip(RuntimeFeatureSettingType::TrimFromStartOfAudioClip);
 SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
+RoundedCornersSettingToggle menuRoundedCorners(RuntimeFeatureSettingType::RoundedCorners);
 
 std::array<MenuItem*, RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettings> subMenuEntries{
     &menuDrumRandomizer,
@@ -70,6 +84,7 @@ std::array<MenuItem*, RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettin
     &menuEnableGridViewLoopPads,
     &menuAlternativeTapTempoBehaviour,
     &menuHorizontalMenus,
+    &menuRoundedCorners,
     &menuTrimFromStartOfAudioClip,
     &menuShowBatteryLevel};
 

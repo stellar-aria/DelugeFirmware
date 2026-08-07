@@ -803,9 +803,10 @@ void SoundEditor::updatePadLightsFor(MenuItem* currentItem) {
 	uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
 
 	if (!inSettingsMenu()
-	    && !util::one_of<MenuItem*>(currentItem, {&sample0StartMenu, &sample1StartMenu, &sample0EndMenu,
-	                                              &sample1EndMenu, &audioClipSampleMarkerEditorMenuStart,
-	                                              &audioClipSampleMarkerEditorMenuEnd, &nameEditMenu})) {
+	    && !util::one_of<MenuItem*>(currentItem,
+	                                {&sample0StartMenu, &sample1StartMenu, &sample0EndMenu, &sample1EndMenu,
+	                                 &audioClipSampleMarkerEditorMenuStart, &audioClipSampleMarkerEditorMenuEnd,
+	                                 &nameEditMenu, &editNameMenu, &drumNameEditMenu})) {
 
 		memset(sourceShortcutBlinkFrequencies, 255, sizeof(sourceShortcutBlinkFrequencies));
 		memset(sourceShortcutBlinkColours, 0, sizeof(sourceShortcutBlinkColours));
@@ -839,7 +840,10 @@ void SoundEditor::updatePadLightsFor(MenuItem* currentItem) {
 		// Or for MIDI or CV clips, or MIDI drums
 		else if (editingCVOrMIDIClip() || editingMidiDrumRow()) {
 			for (int32_t y = 0; y < kDisplayHeight; y++) {
-				if (midiOrCVParamShortcuts[y] == currentItem) {
+				const MenuItem* shortcutItem = (editingMidiDrumRow() && midiOrCVParamShortcuts[y] == &editNameMenu)
+				                                   ? &drumNameEditMenu
+				                                   : midiOrCVParamShortcuts[y];
+				if (shortcutItem == currentItem) {
 					setupShortcutBlink(11, y, 0);
 					break;
 				}
@@ -850,6 +854,11 @@ void SoundEditor::updatePadLightsFor(MenuItem* currentItem) {
 
 			if (currentItem == &menu_item::multiRangeMenu) {
 				currentItem = menu_item::multiRangeMenu.menuItemHeadingTo;
+			}
+
+			if (getCurrentOutputType() == OutputType::KIT && currentItem == &drumNameEditMenu) {
+				setupShortcutBlink(11, 5, 0);
+				goto stopThat;
 			}
 
 			// First, see if there's a shortcut for the actual MenuItem we're currently on
@@ -1266,6 +1275,9 @@ getOut:
 				if (editingCVOrMIDIClip() || editingNonAudioDrumRow()) {
 					if (x == 11) {
 						item = editingGateDrumRow() ? gateDrumParamShortcuts[y] : midiOrCVParamShortcuts[y];
+						if (editingNonAudioDrumRow() && item == &editNameMenu) {
+							item = &drumNameEditMenu;
+						}
 					}
 					else if (x == 15) {
 						// Randomizer shortcuts for MIDI / CV clips
@@ -1291,6 +1303,9 @@ getOut:
 				}
 				else {
 					item = paramShortcutsForSounds[x][y];
+					if (getCurrentOutputType() == OutputType::KIT && item == &editNameMenu) {
+						item = &drumNameEditMenu;
+					}
 
 					// Replace the current shortcut with a second layer shortcut if the pad was pressed twice
 					secondLayerShortcutsToggled =
@@ -1734,7 +1749,7 @@ doMIDIOrCV:
 				}
 
 				else {
-					newItem = &soundEditorRootMenu;
+					newItem = (outputType == OutputType::KIT) ? &soundEditorRootMenuDrum : &soundEditorRootMenu;
 				}
 			}
 
@@ -2063,7 +2078,8 @@ void SoundEditor::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) 
 
 	// Sorry - extremely ugly hack here.
 	MenuItem* currentMenuItem = getCurrentMenuItem();
-	if (currentMenuItem == static_cast<void*>(&nameEditMenu)) {
+	if (currentMenuItem == static_cast<void*>(&nameEditMenu)
+	    || currentMenuItem == static_cast<void*>(&drumNameEditMenu)) {
 		if (!navigationDepth) {
 			return;
 		}

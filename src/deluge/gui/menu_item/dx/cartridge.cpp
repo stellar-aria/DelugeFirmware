@@ -80,14 +80,17 @@ namespace deluge::gui::menu_item {
 DxCartridge dxCartridge{l10n::String::STRING_FOR_DX_CARTRIDGE};
 
 void DxCartridge::beginSession(MenuItem* navigatedBackwardFrom) {
+	loadPatch();
 	readValueAgain();
 }
 
-void DxCartridge::readValueAgain() {
+// Unpacks the currently-selected program into the live DX patch and hard-cuts any sounding voices.
+// Only call this when the selected patch actually changes - NOT from a plain redraw, otherwise an
+// audition note gets cut every time the menu refreshes (e.g. mod-encoder press, display change).
+void DxCartridge::loadPatch() {
 	if (pd == nullptr) {
 		return;
 	}
-	renderUIsForOled();
 
 	DxPatch* patch = soundEditor.currentSource->ensureDxPatch();
 	pd->unpackProgram(patch->params, currentValue);
@@ -100,6 +103,13 @@ void DxCartridge::readValueAgain() {
 			instrument->name = name;
 		}
 	}
+}
+
+void DxCartridge::readValueAgain() {
+	if (pd == nullptr) {
+		return;
+	}
+	renderUIsForOled();
 }
 
 void DxCartridge::drawPixelsForOled() {
@@ -140,6 +150,7 @@ void DxCartridge::selectEncoderAction(int32_t offset) {
 
 	scrollPos = std::clamp<int>(newValue - 1, 0, numValues - kOLEDMenuNumOptionsVisible);
 
+	loadPatch();
 	readValueAgain(); // redraw
 }
 

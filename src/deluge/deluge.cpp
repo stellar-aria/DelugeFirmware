@@ -36,6 +36,7 @@
 #include "hid/buttons.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
+#include "hid/display/screensaver.h"
 #include "hid/display/seven_segment_tombstone.h"
 #include "hid/encoder_input.h"
 #include "hid/encoders.h"
@@ -217,6 +218,16 @@ extern "C" void closeUSBPeripheral(void);
 uint32_t picFirmwareVersion = 0;
 bool picSaysOLEDPresent = false;
 
+namespace Deluge {
+void factoryReset() {
+	display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_FACTORY_RESET));
+	FlashStorage::factoryReset(false);
+	runtimeFeatureSettings.factoryReset(false);
+	midiFollow.factoryReset(false);
+	MIDIDeviceManager::factoryReset(false);
+}
+} // namespace Deluge
+
 bool isShortPress(uint32_t pressTime) {
 	return ((int32_t)(AudioEngine::audioSampleTimer - pressTime) < FlashStorage::holdTime);
 }
@@ -227,6 +238,7 @@ bool isShortPress(uint32_t pressTime) {
 static bool dispatchInputEvent(const DelugeInputEvent& ev) {
 	switch (ev.kind) {
 	case DELUGE_EVENT_PAD: {
+		deluge::hid::display::Screensaver::noteActivity();
 		// value is the velocity; 255 means "use the instrument default", 0 a release.
 		ActionResult result = matrixDriver.padAction(ev.x, ev.y, ev.value);
 		if (ev.value) {
@@ -240,6 +252,7 @@ static bool dispatchInputEvent(const DelugeInputEvent& ev) {
 		break;
 	}
 	case DELUGE_EVENT_BUTTON: {
+		deluge::hid::display::Screensaver::noteActivity();
 		auto b = deluge::hid::button::fromXY(ev.x, ev.y);
 		ActionResult result = Buttons::buttonAction(b, ev.value, isSDRoutineActive());
 		if (result == ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE) {
@@ -690,9 +703,7 @@ static void deluge_boot(const DelugeBoard* board) {
 	D_PRINTLN("PIC firmware version reported: %d", picFirmwareVersion);
 
 	if (bootInfo.factory_reset_requested) {
-		display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_FACTORY_RESET));
-		FlashStorage::resetSettings();
-		FlashStorage::writeSettings();
+		Deluge::factoryReset();
 	}
 
 	FlashStorage::readSettings();
@@ -720,6 +731,8 @@ static void deluge_boot(const DelugeBoard* board) {
 
 	// Hopefully we can read these files now
 	runtimeFeatureSettings.readSettingsFromFile();
+	deluge::hid::display::oled_canvas::Canvas::roundedCornersEnabled =
+	    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RoundedCorners);
 	MIDIDeviceManager::readDevicesFromFile();
 	midiFollow.readDefaultsFromFile();
 	PadLEDs::setBrightnessLevel(FlashStorage::defaultPadBrightness);
@@ -744,6 +757,9 @@ static void deluge_boot(const DelugeBoard* board) {
 	inputRoutine();
 
 	uiTimerManager.setTimer(TimerName::GRAPHICS_ROUTINE, 50);
+
+	// Settings have been read and the UI is up: start the idle countdown.
+	deluge::hid::display::Screensaver::settingsChanged();
 
 	D_PRINTLN("going into main loop");
 	deluge_board_unlock_data_cache();

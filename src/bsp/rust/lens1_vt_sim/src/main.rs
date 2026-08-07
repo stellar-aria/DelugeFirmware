@@ -68,7 +68,7 @@
 //! definitions in `sd.rs`/`scheduler.rs`.
 #![feature(impl_trait_in_assoc_type)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use embassy_executor::raw;
 use embassy_time::Duration;
@@ -411,6 +411,54 @@ fn main() {
     let driver = clock::PeekableMockDriver::get();
     let budget_ticks = Duration::from_millis(budget_ms).as_ticks();
     let wall_start = std::time::Instant::now();
+    // Wall-clock deadline for the loop below, distinct from `budget_ticks`
+    // (VIRTUAL time — see the doc comment on `budget_ms` above): a task pair
+    // that keeps re-pending on every `executor.poll()` never breaks out of the
+    // inner quiescence loop, so neither of that loop's sibling `hard_exit(2)`
+    // wedge paths (no outstanding timer / virtual budget exceeded) is ever
+    // reached — this bounds REAL time spent stuck there instead.
+    let wall_deadline = wall_start + std::time::Duration::from_secs(step_timeout_s);
+    // Mirrors of the loop-local counters below, published for the watchdog
+    // thread spawned just below: it cannot read this function's stack
+    // locals, only `'static` state.
+    static QUIESCENCE_PASSES: AtomicU64 = AtomicU64::new(0);
+    static ADVANCES: AtomicU64 = AtomicU64::new(0);
+    // A second, independent OS thread that unconditionally fires at
+    // `wall_deadline` REGARDLESS of whether the main thread ever returns to
+    // the in-loop check below. Necessary, not just defensive: this harness's
+    // own module doc (top of file, "The boot livelock") already documents
+    // that a single `executor.poll()` call can itself never return —
+    // `embassy_futures::block_on`'s poll loop has no waker use and no
+    // deadline check of its own — in which case control never comes back to
+    // increment `quiescence_passes` at all, and the in-loop check can never
+    // run. Confirmed directly on the `cordae` fixture while building this
+    // guard: an instrumented build showed `quiescence_passes` stall for good
+    // partway through startup (a few hundred microseconds of wall time in,
+    // deep inside `executor.poll()`) while the process kept burning ~100% CPU
+    // — i.e. stuck inside one non-yielding call, not spinning across many
+    // fast ones. See the report for the full readout and hypothesis.
+    std::thread::spawn(move || {
+        std::thread::sleep(wall_deadline.saturating_duration_since(std::time::Instant::now()));
+        // `println!`, not `log::error!`: a release build is built with
+        // `log/release_max_level_off` (additive across `rza1l-hal`/
+        // `deluge-bsp`), which compiles out `log::` macro bodies entirely —
+        // exactly the build that hangs. Reuses the same field set as the
+        // periodic progress log and the in-loop check below so all three
+        // diagnostics stay comparable.
+        println!(
+            "lens1-vt-sim: WEDGED (watchdog) — wall-clock step timeout ({step_timeout_s}s) \
+             exceeded; the main thread never returned to its own in-loop check (see report for \
+             why): virtual t={}us quiescence_passes={} advances={} next_deadline={:?} \
+             on_fiber_reads={} on_fiber_writes={}",
+            driver.now(),
+            QUIESCENCE_PASSES.load(Ordering::Relaxed),
+            ADVANCES.load(Ordering::Relaxed),
+            driver.peek_next_deadline(),
+            sd::stats::on_fiber_reads(),
+            sd::stats::on_fiber_writes(),
+        );
+        hard_exit(2);
+    });
     let mut quiescence_passes = 0u64;
     let mut advances = 0u64;
     loop {
@@ -419,6 +467,27 @@ fn main() {
             // SAFETY: single-threaded, never called reentrantly.
             unsafe { executor.poll() };
             quiescence_passes += 1;
+            QUIESCENCE_PASSES.store(quiescence_passes, Ordering::Relaxed);
+            // Checked every 4096 passes (not every pass) so the check itself
+            // cannot dominate runtime in the hot loop. This is the cheap,
+            // cooperative half of the guard — it catches a task pair that
+            // re-pends on every fast `executor.poll()` call. It CANNOT catch
+            // a single `poll()` call that never returns at all; that's what
+            // the watchdog thread spawned above is for.
+            if quiescence_passes.is_multiple_of(4096) && std::time::Instant::now() >= wall_deadline
+            {
+                println!(
+                    "lens1-vt-sim: WEDGED — wall-clock step timeout ({step_timeout_s}s) exceeded \
+                     inside the quiescence loop (scenario not making progress): virtual \
+                     t={}us quiescence_passes={quiescence_passes} advances={advances} \
+                     next_deadline={:?} on_fiber_reads={} on_fiber_writes={}",
+                    driver.now(),
+                    driver.peek_next_deadline(),
+                    sd::stats::on_fiber_reads(),
+                    sd::stats::on_fiber_writes(),
+                );
+                hard_exit(2);
+            }
             if !PENDED.load(Ordering::SeqCst) {
                 break;
             }
@@ -449,6 +518,7 @@ fn main() {
         let now = driver.now();
         driver.advance_ticks(next - now);
         advances += 1;
+        ADVANCES.store(advances, Ordering::Relaxed);
         if advances.is_multiple_of(20_000) {
             log::info!(
                 "lens1-vt-sim: progress: virtual t={}us advances={advances} passes={quiescence_passes} \

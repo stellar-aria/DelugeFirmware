@@ -6,9 +6,10 @@
 # not suppressed)" — kept visible in every run's summary, distinct from the broad
 # pre-existing baseline in known_patterns.txt.
 #
-# One extended-regex PATTERN per line (grep -E). IMPORTANT: run.sh matches each race by its
-# normalized TSan SUMMARY LINE — the top-frame "... in <function>" — NOT the full stack. So a
-# pattern must name the symbol that appears as the race's TOP frame, not a deeper caller.
+# One extended-regex PATTERN per line (grep -E). run.sh (2026-08-06) matches each race
+# against its normalized FULL stack block — every frame of both racing accesses, one frame
+# per grep input line, not just the one-line SUMMARY's top frame — so a pattern here may name
+# any frame in either racing stack, not only the top/SUMMARY one.
 #
 # ── STATUS (2026-07-19): the SampleRecorder/SampleStream recorder-hand-off races formerly
 #    listed here are FIXED — see docs/dev/known-concurrency-bugs.md (B2 table_ realloc UAF;

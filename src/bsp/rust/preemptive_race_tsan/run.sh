@@ -5,8 +5,13 @@
 # time playback on its own preemptive OS-thread executor, a concurrent output recording) —
 # see main.rs's `host_app` boot block and scenario.rs's module doc — against the TSan-
 # instrumented `deluge_app` (HOST_HARNESS.md's "M4c" section), for N
-# iterations, and categorizes every TSan `SUMMARY:` line it sees against the two catalogs
-# in this directory:
+# iterations, and categorizes every TSan finding it sees against the two catalogs in this
+# directory. Each finding is classified on its FULL stack block — every frame of both
+# racing accesses, from the `WARNING: ThreadSanitizer: data race` line through the
+# terminating `SUMMARY: ThreadSanitizer:` line — not just the one-line SUMMARY (whose top
+# frame, for a race lowered to a memcpy/strlen/etc. runtime intercept, is often a bare
+# compiler-generated intrinsic that carries no file/subsystem information at all; the real
+# site is deeper in the stack). A catalog pattern matches if ANY frame in the block matches.
 #   - known_patterns.txt          — pre-existing, unrelated-to-streaming debt, matched by
 #                                    broad file/subsystem pattern (see that file's header
 #                                    for why patterns, not exact lines).
@@ -91,9 +96,10 @@ if [[ "$TSAN_INITS" != "1" || "$UNDEF_TSAN" != "0" ]]; then
 fi
 
 normalize() {
-    # A TSan SUMMARY line -> the catalog key: strip repo-root / rustup-sysroot prefixes,
+    # A TSan finding block -> the catalog key: strip repo-root / rustup-sysroot prefixes,
     # the trailing (BuildId: ...), and any (path+0xNNNN) address annotation, so the same
-    # logical site matches across machines/builds/ASLR.
+    # logical site matches across machines/builds/ASLR. Operates line-at-a-time, so it
+    # applies uniformly whether fed the one-line SUMMARY or a full multi-frame block.
     sed -E \
         -e "s#$REPO_ROOT/##g" \
         -e 's#/home/[^/]+/\.rustup/toolchains/[^/]+/lib/rustlib/src/rust/##g' \
@@ -129,9 +135,24 @@ for i in $(seq 1 "$NUM_RUNS"); do
         any_scenario_fail=1
     fi
 
-    summaries="$(grep '^SUMMARY: ThreadSanitizer:' "$log" | sed -E 's/^SUMMARY: ThreadSanitizer: //' | normalize | sort -u || true)"
+    # Extract one normalized record per TSan finding, spanning EVERY frame from the
+    # `WARNING: ThreadSanitizer: data race` line through its terminating `SUMMARY:` line
+    # (both racing accesses' full stacks) — not just the one-line SUMMARY, whose top frame
+    # can be a bare compiler-intrinsic intercept (e.g. `__tsan_memcpy`) with no file/subsystem
+    # info, while the real site sits deeper in the stack. A block's frames are joined with a
+    # \037 (unit separator) so the whole block survives as a single record through `sort -u`
+    # and the classify loop's `read` below; it is expanded back to real newlines just before
+    # each `grep -Eq` so per-frame, `$`-anchored patterns still match one frame at a time
+    # instead of the whole joined block.
+    findings="$(awk '
+        /^WARNING: ThreadSanitizer: data race/ { block = $0; next }
+        block != "" {
+            block = block "\037" $0
+            if ($0 ~ /^SUMMARY: ThreadSanitizer:/) { print block; block = "" }
+        }
+    ' "$log" | normalize | sort -u || true)"
     known=0 open=0 uncat=0
-    # Two-tier classification, checked in this order:
+    # Two-tier classification, checked in this order, against every frame of the block:
     #   1. open_findings_races.txt — exact-line matches for the specific, narrow, REAL
     #      cluster/loaded/recorder/resource-manager races found (kept visible
     #      every run, not suppressed — see that file's header).
@@ -139,17 +160,18 @@ for i in $(seq 1 "$NUM_RUNS"); do
     #      "cooperative-only, not preemption-safe" debt class, so a fresh run's different
     #      exact line (new field, same subsystem) doesn't fall through as UNCATALOGUED — see
     #      that file's header for why exact-line-only matching doesn't scale here.
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        if grep -Eq -f <(grep -Ev '^\s*(#|$)' "$SCRIPT_DIR/open_findings_races.txt") <<<"$line" 2>/dev/null; then
+    while IFS= read -r block; do
+        [[ -z "$block" ]] && continue
+        frames="$(tr '\037' '\n' <<<"$block")"
+        if grep -Eq -f <(grep -Ev '^\s*(#|$)' "$SCRIPT_DIR/open_findings_races.txt") <<<"$frames" 2>/dev/null; then
             open=$((open + 1))
-        elif grep -Eq -f <(grep -Ev '^\s*(#|$)' "$SCRIPT_DIR/known_patterns.txt") <<<"$line" 2>/dev/null; then
+        elif grep -Eq -f <(grep -Ev '^\s*(#|$)' "$SCRIPT_DIR/known_patterns.txt") <<<"$frames" 2>/dev/null; then
             known=$((known + 1))
         else
             uncat=$((uncat + 1))
-            echo "$line" >>"$uncatalogued_lines_file"
+            echo "$block" >>"$uncatalogued_lines_file"
         fi
-    done <<<"$summaries"
+    done <<<"$findings"
 
     total_known=$((total_known + known))
     total_open=$((total_open + open))
@@ -171,7 +193,11 @@ fi
 if [[ "$total_uncatalogued" != "0" ]]; then
     echo "!! UNCATALOGUED race site(s) — a signature not in EITHER catalog. Investigate before" \
          "assuming this is more of the known noise:"
-    sort -u "$uncatalogued_lines_file" | sed 's/^/    /'
+    while IFS= read -r block; do
+        [[ -z "$block" ]] && continue
+        echo "    ----"
+        tr '\037' '\n' <<<"$block" | sed 's/^/    /'
+    done < <(sort -u "$uncatalogued_lines_file")
     status=1
 fi
 rm -f "$uncatalogued_lines_file"

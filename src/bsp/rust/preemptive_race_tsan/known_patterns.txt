@@ -1,7 +1,11 @@
 # Lens 2 (Task 9) TSan classifier: KNOWN, pre-existing, BROAD debt patterns.
 #
 # One extended-regex PATTERN per line (matched with `grep -E` against a normalized TSan
-# `SUMMARY:` line — see run.sh's `normalize()`). Blank lines and `#` comments are ignored.
+# finding's FULL stack block — every frame of both racing accesses, from the `WARNING:
+# ThreadSanitizer: data race` line through the terminating `SUMMARY:` line, one frame per
+# grep input line — not just the one-line SUMMARY; see run.sh's `normalize()` and the block
+# extraction above it). A pattern matches if it matches ANY frame in the block. Blank lines
+# and `#` comments are ignored.
 # Order matters: run.sh checks `open_findings_patterns.txt` FIRST, so a line matching both
 # (e.g. `loader.cpp:82` below, which is inside a file this list's broad `loader\.cpp`-style
 # reasoning would otherwise also catch) is correctly bucketed as an open finding, not here.
@@ -116,24 +120,32 @@ src/deluge/gui/waveform/waveform_renderer\.cpp:69[14]:33 in WaveformRenderer::ad
 #      sites on two threads. Verified via full-stack backtrace on every
 #      instance this run (grep the run logs' "#1" frames): always
 #      logDebug/print.cpp/log.cpp <-> printf.c's _out_rev/_vsnprintf/_ftoa.
-#      The NEW wrinkle: on THIS run TSan chose the OTHER thread's frame (the
+#      The wrinkle: on some runs TSan chose the OTHER thread's frame (the
 #      generic runtime interceptor itself, which carries no file/line) as the
-#      SUMMARY site, so the existing printf.c pattern -- which matches the
-#      file-bearing side -- doesn't catch it. Matched here by interceptor
-#      name/Rust-str-validation-site instead:
+#      one-line SUMMARY site. That no longer matters -- run.sh (2026-08-06)
+#      now classifies each finding on its FULL stack block (every frame of
+#      BOTH racing accesses, WARNING line through SUMMARY line), and every
+#      instance of this class has been verified to carry a src/lib/printf.c
+#      frame somewhere in that block, so the plain printf.c pattern above
+#      matches it directly regardless of which single frame TSan happened to
+#      pick as the SUMMARY site. Two narrow, already-observed interceptor
+#      symbols are kept below as belt-and-suspenders documentation of the
+#      exact non-printf.c-named frames this class has produced; they are
+#      redundant with the printf.c match today, not load-bearing:
 core::ffi::c_str::strlen::runtime
- in strlen$
- in __tsan_memcpy$
 library/core/src/str/validations\.rs:23[23]:52 in core::str::validations::run_utf8_validation
-#      CAVEAT for a future reviewer: these three patterns key off generic
-#      runtime-intercepted function names that carry NO file/subsystem info in
-#      the SUMMARY line itself (run.sh only classifies the one-line SUMMARY,
-#      not the full stack) -- every instance observed on 2026-08-06 was
-#      verified (via full-stack backtrace) to be the printf.c log-buffer
-#      class, but a hypothetical FUTURE genuinely-new strlen/memcpy race
-#      elsewhere (including on a storage path) would also match. If this
-#      pattern ever needs to earn back specificity, the fix is a run.sh change
-#      to classify on the full stack, not just the SUMMARY line.
+#      REMOVED 2026-08-06 (full-block-matching follow-up): the bare
+#      ` in __tsan_memcpy$` / ` in strlen$` SUMMARY-line patterns that used to
+#      sit here (added by f4c700b98, needed only because run.sh classified on
+#      the one-line SUMMARY). They were dangerously broad -- a bare, generic
+#      compiler-intrinsic name with no file/subsystem info -- and, once
+#      matched against a real R4 storage/cluster memcpy race's SUMMARY line
+#      (also often a bare __tsan_memcpy top frame), would have silently
+#      absorbed it as "known noise" instead of failing the gate. Full-block
+#      matching removes the need for them: this class's real printf.c frame
+#      is now visible to the classifier even when it isn't the SUMMARY frame,
+#      so a genuinely new bare-memcpy/strlen race elsewhere (no printf.c frame
+#      anywhere in its block) now correctly falls through to UNCATALOGUED.
 #
 #   3. Song-model object-graph CONSTRUCTION/TEARDOWN during a live song swap
 #      (LoadSongUI::performLoad() building a brand-new Song's full DSP/param

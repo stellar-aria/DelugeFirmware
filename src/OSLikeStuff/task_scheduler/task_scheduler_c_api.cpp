@@ -116,6 +116,13 @@ bool deluge_storage_on_owner(void) {
 	return true;
 }
 
+// libdeluge/storage_owner.h — cooperative/C-host default: FatFS runs inline on the
+// caller, so no other context can be holding the filesystem. Embassy overrides
+// (true while the efatfs FS mutex is held).
+bool deluge_storage_fs_busy(void) {
+	return false;
+}
+
 // Cooperative yield hooks for slow-storage busy-waits (the <libdeluge/storage_wait.h>
 // contract). The HAL/BSP calls these while spinning on SD / SPI-flash / USB so the
 // scheduler keeps audio + UI + USB alive. Relocated here from the application: they

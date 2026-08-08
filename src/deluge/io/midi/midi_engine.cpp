@@ -501,7 +501,9 @@ void MidiEngine::checkIncomingUsbMidi() {
 	if (!usbCurrentlyInitialized
 	    || deluge::sync::sd_busy()) { // hack to avoid SysEx handlers clashing with other sd-card activity.
 		if (deluge::sync::sd_busy()) {
-			// D_PRINTLN("checkIncomingUsbMidi seeing sd_busy()");
+			// sd_busy() is a real signal now (see docs/dev/sd_busy_audit.md) -- this is exactly the
+			// moment someone debugging a dropped/delayed MIDI report would want this log back.
+			D_PRINTLN("checkIncomingUsbMidi seeing sd_busy()");
 		}
 		return;
 	}

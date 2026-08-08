@@ -132,7 +132,13 @@ Every single hit printed `investigated=1` — zero `investigated=0` lines (check
   signature of several audio files of different lengths being round-robined by
   `AudioFileManager::backgroundWaveformOverviewScan` — shorter files finish (drop out of the "still has
   work" rotation) before longer ones, which is exactly the shape you'd expect from `kOverviewScanClustersPerCall
-  = 1` scanning ~19 files of varying length one cluster at a time. That shape is evidence of a
+  = 1` scanning several files of varying length one cluster at a time. **The "~19 files" figure is
+  INFERRED from the cluster=0 hit count (19), not observed** — the probe printed only `clusterIndex`, never
+  a sample identity, so it cannot distinguish "19 different files each hit once at cluster 0" from any
+  other combination that happens to sum to 19; the inference rests on `kOverviewScanClustersPerCall = 1`
+  meaning at most one file advances per call, which makes "N distinct files" the natural reading of a
+  count of N hits at the lowest cluster index, but that is a reading of the shape, not a direct
+  observation. Either way, the shape itself — decreasing, not flat or erratic — is evidence of a
   functioning round-robin, not an artifact of a stuck cursor (a stuck cursor would show one cluster index
   with a runaway count and nothing after it).
 - Zero `investigated=0` observations rules out the failure mode where the guard's deferral path is
@@ -142,31 +148,49 @@ Every single hit printed `investigated=1` — zero `investigated=0` lines (check
   anything would show either zero probe lines or (if the guard were the culprit) probe lines that never
   advance past `cluster=0`. Neither happened, so the pre-existing device-side degrade is confirmed **not**
   live in this harness and did not confound this result, as the brief anticipated.
+- **The guard genuinely fires in this run, and the evidence for that is the WEDGED→`exit=0` transition
+  itself, not this probe.** Task 3's report shows the *identical* fixture (`cordae`, same block/timeout
+  budget) reproducibly `WEDGED` before the guard existed and reproducibly reached `exit=0` after it. A
+  wedge only happens if the scan's synchronous read actually raced the storage worker for the FS mutex;
+  the fact that it no longer does is only explained by `sd_busy()` returning `true` at the moment that
+  race would otherwise have occurred, and the guard deferring on that `true`. This probe's job is
+  therefore narrower than "prove the guard fires" — it is "prove the scan still gets its work done, on
+  top of a guard Task 3 already showed fires." (An earlier draft of this document instead argued from this
+  run's silence — "these `sd_busy()`-true windows apparently didn't coincide with an in-progress scan
+  attempt" — but that reasoning is circular: if the guard never coincided with a scan attempt, the pre-fix
+  run could not have wedged in the first place. Corrected here.)
 - Combined with the structural argument from Task 3 (the guard's `return true` is taken *before*
   `investigateWholeCluster` is called, so a deferral never touches `overviewScanNextCluster` and never
   produces a false `investigated=0`), this closes the loop: the code-reading argument said deferral is
-  lossless, and this run is direct execution evidence that, deferral or not, the scan completes real work
-  and keeps making progress across the whole fixture.
+  lossless, Task 3's WEDGED→`exit=0` transition is evidence the guard fires, and this run is direct
+  execution evidence that, guard or not, the scan completes real work and keeps making progress across the
+  whole fixture.
 
 ### What this does NOT prove
 
 - It does not prove the scan reaches full completion (`overviewScanAllDone = true`) for every sample in
   the fixture — the run only needed to reach the target block count, not necessarily scan every cluster
-  of every file to exhaustion. 172 successful investigations across ~19 files reaching at least cluster 14
-  is strong partial-completion evidence, not a proof of exhaustive completion.
-- It does not exercise the `deluge::sync::sd_busy() == true` deferral branch itself with direct evidence
-  of a *retry* (i.e., a probe line for the same cluster appearing twice because a deferral happened in
-  between) — this run's `sd_busy()` windows apparently didn't coincide with an in-progress scan attempt at
-  a granularity this probe would catch as a repeat. That branch's correctness rests on the structural
-  argument (untouched cursor) rather than on execution evidence from this specific run.
+  of every file to exhaustion. 172 successful investigations reaching at least cluster 14 (across an
+  inferred, not observed, ~19 files — see above) is strong partial-completion evidence, not a proof of
+  exhaustive completion.
+- **The probe only instrumented the success path, not the deferral path.** It counts successful
+  `investigateWholeCluster` calls; it does not count how many times `advanceOverviewScan` took the
+  `sd_busy()`-true `return true` branch. A one-line counter on that branch (deferrals-N) alongside the
+  172 successes would have shown both "the guard fires" and "the guard does not starve the scan" from the
+  same run, closing the loop directly rather than leaning on Task 3's separate WEDGED→`exit=0` result for
+  the first half. That counter was not added in this run — this document states the gap rather than
+  claiming stronger coverage than was measured. As it stands: this run is direct evidence the scan makes
+  progress, and Task 3's before/after gate is the evidence the guard fires; no single run in this plan
+  has yet shown both signals simultaneously with dedicated instrumentation for each.
 - It says nothing about hardware timing, real SD-card latency, or the on-device experience — this is a
   virtual-time host harness.
 
 ### Headline finding
 
 **The scan still functions.** This is not a regression. 172 successful, cache-flipping investigations
-across 15 distinct cluster indices and roughly 19 audio files were observed in one run, ruling out the
-"deadlock fixed by starving the feature" failure mode this task exists to check for.
+across 15 distinct cluster indices (and, per the inference above, roughly 19 audio files) were observed
+in one run, ruling out the "deadlock fixed by starving the feature" failure mode this task exists to
+check for.
 
 ### Instrumentation removed
 
@@ -177,18 +201,42 @@ and by rebuilding `deluge_app`/`deluge_loadcheck` clean afterward).
 
 ## Step 1–2: the nine sites
 
-**Summary, as shipped by this task: 7 IMPROVED / 2 NEUTRAL / 0 REGRESSION.**
+**Summary, as shipped by this task: 4 IMPROVED / 5 NEUTRAL / 0 REGRESSION.**
 
-(Sites 1–6 and 8 are IMPROVED; sites 7 and 9 are NEUTRAL — site 7 because its code path is compiled out
-by default, site 9 because Step 3 downgraded what would otherwise have been a regression, discussed
-next.)
+- IMPROVED: sites 1, 2, 4, 5.
+- NEUTRAL: site 7 (its code path is compiled out by default); sites 3 and 6 (redundant with site 2's
+  scheduler ceiling — see below); sites 8 and 9 (both were REGRESSIONs as activated by the flip alone —
+  false `FREEZE_WITH_ERROR`s on legitimate concurrency, worse than the eternal no-op they replaced — and
+  both were downgraded to diagnostic logs in this task before they could ship).
 
-That tally already accounts for Step 3's fix. Stated the other way, because it is the more important
-fact: **as activated by the flip, before this task's Step 3 judgement, one of the nine
-(`save_song_ui.cpp:124`) would have been a REGRESSION** — a false `FREEZE_WITH_ERROR` on legitimate,
-harmless concurrency, worse than the eternal no-op it replaced. This task's job was exactly to catch that
-before it shipped, per Step 3 below, rather than let the flip alone decide it. With that fix applied, the
-final, shipped tally has zero regressions.
+Stated the more important way: **as activated by the flip alone, before this task's judgement, two of
+the nine (`audio_engine.cpp:1666` and `save_song_ui.cpp:124`) would have been REGRESSIONs.** Catching
+that before it ships is exactly this task's job, not a side effect of it — see Step 3 below for both.
+With those two fixes applied, the shipped tally has zero regressions.
+
+**A premise correction, made during review of this document, that changes two more classifications.**
+This document originally described `audio_recorder.cpp:174` and `audio_engine.cpp:1666` as "already
+paired with `isSDRoutineActive()`, which softens them" — a premise inherited from this task's own brief
+and not independently re-verified before use. It is false on Embassy: `isSDRoutineActive()` is hardwired
+`return false` there (`src/bsp/rust/src/scheduler.rs:658`), with a comment explaining why — SD access on
+this BSP goes through `block_on`, which parks the whole executor for the duration of a transfer, so there
+is no busy-wait for `isSDRoutineActive()` to ever report `true` about. So on Embassy, before this flip,
+`isSDRoutineActive() || sd_busy()` was exactly as dead as `sd_busy()` alone — both halves were always
+`false`. Neither site 5 nor site 8 had *any* live half before this change; the "softening" never existed
+on the BSP this whole plan is about. Verifying an inherited premise is exactly what this audit
+exists to do; this correction is recorded here rather than silently folded in, and it is the reason sites
+5 and 8 read differently below than in this document's first draft. (It does not change sites 1–4/6/7/9,
+which never rested on that premise.)
+
+**A duty-cycle caveat that applies wherever "busy is brief" appears below.** "Busy" spans one `with_fs`
+call — true — but per-call brevity does not bound hold-off *frequency*. During a song load or a
+streaming burst the storage owner issues many consecutive `with_fs` calls back-to-back; across that
+whole window `sd_busy()` reads `true` on a large fraction of samples, even though no single `true` window
+is long. A `RESOURCE_SD`-gated task (site 2) or an in-function check gated the same way (sites 3, 4, 5, 6)
+can therefore be held off across most of a load, not just for one operation's duration. This does not
+change any classification below — every one of these sites was written to defer, and deferring more
+often during a burst is the mechanism working as designed, not a new failure mode — but "brief" must not
+be read as "rare," and it is stated once here rather than re-derived at each site.
 
 No site's deferral/assertion branch had ever executed, on host or Embassy, before this change — every
 one of the nine reads below the fold is being exercised for the first time by this plan.
@@ -221,11 +269,12 @@ the ceiling was a permanent no-op: any task declaring `RESOURCE_SD` was always a
 real FS state. Now it can genuinely hold off admission for the brief window a real FS operation is in
 flight, which is exactly the protection the ceiling was written to provide. Per the brief's own framing
 this is the widest-blast-radius site in the plan (task admission, not one call-site deferral) and has no
-`isSDRoutineActive()`-style softening companion; Task 4's report flagged that explicitly and did not
-narrow it, deferring the call to review. Nothing in this task's investigation surfaces a reason to
-downgrade that IMPROVED classification to NEUTRAL or REGRESSION — "busy" is still bounded to one FS
-operation's duration, so the ceiling's new hold-offs are brief by the same architectural guarantee that
-bounds every other site here.
+softening companion check; Task 4's report flagged that explicitly and did not narrow it, deferring the
+call to review. Nothing in this task's investigation surfaces a reason to downgrade that IMPROVED
+classification to NEUTRAL or REGRESSION — but see the duty-cycle caveat above: during a load or streaming
+burst this ceiling can hold off `RESOURCE_SD` tasks across most of that window, not just for one
+operation's duration, which is the mechanism working as designed, not a new risk this audit is
+introducing.
 
 Migrated by commits `1c3295df3`/`a6447337b` (Task 4); not touched by this task.
 
@@ -236,13 +285,16 @@ Migrated by commits `1c3295df3`/`a6447337b` (Task 4); not touched by this task.
 The existing comment already calls this "a hack to avoid SysEx handlers clashing with other sd-card
 activity" — i.e. this check was *written* to do exactly what it can now actually do.
 
-**Classification: IMPROVED.** Before, USB-MIDI/SysEx servicing ran on every tick regardless of real SD
-activity, so it could clash with concurrent card access — the precise hazard the comment names. Now it
-genuinely defers during the brief window a real FS operation is in flight, and resumes on the very next
-tick (this function is called from the main poll loop at high frequency, so a one-tick defer is not a
-perceptible MIDI-timing hit). No counter-indication found that deferring USB-MIDI service for a single
-FS-operation-length window causes data loss — the USB stack buffers received bytes at a lower layer
-(`deluge_midi_service`), so a skipped poll doesn't drop input, only delays draining it by one tick.
+**Classification: NEUTRAL, redundant with site 2.** `checkIncomingUsbMidi()` has exactly one caller,
+`PlaybackHandler::midiRoutine()` (`playback_handler.cpp:132`), which is scheduled as the "midi routine"
+task registered `RESOURCE_SD | RESOURCE_USB` (`deluge.cpp:542-543`). Since Task 4, site 2's scheduler
+ceiling already holds this whole task off admission whenever `sd_busy()` is true — the task cannot start
+at all while busy, so the in-function check at line 502-504 can only ever observe `sd_busy()` transitioning
+`true` in the vanishingly narrow window between the scheduler's admission check and this line executing.
+The hazard the comment names (SysEx handlers clashing with card activity) is now caught upstream, at
+admission, essentially always. This in-function check is not wrong or harmful — it is a second layer that
+happens to sit almost entirely behind an already-closed gate — but it is not, in practice, doing
+independent work, so NEUTRAL rather than IMPROVED.
 
 ### 4. `playback_handler.cpp:191` — defer a pending global MIDI undo/redo command
 
@@ -250,13 +302,19 @@ FS-operation-length window causes data loss — the USB stack buffers received b
 && !sd_busy()`; when busy, the whole body is skipped and `pendingGlobalMIDICommand` is left untouched
 (it's only cleared inside the guarded body), so the pending command is retried, unlost, on the next tick.
 
-**Classification: IMPROVED.** The dispatched op (`undo()`/`redo()`) can itself load a sample and, on
-Embassy, can outlive the call that dispatched it onto the storage worker (documented in the surrounding
-comment, referencing `known-concurrency-bugs.md` B6). Deferring dispatch while a real FS operation is
-already in flight avoids adding a second concurrent FS consumer during that same brief window, which is
-strictly safer than dispatching unconditionally as before. The retry is lossless by construction — the
-flag is cleared only on the taken branch, matching the same "lossless deferral" shape verified for the
-waveform guard in Step 0.
+**Classification: IMPROVED, and independently load-bearing (not redundant with site 2).**
+`PlaybackHandler::slowRoutine()` IS also a scheduled task ("playback slow routine", `RESOURCE_SD`,
+`deluge.cpp:568-569`), so admission through it is covered by site 2's ceiling the same way site 3 is.
+But unlike site 3, `slowRoutine()` has a second, direct call path that bypasses the scheduler entirely:
+`View::noteRowKindaMessage` — the undo/redo button handler — calls `playbackHandler.slowRoutine();`
+directly, twice (`view.cpp:417` and `:436`, both commented "Do it now if not reading card"). Neither call
+goes through task admission, so site 2's ceiling does not protect this path at all; this in-function
+check is the *only* protection against dispatching `undo()`/`redo()` while a real FS operation is
+already in flight, on that path. The dispatched op can itself load a sample and, on Embassy, can outlive
+the call that dispatched it onto the storage worker (documented in the surrounding comment, referencing
+`known-concurrency-bugs.md` B6) — deferring while busy avoids adding a second concurrent FS consumer
+during that window. The retry is lossless by construction — the flag is cleared only on the taken branch,
+matching the same "lossless deferral" shape verified for the waveform guard in Step 0.
 
 ### 5. `audio_recorder.cpp:174` — defer recorder `slowRoutine` work
 
@@ -264,17 +322,24 @@ waveform guard in Step 0.
 sd_busy()`; when either is true, the whole routine (including the check that calls `finishRecording()`,
 which frees the `SampleRecorder`) is skipped for this tick.
 
-**Classification: IMPROVED, softened.** This is one of the two sites the brief calls out as already
-paired with `isSDRoutineActive()`. The comment explains the underlying hazard precisely:
-`finishRecording()` frees the recorder, and `discardRecorder()` (site 8 below) forbids doing that from
-inside the SD card routine because the recorder may be suspended part-way through its own
-`cardRoutine()` — freeing it there leaves that routine running on freed memory. `isSDRoutineActive()`
-was already a real, live signal before this change (unrelated to the dead `currentlyAccessingCard`
-flag), so this site already had partial protection. Adding a genuine `sd_busy()` extends coverage to the
-FS-mutex-held window specifically, which `isSDRoutineActive()` does not by itself guarantee overlaps
-with. Since the two signals track different mechanisms (a cooperative-routine flag vs. the efatfs
-FS-mutex state) rather than being redundant, the real `sd_busy()` half is additive protection against the
-same documented hazard, not a new hazard of its own.
+**Classification: IMPROVED, and independently load-bearing (not redundant with site 2). Not "softened" by
+`isSDRoutineActive()` — see the premise correction above.** This document's first draft called this site
+"softened" by its `isSDRoutineActive()` half, inherited from the brief's characterization. That is false
+on Embassy: `isSDRoutineActive()` is hardwired `false` there (`scheduler.rs:658`), so before this flip
+neither half of `isSDRoutineActive() || sd_busy()` was ever `true` — this check was completely dead, not
+partially live. The `sd_busy()` half newly backing this check is not "additive" to an existing protection;
+it is the first protection this site has ever had on Embassy.
+
+What it protects is real: the comment explains `finishRecording()` frees the recorder, and
+`discardRecorder()` (site 8 below) forbids doing that from inside the SD card routine because the
+recorder may be suspended part-way through its own `cardRoutine()` — freeing it there leaves that
+routine running on freed memory. And this check is independently load-bearing, not redundant with site
+2's ceiling: `AudioRecorder::slowRoutine()` IS also a scheduled task ("audio recorder slow",
+`RESOURCE_SD | RESOURCE_SD_ROUTINE`, `deluge.cpp:565-567`), but it additionally has direct call paths
+that bypass the scheduler — `deluge_app_tick`'s cooperative-BSP tick function calls
+`audioRecorder.slowRoutine();` unconditionally (`deluge.cpp:618`), and `StemExport`'s yield loop does the
+same (`stem_export.cpp:225`, alongside `AudioEngine::slowRoutine()`). Neither path is gated by site 2's
+ceiling, so this in-function check is the only protection on those paths.
 
 ### 6. `smsysex.cpp:909` — defer dispatching the front SysEx op
 
@@ -282,13 +347,15 @@ same documented hazard, not a new hazard of its own.
 and before dispatching `runSysexOp` onto the storage owner; the queued `SysExQ` entry is untouched, so
 it's retried, unlost, on the next tick.
 
-**Classification: IMPROVED.** Before, the front SysEx request was dispatched onto the storage owner
-unconditionally. Now dispatch is briefly held back while the FS mutex is genuinely held elsewhere, adding
-a small amount of backpressure before a FatFS-touching op is queued during a window when FatFS is
-already busy. The `deluge::storage::Owner::run` dispatch mechanism would eventually serialize this either
-way, so the marginal safety benefit here is smaller than at the recorder/overview-scan sites — but there
-is no plausible starvation risk given "busy" is bounded to one brief FS operation, and the in-flight
-guard/queue-front state is left completely untouched on the deferred path, so nothing is lost.
+**Classification: NEUTRAL, redundant with site 2.** `handleNextSysEx()` has exactly one caller: it is
+scheduled directly as "Handle pending SysEx traffic." (`RESOURCE_SD`, `deluge.cpp:556-557`) — there is no
+other call site, unlike sites 4/5's bypass paths. Since Task 4, site 2's ceiling already holds this whole
+task off admission whenever `sd_busy()` is true, so by the time this function's own body runs, `sd_busy()`
+has already been checked at admission for the same task. The in-function check at line 909 can only
+observe a `true` transition in the same vanishingly narrow admit-to-check window as site 3. It is not
+wrong to keep it — the queued `SysExQ` entry and in-flight guard are left untouched either way, so there
+is no starvation risk regardless of which layer catches the busy state — but it is not doing independent
+work now that admission itself is gated, so NEUTRAL rather than IMPROVED.
 
 ### 7. `sample_marker_editor.cpp:902` — throttle a debug-only marker-randomization routine
 
@@ -308,14 +375,17 @@ the one developer workflow that ever compiles this code.
 
 ### 8. `audio_engine.cpp:1666` — `discardRecorder()`'s `ALPHA_OR_BETA` assertion
 
-**What it does when busy:** `FREEZE_WITH_ERROR("E251")` if `isSDRoutineActive() || sd_busy()`.
+**What it does when busy (as activated by the flip alone, before this task's fix):**
+`FREEZE_WITH_ERROR("E251")` if `isSDRoutineActive() || sd_busy()`.
 
-**Classification: IMPROVED.** Full reasoning in Step 3 below — kept unchanged. This assertion now does
-exactly what its own comment says it exists to do: catch a real, documented double-free hazard
-(freeing a `SampleRecorder` while its own `cardRoutine()` may be suspended mid-transfer) on a call path
-(`AudioRecorder::process()`) that has no other guard. Before this flip, the `sd_busy()` half of its
-condition was dead, so this assertion was only ever as strong as `isSDRoutineActive()` alone; now it is
-as strong as intended.
+**Classification: REGRESSION as activated, fixed to NEUTRAL in this task.** Full reasoning in Step 3
+below — this document's first draft classified this site IMPROVED and KEPT it unchanged, reasoning that
+`isSDRoutineActive()` already made the assertion "partially live" before this flip. That premise is false
+on Embassy (see the correction above): neither half of the condition was ever `true` there before this
+change, so this assertion was exactly as dead as site 9's before the flip, and giving it real teeth
+exposes the exact same false-freeze risk site 9 has — arguably worse, since `discardRecorder()` is
+reachable, unguarded, from three live UI paths (see Step 3) during recording completion, which is
+FS-heavy. Downgraded to a diagnostic log in this task; see Step 3 for the full re-derivation.
 
 ### 9. `save_song_ui.cpp:124` — `performSave()`'s `ALPHA_OR_BETA` assertion
 
@@ -323,8 +393,7 @@ as strong as intended.
 `FREEZE_WITH_ERROR("E316")` if `sd_busy()`.
 
 **Classification: REGRESSION as activated, fixed to NEUTRAL in this task.** Full reasoning in Step 3
-below. Unlike site 8, no documented hazard justifies halting here — `performSave()`'s own filesystem
-calls simply queue behind whatever briefly holds the FS mutex, exactly like any other caller. Left as a
+below. Unlike site 8's documented double-free hazard, no documented hazard justifies halting here. Left as a
 hard freeze, this assertion would turn an ordinary, harmless scheduling coincidence (a user pressing Save
 while an unrelated background op like the overview scan briefly holds the mutex) into a user-visible
 device freeze on every beta build — worse than the eternal no-op it replaced. Downgraded to a diagnostic
@@ -339,7 +408,16 @@ dead. With a real signal, both *can* now fire — the question for each is wheth
 genuine invariant violation worth halting a beta build over, or legitimate concurrency that the assertion
 was never entitled to rule out.
 
-### `audio_engine.cpp:1666` (`discardRecorder`) — **KEEP**
+**This section was re-derived after review.** The first draft of this document reasoned that
+`audio_engine.cpp:1666` was already "partially live" via `isSDRoutineActive()`, and KEPT it unchanged on
+that basis while downgrading only `save_song_ui.cpp:124`. That premise — inherited from this task's own
+brief, and not independently re-verified before use — is false on Embassy:
+`isSDRoutineActive()` is hardwired `return false` there (`src/bsp/rust/src/scheduler.rs:658`). Neither
+half of `isSDRoutineActive() || sd_busy()` was ever `true` on Embassy before this flip, so this assertion
+was exactly as completely dead as `save_song_ui.cpp:124`'s — not "half-live." The re-derivation below
+replaces the original KEEP.
+
+### `audio_engine.cpp:1666` (`discardRecorder`, E251) — **DOWNGRADED to a diagnostic log**
 
 ```cpp
 void discardRecorder(SampleRecorder* recorder) {
@@ -349,33 +427,55 @@ void discardRecorder(SampleRecorder* recorder) {
 	...
 ```
 
-The surrounding comment states the hazard explicitly and specifically: `finishRecording()` frees the
+The surrounding comment states a real hazard, specifically: `finishRecording()` frees the
 `SampleRecorder`, and freeing it while the recorder's own `cardRoutine()` is suspended part-way through
 leaves that routine running on freed memory, "then freeing it a second time" — a double free, which
-"surfaces as M123 from the allocator, a long way from here." The comment says the rule is enforced here,
-rather than left for every caller to honour individually, *because* the consequence is real memory
-corruption at a distant, hard-to-diagnose site.
+"surfaces as M123 from the allocator, a long way from here." That invariant is genuine, and unlike site
+9 this assertion protects something real. But three corrections to the original KEEP reasoning together
+make KEEP the wrong call *for this round*:
 
-Two things push this toward KEEP rather than downgrade or narrow:
+1. **The "partially live" premise is false, as established above.** This assertion had zero live
+   protection on Embassy before this flip, the same starting point as site 9.
+2. **`sd_busy()` is a coarser signal than the invariant actually needs.** The comment's hazard is about
+   *this recorder's own* `cardRoutine()` being suspended mid-transfer — but `sd_busy()` answers "is ANY
+   FS operation in flight anywhere," since FatFS access is serialized through one worker but not
+   per-caller-attributed. A `true` reading at this call site does not establish that the in-flight
+   operation is this recorder's own; it could be an unrelated file's cluster load. So the same
+   false-freeze shape that makes site 9 unacceptable — halting on a coincidence rather than a genuine
+   conflict — applies here too, and arguably worse: recording completion is the FS-heaviest moment in
+   the app (finalizing/closing the just-recorded file), which is exactly when other background FS work
+   like the overview scan (Step 0: fires well over a hundred times per run) is likely to be active at the
+   same time, for reasons unrelated to this recorder.
+3. **The exposure is on a *live*, not legacy, call path.** The original KEEP argument #3 called
+   `AudioRecorder::process()` "the legacy non-`USE_TASK_MANAGER` mainLoop," inherited from a stale
+   in-source comment (`audio_recorder.cpp:171-173`). It is not legacy: `AudioRecorder::process()` calls
+   `finishRecording()` → `discardRecorder()` **unguarded** (`audio_recorder.cpp:219`, no
+   `isSDRoutineActive()`/`sd_busy()` check anywhere in `process()`), and `process()` itself is reached
+   from three live UI call sites — `gui/menu_item/osc/audio_recorder.h:57`,
+   `gui/ui/browser/sample_browser.cpp:471`, and `gui/views/instrument_clip_view.cpp:5563`. On an Embassy
+   beta build, any ordinary recording finished through one of those paths while any unrelated FS
+   operation happens to be mid-flight is now `FREEZE_WITH_ERROR("E251")`.
 
-1. **This is a real, distant, hard-to-diagnose memory-corruption bug if the invariant is violated**, not
-   a scheduling nicety. A false FREEZE (halting when nothing would actually have gone wrong) is a strictly
-   better failure mode than a missed real violation (silent heap corruption that surfaces later, possibly
-   nowhere near this call site).
-2. **`isSDRoutineActive()` already made this assertion partially live before this whole plan.** It has
-   already been a real, reachable check, on real signal, independent of the dead-flag bug this plan fixes.
-   Adding `sd_busy()` extends the same already-accepted invariant to also cover the FS-mutex-held window,
-   rather than introducing a brand new failure mode into a check that was previously always benign.
-3. **There is a second call path that bypasses the one softening guard that exists.**
-   `AudioRecorder::slowRoutine()` (site 5 above) checks `isSDRoutineActive() || sd_busy()` before calling
-   `finishRecording()` → `discardRecorder()`, but `AudioRecorder::process()` (the legacy
-   non-`USE_TASK_MANAGER` main loop) calls `finishRecording()` directly, with no such guard. This
-   assertion is the *only* protection on that second path — downgrading it to a log would remove the only
-   enforcement of a documented double-free hazard on a live call path, not just add a false positive.
+That combination — a coarse signal, applied to a real invariant it doesn't precisely establish, reachable
+from ordinary UI use, at the app's FS-heaviest moment — crosses the same "worse than the no-op" bar as
+site 9. Downgraded the same way:
 
-**Kept unchanged.** No code edit made to this site.
+```cpp
+if (ALPHA_OR_BETA_VERSION && (isSDRoutineActive() || deluge::sync::sd_busy())) {
+	D_PRINTLN("discardRecorder: isSDRoutineActive()/sd_busy() was true on entry (see sd_busy_audit.md)");
+}
+```
 
-### `save_song_ui.cpp:124` (`performSave`) — **DOWNGRADED to a diagnostic log**
+**The correct fix is narrower, and is a follow-up, not this round's job.** The BSP already tracks the
+precise invariant per-op: `fiber.rs`'s `SD_ROUTINE_HELD`/`sd_routine_held()` (`fiber.rs:403,411-412`) is
+"count of SD-routine-class ops in flight," consumed by the `RESOURCE_SD_ROUTINE` scheduler gate
+(`scheduler.rs:461`) for exactly this class of hazard — but it is not currently exported through the
+libdeluge C-ABI, so app code cannot ask it directly. Exporting it and switching this assertion (and site
+5's `slowRoutine()` guard) onto it would recover a signal precise enough to KEEP as a hard assertion. That
+export was explicitly out of scope for this round (no new C-ABI export) and is recorded here as the
+correct next step, not implemented.
+
+### `save_song_ui.cpp:124` (`performSave`, E316) — **DOWNGRADED to a diagnostic log**
 
 ```cpp
 if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
@@ -383,74 +483,104 @@ if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
 }
 ```
 
-Unlike site 8, there is no comment here, and reading the surrounding code finds no memory-safety or
-data-corruption rationale — `performSave()` is a UI-triggered entry point (context menus, the Save
-button) that goes on to do its own filesystem work (`StorageManager::fileExists`, sample renames, the
-save itself), all of which routes through the same single-owner FS serialization as everything else in
-this plan. There is nothing about calling `performSave()` while some unrelated background operation
-briefly holds the FS mutex that is unsafe: `performSave`'s own FS calls will simply queue behind whatever
-currently holds the mutex, exactly as they would for any other caller.
+There is no comment here, and reading the surrounding code finds no memory-safety or data-corruption
+rationale. **A claim in this document's first draft was wrong and has been corrected in the shipped code
+comment:** it stated `performSave`'s own filesystem calls "simply queue behind" whatever holds the FS
+mutex. On Embassy they do not queue — `performSave()` is not owner-dispatched (no `Owner::run` anywhere
+under `src/deluge/gui/ui/save/`), so its filesystem calls run off the storage-worker fiber, and the
+efatfs task-context C-ABI **rejects** off-fiber callers outright (`DELUGE_ERR_BUSY`,
+`src/bsp/rust/src/efatfs_fs.rs:535-537`) rather than serializing them.
 
-The most plausible original intent is a sanity check written when the dead flag was believed to
-correctly track "exclusive SD access is in progress" — a state that, under the old purely-cooperative,
-single-thread-does-everything model, arguably never should have coincided with a user pressing Save. On
-Embassy that assumption is simply no longer true: background FS work (the overview scan, sample loads for
-playback, MIDI-driven undo/redo dispatch, SysEx handling — sites 1, 4, 6 in this same document) can now
-legitimately be mid-operation, for a brief window, at the exact moment a user presses Save. Step 0's own
-probe run shows the overview scan alone issuing FS work well over a hundred times across one run — the
-kind of frequency that makes a coincidental Save-while-busy a real, unremarkable possibility rather than
-an edge case.
+That correction **narrows, rather than strengthens, the "provably benign" conclusion this document
+originally reached.** `performSave()` calls `StorageManager::fileExists()` at line 151, which opens the
+file to test existence and reports "exists" only if the open succeeds. If that open happens off-fiber
+(which — per the above — appears to be the normal case for `performSave`, independent of whether
+`sd_busy()` is true at all), it returns `DELUGE_ERR_BUSY`, `fileExists()` reads as `false`, and
+`fileAlreadyExisted` (line 151) is `false` regardless of whether the file actually exists — silently
+skipping the overwrite-confirmation prompt at line 153 and overwriting an existing song without asking.
+**This is a real, separately-tracked gap, not something this task's diagnostic-log change fixes or
+should try to fix** — it is orthogonal to `sd_busy()` (it would reproduce even with `sd_busy()` always
+`false`) and is being tracked outside this plan. It is recorded here because reasoning carefully about
+"is it safe to proceed while busy" surfaced it, and a reader of the original "simply queue, nothing
+unsafe" claim would not have found it.
 
-Firing `FREEZE_WITH_ERROR` here would turn a normal scheduling coincidence into a user-visible device
-freeze on every beta build, for behaviour that was never dangerous. That is exactly the "worse than the
-no-op" bar the brief describes for REGRESSION-shaped consumer sites, so this one is fixed rather than left
-to fire in the field. Downgraded to a diagnostic `D_PRINTLN` that preserves the `ALPHA_OR_BETA_VERSION`
-gate (so it costs nothing on release builds) and keeps a record of the event for anyone debugging a
-report of a "slow save," without halting the device:
+What this task's own diagnostic-log downgrade *does* establish, more narrowly than the original draft
+claimed: `sd_busy()` being `true` at line 124 is orthogonal to any known hazard at that instant — nothing
+about the busy signal itself makes this call more or less dangerous than any other invocation of
+`performSave()`. Firing `FREEZE_WITH_ERROR` on that orthogonal signal would turn an unrelated scheduling
+coincidence into a user-visible device freeze on every beta build, which is still the right reason to
+downgrade it — that conclusion survives the correction even though the "provably benign" framing around
+it does not. Downgraded to a diagnostic `D_PRINTLN` that preserves the `ALPHA_OR_BETA_VERSION` gate (so
+it costs nothing on release builds):
 
 ```cpp
-// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp:124):
-// this used to FREEZE_WITH_ERROR("E316") here, back when sd_busy() was permanently false and the
-// check could never fire. Now that it reports a real, brief per-operation FS-mutex state, a user
-// pressing Save while some unrelated background op (e.g. the waveform overview scan) is mid-op is
-// legitimate, benign concurrency, not corruption -- performSave's own filesystem calls simply queue
-// behind it via the usual single-owner serialization. Log it rather than crash a beta build over a
-// normal scheduling coincidence.
+// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp:124): this
+// used to FREEZE_WITH_ERROR("E316") here, back when sd_busy() was permanently false and the check
+// could never fire. No comment or invariant here ever explained *why* entering performSave() while
+// busy would be unsafe, and this task found none -- sd_busy() being true at this exact instant is
+// orthogonal to any hazard at this call site. It is NOT true that performSave's own filesystem calls
+// then "queue" behind whatever holds the mutex: performSave is not owner-dispatched, so its FS calls
+// run off the storage-worker fiber, and the efatfs C-ABI rejects off-fiber callers outright
+// (DELUGE_ERR_BUSY, see efatfs_fs.rs's task-context bridge) rather than serializing them. Whether
+// that rejection itself causes a problem here (e.g. StorageManager::fileExists silently reading as
+// "doesn't exist" off-fiber) is a separate, already-tracked gap, not something this log line
+// addresses -- see sd_busy_audit.md. Log it rather than crash a beta build over what this task
+// established is ordinary scheduling coincidence, not a known hazard.
 if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
 	D_PRINTLN("performSave: sd_busy() was true on entry (see sd_busy_audit.md)");
 }
 ```
 
-### Why one and not the other
+### Why both ended up downgraded, and what still differs between them
 
-This is a deliberate asymmetry, not an oversight: site 8 protects a *documented, distant,
-hard-to-diagnose memory-corruption hazard* on a call path that has no other guard, where a false halt is
-the safe failure mode. Site 9 protects *no documented hazard at all*, on a call path where the
-"violation" is provably benign (the operation just queues), where a false halt is a real, avoidable
-regression. Reasoning about them independently rather than applying one rule to both is exactly what
-produced the different outcomes — treating "assert not busy" as one interchangeable pattern across both
-sites would have missed the difference between "this could corrupt memory" and "this is provably safe to
-proceed."
+Both assertions turned out to have zero live protection before this flip (the "one already partially
+live" asymmetry this section originally rested on was wrong), and both cross the same "false freeze on
+an orthogonal or imprecise signal" bar once given a real signal — so both are downgraded this round, not
+one of each as the first draft concluded. That is not "no reasoning, same outcome for both": what
+differs, and is recorded for whoever picks up the follow-up work, is *why* each is worth revisiting
+differently. Site 8 (`discardRecorder`) protects a real, documented invariant and has a known, precise
+fix waiting (`sd_routine_held()`, once exported) — it should eventually go back to a hard assertion, on
+the narrower signal. Site 9 (`performSave`) protects no known invariant at all; there is nothing to
+"precisely re-derive" it onto, and its off-fiber `fileExists()` behavior is a separate, already-tracked
+concern rather than a reason to reinstate this particular check. Collapsing them to "downgrade both, done"
+would lose that distinction, which is why it's stated explicitly here rather than left implied by an
+identical code change.
 
 ## Step 3b: stale doc reference
 
 `docs/dev/target_architecture.md:66` named `currentlyAccessingCard` (deleted in this plan's Task 5) as a
-still-existing "hand-placed guard" alongside `audioRoutineLocked`. Updated to name the real, current
-mechanism, `deluge::sync::sd_busy()`. The surrounding architectural point (concurrency safety in this
-codebase rests on ad-hoc, hand-placed guards rather than a declared contract) is unchanged — only the
-example needed correcting.
+still-existing "hand-placed guard" alongside `audioRoutineLocked`. Updated to say a hand-placed guard *at
+call sites that query* `deluge_storage_fs_busy()` (naming the actual seam, with `deluge::sync::sd_busy()`
+noted as its app-side alias) — `sd_busy()` itself is a query, not a guard; the guards are the nine call
+sites in this document. The surrounding architectural point (concurrency safety in this codebase rests on
+ad-hoc, hand-placed guards rather than a declared contract) is unchanged — only the example needed
+correcting.
 
 ## Concerns
 
 1. The Step 0 probe's 172 hits confirm the scan runs and makes progress in the one fixture (`cordae`)
    this plan's harness exercises. It is not a proof for every possible sample/fixture combination, and it
    does not confirm the scan reaches full completion (`overviewScanAllDone`) — only that it makes
-   substantial, correctness-preserving progress within the run's virtual-time budget.
+   substantial, correctness-preserving progress within the run's virtual-time budget. It also only
+   instrumented the success path, not the deferral path — see "What this does NOT prove" above; the
+   evidence that the guard itself fires comes from Task 3's WEDGED→`exit=0` transition on the identical
+   fixture, not from this probe's counter.
 2. `resource_checker.h`'s `RESOURCE_SD` ceiling (site 2) remains the widest-blast-radius site in this
    plan, per Task 4's own concern, with no softening companion check. This audit did not find a reason to
    narrow it, but it is worth an on-device ear/behaviour check alongside the rest of this plan's pending
    hardware smoke test, since it is the one site that changes task admission rather than a single
-   call-site's own behaviour.
-3. All classifications and both Step 3 decisions rest on reading the code plus the one Lens 1 fixture's
+   call-site's own behaviour. Per the duty-cycle caveat above, this ceiling (and sites 4/5, its two
+   independently load-bearing counterparts) can hold off their tasks across most of a song load or
+   streaming burst, not just for one FS operation — expected behaviour, not a new risk, but worth keeping
+   in mind if a load-time regression is ever reported.
+3. Two follow-ups this task found but explicitly did not implement, both noted in Step 3: (a) exporting
+   `fiber::sd_routine_held()` through the libdeluge C-ABI would let `discardRecorder`'s assertion (site 8)
+   go back to a hard, precisely-targeted check instead of a diagnostic log; (b) `StorageManager::fileExists()`
+   appears to read as unconditionally `false` when called off the storage-worker fiber on Embassy (the
+   efatfs task-context C-ABI rejects off-fiber callers with `DELUGE_ERR_BUSY` rather than serializing them),
+   which would make `save_song_ui.cpp`'s overwrite-confirmation prompt silently skip on Embassy — a
+   pre-existing gap this task's reasoning surfaced but did not create, is not scoped to fix, and is being
+   tracked separately.
+4. All classifications and both Step 3 decisions rest on reading the code plus the one Lens 1 fixture's
    execution evidence; none of this has run on real Embassy hardware yet, consistent with the rest of this
    plan.

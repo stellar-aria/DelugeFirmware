@@ -409,13 +409,16 @@ pub extern "C" fn deluge_storage_on_owner() -> bool {
     crate::fiber::on_fiber()
 }
 
-// FatFS is not re-entrant, and the app's SD-reentrancy guard
-// (`currentlyAccessingCard`) is only set by the legacy C diskio
-// (src/RZA1/diskio.c), which this BSP does not link — so on this BSP it is
-// always 0. Yielding mid-transfer unconditionally would let other tasks
-// re-enter FatFS concurrently and corrupt it (manifests as "NO MORE PRESETS
-// FOUND" on track create, and would also break song/sample loads). Safe
-// yielding therefore requires all SD access to be serialized first: the
+// FatFS is not re-entrant. The app's SD-reentrancy guard is
+// `deluge_storage_fs_busy()`, which this BSP backs with the efatfs FS-mutex
+// state (see `efatfs_fs.rs`), so it now genuinely reflects whether a FatFS
+// transfer is in flight rather than being a dead always-0 flag. But that
+// guard only lets callers *detect* an in-flight transfer and back off — it
+// does nothing to prevent two tasks from entering FatFS concurrently in the
+// first place. Yielding mid-transfer unconditionally would still let other
+// tasks re-enter FatFS concurrently and corrupt it (manifests as "NO MORE
+// PRESETS FOUND" on track create, and would also break song/sample loads).
+// Safe yielding therefore requires all SD access to be serialized first: the
 // single-owner routing enforced by `deluge_storage_on_owner`/
 // `storage-owner-audit`, plus priority-queue and cooperative-yield
 // dispatch, guarantees every FatFS transfer after the storage owner is up

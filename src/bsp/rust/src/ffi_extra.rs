@@ -1,5 +1,5 @@
 //! Stubs for app/BSP symbols that live OUTSIDE the libdeluge C-ABI headers:
-//! BSP globals/functions the app references directly (USB-host, card, trigger
+//! BSP globals/functions the app references directly (USB-host, trigger
 //! clock), the FatFS `disk_*` diskio glue, NE10 DSP entry points (see note), and
 //! a couple of C-runtime/linker shims.
 //!
@@ -47,8 +47,6 @@ pub extern "C" fn _sbrk(incr: isize) -> *mut core::ffi::c_void {
 // --- BSP globals the app reads (cf. src/bsp/{host,rza1}) ---
 #[unsafe(no_mangle)]
 pub static mut anythingInitiallyAttachedAsUSBHost: u8 = 0;
-#[unsafe(no_mangle)]
-pub static mut currentlyAccessingCard: u8 = 0;
 #[unsafe(no_mangle)]
 pub static mut triggerClockRisingEdgesReceived: u32 = 0;
 #[unsafe(no_mangle)]

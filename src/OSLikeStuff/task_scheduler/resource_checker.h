@@ -16,9 +16,9 @@
  */
 #ifndef RESOURCE_CHECKER_H
 #define RESOURCE_CHECKER_H
+#include "libdeluge/storage_owner.h"
 #include <OSLikeStuff/scheduler_api.h>
 #include <bitset>
-extern uint8_t currentlyAccessingCard;
 extern uint32_t usbLock;
 // this is basically a bitset however the enums need to be exposed to C code and this is easier to keep synced
 class ResourceChecker {
@@ -35,7 +35,13 @@ public:
 		}
 		bool anythingLocked = false;
 		if ((resources_ & RESOURCE_SD) != 0u) {
-			anythingLocked |= currentlyAccessingCard;
+			// OSLikeStuff (the runtime/scheduler layer) may only reach app-side code through a
+			// libdeluge/ C-ABI boundary — it must NOT include sync/sd_access.h or call
+			// deluge::sync::sd_busy() directly, since that lives on the app side. Calling
+			// deluge_storage_fs_busy() here is legitimate specifically because the symbol is
+			// declared in libdeluge/storage_owner.h, i.e. it IS that boundary. Do not "simplify"
+			// this to the app-side call.
+			anythingLocked |= deluge_storage_fs_busy();
 		}
 		if ((resources_ & RESOURCE_USB) != 0u) {
 			anythingLocked |= usbLock;

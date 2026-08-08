@@ -218,11 +218,17 @@ Harness-first; device is a periodic confidence pass, not a per-rung blocker.
 | **`deluge_loadcheck` RUN** | Real execution, not merely linking |
 | **Device flash** | SGI priority ordering is a hardware property; audio under storage load |
 
-**On using the goldens differentially:** `golden_vt_render` has two known absolute divergences
-(the residual 1-LSB cordae fill-equivalence gap and the icoustic A-root efatfs range-load, both
-tracked from U4b). A known absolute divergence does not invalidate a **before/after
-self-comparison** — each rung asserts "this change altered nothing," not "the Embassy renderer
-matches C-host." So the harness gates without first being closed.
+**On using the goldens differentially:** `golden_vt_render` has known absolute divergences tracked from
+U4b. A known absolute divergence does not invalidate a **before/after self-comparison** — each rung
+asserts "this change altered nothing," not "the Embassy renderer matches C-host." So the harness gates
+without first being closed.
+
+**Correction (2026-08-08):** an earlier draft of this doc called icoustic's divergence an "A-root efatfs
+range-load" issue. **That label was never established and measurement refutes it.** icoustic's left
+channel diverges *during digital silence*, which no wrong-bytes-loaded mechanism explains; the right
+channel is bit-identical across all 798 s. It is a low-level arithmetic/rounding divergence in the left
+output path — a **render/DSP** matter with no storage component. Do not treat it as part of this arc.
+Full characterisation is recorded in the `icoustic-golden-divergence` project memory.
 
 **Golden cannot gate the FS layer itself.** Correct bytes produce identical audio regardless of which
 filesystem read them, so FS-layer correctness lives in `fs_differential`, not in the goldens.
@@ -264,8 +270,9 @@ Gaps, not risks. Named here so they are not rediscovered as surprises.
 - **The error conflation** — `StorageManager::fileExists` is `File::open(...).has_value()`, so it
   reads `DELUGE_ERR_BUSY` as *absent*. Wrong under any architecture, authorised independently, and
   fixed without reference to this ladder.
-- **icoustic's golden divergence** — bisected to pre-existing (fails at `921fd1bf9` and `e653023ef`
-  with byte-identical renders), the tracked A-root efatfs range-load item. Not part of this arc.
+- **icoustic's golden divergence** — pre-existing (byte-identical renders at `921fd1bf9`, `e653023ef`
+  and two later runs) and, per the 2026-08-08 characterisation, **not a storage problem at all**:
+  left-channel-only, present in silence, ~−58 dB arithmetic/rounding. A render/DSP item.
 - **exFAT** — FAT16/32 + LFN only. This is what makes a Rust-native FS tractable.
 - **Flash settings (`flash_storage`)** — SPI/NVM flash, not the SD FAT volume.
 - **SRAM residency (SP-R)** — a parallel track meeting this one only at the resource manager's

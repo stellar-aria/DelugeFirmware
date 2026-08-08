@@ -1,6 +1,23 @@
 # Async storage & SD loading — end-state architecture
 
-**Status:** north-star architecture design. Integrating end-state for the *whole* SD/file-I/O stack,
+> ## ⚠️ SUPERSEDED 2026-08-08 — read `2026-08-08-storage-execution-model-end-state-design.md`
+>
+> Its **strategy holds** (two domains, Rust-native FS, adopt `embedded-fatfs`, FAT16/32+LFN only,
+> C++ as a client below the `file_io.h`/`stream_io.h` seam) and the SP0–SP6 decomposition in §5 is
+> the ladder that was actually executed as R0–R4.
+>
+> Two things are **wrong** here, one of them load-bearing:
+> 1. §1 claim 1 — "the worker fiber's **sole** reason to exist is non-reentrant C FatFS." R4 deleted
+>    C-FatFS and the fiber remains, 706 lines with 69 live `block_on_fiber` sites. Its real surviving
+>    job is bridging synchronous C++ to the async Rust FS, plus suspending stacks for waits only user
+>    input can satisfy. Planning off this claim under-scoped R5, which had to split into R5a/R5b.
+> 2. §1 claim 4 / §3 — "C++ runs on a plain blocking worker context" is under-specified. Blocking is
+>    legal only under the tier invariant in the successor doc §1; some work can never block at all.
+>
+> §2 ("where we are starting from") is also ~3 weeks and two ladders stale. Full itemised drift in
+> the successor's Appendix A.
+
+**Status:** SUPERSEDED (see above). Originally: north-star architecture design. Integrating end-state for the *whole* SD/file-I/O stack,
 plus a sequenced decomposition into shippable sub-projects. Nothing new implemented by this doc — it
 defines the target the in-flight work converges on. NEEDS-HARDWARE gates called out per sub-project.
 

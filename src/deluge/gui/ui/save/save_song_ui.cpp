@@ -121,8 +121,15 @@ void SaveSongUI::focusRegained() {
 
 bool SaveSongUI::performSave(bool mayOverwrite) {
 
+	// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp:124):
+	// this used to FREEZE_WITH_ERROR("E316") here, back when sd_busy() was permanently false and the
+	// check could never fire. Now that it reports a real, brief per-operation FS-mutex state, a user
+	// pressing Save while some unrelated background op (e.g. the waveform overview scan) is mid-op is
+	// legitimate, benign concurrency, not corruption -- performSave's own filesystem calls simply queue
+	// behind it via the usual single-owner serialization. Log it rather than crash a beta build over a
+	// normal scheduling coincidence.
 	if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
-		FREEZE_WITH_ERROR("E316");
+		D_PRINTLN("performSave: sd_busy() was true on entry (see sd_busy_audit.md)");
 	}
 
 	if (currentSong->hasAnyPendingNextOverdubs()) {

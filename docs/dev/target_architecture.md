@@ -63,7 +63,7 @@ Downward arrows (gui → model) are healthy. The defining problems are the
   menu item is a class conflating tree structure, behavior, and rendering.
 - **Concurrency safety is ad-hoc discipline.** The UI mutates the model while
   the audio path reads it; safety rests on single-core cooperative scheduling
-  plus hand-placed guards (`currentlyAccessingCard`, `audioRoutineLocked`). There
+  plus hand-placed guards (`deluge::sync::sd_busy()`, `audioRoutineLocked`). There
   is no declared contract for which code may run in which context.
 - **Undo is its own smeared subsystem**: `model/action` + `model/consequence`
   (the ActionLogger) is invoked ad-hoc from views and model code alike.

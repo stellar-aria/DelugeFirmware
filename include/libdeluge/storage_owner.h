@@ -34,6 +34,17 @@ extern "C" {
 /// @return true iff the calling context is the storage owner.
 bool deluge_storage_on_owner(void);
 
+/// @brief True when a filesystem operation is in flight — i.e. touching the filesystem now would
+///        block until it completes.
+///
+/// Cooperative/C-host BSPs: always false (`Owner::run` executes inline on the caller, so no other
+/// context can hold the filesystem). Embassy: true while the efatfs FS mutex is held, by the worker
+/// fiber or by the streaming task.
+/// @note Safe to call from ANY context and never blocks — off-owner callers querying "may I start
+///       filesystem work now?" are the primary consumer.
+/// @return true iff a filesystem operation is currently in flight.
+bool deluge_storage_fs_busy(void);
+
 #ifdef __cplusplus
 }
 #endif

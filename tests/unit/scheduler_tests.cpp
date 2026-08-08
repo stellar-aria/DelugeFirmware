@@ -13,7 +13,6 @@
 #include <unistd.h>
 #endif
 
-uint8_t currentlyAccessingCard = false;
 uint32_t usbLock = false;
 namespace {
 
@@ -65,14 +64,14 @@ TEST_GROUP(Scheduler){
 
     void setup(){taskManager = TaskManager();
 sdRoutineActive = false;
-currentlyAccessingCard = false;
+fsBusyTestOverride = false;
 } // namespace
 
 // These are globals the ResourceChecker reads. Reset them here as well as in setup(), so that a test which fails
 // part-way through while holding one can't leave it locked and silently starve every later resource-gated task.
 void teardown() {
 	sdRoutineActive = false;
-	currentlyAccessingCard = false;
+	fsBusyTestOverride = false;
 }
 }
 ;
@@ -143,10 +142,14 @@ TEST(Scheduler, sdRoutineActiveBlocksSdRoutineTask) {
 	mock().checkExpectations();
 };
 
-TEST(Scheduler, cardAccessBlocksSdTask) {
+// RESOURCE_SD is gated on deluge_storage_fs_busy() (the libdeluge/storage_owner.h seam), not on the
+// retired currentlyAccessingCard flag. fsBusyTestOverride is the cooperative default's test-only hook
+// (task_scheduler_c_api.cpp) that drives that seam's return value from here, since this TU #includes
+// the .cpp directly rather than linking it.
+TEST(Scheduler, fsBusyBlocksSdTask) {
 	mock().clear();
 	mock().expectNCalls(0, "sleep_50ns");
-	currentlyAccessingCard = true;
+	fsBusyTestOverride = true;
 	addRepeatingTask(sleep_50ns, 0, 0.001, 0.001, 0.001, "sd task", RESOURCE_SD);
 	taskManager.start(0.0095);
 	mock().checkExpectations();

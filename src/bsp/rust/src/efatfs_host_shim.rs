@@ -65,6 +65,23 @@
 #![cfg(feature = "host_app")]
 #![allow(dead_code)]
 
+// Structural guard, not just documentation: this file's own inclusion (see this `#![cfg]` and
+// main.rs's matching `mod` attribute) depends ONLY on `feature = "host_app"`, with no
+// `not(target_os = "none")` -- so nothing stops a device build from also turning on `host_app`.
+// `efatfs_fs.rs` (the device efatfs impl) is included independently on `target_os = "none"` --
+// see its own `#![cfg]`. If both conditions were ever true at once, both files would compile into
+// the same binary and doubly define the whole efatfs C-ABI, including `deluge_storage_fs_busy`,
+// which would surface as an opaque `E0428` with no hint why. This file compiles on every build
+// that could trigger the overlap (it's the `host_app` half of the pair), so it's the right place
+// to fail loudly with the real explanation instead.
+#[cfg(all(target_os = "none", feature = "host_app"))]
+compile_error!(
+    "efatfs_fs.rs (device) and efatfs_host_shim.rs (host) both define the efatfs C-ABI, \
+     including deluge_storage_fs_busy -- a device build (target_os = \"none\") must never also \
+     enable the `host_app` feature, or both modules compile into the same binary and duplicate \
+     every efatfs_* C-ABI symbol."
+);
+
 use aligned::{A4, Aligned};
 use block_device_adapters::BufStream;
 use block_device_driver::BlockDevice;
@@ -911,6 +928,16 @@ pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
         embassy_futures::block_on(fut)
     }
     .is_some()
+}
+
+/// C-ABI (libdeluge/storage_owner.h): is a filesystem operation in flight? Host mirror of the
+/// device impl in `efatfs_fs.rs` — see that file's `deluge_storage_fs_busy` for the full
+/// rationale (non-blocking, callable from any context, `Err` means held, check-then-act is sound
+/// here because there's no `await` between this probe and the caller's own FS access — do not
+/// "harden" this into an atomic).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_storage_fs_busy() -> bool {
+    FS.try_lock().is_err()
 }
 
 /// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh

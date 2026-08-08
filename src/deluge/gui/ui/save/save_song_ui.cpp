@@ -121,8 +121,20 @@ void SaveSongUI::focusRegained() {
 
 bool SaveSongUI::performSave(bool mayOverwrite) {
 
+	// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp): this
+	// used to FREEZE_WITH_ERROR("E316") here, back when sd_busy() was permanently false and the check
+	// could never fire. No comment or invariant here ever explained *why* entering performSave() while
+	// busy would be unsafe, and this task found none -- sd_busy() being true at this exact instant is
+	// orthogonal to any hazard at this call site. It is NOT true that performSave's own filesystem calls
+	// then "queue" behind whatever holds the mutex: performSave is not owner-dispatched, so its FS calls
+	// run off the storage-worker fiber, and the efatfs C-ABI rejects off-fiber callers outright
+	// (DELUGE_ERR_BUSY, see efatfs_fs.rs's task-context bridge) rather than serializing them. Whether
+	// that rejection itself causes a problem here (e.g. StorageManager::fileExists silently reading as
+	// "doesn't exist" off-fiber) is a separate, already-tracked gap, not something this log line
+	// addresses -- see sd_busy_audit.md. Log it rather than crash a beta build over what this task
+	// established is ordinary scheduling coincidence, not a known hazard.
 	if (ALPHA_OR_BETA_VERSION && deluge::sync::sd_busy()) {
-		FREEZE_WITH_ERROR("E316");
+		D_PRINTLN("performSave: sd_busy() was true on entry (see sd_busy_audit.md)");
 	}
 
 	if (currentSong->hasAnyPendingNextOverdubs()) {

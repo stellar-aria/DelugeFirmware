@@ -16,15 +16,12 @@
  */
 #include "sync/sd_access.h"
 
-#include <cstdint>
-
-// Defined in the diskio layer (RZA1/diskio.c) / host_platform.c; C linkage.
-extern "C" uint8_t currentlyAccessingCard;
+#include "libdeluge/storage_owner.h"
 
 namespace deluge::sync {
 
 bool sd_busy() {
-	return currentlyAccessingCard != 0;
+	return deluge_storage_fs_busy();
 }
 
 } // namespace deluge::sync

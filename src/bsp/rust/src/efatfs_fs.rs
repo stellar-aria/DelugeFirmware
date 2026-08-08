@@ -837,6 +837,31 @@ pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
     crate::fiber::block_on_fiber(with_fs(async |_fs| ())).is_some()
 }
 
+/// C-ABI (libdeluge/storage_owner.h): is a filesystem operation in flight?
+///
+/// NON-BLOCKING and callable from ANY context — deliberately unlike
+/// [`deluge_efatfs_is_mounted`], which guards on `on_fiber()` and then `block_on_fiber`s. Off-owner
+/// callers asking "may I start filesystem work now?" are the primary consumer, and blocking here
+/// would be the very deadlock this exists to prevent.
+///
+/// `try_lock()` returns `Err` when the mutex is HELD — do not invert this. On `Ok` the guard is
+/// dropped immediately (it's a temporary, dropped at the end of the statement), so a successful
+/// probe does not keep the lock.
+///
+/// Check-then-act is sound here, but narrower than "cooperative on one thread" alone would suggest:
+/// the audio InterruptExecutor CAN preempt a thread-mode task_runner mid-handle (`scheduler.rs:476-478`),
+/// so this is not literally single-threaded. It is sound because audio never touches the filesystem —
+/// the interrupt executor has no code path that acquires `FS` — so no preemption can land inside the gap
+/// between this probe and the caller's own filesystem access, and no `await` sits in that gap either.
+/// That "audio never touches the FS" fact is the actual load-bearing premise, not thread-cooperation by
+/// itself — state it plainly so a future reader "hardening" this into an atomic understands what would
+/// have to become false first (audio starting to touch the FS), rather than assuming there is no race to
+/// reason about at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_storage_fs_busy() -> bool {
+    FS.try_lock().is_err()
+}
+
 /// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
 /// (see [`remount`]). For a card SWAP: gives a clean FS against the new card
 /// and invalidates stale Rust-side handle state from the old one.

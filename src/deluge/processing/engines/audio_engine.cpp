@@ -1662,9 +1662,21 @@ errorAfterAllocation:
 // cardRoutine() operating on freed memory before handing it back to doRecorderCardRoutines() to be freed a second
 // time. That's a double free, and it surfaces as M123 from the allocator, a long way from here - so rather than
 // leaving the rule as a comment for each caller to honour, enforce it.
+//
+// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, audio_engine.cpp): this used
+// to FREEZE_WITH_ERROR("E251") here. On Embassy isSDRoutineActive() is hardwired false
+// (scheduler.rs:658), so before sd_busy() was backed for real, this check never fired at all -- it was
+// exactly as dead as save_song_ui.cpp's E316, not "half-live". sd_busy() is now real, but it answers "is
+// ANY FS operation in flight anywhere", not "is THIS recorder's own cardRoutine() suspended mid-transfer"
+// -- the two can differ, since FatFS work is serialized but not per-caller-attributed. The precise
+// invariant this comment actually wants is tracked per-op on the BSP (fiber.rs's SD_ROUTINE_HELD /
+// sd_routine_held(), consumed by the RESOURCE_SD_ROUTINE scheduler gate) but is not yet exported through
+// the libdeluge C-ABI -- exporting it is the correct future fix, not a new export sneaked in here. Until
+// then, treat a busy signal at this call site as informative, not as proof this recorder is the one
+// suspended -- log it rather than freeze a beta build on what may be an unrelated FS operation.
 void discardRecorder(SampleRecorder* recorder) {
 	if (ALPHA_OR_BETA_VERSION && (isSDRoutineActive() || deluge::sync::sd_busy())) {
-		FREEZE_WITH_ERROR("E251");
+		D_PRINTLN("discardRecorder: isSDRoutineActive()/sd_busy() was true on entry (see sd_busy_audit.md)");
 	}
 
 	int32_t count = 0;

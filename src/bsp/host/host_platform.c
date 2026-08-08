@@ -53,10 +53,6 @@ static bool host_sd_root_present(void) {
 	return stat(root, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// Set while the SD routine is mid-access on target; nothing toggles it on host
-// (synchronous I/O, no reentrancy), but it is read app-wide.
-uint8_t currentlyAccessingCard = 0;
-
 // block_device.h — the app's native (non-FatFS) card-detect/init entry points.
 // deluge_block_ready/deluge_block_init live here (rather than host_bsp.c,
 // where the rest of the block_device.h stubs are) because they need this

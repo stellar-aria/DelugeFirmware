@@ -30,7 +30,17 @@ extern TaskManager taskManager;
 // isSDRoutineActive() to gate user actions. Was the app-global sdRoutineLock in deluge.cpp.
 namespace {
 bool sdRoutineActive = false;
-}
+
+// Test-only seam for the cooperative deluge_storage_fs_busy() default below. Production never
+// sets this, so it is always false there and the default's real behaviour ("FatFS runs inline on
+// the caller, so nothing else can be holding the filesystem") is unchanged. tests/unit/
+// scheduler_tests.cpp #includes this .cpp directly (rather than linking it), which makes this
+// anonymous-namespace flag directly settable by name from the test file — the same trick already
+// used there for sdRoutineActive above (and formerly currentlyAccessingCard) — so
+// Scheduler.fsBusyBlocksSdTask can drive the RESOURCE_SD ceiling through the real seam
+// (resource_checker.h -> deluge_storage_fs_busy()) instead of a symbol the ceiling no longer reads.
+bool fsBusyTestOverride = false;
+} // namespace
 extern "C" bool isSDRoutineActive() {
 	return sdRoutineActive;
 }
@@ -114,6 +124,14 @@ bool deluge_worker_on_worker(void) {
 // caller, so the caller is always the owner. Embassy overrides (fiber-only).
 bool deluge_storage_on_owner(void) {
 	return true;
+}
+
+// libdeluge/storage_owner.h — cooperative/C-host default: FatFS runs inline on the
+// caller, so no other context can be holding the filesystem. Embassy overrides
+// (true while the efatfs FS mutex is held). Always false in production — see
+// fsBusyTestOverride above for the one exception, which only a unit test can reach.
+bool deluge_storage_fs_busy(void) {
+	return fsBusyTestOverride;
 }
 
 // Cooperative yield hooks for slow-storage busy-waits (the <libdeluge/storage_wait.h>

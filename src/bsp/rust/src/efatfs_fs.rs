@@ -837,6 +837,26 @@ pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
     crate::fiber::block_on_fiber(with_fs(async |_fs| ())).is_some()
 }
 
+/// C-ABI (libdeluge/storage_owner.h): is a filesystem operation in flight?
+///
+/// NON-BLOCKING and callable from ANY context — deliberately unlike
+/// [`deluge_efatfs_is_mounted`], which guards on `on_fiber()` and then `block_on_fiber`s. Off-owner
+/// callers asking "may I start filesystem work now?" are the primary consumer, and blocking here
+/// would be the very deadlock this exists to prevent.
+///
+/// `try_lock()` returns `Err` when the mutex is HELD — do not invert this. On `Ok` the guard is
+/// dropped immediately (it's a temporary, dropped at the end of the statement), so a successful
+/// probe does not keep the lock.
+///
+/// Check-then-act is sound rather than racy here: the caller and the FS holder are cooperative on
+/// one thread and no `await` sits between this probe and the caller's own filesystem access, so
+/// nothing can take the mutex in the gap. Do not "harden" this into an atomic — a future reader
+/// will be tempted to, but there is no race to fix.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_storage_fs_busy() -> bool {
+    FS.try_lock().is_err()
+}
+
 /// C-ABI: drop the mounted FS + reset the four handle tables + re-mount fresh
 /// (see [`remount`]). For a card SWAP: gives a clean FS against the new card
 /// and invalidates stale Rust-side handle state from the old one.

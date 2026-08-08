@@ -201,18 +201,36 @@ and by rebuilding `deluge_app`/`deluge_loadcheck` clean afterward).
 
 ## Step 1–2: the nine sites
 
-**Summary, as shipped by this task: 4 IMPROVED / 5 NEUTRAL / 0 REGRESSION.**
+**Summary, as shipped by this task and corrected during final review (see below): 5 IMPROVED / 4
+NEUTRAL / 0 REGRESSION.**
 
-- IMPROVED: sites 1, 2, 4, 5.
-- NEUTRAL: site 7 (its code path is compiled out by default); sites 3 and 6 (redundant with site 2's
-  scheduler ceiling — see below); sites 8 and 9 (both were REGRESSIONs as activated by the flip alone —
-  false `FREEZE_WITH_ERROR`s on legitimate concurrency, worse than the eternal no-op they replaced — and
-  both were downgraded to diagnostic logs in this task before they could ship).
+- IMPROVED: sites 1, 3, 4, 5, 6.
+- NEUTRAL: site 2 (its `RESOURCE_SD` ceiling is not linked into any BSP this repo currently builds —
+  forward-looking only, see the correction below); site 7 (its code path is compiled out by default);
+  sites 8 and 9 (both were REGRESSIONs as activated by the flip alone — false `FREEZE_WITH_ERROR`s on
+  legitimate concurrency, worse than the eternal no-op they replaced — and both were downgraded to
+  diagnostic logs in this task before they could ship).
 
 Stated the more important way: **as activated by the flip alone, before this task's judgement, two of
-the nine (`audio_engine.cpp:1666` and `save_song_ui.cpp:124`) would have been REGRESSIONs.** Catching
-that before it ships is exactly this task's job, not a side effect of it — see Step 3 below for both.
-With those two fixes applied, the shipped tally has zero regressions.
+the nine (`audio_engine.cpp` and `save_song_ui.cpp`) would have been REGRESSIONs.** Catching that before
+it ships is exactly this task's job, not a side effect of it — see Step 3 below for both. With those two
+fixes applied, the shipped tally has zero regressions.
+
+**A final-review correction to sites 2, 3, and 6, made after the original tally above was written.**
+That tally classified site 2 IMPROVED and sites 3/6 NEUTRAL-as-redundant-with-site-2. Verified from this
+branch's own device ELF (`arm-none-eabi-nm -C target/armv7a-none-eabihf/release/deluge-rust | grep -cE
+"TaskManager::|ResourceChecker"` → `0`): the C++ `ResourceChecker`/`TaskManager` that site 2's
+`RESOURCE_SD` ceiling lives in is not linked into the Embassy device build at all.
+`addRepeatingTask`/`isSDRoutineActive`/`startTaskManager` all resolve into `scheduler.rs`, which states
+directly why — `scheduler.rs:526-528` says its reimplementation of the `scheduler_api.h` ABI exists
+specifically to "keep the C++ TaskManager out of the link", and `scheduler.rs:228`/`:465-467` state the
+Rust task runner has **no `RESOURCE_SD` gate by design**. Site 2 is therefore reclassified NEUTRAL
+(forward-looking only, not currently live anywhere) rather than IMPROVED — full reasoning in its own
+entry below. Because site 2 gates nothing on Embassy, sites 3 (`midi_engine.cpp`) and 6
+(`smsysex.cpp`) are **not** redundant with it — they are re-derived IMPROVED, independently load-bearing,
+below. This correction must not be read as softening: on Embassy those two sites are the only protection
+SysEx dispatch and USB-MIDI servicing have against concurrent filesystem work, and a reader relying on
+the original "not doing independent work" wording could conclude they're safe to delete.
 
 **A premise correction, made during review of this document, that changes two more classifications.**
 This document originally described `audio_recorder.cpp:174` and `audio_engine.cpp:1666` as "already
@@ -248,35 +266,70 @@ one of the nine reads below the fold is being exercised for the first time by th
 **What it does when busy:** `advanceOverviewScan` returns `true` before issuing a synchronous cluster
 load, deferring that cluster to the next call instead of racing the storage worker for the FS mutex.
 
-**Classification: IMPROVED.** This is the deadlock fix itself. Before, the branch never fired (dead
-flag), so the scan's synchronous off-owner read could — and, per the bug report that started this whole
-plan, did — block on the efatfs FS mutex while a suspended worker fiber held it, with no task able to
-ever resume that fiber. Now the branch fires correctly and defers instead of deadlocking. Step 0 above
-independently confirms the deferred scan still gets its work done.
+**Classification: IMPROVED — but "this is the deadlock fix itself" (this section's original wording)
+overstates it for real hardware; corrected during final review.** The literal deadlock mechanism —
+a synchronous off-owner read blocking on the FS mutex while MAIN's own `executor.poll()` spins on the
+lock, so nothing is left able to resume the holder fiber — is the `embassy_futures::block_on` spin that
+lives only in `efatfs_host_shim.rs` (`#![cfg(feature = "host_app")]`), i.e. the Embassy **host harness**
+this plan's bug report and Lens 1 gate both run on. On the device build, `embassy_futures::block_on` does
+not appear in `efatfs_fs.rs` at all; every entry point there (e.g. `deluge_efatfs_read_at`,
+`efatfs_fs.rs:301`, the exact function the scan's fill path calls) gates on `on_fiber()` and rejects an
+off-fiber caller immediately instead of spinning. So on hardware this guard's job is narrower than "fixes
+a deadlock": it stops the scan from churning always-failing off-fiber read attempts, since the FS mutex
+was never going to make MAIN's executor spin there in the first place. It is still the correct fix and
+still IMPROVED — a scan that keeps retrying a call guaranteed to fail is real, measurable waste — the
+correction is to the mechanism named, not the classification. Before this change the branch never fired
+(dead flag), so the scan's synchronous off-owner read could — and, per the bug report that started this
+whole plan (reproduced in the host harness), did — block the harness this way. Now the branch fires
+correctly and defers instead. Step 0 above independently confirms the deferred scan still gets its work
+done.
 
 Migrated by commit `41745107e` (Task 3); not touched by this task beyond the temporary Step 0 probe,
 which was reverted before commit.
 
 ### 2. `resource_checker.h:38` — the scheduler `RESOURCE_SD` ceiling (already migrated, Task 4)
 
-**What it does when busy:** `ResourceChecker::checkResources()` treats `RESOURCE_SD` as locked, holding
-off admission of any task that declares that resource.
+**What it does when busy, on the one class of build where it links:** `ResourceChecker::checkResources()`
+treats `RESOURCE_SD` as locked, holding off admission of any task that declares that resource.
 
-**Classification: IMPROVED.** This priority-ceiling exists specifically to stop a task from locking one
-resource and then yielding while it waits for another — a real hazard shape. Before, its input
-(`currentlyAccessingCard`, then `deluge_storage_fs_busy()` before this whole flip) never went `true`, so
-the ceiling was a permanent no-op: any task declaring `RESOURCE_SD` was always admitted regardless of
-real FS state. Now it can genuinely hold off admission for the brief window a real FS operation is in
-flight, which is exactly the protection the ceiling was written to provide. Per the brief's own framing
-this is the widest-blast-radius site in the plan (task admission, not one call-site deferral) and has no
-softening companion check; Task 4's report flagged that explicitly and did not narrow it, deferring the
-call to review. Nothing in this task's investigation surfaces a reason to downgrade that IMPROVED
-classification to NEUTRAL or REGRESSION — but see the duty-cycle caveat above: during a load or streaming
-burst this ceiling can hold off `RESOURCE_SD` tasks across most of that window, not just for one
-operation's duration, which is the mechanism working as designed, not a new risk this audit is
-introducing.
+**Classification: NEUTRAL — not linked into any BSP this repo currently builds; forward-looking only.
+Corrected during final review; supersedes the IMPROVED classification this section originally gave.**
+The original reasoning was that `deluge_storage_fs_busy()` finally going genuinely `true` made this
+priority-ceiling live for the first time. That assumed `ResourceChecker::checkResources()` is in the
+Embassy call graph. It is not. Verified from this branch's own device ELF:
 
-Migrated by commits `1c3295df3`/`a6447337b` (Task 4); not touched by this task.
+```
+$ arm-none-eabi-nm -C target/armv7a-none-eabihf/release/deluge-rust | grep -cE "TaskManager::|ResourceChecker"
+0
+```
+
+`addRepeatingTask`, `isSDRoutineActive`, and `startTaskManager` all resolve into `scheduler.rs`, a
+from-scratch Rust reimplementation of the `scheduler_api.h` ABI — which states directly why:
+`scheduler.rs:526-528` says the reimplementation exists specifically to "keep the C++ TaskManager out of
+the link." `scheduler.rs:228` and `:465-467` go further, stating the Rust task runner has **no
+`RESOURCE_SD` gate by design** — SD serialization on Embassy comes from the single-owner storage
+discipline (the storage owner IS the worker fiber) plus the `block_on_fiber` yield in `sd.rs`, not from a
+resource-ceiling admission check. `ResourceChecker` is real code, but Embassy never calls it.
+
+On the other class of build — cooperative/C-host (sim, `deluge_loadcheck`, `build-tests`, legacy RZA1) —
+`ResourceChecker` IS linked, but `deluge_storage_fs_busy()` is hardwired `false` there (this document's
+scope note up top), so the ceiling is a no-op for the opposite reason: the code runs, but its input never
+goes `true`.
+
+**`resource_checker.h`'s `RESOURCE_SD` branch is therefore a no-op on every build this repo currently
+produces.** Its only observable live effect anywhere in this repo is the CI unit test
+`Scheduler.fsBusyBlocksSdTask`, which exercises `ResourceChecker` directly rather than through a linked
+app. Keeping the check is still correct — it is the right behaviour to have ready — and it becomes live,
+exactly as this section originally described, if and when the Rust task runner ever grows a `RESOURCE_SD`
+gate of its own (`scheduler.rs:228`'s comment describes what that would take). Until then it is
+forward-looking, not IMPROVED, and the on-device hardware-smoke watch item this document previously
+carried for it (see Concerns and "Gates NOT run" below) is moot — there is nothing to observe on
+hardware, because the code isn't in the hardware build. **This also means sites 3 and 6 below, previously
+classified NEUTRAL as "redundant with this ceiling," are not redundant with anything — see their
+re-derivation below.**
+
+Migrated by commits `1c3295df3`/`a6447337b` (Task 4); not touched by this task. The reclassification
+above was made during final review of this document, not by re-touching the migration commits.
 
 ### 3. `midi_engine.cpp:502-504` — defer SysEx/USB-MIDI handling
 
@@ -285,16 +338,20 @@ Migrated by commits `1c3295df3`/`a6447337b` (Task 4); not touched by this task.
 The existing comment already calls this "a hack to avoid SysEx handlers clashing with other sd-card
 activity" — i.e. this check was *written* to do exactly what it can now actually do.
 
-**Classification: NEUTRAL, redundant with site 2.** `checkIncomingUsbMidi()` has exactly one caller,
-`PlaybackHandler::midiRoutine()` (`playback_handler.cpp:132`), which is scheduled as the "midi routine"
-task registered `RESOURCE_SD | RESOURCE_USB` (`deluge.cpp:542-543`). Since Task 4, site 2's scheduler
-ceiling already holds this whole task off admission whenever `sd_busy()` is true — the task cannot start
-at all while busy, so the in-function check at line 502-504 can only ever observe `sd_busy()` transitioning
-`true` in the vanishingly narrow window between the scheduler's admission check and this line executing.
-The hazard the comment names (SysEx handlers clashing with card activity) is now caught upstream, at
-admission, essentially always. This in-function check is not wrong or harmful — it is a second layer that
-happens to sit almost entirely behind an already-closed gate — but it is not, in practice, doing
-independent work, so NEUTRAL rather than IMPROVED.
+**Classification: IMPROVED, and independently load-bearing on Embassy. Corrected during final review —
+supersedes the "NEUTRAL, redundant with site 2" classification this section originally gave.** The
+original reasoning was that `checkIncomingUsbMidi()`'s caller, `PlaybackHandler::midiRoutine()`
+(`playback_handler.cpp:132`, scheduled `RESOURCE_SD | RESOURCE_USB`, `deluge.cpp:542-543`), is already
+held off admission by site 2's scheduler ceiling whenever `sd_busy()` is true, so this in-function check
+could only ever observe a vanishingly narrow admit-to-check window. That reasoning is false — see the
+site-2 correction above: `ResourceChecker`'s `RESOURCE_SD` ceiling is not linked into the Embassy build
+at all, so it gates nothing there. **On Embassy this check is not a second layer sitting behind an
+already-closed gate — it is the only gate.** It is the sole protection for SysEx dispatch and USB-MIDI
+servicing against concurrent filesystem work on this BSP (alongside site 6). This distinction is not
+just bookkeeping: a future reader relying on this section's original "not, in practice, doing independent
+work" wording could conclude the check is safe to delete as dead-code cleanup. It is not — deleting it
+would reopen exactly the hazard the check's own comment ("a hack to avoid SysEx handlers clashing with
+other sd-card activity") was written for, with nothing behind it on this BSP.
 
 ### 4. `playback_handler.cpp:191` — defer a pending global MIDI undo/redo command
 
@@ -347,15 +404,19 @@ ceiling, so this in-function check is the only protection on those paths.
 and before dispatching `runSysexOp` onto the storage owner; the queued `SysExQ` entry is untouched, so
 it's retried, unlost, on the next tick.
 
-**Classification: NEUTRAL, redundant with site 2.** `handleNextSysEx()` has exactly one caller: it is
-scheduled directly as "Handle pending SysEx traffic." (`RESOURCE_SD`, `deluge.cpp:556-557`) — there is no
-other call site, unlike sites 4/5's bypass paths. Since Task 4, site 2's ceiling already holds this whole
-task off admission whenever `sd_busy()` is true, so by the time this function's own body runs, `sd_busy()`
-has already been checked at admission for the same task. The in-function check at line 909 can only
-observe a `true` transition in the same vanishingly narrow admit-to-check window as site 3. It is not
-wrong to keep it — the queued `SysExQ` entry and in-flight guard are left untouched either way, so there
-is no starvation risk regardless of which layer catches the busy state — but it is not doing independent
-work now that admission itself is gated, so NEUTRAL rather than IMPROVED.
+**Classification: IMPROVED, and independently load-bearing on Embassy. Corrected during final review —
+supersedes the "NEUTRAL, redundant with site 2" classification this section originally gave.**
+`handleNextSysEx()` has exactly one caller: it is scheduled directly as "Handle pending SysEx traffic."
+(`RESOURCE_SD`, `deluge.cpp:556-557`) — there is no other call site, unlike sites 4/5's bypass paths. The
+original reasoning was that site 2's ceiling already holds this task off admission whenever `sd_busy()`
+is true, making this in-function check redundant with admission-time gating. That is false — see the
+site-2 correction above: nothing gates this task's admission on Embassy. **This check is the sole
+protection for SysEx dispatch against concurrent filesystem work on this BSP, alongside site 3.** The
+queued `SysExQ` entry and in-flight guard being left untouched either way still means deferring costs no
+starvation risk — that part of the original reasoning holds — but "not doing independent work" does not:
+with site 2 gating nothing, this check does all of the work, not none of it. Same caution as site 3: this
+is not a redundant layer to prune, and deleting it on the "redundant" reading this section previously
+gave would remove the only defence this call site has on Embassy.
 
 ### 7. `sample_marker_editor.cpp:902` — throttle a debug-only marker-randomization routine
 
@@ -373,7 +434,7 @@ correct than a permanently-false one for the exact reason the guard exists (thro
 from real card activity). NEUTRAL for the shipped product; a minor, harmless correctness improvement for
 the one developer workflow that ever compiles this code.
 
-### 8. `audio_engine.cpp:1666` — `discardRecorder()`'s `ALPHA_OR_BETA` assertion
+### 8. `audio_engine.cpp` — `discardRecorder()`'s `ALPHA_OR_BETA` assertion
 
 **What it does when busy (as activated by the flip alone, before this task's fix):**
 `FREEZE_WITH_ERROR("E251")` if `isSDRoutineActive() || sd_busy()`.
@@ -387,7 +448,7 @@ exposes the exact same false-freeze risk site 9 has — arguably worse, since `d
 reachable, unguarded, from three live UI paths (see Step 3) during recording completion, which is
 FS-heavy. Downgraded to a diagnostic log in this task; see Step 3 for the full re-derivation.
 
-### 9. `save_song_ui.cpp:124` — `performSave()`'s `ALPHA_OR_BETA` assertion
+### 9. `save_song_ui.cpp` — `performSave()`'s `ALPHA_OR_BETA` assertion
 
 **What it does when busy (as activated by the flip, before this task's fix):**
 `FREEZE_WITH_ERROR("E316")` if `sd_busy()`.
@@ -565,14 +626,18 @@ correcting.
    instrumented the success path, not the deferral path — see "What this does NOT prove" above; the
    evidence that the guard itself fires comes from Task 3's WEDGED→`exit=0` transition on the identical
    fixture, not from this probe's counter.
-2. `resource_checker.h`'s `RESOURCE_SD` ceiling (site 2) remains the widest-blast-radius site in this
-   plan, per Task 4's own concern, with no softening companion check. This audit did not find a reason to
-   narrow it, but it is worth an on-device ear/behaviour check alongside the rest of this plan's pending
-   hardware smoke test, since it is the one site that changes task admission rather than a single
-   call-site's own behaviour. Per the duty-cycle caveat above, this ceiling (and sites 4/5, its two
-   independently load-bearing counterparts) can hold off their tasks across most of a song load or
-   streaming burst, not just for one FS operation — expected behaviour, not a new risk, but worth keeping
-   in mind if a load-time regression is ever reported.
+2. `resource_checker.h`'s `RESOURCE_SD` ceiling (site 2) is **not linked into any BSP this repo
+   currently builds** — see the site-2 correction above. It has zero live effect on Embassy (the Rust
+   task runner has no such gate, by design — `scheduler.rs:228`) and zero live effect on the
+   cooperative/C-host BSPs (`deluge_storage_fs_busy()` is hardwired `false` there). Its only observable
+   live effect anywhere in this repo is the CI unit test `Scheduler.fsBusyBlocksSdTask`. **The on-device
+   ear/behaviour check this document previously flagged for it is therefore moot** — there is nothing to
+   observe on hardware, because the code isn't in the hardware build; see "Gates NOT run" below for the
+   fuller version of this point. It becomes a real, worth-watching site only if/when the Rust task runner
+   grows a `RESOURCE_SD` gate of its own. Per the duty-cycle caveat above, sites 3, 4, 5, and 6 —
+   independently load-bearing, not redundant with a ceiling that currently gates nothing — can hold off
+   their tasks across most of a song load or streaming burst, not just for one FS operation; expected
+   behaviour, not a new risk, but worth keeping in mind if a load-time regression is ever reported.
 3. Two follow-ups this task found but explicitly did not implement, both noted in Step 3: (a) exporting
    `fiber::sd_routine_held()` through the libdeluge C-ABI would let `discardRecorder`'s assertion (site 8)
    go back to a hard, precisely-targeted check instead of a diagnostic log; (b) `StorageManager::fileExists()`
@@ -584,6 +649,18 @@ correcting.
 4. All classifications and both Step 3 decisions rest on reading the code plus the one Lens 1 fixture's
    execution evidence; none of this has run on real Embassy hardware yet, consistent with the rest of this
    plan.
+5. **The seam self-reports `true` to its own holder, not just to other consumers.**
+   `deluge_storage_fs_busy()` is `FS.try_lock().is_err()` (`efatfs_fs.rs:856-858`) — `try_lock()` fails
+   for the holder's OWN async context too, not only for outside callers, so a caller reading
+   `sd_busy() == true` may be reading back its own hold, not someone else's. This is harmless at every
+   deferral site in this document (sites 1, 3, 4, 5, 6): defer-and-retry is lossless whether the busy
+   signal is "someone else" or "myself, moments ago on the same call stack." It is the strongest argument
+   for the Step 3 E251 downgrade specifically: a hard `FREEZE_WITH_ERROR` there would have fired on the
+   CORRECT path where `discardRecorder` runs from the recorder's own owner-dispatched card routine while
+   the fiber legitimately holds the mutex for that very op — not only on the false-positive "unrelated FS
+   work" case Step 3 already argues from. Unstated premises like this one are exactly the kind that
+   already produced a wrong decision on this branch (the `isSDRoutineActive()` "partially live" premise
+   corrected earlier in this document); recording it here so it isn't inherited silently again.
 
 ## Gate results
 
@@ -735,15 +812,37 @@ offset 25,096,308, which is frame 4,182,718 — **94.85 seconds into a 798-secon
 the file)** — after which 5,219,669 of the remaining 186,069,804 bytes (≈2.8%) differ. `cordae` renders
 clean while `icoustic` does not, so this is fixture-specific, not a wholesale renderer break.
 
-This is consistent with the brief's own prediction: deferring the overview scan (Task 3) changes *when*
-clusters load, and `golden_vt_render` links the real Rust BSP, so unlike a C-host renderer it observes
-that timing change. A divergence starting well into the render (not at sample 0) is the shape you'd
-expect from a scan-timing perturbation rather than a broken renderer. **This finding is unresolved** —
-root-causing exactly which of the nine activated sites (most likely site 1, the overview-scan guard
-itself, or the site-2 scheduler ceiling's admission-timing change) shifts `icoustic`'s cluster-load
-schedule enough to produce an audible difference is follow-up work, not something this task's gate-running
-scope covers or fixes. The failing render is preserved at the path above for that follow-up (the script's
-cleanup trap is deliberately disarmed on a FAIL, "render kept for inspection" is not asserted lightly).
+**A bisect run after this gate refuted the "brief's own prediction" reasoning this section originally
+gave** (that deferring the overview scan shifts `icoustic`'s cluster-load timing enough to move its
+bytes). Full method in
+`.superpowers/sdd/2026-08-07-sd-busy-seam-backing/icoustic-bisect-report.md` — that report is itself
+gitignored, so the facts are restated here as the durable record:
+
+- `icoustic` FAILS at the merge-base `921fd1bf9` (tip of the "R5a Phase 0" merge into `next`) AND at
+  `e653023ef` (the `next` commit immediately before that merge), and **both commits produce a
+  byte-identical render** (sha256 `a565391b29…`) at the exact same fingerprint this branch's HEAD
+  produces: onset ~94.846s into a ~798s render, 2.805% of the remaining bytes differing from the
+  `ae0addca…` baseline. A branch cannot cause a failure that already reproduces, byte-for-byte, at its
+  own merge base.
+- The `ae0addca…` baseline was captured 2026-07-30 and is stale relative to whatever actually changed
+  the render — not relative to anything in this branch.
+- The likely real cause is the separately-tracked "icoustic A-root efatfs range-load" item, **not** any
+  of this branch's nine activated `sd_busy()` sites. Root-causing that item is out of this branch's
+  scope.
+- Bonus finding worth recording here because it has no other durable home: the preceding branch ("R5a
+  Phase 0") was **render-inert** on `icoustic` — the two byte-identical renders at `e653023ef` and
+  `921fd1bf9` straddle that merge, so whatever it changed did not move this fixture's bytes at all.
+- `cordae` staying byte-identical (Gate 3 above) is the stronger signal here, not a weaker one: `cordae`
+  is the fixture that actually wedged before this branch's fix, i.e. the one whose cluster-load schedule
+  the new guard actually perturbs. If deferring the overview scan shifted timing audibly, `cordae` is
+  where it would show first — and it doesn't move at all.
+
+**Conclusion: pre-existing, not caused by this branch.** The bisect refutes the original "consistent
+with the brief's own prediction" reasoning — identical bytes at the merge-base and at the pre-merge
+commit mean nothing this branch touched is responsible for the divergence. Per this plan's scope, the
+failure is CARRIED, not fixed, and the baseline was never updated. The failing render from this gate's
+own run is preserved at the path above (the script's cleanup trap is deliberately disarmed on a FAIL,
+"render kept for inspection" is not asserted lightly).
 
 ### 4. Device build, and re-verify the symbol is naturally rooted
 
@@ -788,19 +887,30 @@ produces the natural-rooting count of 1 seen above.
 - **On-device hardware checks — all outstanding, no host build can substitute.** SysEx-during-card-
   activity, save/load, waveform pre-scan, and multi-take record all need a real Embassy device; nothing
   in this session runs on hardware.
-- **The scheduler `RESOURCE_SD` ceiling (site 2) specifically cannot be exercised by ANY host build, not
-  just "hasn't been tested yet."** `deluge_storage_fs_busy()` is hardwired `false` on the
-  cooperative/C-host BSP (`task_scheduler_c_api.cpp`) — there is no FS mutex to report on there, so the
-  ceiling's `checkResources()` branch is a structural no-op on every build this session can run. Its
-  live behavior (admission actually held off while `sd_busy()` is `true`) is unverifiable off hardware by
-  construction, not merely unverified this round. The Embassy-linked `golden_vt_render` harness used for
-  Gate 3 does link the real BSP and does exercise the seam's *read* side (that's why `icoustic` diverged
-  above), but it is a fixed-scenario audio render, not a scheduler-admission probe — it cannot confirm or
-  deny the ceiling holds off task admission specifically.
+- **The scheduler `RESOURCE_SD` ceiling (site 2) cannot be exercised on hardware EITHER, not just off
+  it — corrected during final review.** This section originally framed the ceiling as "unverifiable off
+  hardware by construction," implying hardware would be able to verify it. It cannot. Verified from this
+  branch's own device ELF (`arm-none-eabi-nm -C target/armv7a-none-eabihf/release/deluge-rust | grep -cE
+  "TaskManager::|ResourceChecker"` → `0`): the C++ `ResourceChecker`/`TaskManager` this ceiling lives in
+  is not linked into the Embassy device build at all — `scheduler.rs` reimplements the
+  `scheduler_api.h` ABI specifically to keep the C++ TaskManager out of the link (`scheduler.rs:526-528`)
+  and has no `RESOURCE_SD` gate by design (`scheduler.rs:228`, `:465-467`). On the cooperative/C-host BSP
+  where `ResourceChecker` IS linked, `deluge_storage_fs_busy()` is hardwired `false`
+  (`task_scheduler_c_api.cpp`), so the ceiling is a no-op there too, for the opposite reason. Put
+  together: this ceiling is unverifiable off hardware because the busy signal is fake there, AND
+  unverifiable on hardware because the code that would consume a real signal isn't in that build — there
+  is currently no build this repo produces on which "does the ceiling actually hold off admission" is
+  even a meaningful question to ask. **The on-device hardware-smoke watch item this document previously
+  carried for site 2 is therefore moot** — it was never going to observe anything. The Embassy-linked
+  `golden_vt_render` harness used for Gate 3 does link the real BSP and does exercise the seam's *read*
+  side (relevant to the bisect below), but that is orthogonal to the ceiling, which isn't linked into
+  that harness's C++ closure either.
 - **`icoustic`'s divergence root cause.** Gate 3 captured and stopped, per the brief's explicit
-  instruction not to treat a divergence as a reason to `update` the baseline. Identifying which of the
-  nine activated sites causes the shift, and whether the shifted output is itself correct (a legitimate
-  timing change) or a bug, is unresolved and not in this task's scope.
+  instruction not to treat a divergence as a reason to `update` the baseline. A later bisect (see Gate 3
+  above) ruled out all nine activated `sd_busy()` sites as the cause — the divergence reproduces
+  byte-identically at the branch's own merge-base and at the commit before that. The likely real cause is
+  the separately-tracked "icoustic A-root efatfs range-load" item; root-causing that remains unresolved
+  and out of this task's scope.
 - **Lens 2 (`preemptive_race_tsan`) and the full margin sweep.** Not requested by this task's step list
   and not run — the brief's own timing guidance says not to run `sweep.sh`'s full margin sweep, and Lens
   2 is a separate lens from a different plan's gate set, last touched (per memory) in an unrelated,

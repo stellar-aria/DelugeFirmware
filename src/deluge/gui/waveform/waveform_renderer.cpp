@@ -17,7 +17,6 @@
 
 #include "gui/waveform/waveform_renderer.h"
 #include "definitions_cxx.hpp"
-#include "extern.h" // currentlyAccessingCard
 #include "gui/colour/colour.h"
 #include "gui/waveform/waveform_peak_math.h"
 #include "gui/waveform/waveform_render_data.h"
@@ -31,6 +30,7 @@
 #include "scheduler_api.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
+#include "sync/sd_access.h"
 #include <algorithm>
 #include <iterator>
 #include <limits>
@@ -685,10 +685,14 @@ bool WaveformRenderer::advanceOverviewScan(Sample* sample, int32_t maxClusters) 
 
 		// Authoritative "is card I/O safe right now?" guard: each investigateWholeCluster can issue a
 		// synchronous load, so bail before every one rather than compete with the card or audio routine
-		// (#4460). This mirrors the loader pump's own gate (currentlyAccessingCard / audioRoutineLocked),
-		// so it also scales safely if maxClusters ever grows past 1. `currentlyAccessingCard` is the extern
-		// from extern.h included at the top of this file.
-		if (currentlyAccessingCard || AudioEngine::audioRoutineLocked) {
+		// (#4460), and it scales safely if maxClusters ever grows past 1. This guard is load-bearing, not
+		// defensive: without it, this scan's synchronous read runs off the storage owner and can block on
+		// the efatfs FS mutex while it's held by the worker fiber suspended mid-operation. That fiber can
+		// only be resumed by a MAIN-executor task — but the spin itself occupies MAIN's executor.poll(),
+		// so nothing can ever resume the fiber. That's an unbreakable deadlock, not a stall. `sd_busy()`
+		// (deluge::sync, sync/sd_access.h) reports whether the FS mutex is actually held right now, so a
+		// future reader must not mistake this check for redundant and delete it.
+		if (deluge::sync::sd_busy() || AudioEngine::audioRoutineLocked) {
 			return true;
 		}
 

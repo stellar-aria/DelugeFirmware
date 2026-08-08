@@ -584,3 +584,224 @@ correcting.
 4. All classifications and both Step 3 decisions rest on reading the code plus the one Lens 1 fixture's
    execution evidence; none of this has run on real Embassy hardware yet, consistent with the rest of this
    plan.
+
+## Gate results
+
+Run at HEAD `1f272ddb9` (clean tree throughout; `deluge_host_out.wav`, a `deluge_loadcheck` render
+artifact dropped in the repo root by that gate, was deleted afterward — not tracked, not part of this
+change).
+
+### 1. Unit + spec suites
+
+`deluge_loadcheck` build (`build-sim`), **clean**:
+
+```
+$ cmake --build build-sim --target deluge_loadcheck
+[0/2] Re-checking globbed directories...
+[1/4] Generating version from git state...
+-- Deluge Community Firmware v1.3.0-1f272ddb9
+[2/4] Building CXX object app/CMakeFiles/deluge_app.dir/version/version.cpp.o
+[3/4] Linking CXX executable deluge_loadcheck
+```
+
+`sim_block_host`, **2/2**:
+
+```
+$ cd src/bsp/rust && cargo test --test sim_block_host
+test block_on_completes_when_hook_makes_progress ... ok
+test block_on_wedges_instead_of_spinning_forever - should panic ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`lens1_vt_sim` selftest (`NO_BUILD=1`, binary already built), **both modes PASS**:
+
+```
+$ cd src/bsp/rust/lens1_vt_sim && NO_BUILD=1 ./sweep.sh selftest
+  --selftest-block:        PASS
+  --selftest-block-nested: PASS
+SELFTEST: PASS
+```
+
+`sync_specs` (built in `build-tests`; CTest name `sd_access_spec`), **3 examples, all passing**,
+including the polarity case:
+
+```
+$ cmake --build build-tests --target sync_specs
+[100%] Built target sync_specs
+$ cd build-tests && ctest -R sd_access_spec --output-on-failure
+    Start 35: sd_access_spec
+1/1 Test #35: sd_access_spec ...................   Passed    0.01 sec
+100% tests passed out of 1
+
+$ ./spec_sync/sync_specs sd_access_spec --verbose
+deluge::sync::sd_busy
+  is false when the filesystem is not busy
+  is true when the filesystem is busy
+  tracks the seam rather than a hardcoded constant
+```
+
+That third example is the polarity case named in the plan's exit criteria (`deluge::sync::sd_busy()`
+must track the live seam, not a hardcoded constant); Task 1's own report is where it was proven to fail
+before the seam existed — not re-proven here, since the seam is now committed and the point of this run
+is to confirm it still passes, which it does. `storage_op_spec` (the sibling spec in the same binary)
+also ran clean (`ctest -R storage_op_spec`, 1/1 passed) but is out of this plan's scope.
+
+CI unit suite (`UnitTests`, built in `build-tests`, run exactly as
+`.github/workflows/tests.yml:48` does — `-ojunit` from a `results`-style directory), **158/158, 0
+failures, 0 errors**:
+
+```
+$ cmake --build build-tests --target UnitTests
+[100%] Built target UnitTests
+$ ./unit/UnitTests -ojunit   # run from a scratch results dir
+RANDOM TEST SEEDS = { -281995255, 157223302 }
+conputeChangeFrom failed with SM01
+conputeChangeFrom failed with SM01
+$ echo exit=$?
+exit=0
+```
+
+(The two `conputeChangeFrom failed with SM01` lines are stderr chatter from an existing test that
+deliberately exercises a failure-reporting path — not a suite failure; exit code and the summed JUnit
+XML both confirm 0 failures / 0 errors.) Summed across all 26 emitted `cpputest_*.xml` files:
+
+```
+total tests: 158
+total failures: 0
+total errors: 0
+```
+
+Matches the brief's stated expectation exactly.
+
+### 2. `deluge_loadcheck` RUN, not just link
+
+Per the brief, the invocation was *found*, not guessed: no `sim/CMakeLists.txt`/`tests/`/`scripts/`
+hit gave a literal command line, so the real one came from this same plan family's prior practice
+(`docs/superpowers/plans/2026-08-06-r4-phaseC-followups.md:18`, and confirmed working in
+`.superpowers/sdd/2026-08-06-r4-phaseC-followups/task-8-report.md`, gate 3):
+`./deluge_loadcheck --project <dir with SAMPLES/A.WAV> --file SAMPLES/A.WAV`, run against a scratch
+project directory seeded with a real WAV file already present in the tree
+(`toolchain/v25/linux-x86_64/arm-none-eabi-gcc/lib/python3.13/test/audiodata/pluck-pcm16.wav`, copied to
+`SAMPLES/A.WAV`). It **ran** — not merely linked — and parsed the file:
+
+```
+$ ./build-sim/deluge_loadcheck --project <tmp> --file SAMPLES/A.WAV
+0.0000: audio_file_manager.cpp:125: Cluster::size  4096 clusterSizeMagnitude  12
+0.0000: audio_file_manager.cpp:125: Cluster::size  4096 clusterSizeMagnitude  12
+0.0000: deluge.cpp:703: PIC firmware version reported: 0
+0.0000: deluge.cpp:725: switching from host to peripheral
+0.0000: storage_manager.cpp:87: free clusters:  2668213
+[host-audio] capturing 2.00s (88200 frames) -> deluge_host_out.wav
+0.0007: deluge.cpp:118: mic 10.0007: deluge.cpp:764: going into main loop
+LOADED SAMPLES/A.WAV | channels=2 byteDepth=2 rawFormat=0 sampleRate=11025 dataStart=142 dataLen=13228 lengthSamples=3307 midiNote=-1.0000 loopStart=0 loopEnd=0 wtCycle=2048
+exit=0
+```
+
+`LOADED` with real parsed descriptor fields (`channels`, `sampleRate`, `dataLen`, `lengthSamples`, …) is
+the actual execution proof this gate exists for — this branch's changes (the seam, the guard, the
+scheduler ceiling) do not touch the load-check path directly, but this confirms nothing in the
+committed work silently broke it.
+
+### 3. The golden differential — a real gate
+
+`cordae`: **PASS, byte-identical.**
+
+```
+$ scripts/golden_embassy_diff.sh cordae check
+ninja: Entering directory `.../build-embassy-hostapp`
+[2/3] Building CXX object app/CMakeFiles/deluge_app.dir/version/version.cpp.o
+   Compiling golden_vt_render v0.1.0 (.../src/bsp/rust/golden_vt_render)
+   ... (full target-list rebuild; deluge_app object closure changed, forced a relink)
+    Finished `release` profile [optimized] target(s) in 8.76s
+PASS — cordae MIXDOWN matches golden (db63b128be9748ed…)
+```
+
+`icoustic`: **FAIL — a genuine divergence. This is a finding, not a baseline problem. The baseline was
+NOT updated.**
+
+```
+$ scripts/golden_embassy_diff.sh icoustic check
+    Finished `release` profile [optimized] target(s) in 0.03s
+FAIL — icoustic MIXDOWN differs from golden
+  golden sha256: ae0addcaf5f97774241fdcb6cc18a4f28a8ca31ba161d5a4cfb6e90eeb947489
+  render sha256: a565391b293e9d88344e98a95518dc980171159f3d36565f41b460f1709e1fea
+  render kept for inspection: /tmp/golden_embassy_diff.icoustic.SqdBpk/render/MIXDOWN_142BPM_E4-MINOR.WAV
+```
+
+Diagnostic follow-up on the kept render (read-only inspection, no baseline touched): both files are the
+same length (`nframes=35194352`, `sampwidth=3`, `nchannels=2`, `framerate=44100` — 211,166,156 bytes
+each), so this is a sample-content divergence, not a truncation/crash. The first differing byte is at
+offset 25,096,308, which is frame 4,182,718 — **94.85 seconds into a 798-second render (≈11.9% through
+the file)** — after which 5,219,669 of the remaining 186,069,804 bytes (≈2.8%) differ. `cordae` renders
+clean while `icoustic` does not, so this is fixture-specific, not a wholesale renderer break.
+
+This is consistent with the brief's own prediction: deferring the overview scan (Task 3) changes *when*
+clusters load, and `golden_vt_render` links the real Rust BSP, so unlike a C-host renderer it observes
+that timing change. A divergence starting well into the render (not at sample 0) is the shape you'd
+expect from a scan-timing perturbation rather than a broken renderer. **This finding is unresolved** —
+root-causing exactly which of the nine activated sites (most likely site 1, the overview-scan guard
+itself, or the site-2 scheduler ceiling's admission-timing change) shifts `icoustic`'s cluster-load
+schedule enough to produce an audible difference is follow-up work, not something this task's gate-running
+scope covers or fixes. The failing render is preserved at the path above for that follow-up (the script's
+cleanup trap is deliberately disarmed on a FAIL, "render kept for inspection" is not asserted lightly).
+
+### 4. Device build, and re-verify the symbol is naturally rooted
+
+Build: **succeeds**, ARM ELF produced.
+
+```
+$ cd src/bsp/rust && DELUGE_BUILD_CONFIG=Debug cargo device --release
+warning: `deluge-bsp-rust` (bin "deluge-rust") generated 5 warnings (1 duplicate)
+    Finished `release` profile [optimized + debuginfo] target(s) in 8.78s
+$ file target/armv7a-none-eabihf/release/deluge-rust
+target/armv7a-none-eabihf/release/deluge-rust: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV),
+statically linked, with debug_info, not stripped
+```
+
+`nm` count:
+
+```
+$ nm -C target/armv7a-none-eabihf/release/deluge-rust | grep -c " T deluge_storage_fs_busy"
+1
+```
+
+**1, with no manual `-u` link root** — the expected outcome by this task, and confirmation that Task 2's
+open question is closed: the C++ closure has been rebuilt since (verified — `audio_engine.cpp.obj` in
+the top-level `build/` tree carries a timestamp of 08:43:51, seven minutes ahead of the `1f272ddb9`
+commit it belongs to, i.e. this device build reflects the final, fully-committed state of the branch,
+not a stale pre-seam closure), and `deluge::sync::sd_busy()`'s nine callers now root
+`deluge_storage_fs_busy` through the natural call graph. Cross-checked at the object level:
+`sd_access.cpp.obj` shows `deluge::sync::sd_busy()` defined (`T`) and referencing `deluge_storage_fs_busy`
+as undefined (`U`) — exactly the edge that, when linked against the Rust side's single `T` definition,
+produces the natural-rooting count of 1 seen above.
+
+### Exit-criteria items not re-verified by this task (already established earlier in the plan)
+
+- **`spec_sync` polarity case proven to fail pre-seam**: proven once, by Task 1 (RED before the seam
+  existed, GREEN after) — not re-proven here; Gate 1 above confirms it still passes at HEAD.
+- **Lens 1 `cordae`, deterministic across three runs**: established by Task 3 Step 4 (three consecutive
+  `exit=0` runs, byte-identical `LENS1_RESULT` lines) — not re-run here; this task's Gate 3 `cordae`
+  golden-diff run is a second, independent confirmation the fixture still completes cleanly at HEAD.
+
+### Gates NOT run, and why
+
+- **On-device hardware checks — all outstanding, no host build can substitute.** SysEx-during-card-
+  activity, save/load, waveform pre-scan, and multi-take record all need a real Embassy device; nothing
+  in this session runs on hardware.
+- **The scheduler `RESOURCE_SD` ceiling (site 2) specifically cannot be exercised by ANY host build, not
+  just "hasn't been tested yet."** `deluge_storage_fs_busy()` is hardwired `false` on the
+  cooperative/C-host BSP (`task_scheduler_c_api.cpp`) — there is no FS mutex to report on there, so the
+  ceiling's `checkResources()` branch is a structural no-op on every build this session can run. Its
+  live behavior (admission actually held off while `sd_busy()` is `true`) is unverifiable off hardware by
+  construction, not merely unverified this round. The Embassy-linked `golden_vt_render` harness used for
+  Gate 3 does link the real BSP and does exercise the seam's *read* side (that's why `icoustic` diverged
+  above), but it is a fixed-scenario audio render, not a scheduler-admission probe — it cannot confirm or
+  deny the ceiling holds off task admission specifically.
+- **`icoustic`'s divergence root cause.** Gate 3 captured and stopped, per the brief's explicit
+  instruction not to treat a divergence as a reason to `update` the baseline. Identifying which of the
+  nine activated sites causes the shift, and whether the shifted output is itself correct (a legitimate
+  timing change) or a bug, is unresolved and not in this task's scope.
+- **Lens 2 (`preemptive_race_tsan`) and the full margin sweep.** Not requested by this task's step list
+  and not run — the brief's own timing guidance says not to run `sweep.sh`'s full margin sweep, and Lens
+  2 is a separate lens from a different plan's gate set, last touched (per memory) in an unrelated,
+  unmerged branch.

@@ -1663,7 +1663,7 @@ errorAfterAllocation:
 // time. That's a double free, and it surfaces as M123 from the allocator, a long way from here - so rather than
 // leaving the rule as a comment for each caller to honour, enforce it.
 //
-// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, audio_engine.cpp:1666): this used
+// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, audio_engine.cpp): this used
 // to FREEZE_WITH_ERROR("E251") here. On Embassy isSDRoutineActive() is hardwired false
 // (scheduler.rs:658), so before sd_busy() was backed for real, this check never fired at all -- it was
 // exactly as dead as save_song_ui.cpp's E316, not "half-live". sd_busy() is now real, but it answers "is

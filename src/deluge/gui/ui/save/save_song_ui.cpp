@@ -121,7 +121,7 @@ void SaveSongUI::focusRegained() {
 
 bool SaveSongUI::performSave(bool mayOverwrite) {
 
-	// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp:124): this
+	// Diagnostic only, not a hard invariant (see docs/dev/sd_busy_audit.md, save_song_ui.cpp): this
 	// used to FREEZE_WITH_ERROR("E316") here, back when sd_busy() was permanently false and the check
 	// could never fire. No comment or invariant here ever explained *why* entering performSave() while
 	// busy would be unsafe, and this task found none -- sd_busy() being true at this exact instant is

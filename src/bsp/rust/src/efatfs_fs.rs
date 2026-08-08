@@ -848,10 +848,15 @@ pub extern "C" fn deluge_efatfs_is_mounted() -> bool {
 /// dropped immediately (it's a temporary, dropped at the end of the statement), so a successful
 /// probe does not keep the lock.
 ///
-/// Check-then-act is sound rather than racy here: the caller and the FS holder are cooperative on
-/// one thread and no `await` sits between this probe and the caller's own filesystem access, so
-/// nothing can take the mutex in the gap. Do not "harden" this into an atomic — a future reader
-/// will be tempted to, but there is no race to fix.
+/// Check-then-act is sound here, but narrower than "cooperative on one thread" alone would suggest:
+/// the audio InterruptExecutor CAN preempt a thread-mode task_runner mid-handle (`scheduler.rs:476-478`),
+/// so this is not literally single-threaded. It is sound because audio never touches the filesystem —
+/// the interrupt executor has no code path that acquires `FS` — so no preemption can land inside the gap
+/// between this probe and the caller's own filesystem access, and no `await` sits in that gap either.
+/// That "audio never touches the FS" fact is the actual load-bearing premise, not thread-cooperation by
+/// itself — state it plainly so a future reader "hardening" this into an atomic understands what would
+/// have to become false first (audio starting to touch the FS), rather than assuming there is no race to
+/// reason about at all.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_storage_fs_busy() -> bool {
     FS.try_lock().is_err()

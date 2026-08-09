@@ -142,6 +142,17 @@ uint8_t pack_fat_attrs(const MockEntry& entry) {
 	return attrs;
 }
 
+std::map<std::string, DelugeStatus> g_injected;
+
+/// DELUGE_OK when no injection applies, otherwise the injected failure.
+DelugeStatus injectedFor(const char* path) {
+	if (path == nullptr) {
+		return DELUGE_OK;
+	}
+	auto it = g_injected.find(std::string{path});
+	return (it == g_injected.end()) ? DELUGE_OK : it->second;
+}
+
 } // namespace
 
 void mock_file_io_reset() {
@@ -150,11 +161,23 @@ void mock_file_io_reset() {
 	g_open_files_gen.clear();
 	g_open_dirs.clear();
 	g_open_dirs_gen.clear();
+	g_injected.clear();
+}
+
+void mock_file_io_inject_status(const char* path, DelugeStatus status) {
+	g_injected[std::string{path}] = status;
+}
+
+void mock_file_io_clear_injections() {
+	g_injected.clear();
 }
 
 extern "C" {
 
 DelugeStatus deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string p(path);
 	if (static_cast<DelugeFileOpenMode>(mode) == DELUGE_FILE_READ) {
 		auto it = g_entries.find(p);
@@ -251,6 +274,9 @@ void deluge_efatfs_file_close(uint32_t handle) {
 }
 
 DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string prefix(path);
 	if (!prefix.empty() && prefix.back() != '/') {
 		prefix += '/';
@@ -295,6 +321,9 @@ void deluge_efatfs_dir_close(uint32_t handle) {
 }
 
 DelugeStatus deluge_efatfs_mkdir(const char* path) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string p(path);
 	auto it = g_entries.find(p);
 	if (it != g_entries.end()) {
@@ -318,6 +347,9 @@ DelugeStatus deluge_efatfs_unlink(const char* path) {
 }
 
 DelugeStatus deluge_efatfs_rename(const char* old_path, const char* new_path) {
+	if (DelugeStatus injected = injectedFor(old_path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string o(old_path), n(new_path);
 	auto it = g_entries.find(o);
 	if (it == g_entries.end()) {

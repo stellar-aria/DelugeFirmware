@@ -33,6 +33,7 @@
 #include "libdeluge/midi_io.h" // deluge_midi_init/_usb_port/_write/_write_space, deluge_midi_poll_usb_host_event
 #include "mem_functions.h"
 #include "memory/general_memory_allocator.h"
+#include "storage/existence_policy.h"
 #include "storage/storage_manager.h"
 #include "util/misc.h"
 #include <algorithm>
@@ -530,27 +531,32 @@ void readDevicesFromFile() {
 		return; // Yup, we only want to do this once
 	}
 
-	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
-	// gives this site its real ruling.
-	bool success = StorageManager::fileExists(MIDI_DEVICES_XML).value_or(false);
-	if (!success) {
-		// since we changed the file path for the MIDIDevices.XML in c1.3, it's possible
-		// that a MIDIDevice file may exists in the root of the SD card
-		// if so, let's move it to the new SETTINGS folder (but first make sure folder exists)
+	switch (deluge::storage::bootstrap_action(StorageManager::fileExists(MIDI_DEVICES_XML))) {
+	case deluge::storage::Bootstrap::Load:
+		break; // fall through to parsing, exactly as today
+
+	case deluge::storage::Bootstrap::WriteDefaults: {
+		// Genuinely absent: since we changed the file path for the MIDIDevices.XML in c1.3, it's
+		// possible that a MIDIDevice file may exist in the root of the SD card; if so, let's move
+		// it to the new SETTINGS folder (but first make sure folder exists).
 		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
 		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
 			auto renamed = deluge::io::rename("MIDIDevices.XML", MIDI_DEVICES_XML);
 			if (renamed.has_value()) {
-				// this means we moved it
-				// now let's open it
-				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in
-				// this batch gives this site its real ruling.
-				success = StorageManager::fileExists(MIDI_DEVICES_XML).value_or(false);
+				// this means we moved it; confirm the migration actually landed before trusting
+				// the new path.
+				if (deluge::storage::bootstrap_action(StorageManager::fileExists(MIDI_DEVICES_XML))
+				    == deluge::storage::Bootstrap::Load) {
+					break; // fall through to parsing
+				}
 			}
 		}
-		if (!success) {
-			return;
-		}
+		return;
+	}
+
+	case deluge::storage::Bootstrap::UseInMemoryOnly:
+		// Existence unknown: use in-memory defaults for this session and write nothing.
+		return;
 	}
 
 	Error error = StorageManager::openXMLFile(MIDI_DEVICES_XML, smDeserializer, "midiDevices");

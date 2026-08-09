@@ -41,6 +41,7 @@
 #include "modulation/params/param_set.h"
 #include "playback/mode/session.h"
 #include "processing/engines/audio_engine.h"
+#include "storage/existence_policy.h"
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
 #include "util/etl_string.h"
@@ -1809,18 +1810,31 @@ void MidiFollow::readDefaultsFromFile() {
 	}
 
 	// MIDIFollow.XML
-	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
-	// gives this site its real ruling.
-	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML).value_or(false);
-	if (!success) {
-		// if file doesn't exist, lets make SETTINGS folder if it doesn't already exist
-		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
-		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
-			// folder eixsts now, write defaults
-			writeDefaultsToFile();
-			successfullyReadDefaultsFromFile = true;
-			return;
+	switch (deluge::storage::bootstrap_action(StorageManager::fileExists(MIDI_FOLLOW_XML))) {
+	case deluge::storage::Bootstrap::Load:
+		break; // fall through to parsing, exactly as today
+
+	case deluge::storage::Bootstrap::WriteDefaults:
+		// Genuinely absent: if file doesn't exist, lets make SETTINGS folder if it doesn't already
+		// exist.
+		{
+			auto result = deluge::io::mkdir(SETTINGS_FOLDER);
+			if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
+				// folder eixsts now, write defaults
+				writeDefaultsToFile();
+				successfullyReadDefaultsFromFile = true;
+				return;
+			}
+			// mkdir failed: falls through to openXMLFile below for a file we just decided does not
+			// exist. Pre-existing behaviour, preserved as-is (not fixed here).
 		}
+		break;
+
+	case deluge::storage::Bootstrap::UseInMemoryOnly:
+		// Existence unknown: use in-memory defaults for this session and write nothing -- the file
+		// may well be there, and overwriting it would lose the user's settings.
+		successfullyReadDefaultsFromFile = false;
+		return;
 	}
 
 	//<defaults>

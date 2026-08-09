@@ -227,6 +227,16 @@ std::expected<void, Status> Directory::close() {
 	return {};
 }
 
+std::expected<bool, Status> presence_from_open(const std::expected<Directory, Status>& opened) {
+	if (opened.has_value()) {
+		return true;
+	}
+	if (opened.error() == Status::NOT_FOUND) {
+		return false;
+	}
+	return std::unexpected{opened.error()};
+}
+
 std::expected<void, Status> mkdir(std::string_view path) {
 	DelugeStatus st = deluge_efatfs_mkdir(path.data());
 	if (st != DELUGE_OK) {

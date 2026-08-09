@@ -278,6 +278,16 @@ DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 		return injected;
 	}
 	std::string prefix(path);
+	// Root (the empty path) always exists; any other path must name a real
+	// directory entry -- otherwise this would report every nonexistent path as
+	// successfully "open" with zero children, which would make it impossible
+	// to ever observe NOT_FOUND from a directory-existence check.
+	if (!prefix.empty()) {
+		auto it = g_entries.find(prefix);
+		if (it == g_entries.end() || !it->second.is_directory) {
+			return DELUGE_ERR_NOT_FOUND;
+		}
+	}
 	if (!prefix.empty() && prefix.back() != '/') {
 		prefix += '/';
 	}

@@ -41,6 +41,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/file_byte_source.h"
 #include "storage/cluster/cluster.h"
+#include "storage/existence_policy.h"
 #include "storage/owner.h" // deluge::storage::Coalescer
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -368,30 +369,43 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 		char tempPath[255]{0};
 		int i = 0;
 		bool changed = true;
+
+		// Advances `path` (formatted as "<folder>/<songName>/<channelName>_%03d.wav") past every
+		// candidate known to be taken, mirroring the previous
+		// `while (fileExists(path).value_or(false))` spin's snprintf/i++/changed bookkeeping exactly.
+		// Returns once `path` names a candidate that is genuinely free (std::nullopt), or
+		// Error::SD_CARD the moment a candidate's existence can't be determined -- guessing "free"
+		// there would let a recording clobber an existing take.
+		auto advanceUntilFree = [&](char* path, size_t pathSize, const char* folder) -> std::optional<Error> {
+			for (;;) {
+				switch (deluge::storage::presence_of(StorageManager::fileExists(path))) {
+				case deluge::storage::Presence::Absent:
+					return std::nullopt; // genuinely free -- stop searching
+				case deluge::storage::Presence::Undeterminable:
+					return Error::SD_CARD;
+				case deluge::storage::Presence::Present:
+					break; // taken -- advance and retry
+				}
+				snprintf(path, pathSize, "%s/%s/%s_%03d.wav", folder, songName->c_str(), channelName, i);
+				i++;
+				changed = true;
+			}
+		};
+
 		// iterate through the main and temp folders until we find a path that's free in both
 		while (changed) {
 			changed = false;
 			snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
 			         channelName, i);
-			// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this
-			// batch gives this site its real ruling.
-			while (StorageManager::fileExists(namedPath).value_or(false)) {
-				snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
-				         channelName, i);
-				i++;
-				changed = true;
+			if (auto err = advanceUntilFree(namedPath, sizeof(namedPath), filePath.c_str())) {
+				return *err;
 			}
 			if (doingTempFolder) {
 				snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
 				         songName->c_str(), channelName, i);
 
-				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this
-				// batch gives this site its real ruling.
-				while (StorageManager::fileExists(tempPath).value_or(false)) {
-					snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
-					         songName->c_str(), channelName, i);
-					i++;
-					changed = true;
+				if (auto err = advanceUntilFree(tempPath, sizeof(tempPath), tempFilePathForRecording->c_str())) {
+					return *err;
 				}
 			}
 		}

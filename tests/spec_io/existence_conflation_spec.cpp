@@ -126,6 +126,39 @@ describe existence_conflation("existence checks distinguish absent from undeterm
 		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Present).to_equal(true);
 		expect(deluge::storage::bootstrap_action(present) == deluge::storage::Bootstrap::Load).to_equal(true);
 	});
+
+	// deluge::io::presence_from_open's Directory overload -- same rules as the File overload,
+	// exercised through Directory::open/deluge_efatfs_dir_open/deluge_efatfs_mkdir instead.
+	it("does not report a refused directory check as absent", _ {
+		mock_file_io_reset();
+		expect(deluge_efatfs_mkdir("SONGS")).to_equal(DELUGE_OK);
+		mock_file_io_inject_status("SONGS", DELUGE_ERR_BUSY);
+
+		auto present = deluge::io::presence_from_open(deluge::io::Directory::open("SONGS"));
+
+		expect(present.has_value()).to_equal(false);
+		expect(present.error() == deluge::io::Status::BUSY).to_equal(true);
+		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Undeterminable)
+		    .to_equal(true);
+	});
+
+	it("still reports a genuinely missing directory as absent", _ {
+		mock_file_io_reset();
+		auto present = deluge::io::presence_from_open(deluge::io::Directory::open("NoSuchDir"));
+		expect(present.has_value()).to_equal(true);
+		expect(*present).to_equal(false);
+		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Absent).to_equal(true);
+	});
+
+	it("reports an existing directory as present", _ {
+		mock_file_io_reset();
+		expect(deluge_efatfs_mkdir("SONGS")).to_equal(DELUGE_OK);
+
+		auto present = deluge::io::presence_from_open(deluge::io::Directory::open("SONGS"));
+		expect(present.has_value()).to_equal(true);
+		expect(*present).to_equal(true);
+		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Present).to_equal(true);
+	});
 });
 
 CPPSPEC_SPEC(existence_conflation)

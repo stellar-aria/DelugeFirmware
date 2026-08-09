@@ -25,6 +25,7 @@
 #include "util/firmware_version.h"
 
 #include <cstdint>
+#include <expected>
 #include <optional>
 
 extern void deleteOldSongBeforeLoadingNew();
@@ -365,7 +366,13 @@ Error openDelugeFile(char const* path, char const* firstTagName, char const* alt
                      bool ignoreIncorrectFirmware = false);
 Error initSD();
 
-bool fileExists(char const* pathName);
+/// @brief Does `pathName` exist?
+/// @param pathName absolute path on the SD volume.
+/// @return `true` if present; `false` if **known absent**; an error if existence could not be
+///         determined (e.g. `Status::BUSY` when the filesystem refuses off-owner callers).
+///         Callers must never treat an error as absence — see
+///         docs/superpowers/specs/2026-08-08-existence-check-conflation-design.md.
+std::expected<bool, deluge::io::Status> fileExists(char const* pathName);
 /// takes a full path/to/file.text and makes sure the directories exist
 bool buildPathToFile(const char* fileName);
 

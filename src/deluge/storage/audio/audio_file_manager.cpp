@@ -373,7 +373,9 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 			changed = false;
 			snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
 			         channelName, i);
-			while (StorageManager::fileExists(namedPath)) {
+			// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this
+			// batch gives this site its real ruling.
+			while (StorageManager::fileExists(namedPath).value_or(false)) {
 				snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
 				         channelName, i);
 				i++;
@@ -383,7 +385,9 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 				snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
 				         songName->c_str(), channelName, i);
 
-				while (StorageManager::fileExists(tempPath)) {
+				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this
+				// batch gives this site its real ruling.
+				while (StorageManager::fileExists(tempPath).value_or(false)) {
 					snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
 					         songName->c_str(), channelName, i);
 					i++;

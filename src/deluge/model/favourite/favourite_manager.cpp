@@ -67,7 +67,9 @@ std::string FavouritesManager::getFilenameForSave() const {
 void FavouritesManager::loadFavouritesBank() {
 	resetFavourites();
 	std::string filePath = getFilenameForSave();
-	bool fileExists = StorageManager::fileExists(filePath.c_str());
+	// TODO(conflation-batch-4): unknown is being treated as absent here; the load/browse/favourites
+	// batch gives this site its real ruling.
+	bool fileExists = StorageManager::fileExists(filePath.c_str()).value_or(false);
 	if (!fileExists) {
 		// Create an empty bank file and keep the in-memory defaults.
 		saveFavouriteBank();

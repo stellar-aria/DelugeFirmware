@@ -1809,7 +1809,9 @@ void MidiFollow::readDefaultsFromFile() {
 	}
 
 	// MIDIFollow.XML
-	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML);
+	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
+	// gives this site its real ruling.
+	bool success = StorageManager::fileExists(MIDI_FOLLOW_XML).value_or(false);
 	if (!success) {
 		// if file doesn't exist, lets make SETTINGS folder if it doesn't already exist
 		auto result = deluge::io::mkdir(SETTINGS_FOLDER);

@@ -1808,7 +1808,9 @@ void PerformanceView::readDefaultsFromFile() {
 	}
 
 	// PerformanceView.XML
-	bool success = StorageManager::fileExists(PERFORM_DEFAULTS_XML);
+	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
+	// gives this site its real ruling.
+	bool success = StorageManager::fileExists(PERFORM_DEFAULTS_XML).value_or(false);
 	if (!success) {
 		// since we changed the file path for the PerformanceView.XML in c1.3, it's possible
 		// that a PerformanceView file may exists in the root of the SD card
@@ -1819,7 +1821,9 @@ void PerformanceView::readDefaultsFromFile() {
 			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
-				success = StorageManager::fileExists(PERFORM_DEFAULTS_XML);
+				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in
+				// this batch gives this site its real ruling.
+				success = StorageManager::fileExists(PERFORM_DEFAULTS_XML).value_or(false);
 			}
 		}
 		if (!success) {

@@ -418,14 +418,18 @@ void setupStartupSong() {
 	replace_char(replaced, filename, '/', '_');
 	failSafePath.append(replaced);
 
-	if (StorageManager::fileExists(failSafePath.c_str())) {
+	// TODO(conflation-batch-3): unknown is being treated as absent here; the boot/failsafe batch
+	// gives this site its real ruling.
+	if (StorageManager::fileExists(failSafePath.c_str()).value_or(false)) {
 		// canary exists, previous boot failed?
 		display->consoleText("Startup fault F1");
 		return; // no cleanup, keep canary!
 	}
 	switch (startupSongMode) {
 	case StartupSongMode::TEMPLATE: {
-		if (!StorageManager::fileExists(defaultSongFullPath)) {
+		// TODO(conflation-batch-3): unknown is being treated as absent here; the boot/failsafe batch
+		// gives this site its real ruling.
+		if (!StorageManager::fileExists(defaultSongFullPath).value_or(false)) {
 			display->consoleText("Creating template");
 			currentSong->writeTemplateSong(defaultSongFullPath);
 		}
@@ -449,7 +453,9 @@ void setupStartupSong() {
 			}
 		}
 		// Handle missing song
-		if (!StorageManager::fileExists(filename)) {
+		// TODO(conflation-batch-3): unknown is being treated as absent here; the boot/failsafe batch
+		// gives this site its real ruling.
+		if (!StorageManager::fileExists(filename).value_or(false)) {
 			if (startupSongMode == StartupSongMode::TEMPLATE) {
 				// we tried to create it earlier, but didn't happen?
 				display->consoleText("Startup fault F3");
@@ -460,7 +466,9 @@ void setupStartupSong() {
 			}
 			display->consoleText("Song missing");
 			// user didn't ask for the template, but if it exists let's use it instead
-			if (StorageManager::fileExists(defaultSongFullPath)) {
+			// TODO(conflation-batch-3): unknown is being treated as absent here; the boot/failsafe batch
+			// gives this site its real ruling.
+			if (StorageManager::fileExists(defaultSongFullPath).value_or(false)) {
 				display->consoleText("Using template");
 				filename = defaultSongFullPath;
 				startupSongMode = StartupSongMode::TEMPLATE;

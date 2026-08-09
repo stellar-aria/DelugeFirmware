@@ -202,14 +202,21 @@ Error StorageManager::createJsonFile(char const* filePath, JsonSerializer& write
 // Existence check routed through the deluge::io::File port (efatfs when active, else C-FatFS via the
 // selector in file.cpp) - opening for read and letting RAII close it is the FS-agnostic way to ask
 // "does this path exist" without reaching for a raw f_stat/f_open.
-bool StorageManager::fileExists(char const* pathName) {
-	Error error = initSD();
-	if (error != Error::NONE) {
-		return false;
+std::expected<bool, deluge::io::Status> StorageManager::fileExists(char const* pathName) {
+	if (Error error = initSD(); error != Error::NONE) {
+		// The card is not usable, so existence is unknowable -- NOT absent.
+		return std::unexpected{deluge::io::Status::NO_FILESYSTEM};
 	}
 
 	auto opened = deluge::io::File::open(pathName, DELUGE_FILE_READ);
-	return opened.has_value();
+	if (opened.has_value()) {
+		return true;
+	}
+	// Only a genuine NOT_FOUND is an answer; everything else means we could not tell.
+	if (opened.error() == deluge::io::Status::NOT_FOUND) {
+		return false;
+	}
+	return std::unexpected{opened.error()};
 }
 
 // Gets ready to access SD card.

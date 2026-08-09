@@ -478,7 +478,9 @@ ActionResult LoadInstrumentPresetUI::timerCallback() {
 		// preset in some way. So first up, make sure there is a file at that path.
 		std::string filePath = getCurrentFilePath();
 
-		bool fileExists = StorageManager::fileExists(filePath.c_str());
+		// TODO(conflation-batch-4): unknown is being treated as absent here; the load/browse/favourites
+		// batch gives this site its real ruling.
+		bool fileExists = StorageManager::fileExists(filePath.c_str()).value_or(false);
 		if (!fileExists) {
 			// An unsaved (in-memory only) synth preset cannot be loaded / cloned because
 			// the XML is read from disk to create the instrument. If the preset hasn't
@@ -681,7 +683,9 @@ void LoadInstrumentPresetUI::revertToInitialPreset() {
 				// Try getting from file
 				std::string filePath = getCurrentFilePath();
 
-				bool success = StorageManager::fileExists(filePath.c_str());
+				// TODO(conflation-batch-4): unknown is being treated as absent here; the
+				// load/browse/favourites batch gives this site its real ruling.
+				bool success = StorageManager::fileExists(filePath.c_str()).value_or(false);
 				if (!success) {
 					return;
 				}
@@ -1042,7 +1046,10 @@ giveUsedError:
 	if (newInstrument->type == OutputType::MIDI_OUT) {
 		MIDIInstrument* midiInstrument = (MIDIInstrument*)newInstrument;
 		if (midiInstrument->loadDeviceDefinitionFile) {
-			bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str());
+			// TODO(conflation-batch-4): unknown is being treated as absent here; the
+			// load/browse/favourites batch gives this site its real ruling.
+			bool fileExists =
+			    StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str()).value_or(false);
 			if (fileExists) {
 				StorageManager::loadMidiDeviceDefinitionFile(midiInstrument,
 				                                             midiInstrument->deviceDefinitionFileName.c_str(),

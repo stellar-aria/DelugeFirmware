@@ -187,7 +187,9 @@ void RuntimeFeatureSettings::factoryReset(bool showPopup) {
 
 void RuntimeFeatureSettings::readSettingsFromFile() {
 	// CommunityFeatures.XML
-	bool success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
+	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
+	// gives this site its real ruling.
+	bool success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE).value_or(false);
 	if (!success) {
 		// since we changed the file path for the CommunityFeatures.XML in c1.3, it's possible
 		// that a CommunityFeatures file may exists in the root of the SD card
@@ -198,7 +200,9 @@ void RuntimeFeatureSettings::readSettingsFromFile() {
 			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
-				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
+				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in
+				// this batch gives this site its real ruling.
+				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE).value_or(false);
 			}
 		}
 		if (!success) {

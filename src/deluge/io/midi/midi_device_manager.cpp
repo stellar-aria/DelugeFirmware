@@ -530,7 +530,9 @@ void readDevicesFromFile() {
 		return; // Yup, we only want to do this once
 	}
 
-	bool success = StorageManager::fileExists(MIDI_DEVICES_XML);
+	// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in this batch
+	// gives this site its real ruling.
+	bool success = StorageManager::fileExists(MIDI_DEVICES_XML).value_or(false);
 	if (!success) {
 		// since we changed the file path for the MIDIDevices.XML in c1.3, it's possible
 		// that a MIDIDevice file may exists in the root of the SD card
@@ -541,7 +543,9 @@ void readDevicesFromFile() {
 			if (renamed.has_value()) {
 				// this means we moved it
 				// now let's open it
-				success = StorageManager::fileExists(MIDI_DEVICES_XML);
+				// TODO(conflation-batch-1): unknown is being treated as absent here; a later task in
+				// this batch gives this site its real ruling.
+				success = StorageManager::fileExists(MIDI_DEVICES_XML).value_or(false);
 			}
 		}
 		if (!success) {

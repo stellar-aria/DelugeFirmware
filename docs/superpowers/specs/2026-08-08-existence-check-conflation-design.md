@@ -244,6 +244,46 @@ exactly the sabotaged mapping.
 - `midi_follow.cpp`'s pre-existing mkdir fall-through: when `mkdir` fails, control still reaches
   `openXMLFile` for a file just judged absent. Preserved deliberately.
 
+### Fix round 1 (2026-08-09): mock fidelity, batch 5 inventory, three accepted outcomes
+
+A whole-branch review of batch 1 returned MERGEABLE: yes and asked for one tightening pass, not a rescue.
+
+- **Mock fidelity.** `tests/spec_io/mock_file_io.cpp`'s `deluge_efatfs_dir_open` conflated "no such entry"
+  and "entry exists but isn't a directory" into a single `DELUGE_ERR_NOT_FOUND` (Absent). Real efatfs
+  reports these separately (`crates/embedded-fatfs/src/dir.rs:252-256`: `Error::NotFound` vs.
+  `Error::InvalidInput`); the latter maps to `DELUGE_ERR_PARAM`, i.e. Undeterminable. The mock was erring
+  in the dangerous direction — it let a spec "prove" a safe absence the real device would never report.
+  Split the two cases and pinned it with a new case in `existence_conflation_spec.cpp`. Verified no
+  pre-existing spec depended on the old conflation: every existing `Directory::open`/`dir_open` call in
+  `tests/spec_io/` and `tests/spec_host_passthrough/` targets either a genuine directory or a genuinely
+  missing path, never a file path.
+
+- **Batch 5 (new): three unmarked residual sites.** The review found three more sites carrying the same
+  unknown-treated-as-absent shape as batches 1–4, but never entered in the original 24-site inventory, so
+  they had no `TODO(conflation-batch-N)` marker — `getUnusedAudioRecordingFilePath` and
+  `resolveFileSize`'s two lambdas (`tryAlternateName`, `tryRegularPath`) in
+  `src/deluge/storage/audio/audio_file_manager.cpp`. These are unreachable today,
+  same as every other site fixed in batch 1 — the problem is that `getUnusedAudioRecordingFilePath` now
+  *looks* fully hardened while part of it is not, which is a false-honesty risk to future readers. Marked,
+  not fixed: fixing site 1 means deciding what the REC-number scan should do about a stale
+  `highestUsedAudioRecordingNumberNeedsReChecking[folderID]` (sticky, class 2 shape) and a stale
+  `highestUsedAudioRecordingNumber[folderID]` (class 1 shape) after a skipped scan — a real design decision
+  that needs its own gate, not a mechanical marker-batch fix.
+
+- **An accepted behaviour change.** If `SAMPLES/EXPORTS/<song>/TRACKS` exists as a *file* (not a
+  directory), the old code advanced straight to `TRACKS-00`; batch 1's code
+  (`stem_export.cpp:1009-1052`) now classifies the `Directory::open` failure as `Presence::Undeterminable`
+  and aborts the export with `Error::SD_CARD`. This is non-destructive and consistent with the decision
+  rule, but it is not byte-identical to the old behaviour — and correctly so, since this call sits outside
+  the Present/Absent branch and was never covered by the "must be byte-identical" guarantee.
+
+- **A known minor.** Each refused named-song recording attempt still increments
+  `highestUsedAudioRecordingNumber[folderID]` before failing, so N refused attempts inflate the counter by
+  N, producing gaps in recording numbers. Verified this is not an out-param hazard: `*getNumber`,
+  `filePath`, and `*tempFilePathForRecording` are all caller-local to `sample_recorder.cpp`'s calling
+  scope and are never read on the `goto gotError` path (`sample_recorder.cpp:471-472` declares them
+  local; `:599` is the unconditional `gotError:` landing pad that only sets `hadCardError`).
+
 ## 7. Risks
 
 1. **The mechanical migration in batch 1 could silently change a hot path.** `deluge.cpp`'s boot sites

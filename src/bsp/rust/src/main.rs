@@ -885,6 +885,12 @@ fn main() {
                     target_blocks,
                     step_timeout: embassy_time::Duration::from_secs(step_timeout_secs),
                     post_load_sim_latency,
+                    // R5a Phase 0 Task 4's contention knob — not wired to an env var here.
+                    // This binary's manual `cargo run` scenario path isn't the sweep
+                    // instrument Task 5 automates (that's `lens1_vt_sim`, which DOES wire
+                    // it — see its `LENS1_CONCURRENT_LISTING_EVERY_BLOCKS`); `None` keeps
+                    // this call site's existing behaviour exactly as it was.
+                    concurrent_listing_every_blocks: None,
                 }
             });
 

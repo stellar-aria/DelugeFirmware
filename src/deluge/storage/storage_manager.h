@@ -366,12 +366,15 @@ Error openDelugeFile(char const* path, char const* firstTagName, char const* alt
                      bool ignoreIncorrectFirmware = false);
 Error initSD();
 
-/// @brief Does `pathName` exist?
-/// @param pathName absolute path on the SD volume.
-/// @return `true` if present; `false` if **known absent**; an error if existence could not be
-///         determined (e.g. `Status::BUSY` when the filesystem refuses off-owner callers).
-///         Callers must never treat an error as absence — see
-///         docs/superpowers/specs/2026-08-08-existence-check-conflation-design.md.
+/// @brief Check whether a file exists at @p pathName.
+///
+/// @param pathName Absolute path on the SD volume.
+/// @return `true` if the file is present; `false` if it is **known absent**
+///         (Status::NOT_FOUND). Otherwise an error if existence could not be determined, e.g.
+///         Status::BUSY (caller is not on the storage worker fiber) or Status::NO_FILESYSTEM
+///         (card unusable).
+/// @warning Callers must never treat an error as absence — see
+///          docs/superpowers/specs/2026-08-08-existence-check-conflation-design.md.
 std::expected<bool, deluge::io::Status> fileExists(char const* pathName);
 /// takes a full path/to/file.text and makes sure the directories exist
 bool buildPathToFile(const char* fileName);

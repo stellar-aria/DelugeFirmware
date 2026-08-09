@@ -70,7 +70,7 @@ private:
 };
 
 /// @brief Collapse an open attempt into an existence answer.
-/// @param opened the result of `File::open` (only its success/error is read; the File is untouched).
+/// @param opened The result of `File::open()` (only its success/error is read; the File is untouched).
 /// @return `true` present · `false` **known absent** (`Status::NOT_FOUND`) · an error when existence
 ///         could not be determined (e.g. `Status::BUSY` when the filesystem refuses off-owner callers).
 /// @note Callers must never treat the error case as absence.
@@ -108,7 +108,7 @@ private:
 };
 
 /// @brief Collapse a directory-open attempt into an existence answer.
-/// @param opened result of `Directory::open` (only its success/error is read; the Directory is
+/// @param opened The result of `Directory::open()` (only its success/error is read; the Directory is
 ///        untouched).
 /// @return `true` present · `false` **known absent** (`Status::NOT_FOUND`) · an error when existence
 ///         could not be determined (e.g. `Status::BUSY` when the filesystem refuses off-owner callers).

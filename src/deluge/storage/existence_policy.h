@@ -6,8 +6,10 @@
 namespace deluge::storage {
 
 /// @brief A three-state answer to "does this path exist?", suitable for exhaustive switching.
-/// @note Unknown is NEVER absence. Handling it is mandatory at every call site — switch on this
-///       enum without a default so -Wswitch catches a missing case.
+///
+/// @note Unknown is never absence: callers must never take the "absent" branch on `Undeterminable`.
+/// @warning Switch on this enum exhaustively, with no `default:` label. That omission is
+///          deliberate — it lets `-Wswitch` catch an unhandled enumerator, so never add one.
 enum class Presence {
 	Present,        ///< the path is there
 	Absent,         ///< the path is known not to be there (Status::NOT_FOUND)
@@ -15,7 +17,9 @@ enum class Presence {
 };
 
 /// @brief Classify an existence result for exhaustive handling.
-/// @param present result of `StorageManager::fileExists` / `deluge::io::presence_from_open`.
+/// @param present The result of `StorageManager::fileExists` / `deluge::io::presence_from_open`.
+/// @return `Present` if the path is there, `Absent` if it is known not to be, `Undeterminable` if
+///         existence could not be established.
 Presence presence_of(const std::expected<bool, deluge::io::Status>& present);
 
 /// @brief What a settings-file bootstrap path should do about a settings file.
@@ -26,7 +30,7 @@ enum class Bootstrap {
 };
 
 /// @brief The one rule all settings-bootstrap readers share.
-/// @param present result of the existence check on the settings file.
+/// @param present The result of the existence check on the settings file.
 /// @return `UseInMemoryOnly` whenever existence is undeterminable — never write over a file whose
 ///         absence is unconfirmed.
 Bootstrap bootstrap_action(const std::expected<bool, deluge::io::Status>& present);

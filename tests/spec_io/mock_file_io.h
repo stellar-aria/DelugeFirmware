@@ -9,10 +9,16 @@ extern "C" {
 /// touches the mock, so cases don't see each other's files/directories.
 void mock_file_io_reset();
 
-/// Test-only: force `path` to fail with `status` on open/dir_open/mkdir/rename, even when the
-/// path EXISTS in the mock. Models the Rust BSP's off-fiber `DELUGE_ERR_BUSY` rejection, where the
-/// filesystem refuses to answer rather than reporting absence.
+/// @brief Test-only: force @p path to fail with @p status on open/dir_open/mkdir/rename, even when
+///        the path EXISTS in the mock.
+///
+/// Models the Rust BSP's off-fiber `DELUGE_ERR_BUSY` rejection, where the filesystem refuses to
+/// answer rather than reporting absence.
+/// @param path   The path to fail; for rename, matches `old_path`.
+/// @param status The status to return in place of the normal result.
 void mock_file_io_inject_status(const char* path, DelugeStatus status);
 
-/// Test-only: drop all injections (also done by mock_file_io_reset()).
+/// @brief Test-only: drop all injections set via mock_file_io_inject_status().
+///
+/// Also done by mock_file_io_reset().
 void mock_file_io_clear_injections();

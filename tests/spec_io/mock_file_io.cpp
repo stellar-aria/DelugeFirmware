@@ -144,7 +144,7 @@ uint8_t pack_fat_attrs(const MockEntry& entry) {
 
 std::map<std::string, DelugeStatus> g_injected;
 
-/// DELUGE_OK when no injection applies, otherwise the injected failure.
+// DELUGE_OK when no injection applies, otherwise the injected failure.
 DelugeStatus injectedFor(const char* path) {
 	if (path == nullptr) {
 		return DELUGE_OK;

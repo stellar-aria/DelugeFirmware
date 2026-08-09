@@ -313,8 +313,7 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 		// still clears the sticky recheck flag, and the `highestUsedAudioRecordingNumber[folderID]++`
 		// just after it still increments a now-stale counter. Fixing this requires deciding what the
 		// scan should do about a stale counter and a cleared cache flag; that's a real design decision,
-		// not a mechanical fix. (Cited by statement, not line number: an earlier version of this
-		// comment cited lines that its own insertion had already shifted by 7.)
+		// not a mechanical fix.
 		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
 		if (dir.has_value()) {
 			while (true) {
@@ -380,11 +379,10 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 		bool changed = true;
 
 		// Advances `path` (formatted as "<folder>/<songName>/<channelName>_%03d.wav") past every
-		// candidate known to be taken, mirroring the previous
-		// `while (fileExists(path).value_or(false))` spin's snprintf/i++/changed bookkeeping exactly.
-		// Returns once `path` names a candidate that is genuinely free (std::nullopt), or
-		// Error::SD_CARD the moment a candidate's existence can't be determined -- guessing "free"
-		// there would let a recording clobber an existing take.
+		// candidate known to be taken, updating the caller's `i` and `changed` as it goes. Returns
+		// once `path` names a candidate that is genuinely free (std::nullopt), or Error::SD_CARD the
+		// moment a candidate's existence can't be determined -- guessing "free" there would let a
+		// recording clobber an existing take.
 		auto advanceUntilFree = [&](char* path, size_t pathSize, const char* folder) -> std::optional<Error> {
 			for (;;) {
 				switch (deluge::storage::presence_of(StorageManager::fileExists(path))) {

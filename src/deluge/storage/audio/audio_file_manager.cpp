@@ -308,11 +308,13 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 		// C-FatFS underneath; the destructor closes it on every return path below.
 		//
 		// TODO(conflation-batch-5): unknown is being treated as absent here -- a non-NOT_FOUND refusal
-		// silently skips the REC-number scan below, yet :341 still clears the sticky
-		// highestUsedAudioRecordingNumberNeedsReChecking[folderID] rechecking flag and :344 still
-		// increments a now-stale highestUsedAudioRecordingNumber[folderID]. Fixing this requires
-		// deciding what the scan should do about a stale counter and a cleared cache flag; that's a
-		// real design decision, not a mechanical fix.
+		// silently skips the REC-number scan below, yet the
+		// `highestUsedAudioRecordingNumberNeedsReChecking[folderID] = false` at the end of this block
+		// still clears the sticky recheck flag, and the `highestUsedAudioRecordingNumber[folderID]++`
+		// just after it still increments a now-stale counter. Fixing this requires deciding what the
+		// scan should do about a stale counter and a cleared cache flag; that's a real design decision,
+		// not a mechanical fix. (Cited by statement, not line number: an earlier version of this
+		// comment cited lines that its own insertion had already shifted by 7.)
 		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
 		if (dir.has_value()) {
 			while (true) {

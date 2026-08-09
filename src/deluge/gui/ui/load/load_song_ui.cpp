@@ -558,7 +558,10 @@ swapDone:
 		if (thisOutput && thisOutput->type == OutputType::MIDI_OUT) {
 			MIDIInstrument* midiInstrument = (MIDIInstrument*)thisOutput;
 			if (midiInstrument->loadDeviceDefinitionFile) {
-				bool fileExists = StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str());
+				// TODO(conflation-batch-4): unknown is being treated as absent here; the
+				// load/browse/favourites batch gives this site its real ruling.
+				bool fileExists =
+				    StorageManager::fileExists(midiInstrument->deviceDefinitionFileName.c_str()).value_or(false);
 				if (fileExists) {
 					StorageManager::loadMidiDeviceDefinitionFile(midiInstrument,
 					                                             midiInstrument->deviceDefinitionFileName.c_str(),

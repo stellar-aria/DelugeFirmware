@@ -457,7 +457,9 @@ Error Browser::setFileByFullPath(OutputType outputType, char const* fullPath) {
 
 Error Browser::setFileByFullPathImpl(char const* fullPath) {
 	arrivedAtFileByTyping = true;
-	bool fileExists = StorageManager::fileExists(fullPath);
+	// TODO(conflation-batch-4): unknown is being treated as absent here; the load/browse/favourites
+	// batch gives this site its real ruling.
+	bool fileExists = StorageManager::fileExists(fullPath).value_or(false);
 	if (!fileExists) {
 		return Error::FILE_NOT_FOUND;
 	}

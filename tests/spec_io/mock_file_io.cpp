@@ -142,6 +142,17 @@ uint8_t pack_fat_attrs(const MockEntry& entry) {
 	return attrs;
 }
 
+std::map<std::string, DelugeStatus> g_injected;
+
+// DELUGE_OK when no injection applies, otherwise the injected failure.
+DelugeStatus injectedFor(const char* path) {
+	if (path == nullptr) {
+		return DELUGE_OK;
+	}
+	auto it = g_injected.find(std::string{path});
+	return (it == g_injected.end()) ? DELUGE_OK : it->second;
+}
+
 } // namespace
 
 void mock_file_io_reset() {
@@ -150,11 +161,23 @@ void mock_file_io_reset() {
 	g_open_files_gen.clear();
 	g_open_dirs.clear();
 	g_open_dirs_gen.clear();
+	g_injected.clear();
+}
+
+void mock_file_io_inject_status(const char* path, DelugeStatus status) {
+	g_injected[std::string{path}] = status;
+}
+
+void mock_file_io_clear_injections() {
+	g_injected.clear();
 }
 
 extern "C" {
 
 DelugeStatus deluge_efatfs_file_open(const char* path, uint8_t mode, uint32_t* out_handle) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string p(path);
 	if (static_cast<DelugeFileOpenMode>(mode) == DELUGE_FILE_READ) {
 		auto it = g_entries.find(p);
@@ -251,7 +274,31 @@ void deluge_efatfs_file_close(uint32_t handle) {
 }
 
 DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string prefix(path);
+	// Root (the empty path) always exists; any other path must name a real
+	// directory entry -- otherwise this would report every nonexistent path as
+	// successfully "open" with zero children, which would make it impossible
+	// to ever observe NOT_FOUND from a directory-existence check.
+	//
+	// This mirrors real efatfs's Dir::open_dir, which distinguishes the two
+	// failure shapes (crates/embedded-fatfs/src/dir.rs:252-256): Error::NotFound
+	// when the path names no entry at all, vs. Error::InvalidInput when it names
+	// an entry that exists but isn't a directory. The latter maps to
+	// DELUGE_ERR_PARAM, which the policy layer classifies as Undeterminable, not
+	// Absent -- conflating the two here would let a spec "prove" a safe absence
+	// that the real device would never report.
+	if (!prefix.empty()) {
+		auto it = g_entries.find(prefix);
+		if (it == g_entries.end()) {
+			return DELUGE_ERR_NOT_FOUND;
+		}
+		if (!it->second.is_directory) {
+			return DELUGE_ERR_PARAM;
+		}
+	}
 	if (!prefix.empty() && prefix.back() != '/') {
 		prefix += '/';
 	}
@@ -295,6 +342,9 @@ void deluge_efatfs_dir_close(uint32_t handle) {
 }
 
 DelugeStatus deluge_efatfs_mkdir(const char* path) {
+	if (DelugeStatus injected = injectedFor(path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string p(path);
 	auto it = g_entries.find(p);
 	if (it != g_entries.end()) {
@@ -318,6 +368,9 @@ DelugeStatus deluge_efatfs_unlink(const char* path) {
 }
 
 DelugeStatus deluge_efatfs_rename(const char* old_path, const char* new_path) {
+	if (DelugeStatus injected = injectedFor(old_path); injected != DELUGE_OK) {
+		return injected;
+	}
 	std::string o(old_path), n(new_path);
 	auto it = g_entries.find(o);
 	if (it == g_entries.end()) {

@@ -153,7 +153,9 @@ gotError:
 		return false;
 	}
 
-	bool fileAlreadyExisted = StorageManager::fileExists(filePath.c_str());
+	// TODO(conflation-batch-2): unknown is being treated as absent here; the save batch gives this
+	// site its real ruling.
+	bool fileAlreadyExisted = StorageManager::fileExists(filePath.c_str()).value_or(false);
 
 	if (!mayOverwrite && fileAlreadyExisted) {
 		context_menu::overwriteFile.currentSaveUI = this;
@@ -441,7 +443,9 @@ gotError:
 				goto gotError;
 			}
 
-			if (!StorageManager::fileExists(filePathDuringWrite.c_str())) {
+			// TODO(conflation-batch-2): unknown is being treated as absent here; the save batch gives
+			// this site its real ruling.
+			if (!StorageManager::fileExists(filePathDuringWrite.c_str()).value_or(false)) {
 				break;
 			}
 

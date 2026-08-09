@@ -20,6 +20,7 @@
 #include "hid/display/display.h"
 #include "io/file.hpp"
 #include "model/song/song.h"
+#include "storage/existence_policy.h"
 #include "storage/storage_manager.h"
 #include "util/c_string.h"
 #include <cstring>
@@ -187,23 +188,32 @@ void RuntimeFeatureSettings::factoryReset(bool showPopup) {
 
 void RuntimeFeatureSettings::readSettingsFromFile() {
 	// CommunityFeatures.XML
-	bool success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
-	if (!success) {
-		// since we changed the file path for the CommunityFeatures.XML in c1.3, it's possible
-		// that a CommunityFeatures file may exists in the root of the SD card
-		// if so, let's move it to the new SETTINGS folder (but first make sure folder exists)
+	switch (deluge::storage::bootstrap_action(StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE))) {
+	case deluge::storage::Bootstrap::Load:
+		break; // fall through to parsing, exactly as today
+
+	case deluge::storage::Bootstrap::WriteDefaults: {
+		// Genuinely absent: since we changed the file path for the CommunityFeatures.XML in c1.3,
+		// it's possible that a CommunityFeatures file may exist in the root of the SD card; if so,
+		// let's move it to the new SETTINGS folder (but first make sure folder exists).
 		auto result = deluge::io::mkdir(SETTINGS_FOLDER);
 		if (result.has_value() || result.error() == deluge::io::Status::EXISTS) {
 			auto renamed = deluge::io::rename("CommunityFeatures.XML", RUNTIME_FEATURE_SETTINGS_FILE);
 			if (renamed.has_value()) {
-				// this means we moved it
-				// now let's open it
-				success = StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE);
+				// this means we moved it; confirm the migration actually landed before trusting
+				// the new path.
+				if (deluge::storage::bootstrap_action(StorageManager::fileExists(RUNTIME_FEATURE_SETTINGS_FILE))
+				    == deluge::storage::Bootstrap::Load) {
+					break; // fall through to parsing
+				}
 			}
 		}
-		if (!success) {
-			return;
-		}
+		return;
+	}
+
+	case deluge::storage::Bootstrap::UseInMemoryOnly:
+		// Existence unknown: use in-memory defaults for this session and write nothing.
+		return;
 	}
 
 	Error error =

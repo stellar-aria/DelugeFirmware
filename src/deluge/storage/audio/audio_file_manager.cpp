@@ -41,6 +41,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/audio/file_byte_source.h"
 #include "storage/cluster/cluster.h"
+#include "storage/existence_policy.h"
 #include "storage/owner.h" // deluge::storage::Coalescer
 #include "storage/storage_manager.h"
 #include "storage/wave_table/wave_table.h"
@@ -305,6 +306,14 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 
 		// Local RAII handle (not a shared FatFS::Directory global) -- the port selector picks efatfs or
 		// C-FatFS underneath; the destructor closes it on every return path below.
+		//
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a non-NOT_FOUND refusal
+		// silently skips the REC-number scan below, yet the
+		// `highestUsedAudioRecordingNumberNeedsReChecking[folderID] = false` at the end of this block
+		// still clears the sticky recheck flag, and the `highestUsedAudioRecordingNumber[folderID]++`
+		// just after it still increments a now-stale counter. Fixing this requires deciding what the
+		// scan should do about a stale counter and a cleared cache flag; that's a real design decision,
+		// not a mechanical fix.
 		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
 		if (dir.has_value()) {
 			while (true) {
@@ -368,26 +377,42 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 		char tempPath[255]{0};
 		int i = 0;
 		bool changed = true;
+
+		// Advances `path` (formatted as "<folder>/<songName>/<channelName>_%03d.wav") past every
+		// candidate known to be taken, updating the caller's `i` and `changed` as it goes. Returns
+		// once `path` names a candidate that is genuinely free (std::nullopt), or Error::SD_CARD the
+		// moment a candidate's existence can't be determined -- guessing "free" there would let a
+		// recording clobber an existing take.
+		auto advanceUntilFree = [&](char* path, size_t pathSize, const char* folder) -> std::optional<Error> {
+			for (;;) {
+				switch (deluge::storage::presence_of(StorageManager::fileExists(path))) {
+				case deluge::storage::Presence::Absent:
+					return std::nullopt; // genuinely free -- stop searching
+				case deluge::storage::Presence::Undeterminable:
+					return Error::SD_CARD;
+				case deluge::storage::Presence::Present:
+					break; // taken -- advance and retry
+				}
+				snprintf(path, pathSize, "%s/%s/%s_%03d.wav", folder, songName->c_str(), channelName, i);
+				i++;
+				changed = true;
+			}
+		};
+
 		// iterate through the main and temp folders until we find a path that's free in both
 		while (changed) {
 			changed = false;
 			snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
 			         channelName, i);
-			while (StorageManager::fileExists(namedPath)) {
-				snprintf(namedPath, sizeof(namedPath), "%s/%s/%s_%03d.wav", filePath.c_str(), songName->c_str(),
-				         channelName, i);
-				i++;
-				changed = true;
+			if (auto err = advanceUntilFree(namedPath, sizeof(namedPath), filePath.c_str())) {
+				return *err;
 			}
 			if (doingTempFolder) {
 				snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
 				         songName->c_str(), channelName, i);
 
-				while (StorageManager::fileExists(tempPath)) {
-					snprintf(tempPath, sizeof(tempPath), "%s/%s/%s_%03d.wav", tempFilePathForRecording->c_str(),
-					         songName->c_str(), channelName, i);
-					i++;
-					changed = true;
+				if (auto err = advanceUntilFree(tempPath, sizeof(tempPath), tempFilePathForRecording->c_str())) {
+					return *err;
 				}
 			}
 		}
@@ -519,6 +544,10 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 		candidate.append("/");
 		candidate.append(proposedFileName);
 		auto opened = deluge::io::File::open(candidate, DELUGE_FILE_READ);
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a refusal is reported to
+		// the caller the same as a genuine miss (returns false, so tryAlternateDir falls through to
+		// tryRegularPath), yielding Error::FILE_UNREADABLE ("not here") where Error::SD_CARD ("could
+		// not read the card") would be correct.
 		if (!opened.has_value()) {
 			return false;
 		}
@@ -559,6 +588,9 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 	// Open the file at its regular path; on success fill sizeBytes. Returns whether it opened.
 	const auto tryRegularPath = [&]() -> bool {
 		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a refusal is reported to
+		// the caller the same as a genuine miss, yielding Error::FILE_UNREADABLE ("not here") where
+		// Error::SD_CARD ("could not read the card") would be correct.
 		if (!opened.has_value()) {
 			return false;
 		}
@@ -591,10 +623,20 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 		}
 		// Regular path failed — if an alternate dir might exist, open it and search there.
 		if (alternateLoadDirStatus == AlternateLoadDirStatus::MIGHT_EXIST) {
-			if (!deluge::io::Directory::open(alternateAudioFileLoadPath.c_str()).has_value()) {
+			switch (deluge::storage::presence_of(
+			    deluge::io::presence_from_open(deluge::io::Directory::open(alternateAudioFileLoadPath.c_str())))) {
+			case deluge::storage::Presence::Absent:
+				// Genuinely not there: worth remembering, so later lookups skip it.
 				alternateLoadDirStatus = AlternateLoadDirStatus::NOT_FOUND;
 				*error = Error::FILE_UNREADABLE;
 				return false;
+			case deluge::storage::Presence::Undeterminable:
+				// Could not tell. Leave the status at MIGHT_EXIST so a later attempt asks again —
+				// caching this would turn one transient refusal into a permanent wrong answer.
+				*error = Error::SD_CARD;
+				return false;
+			case deluge::storage::Presence::Present:
+				break;
 			}
 			alternateLoadDirStatus = AlternateLoadDirStatus::DOES_EXIST;
 			switch (tryAlternateDir()) {

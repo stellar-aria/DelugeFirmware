@@ -18,12 +18,17 @@ function(create_specs_driver driver_name spec_dir)
     ${specs}
     mock_file_io.cpp
     ../../src/deluge/io/file.cpp
+    ../../src/deluge/storage/existence_policy.cpp
   )
   target_link_libraries(${driver_name} PRIVATE c++spec)
   target_include_directories(${driver_name} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ../../include      # libdeluge/file_io.h, libdeluge/types.h
     ../../src/deluge    # io/file.hpp
+    ../../src           # definitions_cxx.hpp (storage/storage_manager.h's transitive include)
+    ../../src/OSLikeStuff # scheduler_api.h (libdeluge/scheduler.h's transitive include)
+    ../32bit_unit_tests/mocks # util/firmware_version.h host stub (real one is a .h.in template, generated
+                               # at firmware-build time; other spec targets already rely on this same mock)
   )
   set_target_properties(${driver_name} PROPERTIES
     CXX_STANDARD 26

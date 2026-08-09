@@ -41,6 +41,7 @@
 #include "processing/engines/audio_engine.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
+#include "storage/existence_policy.h"
 #include "storage/owner.h" // deluge::storage::Owner::run — run the export on the worker fiber
 #include "util/etl_string.h"
 #include "util/functions.h"
@@ -995,18 +996,35 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 		// folder number appended is 00 (-1 + 1)
 		highestUsedStemFolderNumber = -1;
 
-		// here we loop until we are able to successfully create a folder
+		// here we loop until we are able to successfully create a folder, or give up because
+		// existence could not be determined for some candidate (searchAborted)
+		bool searchAborted = false;
 		while (true) {
 			// efatfs mkdir is idempotent (succeeds on an existing dir), so a successful mkdir does
 			// not imply the folder was new. Only accept a folder that does not already exist, so we
 			// never reuse an occupied stem-export folder (old C-FatFS f_mkdir returned FR_EXIST here).
 			deluge_file_invalidate_cache();
-			if (!deluge::io::Directory::open(tempPathForSearch.c_str()).has_value()) {
-				// try to create folder
-				if (deluge::io::mkdir(tempPathForSearch.c_str()).has_value()) {
-					// successful, exit out of loop
-					break;
-				}
+			bool created = false;
+			switch (deluge::storage::presence_of(
+			    deluge::io::presence_from_open(deluge::io::Directory::open(tempPathForSearch.c_str())))) {
+			case deluge::storage::Presence::Absent:
+				// Genuinely absent: safe to create.
+				created = deluge::io::mkdir(tempPathForSearch.c_str()).has_value();
+				break;
+			case deluge::storage::Presence::Undeterminable:
+				// Could not tell whether this folder is occupied -- do not risk reusing it, and a
+				// persistent BUSY must not spin forever.
+				searchAborted = true;
+				break;
+			case deluge::storage::Presence::Present:
+				break; // occupied: advance to the next candidate
+			}
+			if (created) {
+				// successful, exit out of loop
+				break;
+			}
+			if (searchAborted) {
+				break;
 			}
 			// not successful — an existing folder is how we find a free number; try the next
 			// increment folder number so we can append it to the folder name
@@ -1026,6 +1044,12 @@ Error StemExport::getUnusedStemRecordingFolderPath(std::string* filePath, AudioR
 			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/CLIPS-##
 			// or tempPathForSearch =  SAMPLES/EXPORTS/*INSERT SONG NAME*/DRUMS-##
 			tempPathForSearch.append(deluge::string::fromInt(highestUsedStemFolderNumber, 2));
+		}
+
+		if (searchAborted) {
+			// Existence couldn't be determined for some candidate folder -- refuse rather than
+			// risk reusing an occupied one.
+			return Error::SD_CARD;
 		}
 
 		// copy folder path created above into the filePath so it can be used by the caller

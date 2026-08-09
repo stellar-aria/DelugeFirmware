@@ -211,7 +211,7 @@ Harness-first; device is a periodic confidence pass, not a per-rung blocker.
 
 | Gate | What it proves |
 |---|---|
-| **Lens 1** (`lens1_vt_sim`) | Deterministic virtual-time underrun margin vs modeled SD latency; `sweep.sh` carries a Control A non-vacuity check |
+| **Lens 1** (`lens1_vt_sim`) | Deterministic **wedge / livelock detection**. ⚠️ NOT a margin instrument — corrected 2026-08-09: lens1 never renders audio (`should_skip_render` skips every tick), so the underrun counters are unreachable, `cluster_reads` is actually the #4460 pre-scan, and Control A cannot fire. Margin evidence comes from hardware. See the R5a spec §3 |
 | **Lens 2** (`preemptive_race_tsan`) | No new races — adding an executor is exactly this risk class |
 | **`fs_differential`** | Byte-exact FS correctness against a real C-FatFS oracle on real FAT16/32 images |
 | **`scripts/golden_embassy_diff.sh`** | The **only** golden renderer, and it links the Rust BSP — so it sees the fiber, both executors and every lock |

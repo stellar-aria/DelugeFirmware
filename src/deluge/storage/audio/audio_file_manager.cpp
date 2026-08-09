@@ -609,10 +609,20 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 		}
 		// Regular path failed — if an alternate dir might exist, open it and search there.
 		if (alternateLoadDirStatus == AlternateLoadDirStatus::MIGHT_EXIST) {
-			if (!deluge::io::Directory::open(alternateAudioFileLoadPath.c_str()).has_value()) {
+			switch (deluge::storage::presence_of(
+			    deluge::io::presence_from_open(deluge::io::Directory::open(alternateAudioFileLoadPath.c_str())))) {
+			case deluge::storage::Presence::Absent:
+				// Genuinely not there: worth remembering, so later lookups skip it.
 				alternateLoadDirStatus = AlternateLoadDirStatus::NOT_FOUND;
 				*error = Error::FILE_UNREADABLE;
 				return false;
+			case deluge::storage::Presence::Undeterminable:
+				// Could not tell. Leave the status at MIGHT_EXIST so a later attempt asks again —
+				// caching this would turn one transient refusal into a permanent wrong answer.
+				*error = Error::SD_CARD;
+				return false;
+			case deluge::storage::Presence::Present:
+				break;
 			}
 			alternateLoadDirStatus = AlternateLoadDirStatus::DOES_EXIST;
 			switch (tryAlternateDir()) {

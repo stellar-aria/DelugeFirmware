@@ -306,6 +306,13 @@ Error AudioFileManager::getUnusedAudioRecordingFilePath(std::string& filePath, s
 
 		// Local RAII handle (not a shared FatFS::Directory global) -- the port selector picks efatfs or
 		// C-FatFS underneath; the destructor closes it on every return path below.
+		//
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a non-NOT_FOUND refusal
+		// silently skips the REC-number scan below, yet :341 still clears the sticky
+		// highestUsedAudioRecordingNumberNeedsReChecking[folderID] rechecking flag and :344 still
+		// increments a now-stale highestUsedAudioRecordingNumber[folderID]. Fixing this requires
+		// deciding what the scan should do about a stale counter and a cleared cache flag; that's a
+		// real design decision, not a mechanical fix.
 		auto dir = deluge::io::Directory::open(audioRecordingFolderNames[folderID]);
 		if (dir.has_value()) {
 			while (true) {
@@ -537,6 +544,10 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 		candidate.append("/");
 		candidate.append(proposedFileName);
 		auto opened = deluge::io::File::open(candidate, DELUGE_FILE_READ);
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a refusal is reported to
+		// the caller the same as a genuine miss (returns false, so tryAlternateDir falls through to
+		// tryRegularPath), yielding Error::FILE_UNREADABLE ("not here") where Error::SD_CARD ("could
+		// not read the card") would be correct.
 		if (!opened.has_value()) {
 			return false;
 		}
@@ -577,6 +588,9 @@ bool AudioFileManager::resolveFileSize(std::string& filePath, bool mayReadCard, 
 	// Open the file at its regular path; on success fill sizeBytes. Returns whether it opened.
 	const auto tryRegularPath = [&]() -> bool {
 		auto opened = deluge::io::File::open(filePath, DELUGE_FILE_READ);
+		// TODO(conflation-batch-5): unknown is being treated as absent here -- a refusal is reported to
+		// the caller the same as a genuine miss, yielding Error::FILE_UNREADABLE ("not here") where
+		// Error::SD_CARD ("could not read the card") would be correct.
 		if (!opened.has_value()) {
 			return false;
 		}

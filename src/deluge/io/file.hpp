@@ -69,6 +69,13 @@ private:
 	DelugeFile* handle_ = nullptr;
 };
 
+/// @brief Collapse an open attempt into an existence answer.
+/// @param opened the result of `File::open` (only its success/error is read; the File is untouched).
+/// @return `true` present · `false` **known absent** (`Status::NOT_FOUND`) · an error when existence
+///         could not be determined (e.g. `Status::BUSY` when the filesystem refuses off-owner callers).
+/// @note Callers must never treat the error case as absence.
+std::expected<bool, Status> presence_from_open(const std::expected<File, Status>& opened);
+
 class Directory {
 public:
 	Directory(Directory&) = delete;

@@ -127,6 +127,16 @@ DelugeStatus to_deluge_status(Status status) {
 	return DELUGE_ERR; // unreachable while the switch above stays exhaustive
 }
 
+std::expected<bool, Status> presence_from_open(const std::expected<File, Status>& opened) {
+	if (opened.has_value()) {
+		return true;
+	}
+	if (opened.error() == Status::NOT_FOUND) {
+		return false;
+	}
+	return std::unexpected{opened.error()};
+}
+
 std::expected<File, Status> File::open(std::string_view path, DelugeFileOpenMode mode) {
 	uint32_t handle = 0;
 	DelugeStatus st = deluge_efatfs_file_open(path.data(), static_cast<uint8_t>(mode), &handle);

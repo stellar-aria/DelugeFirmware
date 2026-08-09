@@ -208,15 +208,7 @@ std::expected<bool, deluge::io::Status> StorageManager::fileExists(char const* p
 		return std::unexpected{deluge::io::Status::NO_FILESYSTEM};
 	}
 
-	auto opened = deluge::io::File::open(pathName, DELUGE_FILE_READ);
-	if (opened.has_value()) {
-		return true;
-	}
-	// Only a genuine NOT_FOUND is an answer; everything else means we could not tell.
-	if (opened.error() == deluge::io::Status::NOT_FOUND) {
-		return false;
-	}
-	return std::unexpected{opened.error()};
+	return deluge::io::presence_from_open(deluge::io::File::open(pathName, DELUGE_FILE_READ));
 }
 
 // Gets ready to access SD card.

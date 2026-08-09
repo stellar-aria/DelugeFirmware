@@ -1,6 +1,6 @@
 # Existence-check error conflation — design
 
-**Status:** designed 2026-08-08 with Kate. Not implemented.
+**Status:** batch 1 IMPLEMENTED 2026-08-09 (see §6.1); batches 2-4 outstanding. Designed 2026-08-08 with Kate.
 **Authorised:** independently of the R5a/R5b ladder (Kate, 2026-08-08, option C). This is wrong under
 *any* architecture, so it does not wait on
 `2026-08-08-storage-execution-model-end-state-design.md` and is listed there as out of scope.

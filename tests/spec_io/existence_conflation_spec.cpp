@@ -159,6 +159,23 @@ describe existence_conflation("existence checks distinguish absent from undeterm
 		expect(*present).to_equal(true);
 		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Present).to_equal(true);
 	});
+
+	// A path that names a FILE, not a directory, is a real efatfs Error::InvalidInput
+	// (crates/embedded-fatfs/src/dir.rs:252-256), which maps to DELUGE_ERR_PARAM -- Undeterminable,
+	// not Absent. Opening it as a directory must not be reported as a safe absence.
+	it("classifies a directory-open on a file path as Undeterminable, not absent", _ {
+		mock_file_io_reset();
+		uint32_t h = 0;
+		expect(deluge_efatfs_file_open("SETTINGS/MIDIFollow.XML", DELUGE_FILE_WRITE_CREATE, &h))
+		    .to_equal(DELUGE_OK);
+		deluge_efatfs_file_close(h);
+
+		auto present = deluge::io::presence_from_open(deluge::io::Directory::open("SETTINGS/MIDIFollow.XML"));
+
+		expect(present.has_value()).to_equal(false);
+		expect(deluge::storage::presence_of(present) == deluge::storage::Presence::Undeterminable)
+		    .to_equal(true);
+	});
 });
 
 CPPSPEC_SPEC(existence_conflation)

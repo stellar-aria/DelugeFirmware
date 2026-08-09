@@ -282,10 +282,21 @@ DelugeStatus deluge_efatfs_dir_open(const char* path, uint32_t* out_handle) {
 	// directory entry -- otherwise this would report every nonexistent path as
 	// successfully "open" with zero children, which would make it impossible
 	// to ever observe NOT_FOUND from a directory-existence check.
+	//
+	// This mirrors real efatfs's Dir::open_dir, which distinguishes the two
+	// failure shapes (crates/embedded-fatfs/src/dir.rs:252-256): Error::NotFound
+	// when the path names no entry at all, vs. Error::InvalidInput when it names
+	// an entry that exists but isn't a directory. The latter maps to
+	// DELUGE_ERR_PARAM, which the policy layer classifies as Undeterminable, not
+	// Absent -- conflating the two here would let a spec "prove" a safe absence
+	// that the real device would never report.
 	if (!prefix.empty()) {
 		auto it = g_entries.find(prefix);
-		if (it == g_entries.end() || !it->second.is_directory) {
+		if (it == g_entries.end()) {
 			return DELUGE_ERR_NOT_FOUND;
+		}
+		if (!it->second.is_directory) {
+			return DELUGE_ERR_PARAM;
 		}
 	}
 	if (!prefix.empty() && prefix.back() != '/') {

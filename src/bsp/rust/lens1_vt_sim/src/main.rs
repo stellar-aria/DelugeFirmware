@@ -433,6 +433,17 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
+    // R5a Phase 0 Task 4 contention knob (`ScenarioConfig::concurrent_listing_every_blocks`):
+    // task-context file I/O (a load-browser listing, dispatched-and-never-committed) fired
+    // every N rendered audio blocks, overlapping the sustained sample streaming this
+    // scenario measures. Unset (the default) leaves the block-target wait exactly as it was
+    // before this knob existed — see that field's doc comment for why `None` must be inert.
+    // Same env-var-driven plumbing as every other `LENS1_*` knob above/below (no CLI parser
+    // in this binary — see `post_load_sim_latency`'s `LENS1_THROUGHPUT_BPS`/`LENS1_OVERHEAD_US`
+    // for the established pattern this follows).
+    let concurrent_listing_every_blocks: Option<u64> = std::env::var("LENS1_CONCURRENT_LISTING_EVERY_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse().ok());
     // A whole-process WALL-clock budget for the driver loop below (Steps 8-9 of
     // `task-0-brief.md`) — real time, never compared against virtual time or
     // against `step_timeout_s` above. PROVISIONAL default: 300s was picked
@@ -446,7 +457,8 @@ fn main() {
     log::info!(
         "lens1-vt-sim: fixture={fixture} song={song_path} target_blocks={target_blocks} \
          throughput_bps={throughput_bps} overhead_us={overhead_us} audio_block_us={audio_block_us} \
-         budget_ms={budget_ms} wall_timeout_s={wall_timeout_s}"
+         budget_ms={budget_ms} wall_timeout_s={wall_timeout_s} \
+         concurrent_listing_every_blocks={concurrent_listing_every_blocks:?}"
     );
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same tooling
@@ -823,6 +835,7 @@ fn main() {
         target_blocks,
         step_timeout: Duration::from_secs(step_timeout_s),
         post_load_sim_latency,
+        concurrent_listing_every_blocks,
     };
     static DONE: AtomicBool = AtomicBool::new(false);
     spawner.spawn(scenario_runner(cfg, &DONE).unwrap());

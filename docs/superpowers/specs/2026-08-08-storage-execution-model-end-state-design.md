@@ -63,6 +63,53 @@ reasons: it is the home of `await` (§2), and it bounds how many interaction-tie
 flight against the FS at once. Whether serialisation remains strictly *necessary* after R5b, as
 opposed to merely useful, is an open question for R5b's brainstorm; this doc does not settle it.
 
+### 1.0 The audio-tier contract, AUDITED (2026-08-09)
+
+The audio tier's "never blocks" clause is the load-bearing half of §1's invariant, so it was audited by
+reading the real-time render path end to end (`deluge_app_render` → `renderAudio` → voice/sample render →
+resource-manager access), classifying every reachable wait.
+
+**Verdict: the real-time render path contains no genuinely-blocking off-fiber call.** The chain that
+matters: `sample_low_level_reader.cpp` → `deluge_sample_region_acquire`
+(`crates/deluge_sample_source/src/abi.rs:430`) → `acquire_ex` (`cursor.rs:187`), documented and confirmed
+"non-blocking, synchronous: schedules a fill if needed but never waits", returning Ready/Loading/
+Unavailable immediately; and `ManagerResidency::acquire` (`manager_residency.rs:105`), a cache-hit lookup
+or reserve+enqueue+signal that hands work to `streaming_fill_task` and returns.
+
+**Render never touches the storage C-ABI at all.** It terminates at the resource-manager facade — it does
+not reach `efatfs_fs.rs`, `sd.rs`, any of the 69 `block_on_fiber` sites, or any of the 29 `on_fiber()`
+gates. `deluge_streaming_fill_chunk_blocking` / `_drain_queue_blocking` are reached ONLY by
+`stem_export.cpp:224` (offline, deliberately on-fiber), the recorder read-back probe, and test harnesses
+— none in the real-time graph.
+
+**This narrows Phase 2's risk surface materially:** collapsing the I/O-class sites cannot make the audio
+path block, because the audio path never calls them. Phase 2's risk is entirely that *streaming fill*
+starves, not that render itself blocks.
+
+Three nuances the audit surfaced, none a blocker:
+
+1. **`Masked::enter` (`deluge_resource/src/sync.rs:33`) is a no-op on device, a real mutex on host.**
+   On device `deluge_in_interrupt()` is true on the audio path so it never masks — sound, because
+   `AUDIO_EXEC` cannot be preempted by the fiber, so the `Cell` access is already atomic with respect to
+   it. On host (the Lens 2 TSan harness) both sides mask via a real `critical_section`, so a brief
+   contended wait is possible — bounded to one `Cell` read/write, not a park. A **harness-fidelity**
+   difference, not a device hazard.
+2. **⚠️ Discrepancy with this doc's own "never allocates" clause.** `SampleRecorder::feedAudio`, reached
+   from `currentSong->renderAudio` (`song.cpp:2464`, `sound.cpp:2610`,
+   `global_effectable_for_clip.cpp:139`), calls `allocateBuffer`, which is a lock-free
+   `freeBuffers_.try_pop` **or a heap allocation** when the pool is empty. Non-blocking, so it does not
+   break the invariant — but an allocation on the render path contradicts the audio tier's stated
+   contract. Worth its own look; not part of R5a.
+3. **Undetermined corner:** the rest of the render graph (envelopes / LFO / patcher / wavetable band-data
+   / MPE / arp) was not exhaustively traced. Wavetable render is believed to reuse the same region/cluster
+   mechanism, unverified. Settling it needs a full call-graph trace or an ISR-context instrumented run.
+
+**Scoping note that matters for the harness question:** `audio_host.rs:163-171`'s `should_skip_render()`
+livelock concerns driving `deluge_app_render` *synchronously from the fiber's own thread-mode context in
+the host harness* — a different scenario from the device's preemptive `AUDIO_EXEC`. So that guard protects
+a host-harness hazard, not a device one. If margin-in-sim is ever revisited, driving render from a
+context the in-spin `progress_hook` pumps is not obviously blocked by this audit's findings.
+
 ### 1.1 The invariant classifies every storage call site
 
 This taxonomy is the doc's main working tool. Every `block_on_fiber` site is exactly one of:

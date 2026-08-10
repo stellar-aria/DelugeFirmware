@@ -575,7 +575,25 @@ extern "C" void deluge_app_render(const DelugeStereoSample* in, DelugeStereoSamp
 		// logged alongside because the two failure shapes look identical in the interval alone: a driver
 		// handing over one huge late window (frames tracks the gap) versus the render being starved while
 		// the window stays small (frames stays nominal).
-		D_PRINTLN("Audio routine latency high: %.3fms frames=%d", (current_time - last_call_time) * 1000., (int)frames);
+		//
+		// RATE-LIMITED to once a second, reporting how many it swallowed. Unthrottled this fires on EVERY
+		// render call once the engine falls behind, which made it three problems at once: formatting and
+		// pushing thousands of lines a second costs real time on the audio path, so the warning helped
+		// cause the condition it reports; it exhausted a 10000-line RTT capture within ten seconds, so no
+		// later event could be observed at all; and it turned every latency figure into a measurement of
+		// the logging rather than of the engine. A diagnostic that changes what it measures is worse than
+		// none.
+		static double lastWarnTime = 0.;
+		static uint32_t suppressedWarnings = 0;
+		if (current_time - lastWarnTime >= 1.0) {
+			D_PRINTLN("Audio routine latency high: %.3fms frames=%d (+%d more in the last second)",
+			          (current_time - last_call_time) * 1000., (int)frames, (int)suppressedWarnings);
+			lastWarnTime = current_time;
+			suppressedWarnings = 0;
+		}
+		else {
+			suppressedWarnings++;
+		}
 	}
 	last_call_time = current_time;
 
@@ -1093,8 +1111,21 @@ void routine() {
 		double driveStart = getSystemTime();
 		uint32_t renders = deluge_audio_drive();
 		double driveMs = (getSystemTime() - driveStart) * 1000.;
+		// Rate-limited for the same reason as the latency warning above: unthrottled it fires on nearly
+		// every call while the engine is behind, and the logging then becomes part of what it is measuring.
+		static double lastDriveWarn = 0.;
+		static uint32_t suppressedDriveWarns = 0;
 		if (driveMs > 2.) {
-			D_PRINTLN("audio drive took %.3fms renders=%d", driveMs, (int)renders);
+			double nowMs = getSystemTime();
+			if (nowMs - lastDriveWarn >= 1.0) {
+				D_PRINTLN("audio drive took %.3fms renders=%d (+%d more in the last second)", driveMs, (int)renders,
+				          (int)suppressedDriveWarns);
+				lastDriveWarn = nowMs;
+				suppressedDriveWarns = 0;
+			}
+			else {
+				suppressedDriveWarns++;
+			}
 		}
 		if (renders == 0 && calledFromScheduler) {
 			ignoreForStats();

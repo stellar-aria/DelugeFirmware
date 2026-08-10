@@ -759,10 +759,21 @@ void LoadSongUI::exitAction() {
 
 void LoadSongUI::previewTrampoline(void* self) {
 	auto* ui = static_cast<LoadSongUI*>(self);
+	ui->previewPending_ = false;
 	ui->drawSongPreviewImpl(ui->previewToStore_);
 	// We rendered from the owner, outside the normal UI render pass, so ask for a repaint - otherwise
 	// the pads keep whatever was on them until something else happens to trigger one.
 	renderingNeededRegardlessOfUI();
+
+	if (ui->previewPending_) {
+		// The selection moved again while we were reading, and Coalescer::request() DROPS requests made
+		// while one is in flight ("a dispatch is already in flight - it covers this demand", which only
+		// holds if the in-flight fill has not yet read the state). Without this catch-up, scrolling faster
+		// than one preview round-trip leaves the pads showing an older song with nothing to correct it.
+		// Dispatched directly rather than through the coalescer, whose in-flight guard is still held here;
+		// a dropped enqueue is harmless because the next detent requests again.
+		deluge::storage::Owner::run(&LoadSongUI::previewTrampoline, ui);
+	}
 }
 
 void LoadSongUI::drawSongPreview(bool toStore) {
@@ -772,6 +783,7 @@ void LoadSongUI::drawSongPreview(bool toStore) {
 	// came to claim "FILE NOT FOUND" for songs that load fine). Dispatch and let the owner render.
 	if (!deluge::storage::Owner::on_owner()) {
 		previewToStore_ = toStore;
+		previewPending_ = true;
 		previewCoalescer_.request(&LoadSongUI::previewTrampoline, this);
 		return;
 	}

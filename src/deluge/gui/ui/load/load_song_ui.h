@@ -76,6 +76,10 @@ private:
 	/// `toStore` argument for the dispatched @ref drawSongPreviewImpl (the trampoline takes no args).
 	bool previewToStore_{true};
 
+	/// Set on every request, cleared as the render begins. Still set when the render finishes means the
+	/// selection moved again mid-read and the coalescer dropped that request, so a catch-up is dispatched.
+	bool previewPending_{false};
+
 	bool performingLoad;
 	bool scrollingIntoSlot{};
 	bool qwertyCurrentlyDrawnOnscreen;

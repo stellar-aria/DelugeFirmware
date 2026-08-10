@@ -29,11 +29,17 @@ public:
 	[[nodiscard]] std::string getFilenameWithExtension() const;
 	[[nodiscard]] std::string getFilenameWithoutExtension() const;
 
-	/// @brief Text shown to the user for this entry.
+	/// @brief Text shown to the user for this entry, and the sort/search key. Always includes the extension.
 	///
-	/// Usually points to filename.c_str(), but for "numeric" files cuts off the prefix (e.g. "SONG").
-	/// Always includes the file extension.
-	char const* displayName{};
+	/// Derived on every call rather than cached. It used to be a `char const*` initialised to
+	/// `filename.c_str()`, which made it a raw alias into a std::string stored *inside* this object: every
+	/// reallocation of the owning `Browser::fileItems` vector moved the FileItems, and the cached pointer
+	/// went on referring to the old, freed buffer — which by then held another entry's text. Because
+	/// `searchFileItems()` sorts and binary-searches on this key and
+	/// `setEnteredTextFromCurrentFilename()` assigns from it, the browser sorted, matched and labelled
+	/// rows using freed memory, so the highlighted entry showed a different file's name than the row it
+	/// sat on (and `getCurrentFileItem()` — hence LOAD — could resolve to the wrong file).
+	[[nodiscard]] const std::string& displayName() const { return filename; }
 
 	std::string filename{}; // May or may not include file extension. (Or actually I think it always does now...)
 	Instrument* instrument = nullptr;

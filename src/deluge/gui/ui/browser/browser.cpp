@@ -56,8 +56,8 @@ int32_t Browser::numCharsInPrefix;
 bool Browser::arrivedAtFileByTyping;
 int32_t Browser::numFileItemsDeletedAtStart;
 int32_t Browser::numFileItemsDeletedAtEnd;
-char const* Browser::firstFileItemRemaining;
-char const* Browser::lastFileItemRemaining;
+std::string Browser::firstFileItemRemaining;
+std::string Browser::lastFileItemRemaining;
 OutputType Browser::outputTypeToLoad;
 char const** Browser::allowedFileExtensions;
 bool Browser::allowFoldersSharingNameWithFile;
@@ -240,14 +240,14 @@ deleteFromLeftSide:
 		numFileItemsDeletedAtStart += numFileItemsDeletingNow;
 		startAt = 0;
 		stopAt = numFileItemsDeletingNow;
-		firstFileItemRemaining = (&fileItems[numFileItemsDeletingNow])->displayName;
+		firstFileItemRemaining = (&fileItems[numFileItemsDeletingNow])->displayName();
 	}
 	else if (catalogSearchDirection == CATALOG_SEARCH_RIGHT) {
 deleteFromRightSide:
 		numFileItemsDeletedAtEnd += numFileItemsDeletingNow;
 		stopAt = static_cast<int32_t>(fileItems.size());
 		startAt = stopAt - numFileItemsDeletingNow;
-		lastFileItemRemaining = (&fileItems[startAt - 1])->displayName;
+		lastFileItemRemaining = (&fileItems[startAt - 1])->displayName();
 	}
 
 	// Or if we've been using a search term *and* searching both directions, try to tend towards keeping equal amounts
@@ -311,8 +311,8 @@ Error Browser::readFileItemsForFolder(char const* filePrefixHere, bool allowFold
 
 	numFileItemsDeletedAtStart = 0;
 	numFileItemsDeletedAtEnd = 0;
-	firstFileItemRemaining = nullptr;
-	lastFileItemRemaining = nullptr;
+	firstFileItemRemaining.clear();
+	lastFileItemRemaining.clear();
 	catalogSearchDirection = newCatalogSearchDirection;
 	maxNumFileItemsNow = newMaxNumFileItems;
 	filenameToStartSearchAt = filenameToStartAt;
@@ -363,7 +363,6 @@ extensionNotSupported:
 		// displayName is the sort key, and must equal the real on-card name. The 7SEG short form ("185")
 		// is produced at render time, not stored here - storing it made enteredText display-dependent, which is what
 		// broke default naming on 7SEG (#1069).
-		thisItem->displayName = thisItem->filename.c_str();
 	}
 
 	if (error != Error::NONE) {
@@ -400,7 +399,7 @@ void Browser::deleteFolderAndDuplicateItems(Availability instrumentAvailabilityR
 			// Or if we have an Instrument, and the next item is a file of the same name, delete the next item.
 			else if (readItem->instrument) {
 				if (!nextItem->instrument && !nextItem->isFolder) {
-					if (!strcasecmp(readItem->displayName, nextItem->displayName)) {
+					if (!strcasecmp(readItem->displayName().c_str(), nextItem->displayName().c_str())) {
 						// if (readItem->filename.equalsCaseIrrespective(&nextItem->filename)) {
 						readI++; // Skip the next item; it'll be overwritten by compaction or erased below.
 						nextItem = fileItems.data() + (readI + 1);
@@ -425,7 +424,8 @@ deleteThisItem: // Just skip it; it'll be overwritten by compaction or erased be
 
 			// Or if next item has an Instrument, and we're just a file...
 			else if (nextItem->instrument) {
-				if (!strcasecmp(readItem->displayName, nextItem->displayName)) { // And if same name...
+				if (!strcasecmp(readItem->displayName().c_str(),
+				                nextItem->displayName().c_str())) { // And if same name...
 					goto deleteThisItem;
 				}
 			}
@@ -446,10 +446,10 @@ deleteThisItem: // Just skip it; it'll be overwritten by compaction or erased be
 
 	// Our system of keeping FileItems from getting too full by deleting elements from its ends as we go could have
 	// caused bad results at the edges of the above, so delete a further one element at each end as needed.
-	if (firstFileItemRemaining) {
+	if (!firstFileItemRemaining.empty()) {
 		fileItems.erase(fileItems.begin());
 	}
-	if (lastFileItemRemaining) {
+	if (!lastFileItemRemaining.empty()) {
 		fileItems.pop_back();
 	}
 }
@@ -935,6 +935,7 @@ Error Browser::finishSelectEncoderAction(int32_t newFileIndex, int8_t offset) {
 	// A fast turn may be delivered as a multi-file offset; after a folder-window re-read, that offset can still
 	// overshoot.
 	clampFileSelectionAndScroll(false);
+
 	if (fileIndexSelected == -1) {
 		// allowNoFileSelection=false only leaves -1 when there are no cached files at all,
 		// so there is no selection to reconcile -- not an error.
@@ -1082,7 +1083,7 @@ notFound:
 	FileItem* fileItem = &fileItems[i];
 
 	// If it didn't match exactly, that's ok, but we need to try some other stuff before we accept that result.
-	if (memcasecmp(fileItem->displayName, enteredText.c_str(), enteredTextEditPos)) {
+	if (memcasecmp(fileItem->displayName().c_str(), enteredText.c_str(), enteredTextEditPos)) {
 		// If the search landed on the first cached item, the folder cache may be missing earlier entries (files
 		// alphabetically before the current one). Re-read the folder so we can find them too (#4584).
 		if (i == 0 && !doneNewRead) {
@@ -1542,7 +1543,7 @@ void Browser::goIntoDeleteFileContextMenu() {
 Error Browser::setEnteredTextFromCurrentFilename() {
 	FileItem* currentFileItem = getCurrentFileItem();
 
-	enteredText = currentFileItem->displayName;
+	enteredText = currentFileItem->displayName();
 
 	// Cut off the file extension
 	if (!currentFileItem->isFolder) {
@@ -1681,16 +1682,19 @@ void Browser::sortFileItems() {
 	shouldInterpretNoteNames = shouldInterpretNoteNamesForThisBrowser;
 	octaveStartsFromA = false;
 
-	std::sort(fileItems.begin(), fileItems.end(),
-	          [](FileItem const& a, FileItem const& b) { return strcmpspecial(a.displayName, b.displayName) < 0; });
+	std::sort(fileItems.begin(), fileItems.end(), [](FileItem const& a, FileItem const& b) {
+		return strcmpspecial(a.displayName().c_str(), b.displayName().c_str()) < 0;
+	});
 }
 
 int32_t Browser::searchFileItems(char const* searchString, bool* foundExact) {
+	// Project each item to a plain C string so the comparator is symmetric in its argument types, as
+	// ranges::lower_bound requires of a strict weak order. The projected pointer never outlives the call.
 	auto it = std::ranges::lower_bound(
 	    fileItems, searchString, [](char const* a, char const* b) { return strcmpspecial(a, b) < 0; },
-	    &FileItem::displayName);
+	    [](FileItem const& f) { return f.displayName().c_str(); });
 	if (foundExact != nullptr) {
-		*foundExact = (it != fileItems.end() && strcmpspecial(it->displayName, searchString) == 0);
+		*foundExact = (it != fileItems.end() && strcmpspecial(it->displayName().c_str(), searchString) == 0);
 	}
 	return static_cast<int32_t>(it - fileItems.begin());
 }

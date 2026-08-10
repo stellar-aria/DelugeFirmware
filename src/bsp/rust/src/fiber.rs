@@ -423,6 +423,74 @@ pub fn wake() {
     WORKER_WAKE.signal(());
 }
 
+/// Worker-pump state, readable over the debug probe when the device wedges.
+///
+/// A device found parked in the executor's idle `wfe()` is waiting for a wakeup that never came, and
+/// the question is always the same: was the pump still being scheduled, and did it think it had work?
+/// The statics that answer it (`FIBER_BUSY`, `Q_COUNT`, `WAIT_PRED`, `WAIT_DEADLINE_US`) do not
+/// survive optimisation — LTO folds them into their access sites, leaving nothing in the symbol
+/// table to read. So the answers are mirrored here, in one `#[no_mangle]` struct with a stable
+/// symbol, updated from [`worker_poll`] and [`enqueue`].
+///
+/// Reading it: halt the target and `p DELUGE_FIBER_DEBUG`, twice, a second apart.
+/// - `polls` advancing ⇒ the pump is alive; the stall is in something it is waiting on.
+/// - `polls` frozen with `fiber_busy == 1` ⇒ a suspended op the pump stopped re-polling (its 8 ms
+///   fallback in `app_task` should make this impossible — if you see it, that timer is not arming).
+/// - `polls` frozen with `fiber_busy == 0` and `q_count == 0` ⇒ the pump is idle-asleep on
+///   `WORKER_WAKE` with no fallback timer at all, and whoever is stalled never submitted an op (or
+///   submitted without waking). This is the shape a missed signal takes.
+/// - `submits > resumes + completed ops` ⇒ work was queued that the pump never started.
+///
+/// Diagnostic only: nothing reads this on the device, and the cost is a handful of stores per poll.
+#[repr(C)]
+pub struct FiberDebug {
+    /// Bumped on every [`worker_poll`] entry. Frozen ⇒ the pump is not being scheduled.
+    pub polls: u32,
+    /// Bumped whenever [`worker_poll`] resumes a suspended op.
+    pub resumes: u32,
+    /// Bumped whenever an op is enqueued ([`enqueue`]).
+    pub submits: u32,
+    /// Bumped whenever an enqueue was DROPPED because the ring was full — the op never ran.
+    pub submits_dropped: u32,
+    /// `FIBER_BUSY` as observed at the last poll.
+    pub fiber_busy: u8,
+    /// Queue depth as observed at the last poll.
+    pub q_count: u8,
+    _pad: [u8; 2],
+    /// `WAIT_PRED` at the last poll (0 = "resume on the next poll", what `block_on_fiber` sets).
+    pub wait_pred: u32,
+    /// `WAIT_DEADLINE_US` at the last poll (0 = wait forever).
+    pub wait_deadline_us: u64,
+    /// `now_us()` at the last poll. With `polls`, shows whether the pump stopped and when.
+    pub last_poll_us: u64,
+}
+
+#[unsafe(no_mangle)]
+pub static mut DELUGE_FIBER_DEBUG: FiberDebug = FiberDebug {
+    polls: 0,
+    resumes: 0,
+    submits: 0,
+    submits_dropped: 0,
+    fiber_busy: 0,
+    q_count: 0,
+    _pad: [0; 2],
+    wait_pred: 0,
+    wait_deadline_us: 0,
+    last_poll_us: 0,
+};
+
+/// Bump one `u32` counter in [`DELUGE_FIBER_DEBUG`]. Saturating so a wrap can't be mistaken for a
+/// stalled counter when reading a long-running target.
+fn dbg_bump(field: impl FnOnce(&mut FiberDebug) -> &mut u32) {
+    // SAFETY: single-threaded (the pump and the enqueue path both run on the one executor); this
+    // struct is diagnostic-only and nothing else reads it.
+    unsafe {
+        let d = &mut *core::ptr::addr_of_mut!(DELUGE_FIBER_DEBUG);
+        let f = field(d);
+        *f = f.saturating_add(1);
+    }
+}
+
 /// Wake the worker only if an op is currently on the fiber — i.e. something might
 /// be waiting on the progress the caller just made. Called by task runners after
 /// running a handle; a no-op (no spurious wake) when the worker is idle.
@@ -476,6 +544,13 @@ fn enqueue(f: extern "C" fn(*mut c_void), ctx: *mut c_void, is_sd: bool) -> bool
             false
         }
     };
+    dbg_bump(|d| {
+        if enqueued {
+            &mut d.submits
+        } else {
+            &mut d.submits_dropped
+        }
+    });
     // Wake the pump so the op starts promptly (it may be idle-asleep).
     wake();
     enqueued
@@ -555,6 +630,19 @@ pub fn worker_poll() -> bool {
     // doc comment). Relaxed store is fine — this is a monotonic latch, not a
     // handoff of other state.
     WORKER_STARTED.store(true, Ordering::Relaxed);
+    // Diagnostic snapshot — see DELUGE_FIBER_DEBUG. Taken before anything else so a target halted
+    // mid-poll still shows the state this pass started from.
+    // SAFETY: single-threaded; WAIT_PRED/WAIT_DEADLINE_US/Q_COUNT are only written on the fiber and
+    // in `enqueue`, neither of which can be running concurrently with this.
+    unsafe {
+        let d = &mut *core::ptr::addr_of_mut!(DELUGE_FIBER_DEBUG);
+        d.polls = d.polls.saturating_add(1);
+        d.fiber_busy = FIBER_BUSY.load(Ordering::Relaxed) as u8;
+        d.q_count = Q_COUNT as u8;
+        d.wait_pred = core::ptr::addr_of!(WAIT_PRED).read() as u32;
+        d.wait_deadline_us = core::ptr::addr_of!(WAIT_DEADLINE_US).read();
+        d.last_poll_us = now_us();
+    }
     if !FIBER_BUSY.load(Ordering::Relaxed) {
         let Some((f, ctx, is_sd)) = dequeue() else {
             return false;
@@ -583,6 +671,7 @@ pub fn worker_poll() -> bool {
     let timed_out = deadline != 0 && now_us() >= deadline;
     if met || timed_out {
         unsafe { core::ptr::addr_of_mut!(WAIT_MET).write(met) };
+        dbg_bump(|d| &mut d.resumes);
         let completed = resume();
         if completed {
             complete_active_op();

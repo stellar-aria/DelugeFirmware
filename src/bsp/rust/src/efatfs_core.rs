@@ -29,6 +29,7 @@
 // 2018+, so this can't rely on another module's `extern crate alloc;`.
 // Harmless under a `std` build too -- `alloc` is always in the sysroot there.
 extern crate alloc;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use embedded_fatfs::{
@@ -728,9 +729,16 @@ where
 /// (`embedded_fatfs::FileAttributes::bits()`: READ_ONLY=0x01, HIDDEN=0x02,
 /// SYSTEM=0x04, VOLUME_ID=0x08, DIRECTORY=0x10, ARCHIVE=0x20), bit-for-bit
 /// C-FatFS's `FILINFO::fattrib` (`AM_*`).
+/// `name` is an exact-sized heap `String`, NOT an inline `heapless::String<256>`.
+/// A snapshot holds one of these per directory entry, so an inline 256-byte name
+/// buffer set the entry cost at ~272 bytes whatever the real filename length --
+/// which put the whole-directory snapshot over the FS arena at only a couple of
+/// hundred entries, and the overflow surfaced as `handle_alloc_error` (a panic,
+/// i.e. a dead device) rather than an error. Typical preset names are 20-30 bytes,
+/// so paying for the actual length raises the ceiling several-fold.
 #[derive(Clone)]
 pub struct DirEntryInfo {
-    pub name: heapless::String<256>,
+    pub name: String,
     pub is_dir: bool,
     pub size: u32,
     pub modified: u32,
@@ -787,25 +795,29 @@ where
         if name == "." || name == ".." {
             continue;
         }
-        // A name that doesn't fit `heapless::String<256>` (FAT LFN is 255 UTF-16
-        // units, which can exceed 256 UTF-8 bytes) is skipped rather than failing
-        // the whole snapshot via `?` -- one oversized filename anywhere in the
-        // directory would otherwise take out the ENTIRE listing. Propagating `?`
-        // here would abort the walk with `None`, which the C-ABI (`efatfs_fs.rs`/
-        // `efatfs_host_shim.rs`) can't distinguish from "path is not a
-        // directory" / a real FS error.
-        let Ok(name) = heapless::String::try_from(name.as_str()) else {
-            continue;
-        };
+        // EVERY allocation on this path is fallible. A snapshot is proportional to
+        // the directory's size, the arena backing it is fixed (96 KiB on device),
+        // and an infallible `push`/`String::from` reaches `handle_alloc_error` when
+        // it runs out -- which panics, and a panic on the storage-owner fiber spins
+        // there forever and takes the front panel with it. A folder with too many
+        // files must degrade to an error the browser can display, never to a brick.
+        let mut owned = String::new();
+        if owned.try_reserve_exact(name.len()).is_err() {
+            return Err(DELUGE_ERR_IO);
+        }
+        owned.push_str(&name);
         let is_dir = e.is_dir();
         let size = if is_dir { 0 } else { e.len() as u32 };
         let info = DirEntryInfo {
-            name,
+            name: owned,
             is_dir,
             size,
             modified: pack_fat_datetime(e.modified()),
             attrs: e.attributes().bits(),
         };
+        if entries.try_reserve(1).is_err() {
+            return Err(DELUGE_ERR_IO);
+        }
         entries.push(info);
     }
     Ok(DirCursor { entries, idx: 0 })
@@ -820,12 +832,26 @@ where
 /// in-flight streaming SD read for no reason. An FS-error outer `None` cannot
 /// occur for a snapshot cursor today, but the signature leaves room for a
 /// future non-snapshot cursor that could fail mid-walk.
+///
+/// Consumes each entry as it passes: the returned name is MOVED out of the
+/// snapshot, leaving an empty `String` behind. This is sound because the cursor
+/// only ever walks forward (`idx` is monotonic and there is no rewind API), and it
+/// matters for two reasons — cloning the name would allocate on every read, and
+/// allocating is exactly what cannot be relied upon here, since a large snapshot is
+/// itself what leaves the arena short; and freeing each name as it is handed over
+/// lowers the peak the walk holds. Consequently a given entry can only be read once.
 #[allow(clippy::unnecessary_wraps)]
 pub fn readdir_next(cursor: &mut DirCursor) -> Option<Option<DirEntryInfo>> {
-    let Some(info) = cursor.entries.get(cursor.idx) else {
+    let Some(slot) = cursor.entries.get_mut(cursor.idx) else {
         return Some(None); // end of directory
     };
-    let info = info.clone();
+    let info = DirEntryInfo {
+        name: core::mem::take(&mut slot.name),
+        is_dir: slot.is_dir,
+        size: slot.size,
+        modified: slot.modified,
+        attrs: slot.attrs,
+    };
     cursor.idx += 1;
     Some(Some(info))
 }

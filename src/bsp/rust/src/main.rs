@@ -285,8 +285,18 @@ static FS_ALLOCATOR: fs_alloc::DelugeGlobalAlloc = fs_alloc::DelugeGlobalAlloc::
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     // `extern "C"` boundary: never unwind (panic = "abort" is also set).
+    //
+    // Print STRAIGHT to the RTT channel rather than through `log::error!`. A panic is
+    // exactly the moment the logging stack cannot be trusted to be working: this used
+    // `log::error!`, the `log` crate's max level was compiled out in release (see
+    // deluge-sdk's workspace `log` dependency), and every panic on the only profile that
+    // fits the device was therefore silent. The spin below happens in whatever context
+    // panicked, so on the storage-owner fiber it stalls the whole thread-mode executor
+    // while audio carries on in its own interrupt executor -- a dead front panel with
+    // sound still playing, and not one byte of explanation. `rprintln!` shares the
+    // channel the logger sits on but owes it nothing.
     #[cfg(all(feature = "rtt", target_os = "none"))]
-    log::error!("PANIC: {}", _info);
+    rtt_target::rprintln!("PANIC: {}", _info);
     loop {
         core::hint::spin_loop();
     }

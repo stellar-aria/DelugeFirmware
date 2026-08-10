@@ -32,8 +32,14 @@ pub const RUST_SDRAM_BASE: usize = SDRAM_BASE + SDRAM_SIZE - RUST_SDRAM_RESERVE;
 /// SDRAM-resident globals.
 pub unsafe fn init_sdram_memory() {
     unsafe {
-        zero(&__frunk_bss_start, &__frunk_bss_end);
-        zero(&__sdram_bss_start, &__sdram_bss_end);
+        zero(
+            core::ptr::addr_of!(__frunk_bss_start),
+            core::ptr::addr_of!(__frunk_bss_end),
+        );
+        zero(
+            core::ptr::addr_of!(__sdram_bss_start),
+            core::ptr::addr_of!(__sdram_bss_end),
+        );
 
         let src = core::ptr::addr_of!(__sdram_init_lma);
         let dst = core::ptr::addr_of!(__sdram_init_start) as *mut u8;
@@ -62,10 +68,25 @@ pub unsafe fn run_init_array() {
     }
 }
 
-unsafe fn zero(start: &u8, end: &u8) {
-    let s = start as *const u8 as *mut u8;
-    let len = (end as *const u8 as usize) - (start as *const u8 as usize);
+/// Zero `[start, end)`.
+///
+/// Takes RAW POINTERS, and the callers must produce them with `addr_of!` — never
+/// `&SYMBOL`. This previously took `&u8` references and computed
+/// `end as usize - start as usize`, which subtracts pointers derived from two
+/// *distinct* objects: UB in LLVM's model, so the difference folded away, `len > 0`
+/// went false, and **both memsets were deleted from the image**. The fingerprint was
+/// that `__sdram_bss_start`/`__frunk_bss_start` were absent from the linked ELF
+/// (nothing referenced them any more) while the `_end` symbols, which other code
+/// also reads, were still there.
+///
+/// The consequence was not subtle: no SDRAM or frunk `.bss` was ever cleared, so
+/// every `PLACE_SDRAM_BSS`/`PLACE_INTERNAL_FRUNK` global — including the allocator's
+/// own metadata arrays — started each boot holding whatever the last session left in
+/// RAM. Casting each raw pointer to `usize` first keeps this as plain integer
+/// arithmetic, with no provenance claim for the optimiser to exploit.
+unsafe fn zero(start: *const u8, end: *const u8) {
+    let len = (end as usize) - (start as usize);
     if len > 0 {
-        unsafe { core::ptr::write_bytes(s, 0, len) };
+        unsafe { core::ptr::write_bytes(start as *mut u8, 0, len) };
     }
 }

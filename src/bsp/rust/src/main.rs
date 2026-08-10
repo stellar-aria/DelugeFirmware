@@ -456,6 +456,11 @@ pub extern "C" fn main() -> ! {
         spawner.spawn(usb::midi_rx_task(usb_midi.ep_out).unwrap());
         spawner.spawn(usb::midi_tx_task(usb_midi.ep_in).unwrap());
         spawner.spawn(app_task().unwrap());
+        // Re-identifies the card after a swap. Must be its own task: `sd::init()`
+        // needs embassy-time Timers, which the storage-owner fiber cannot provide
+        // (see `sd::card_service`), and parking `app_task` on a ~1.3 s card
+        // bring-up would stall the worker-fiber pump it owns.
+        spawner.spawn(sd::card_service().unwrap());
         // R2.1: the async cluster-fill task, selectable via `async_streaming_loader`.
         // Owns the streaming loader queue when active (feature `async_streaming_loader`);
         // inert (never polled beyond its idle wait) unless the C++ enqueue path

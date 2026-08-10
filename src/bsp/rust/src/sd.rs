@@ -78,9 +78,10 @@ use crate::sys::{
 // `DelugeStatus` is `i8` (its values run -13..=0, forcing a signed type; the
 // header pins its underlying type explicitly — `enum DelugeStatus : int8_t`),
 // `DelugeCardEvent` is `u8` (0..=2, pinned explicitly as `enum DelugeCardEvent
-// : uint8_t`). Values match include/libdeluge/{types,block_device}.h exactly,
-// so the full card-event edge-tracking algorithm in
-// `deluge_block_poll_card_event` below runs identically on both targets.
+// : uint8_t`). Values match include/libdeluge/{types,block_device}.h exactly, so
+// `deluge_block_poll_card_event` reports the same event vocabulary on both
+// targets — though not by the same means: the device reads the SDHI's card-detect
+// edge latches, while host has no card to remove and so has no edge to detect.
 #[cfg(not(target_os = "none"))]
 type DelugeStatus = i8;
 #[cfg(not(target_os = "none"))]
@@ -151,6 +152,64 @@ pub async fn boot_init() {
         sd::is_inserted(),
         sd::is_write_protected(),
     );
+}
+
+/// Requests to (re-)identify the card, raised by [`deluge_block_poll_card_event`]
+/// on an insertion edge and served by [`card_service`].
+///
+/// A `Signal` rather than a counter: what the service task needs to know is only
+/// "a card that has not been identified is present", so coalescing several
+/// insertion edges into one init is correct, not lossy.
+#[cfg(target_os = "none")]
+static CARD_INIT_REQ: embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> =
+    embassy_sync::signal::Signal::new();
+
+/// Re-identifies the card after a swap, on a real Embassy task.
+///
+/// This exists because the work cannot be done anywhere else. `sd::init()` paces
+/// the SD power-up sequence with `embassy_time::Timer`s, and this BSP uses the
+/// *integrated* (intrusive) timer queue, where a `Timer` only resolves for a
+/// genuine Embassy task waker — under either `embassy_futures::block_on` or
+/// [`crate::fiber::block_on_fiber`] (whose waker is the synthetic one in
+/// `fiber.rs`) it panics instead. So the card re-init cannot happen inside the
+/// C-ABI storage entry points: those run on the worker fiber, which is exactly
+/// where a `Timer` is unavailable. The same constraint is why `boot_init` runs
+/// from `app_task` rather than from the sync `disk_initialize` path.
+///
+/// Nothing waits on this task. It publishes its result through the card's own
+/// ready state: `sd::init()` sets `CARD_READY`, so `deluge_block_ready()` —
+/// hence the app's `StorageManager::checkSDPresent()` — flips to true when the
+/// card is usable. The app's re-insert path (`AudioFileManager::reinitEjectedCard`,
+/// called a couple of times a second from `slowRoutine`) already re-checks that
+/// on every tick and re-mounts once it passes, so the handoff needs no
+/// fiber-to-task rendezvous: an attempt landing mid-init simply finds the card
+/// not ready yet and retries on the next tick.
+///
+/// Holds [`SD_BUS`] across the init so the identification sequence cannot
+/// interleave with a fiber FatFS transfer or a streaming read on the one SDHI
+/// controller. Those fail fast rather than blocking on it, because a detected
+/// removal has already run `sd::invalidate()`.
+#[cfg(target_os = "none")]
+#[embassy_executor::task]
+pub async fn card_service() {
+    loop {
+        CARD_INIT_REQ.wait().await;
+        let _guard = SD_BUS.lock().await;
+        // Re-check presence under the lock: the card may have been pulled again
+        // between the edge and here, in which case there is nothing to identify
+        // and the next insertion edge will raise a fresh request.
+        if !sd::is_inserted() {
+            log::info!("sd: card gone again before re-init; waiting for the next insertion");
+            continue;
+        }
+        match sd::init().await {
+            Ok(()) => log::info!("sd: card re-identified after swap"),
+            // Not fatal, and not retried here: an unreadable or half-seated card
+            // leaves the app in its "ejected" state, still polling, and any later
+            // reseat raises another insertion edge.
+            Err(e) => log::warn!("sd: re-init after swap failed: {:?}", e),
+        }
+    }
 }
 
 /// `host_app` sibling of the device [`boot_init`] above: called from the host
@@ -1019,37 +1078,82 @@ pub extern "C" fn deluge_block_sd_unit() -> u8 {
     0
 }
 
-/// Pull-based card-detect: report INSERTED/EJECTED edges of the card-present
-/// state. The first poll just latches the boot state (no spurious event), so the
-/// app's initial card read isn't double-triggered (mirrors the rza1 latch).
+/// Pull-based card-detect: report one INSERTED/EJECTED transition per call.
+///
+/// Reads the SDHI's *edge* latches rather than comparing successive reads of the
+/// card-present level. The level comparison this replaced could not see a swap at
+/// all: the app polls a couple of times a second, and a card pulled and replaced
+/// between two polls reads present both times, so `now == was` reported
+/// `CARD_NONE` and the app went on using a filesystem mounted against a card that
+/// was no longer in the slot.
+///
+/// A removal always reports before an insertion. When both latches are set — the
+/// swap case — this returns `CARD_EJECTED` now and `CARD_INSERTED` on the next
+/// call, because the app's state machine needs the ejection first: only
+/// `setCardEjected()` arms `AudioFileManager::reinitEjectedCard`, which is what
+/// re-mounts against the new card.
+///
+/// Two side effects, both of which must happen here rather than in the app: a
+/// removal runs `sd::invalidate()` so no transfer is issued against the departed
+/// card's RCA and geometry, and an insertion asks [`card_service`] to re-identify
+/// whatever is now present (`sd::init()` needs timers, so it cannot run on the
+/// fiber the app's storage path uses — see that task's doc comment).
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_poll_card_event(unit: u8) -> DelugeCardEvent {
     if unit != 0 {
         return CARD_NONE;
     }
-    static INITIALISED: AtomicBool = AtomicBool::new(false);
-    static LAST_INSERTED: AtomicBool = AtomicBool::new(false);
-    let now = sd::is_inserted();
-    if !INITIALISED.swap(true, Ordering::Relaxed) {
-        LAST_INSERTED.store(now, Ordering::Relaxed);
-        return CARD_NONE;
+    /// Set when a removal has been reported and its paired insertion has not yet
+    /// been, i.e. a swap seen in a single poll. Carries the second half of the
+    /// transition over to the next call.
+    static INSERTION_PENDING: AtomicBool = AtomicBool::new(false);
+
+    let (removed, inserted) = sd::take_card_detect_events();
+    if inserted {
+        INSERTION_PENDING.store(true, Ordering::Relaxed);
     }
-    let was = LAST_INSERTED.swap(now, Ordering::Relaxed);
-    if now == was {
-        CARD_NONE
-    } else if now {
-        CARD_INSERTED
-    } else {
-        CARD_EJECTED
+
+    if removed {
+        // Ordered before the report so the app can never act on the ejection while
+        // the driver would still accept a transfer against the old card.
+        sd::invalidate();
+        log::info!("sd: card removed");
+        return CARD_EJECTED;
     }
+
+    // Level-based backstop for a removal whose latch went missing — `sd::init()`
+    // consumes any pending edge as it starts, so a card pulled during an init can
+    // leave `is_ready()` true with nothing latched to say otherwise. Cheap, and it
+    // means presence is ultimately governed by the level, not only by edges.
+    if sd::is_ready() && !sd::is_inserted() {
+        sd::invalidate();
+        log::info!("sd: card absent (level check)");
+        return CARD_EJECTED;
+    }
+
+    // Only claim an insertion for a card that is actually still in the slot: the
+    // pending flag can outlive the card when someone pulls it straight back out
+    // again, and reporting an arrival that already left would be a lie to every
+    // consumer of this event.
+    if sd::is_inserted() && INSERTION_PENDING.swap(false, Ordering::Relaxed) {
+        // The card is present but unidentified: hand it to `card_service`, whose
+        // completion the app observes as `deluge_block_ready()` turning true.
+        CARD_INIT_REQ.signal(());
+        log::info!("sd: card inserted; re-init requested");
+        return CARD_INSERTED;
+    }
+
+    CARD_NONE
 }
 
-/// Host: the same insert/eject edge-tracking algorithm as the device path
-/// (above), calling `sd::is_inserted()` uniformly. `deluge_bsp::sd`'s host
-/// stand-in always reports the backing file as present (`is_inserted()`
-/// always returns `true`), so `now == was` holds on every poll after the
-/// first — there is never an edge to report on host.
+/// Host: a level comparison, where the device path reads hardware edge latches
+/// (there are none to read here). It reduces to "never an event": `deluge_bsp::sd`'s
+/// host stand-in backs the card with a file that is present for the whole process
+/// lifetime, so `is_inserted()` always returns `true` and `now == was` holds on
+/// every poll after the first. Kept as a comparison rather than a bare
+/// `CARD_NONE` so a future host harness that models ejection has somewhere
+/// obvious to hook it.
 #[cfg(not(target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_block_poll_card_event(unit: u8) -> DelugeCardEvent {

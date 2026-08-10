@@ -31,13 +31,24 @@ MAX_UPLOAD_BYTES = 0x00C0_0000  # 12 MiB
 BAUD = 115200
 CHUNK = 4096
 
+# The Rust/Embassy BSP firmware. Its build is not a CMake config, so it cannot come from find_elf()'s
+# build/<config>/ glob: cmake produces the C++ app objects and cargo links the ARM image from them.
+RUST_CONFIGS = ("rust", "embassy")
+RUST_BSP_DIR = "src/bsp/rust"
+RUST_TARGET = "armv7a-none-eabihf"
+RUST_ELF = f"{RUST_BSP_DIR}/target/{RUST_TARGET}/release/deluge-rust"
+
 
 def argparser():
     parser = argparse.ArgumentParser(
         prog="run",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Build the firmware and upload it to a Deluge over USB (dev mode)",
-        epilog="""\nusage example: dbt run release
+        epilog="""\nusage example: dbt run rust
+                  Build the Rust/Embassy BSP firmware and push it to a Deluge sitting on the
+                  app-loader boot menu with DEV MODE: ON.
+
+                usage example: dbt run release
                   Build build/Release/deluge.elf and push it to a Deluge sitting
                   on the app-loader boot menu with DEV MODE: ON.""",
     )
@@ -46,8 +57,12 @@ def argparser():
         "config",
         nargs="?",
         default="debug",
-        choices=list(BUILD_CONFIGS.keys()) + list(BUILD_CONFIGS.values()),
-        help="Firmware build configuration to build and upload (default: debug).",
+        choices=list(BUILD_CONFIGS.keys())
+        + list(BUILD_CONFIGS.values())
+        + list(RUST_CONFIGS),
+        help="""Firmware build configuration to build and upload (default: debug).
+                `rust` (or `embassy`) builds and uploads the Rust/Embassy BSP image instead of a
+                CMake config.""",
     )
     parser.add_argument(
         "-p",
@@ -79,7 +94,31 @@ def build_frame(elf_bytes):
     return bytes(frame)
 
 
+def build_rust_device():
+    """Build the Rust/Embassy ARM firmware: cmake makes the C++ app objects, cargo links them.
+
+    Delegates to the `rust` task with the device target appended, rather than re-implementing the
+    two-step flow (and its stale-object pitfall: cargo does not track the C++ sources, so the cmake
+    build must happen first).
+
+    RELEASE deliberately. The dev profile is not a runnable device image -- it leaves zero internal SRAM
+    heap, and with RTT enabled it does not even link, because the image collides with the reserved RTT
+    window. See src/bsp/rust/.cargo/config.toml.
+    """
+    return importlib.import_module("task-rust").main(
+        ["--target", RUST_TARGET, "-Zbuild-std=core,alloc", "--release"]
+    )
+
+
 def find_elf(config):
+    if config in RUST_CONFIGS:
+        if not os.path.isfile(RUST_ELF):
+            raise RuntimeError(
+                f"No Rust/Embassy firmware at {RUST_ELF}. Build it with:\n"
+                f"  ./dbt run {config}    # builds and uploads\n"
+                f"or by hand: ./dbt rust && (cd {RUST_BSP_DIR} && cargo device --release)"
+            )
+        return RUST_ELF
     cmake_config = BUILD_CONFIGS.get(config, config)
     pattern = os.path.join("build", cmake_config, "deluge*.elf")
     matches = sorted(glob.glob(pattern))
@@ -174,7 +213,10 @@ def main():
             util.note(f"ERROR: {elf} does not exist.")
             return 1
     else:
-        result = importlib.import_module("task-build").main([args.config])
+        if args.config in RUST_CONFIGS:
+            result = build_rust_device()
+        else:
+            result = importlib.import_module("task-build").main([args.config])
         if result != 0:
             return result
         try:

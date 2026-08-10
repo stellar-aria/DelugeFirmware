@@ -163,6 +163,10 @@ mod efatfs_host_shim;
 /// device-only counterpart of `fs_differential`'s host `FileBlockDevice`.
 #[cfg(target_os = "none")]
 mod fat_block_device;
+/// `libdeluge/fault.h`: the board half of the portable pad-grid crash reporter — the
+/// blocking PIC transport and the code/stack ranges, both usable from a fault vector.
+#[cfg(target_os = "none")]
+mod fault;
 /// The libdeluge C-ABI service implementations the C++ app calls (stubs).
 /// Compiled on host too under `host_app` (bodies are already host-safe).
 #[cfg(any(target_os = "none", feature = "host_app"))]

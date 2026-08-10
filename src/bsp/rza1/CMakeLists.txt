@@ -16,10 +16,13 @@ add_library(bsp_rza1 STATIC
     block_device.c
     cv_gate.c
     encoder_io.c
-    # RZ/A1L interrupt + system-timer registration and the HW fault reporter,
-    # relocated here from OSLikeStuff (they were never foundation — they are HAL).
+    # RZ/A1L interrupt + system-timer registration, relocated here from OSLikeStuff
+    # (never foundation — they are HAL).
     timers_interrupts.c
-    fault_handler.c
+    # The crash reporter's board half (libdeluge/fault.h). The pad-grid pattern it
+    # feeds is portable and lives in the app now, so both this BSP and the Rust one
+    # render an identical, decodable pattern.
+    fault_hooks.c
     # App-header-free port impls that drive the PIC (pic.h is now byte-oriented /
     # app-free). They still reference legacy-driver symbols compiled into the
     # `deluge` target, resolved at the final link — same as midi_io.c/cv_gate.c.

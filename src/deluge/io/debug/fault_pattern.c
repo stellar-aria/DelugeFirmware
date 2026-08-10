@@ -51,28 +51,36 @@
  * If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "fault_handler.h"
-#include "RTT/SEGGER_RTT.h"
-#include "RZA1/compiler/asm/inc/asm.h"
-#include "RZA1/cpu_specific.h"
-#include "RZA1/system/iodefines/dmac_iodefine.h"
-#include "RZA1/uart/sio_char.h"
-#include "definitions.h"
-#include "drivers/ssi/ssi.h"
-#include "drivers/uart/uart.h"
+// The pad-grid crash pattern. Portable: every board-specific act — getting a byte to
+// the pad driver, and knowing which addresses are code or stack — goes through
+// <libdeluge/fault.h>. This used to live in src/bsp/rza1 and poke that board's PIC
+// UART buffer and DMA channel directly, which meant the Rust/Embassy BSP had no crash
+// pattern at all: a hardware fault there produced a register dump over the debug
+// probe and nothing on the panel, so a crash with no probe attached was invisible.
+// Sharing the renderer keeps the encoding provably identical between boards, which is
+// the whole point — the pattern is only useful if a photo of it decodes the same way
+// whoever built the firmware.
+#include "foundation/panic.h"
+#include "libdeluge/fault.h"
+#include <stddef.h>
 #include <version.h> // kCommitShort — stamped into the crash dump
 
-extern uint32_t program_stack_start;
-extern uint32_t program_stack_end;
-extern uint32_t program_code_start;
-extern uint32_t program_code_end;
+// io/debug/log.h is C++ (it pulls in <cstddef>) and this translation unit is C, so
+// declare the logger's C-linkage entry point directly rather than including it. Same
+// signature as log.h's; kept in step by the shared symbol.
+enum DebugPrintMode { kDebugPrintModeDefault, kDebugPrintModeRaw, kDebugPrintModeNewlined };
+extern void logDebug(enum DebugPrintMode mode, const char* file, int line, size_t bufsize, const char* format, ...);
+#if ENABLE_TEXT_OUTPUT
+#define D_PRINTLN(...) logDebug(kDebugPrintModeNewlined, __FILE__, __LINE__, 256, __VA_ARGS__)
+#else
+#define D_PRINTLN(...)
+#endif
+
+/// Board bounds, fetched once per report (a fault vector is not a place to re-ask).
+static DelugeFaultRanges s_ranges;
 
 [[gnu::always_inline]] inline void sendToPIC(uint8_t msg) {
-	intptr_t writePos = uartItems[UART_ITEM_PIC].txBufferWritePos;
-	volatile char* uncached_tx_buf = (volatile char*)(picTxBuffer + UNCACHED_MIRROR_OFFSET);
-	uncached_tx_buf[writePos] = msg;
-	uartItems[UART_ITEM_PIC].txBufferWritePos += 1;
-	uartItems[UART_ITEM_PIC].txBufferWritePos &= (PIC_TX_BUFFER_SIZE - 1);
+	deluge_fault_pad_write(msg);
 }
 
 [[gnu::always_inline]] inline void sendColor(uint8_t r, uint8_t g, uint8_t b) {
@@ -108,26 +116,18 @@ extern uint32_t program_code_end;
 	drawByte(pointerValue, r, g, b);
 
 #if ENABLE_TEXT_OUTPUT
-	SEGGER_RTT_printf(0, "PTR: 0x%8X (%d, %d, %d)\n", pointerValue, r, g, b);
+	D_PRINTLN("fault PTR: 0x%08x (%d, %d, %d)", pointerValue, r, g, b);
 #endif
 
 	return idxColumnPairStart;
 }
 
 [[gnu::always_inline]] inline bool isStackPointer(uint32_t value) {
-	if (value >= (uint32_t)&program_stack_start && value < (uint32_t)&program_stack_end) {
-		return true;
-	}
-
-	return false;
+	return s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end;
 }
 
 [[gnu::always_inline]] inline bool isCodePointer(uint32_t value) {
-	if (value >= (uint32_t)&program_code_start && value < (uint32_t)&program_code_end) {
-		return true;
-	}
-
-	return false;
+	return s_ranges.code_start != 0 && value >= s_ranges.code_start && value < s_ranges.code_end;
 }
 
 [[gnu::always_inline]] inline uint8_t getHexCharValue(char input) {
@@ -160,7 +160,7 @@ extern uint32_t program_code_end;
 	// Search for stack pointers before any printing
 	if (stackPointer != 0x00000000) {
 		stackPointer = stackPointer - (stackPointer % 4); // Align to 4 bytes
-		while (stackPointer <= (uint32_t)&program_stack_end) {
+		while (stackPointer < s_ranges.stack_end) {
 			uint32_t stackValue = *((uint32_t*)stackPointer);
 
 			// Print any pointer that is pointing to code, different from the LRs and not the same as before
@@ -234,28 +234,33 @@ extern uint32_t program_code_end;
 	drawByte(secondByte, 255, (hardFault ? 0 : 255), 0);
 
 #if ENABLE_TEXT_OUTPUT
-	SEGGER_RTT_printf(0, "COMMIT: %s\n", kCommitShort);
+	D_PRINTLN("fault COMMIT: %s", kCommitShort);
 #endif
 
-	uartFlushIfNotSending(UART_ITEM_PIC);
-
-	// Wait for flush to finish
-	while (!(DMACn(PIC_TX_DMA_CHANNEL).CHSTAT_n & (1 << 6))) {}
+	// Hand the transport to the board: push everything out and block until the wire is
+	// idle. Bounded there, so a wedged transmitter cannot swallow the crash report.
+	deluge_fault_pad_flush();
 }
 
 //@TODO: Pointers seem to be wrong right now and we will need to filter out the SP call to
 // fault_handler_print_freeze_pointers (we can't inline, otherwise that would be huge)
 extern void fault_handler_print_freeze_pointers(uint32_t addrSYSLR, uint32_t addrSYSSP, uint32_t addrUSRLR,
                                                 uint32_t addrUSRSP) {
-	__disable_irq();
+	deluge_fault_ranges(&s_ranges);
 	printPointers(addrSYSLR, addrSYSSP, addrUSRLR, addrUSRSP, false);
-	clearTxBuffer();
-	__enable_irq();
 }
 
 extern void handle_cpu_fault(uint32_t addrSYSLR, uint32_t addrSYSSP, uint32_t addrUSRLR, uint32_t addrUSRSP) {
-	printPointers(addrSYSLR, addrSYSSP, addrUSRLR, addrUSRSP, true);
-	clearTxBuffer();
+	// Re-entry guard. Drawing the pattern touches the pad transport, so a fault raised
+	// from inside that path (or a second fault while reporting the first) would recurse
+	// straight back to here and never draw anything at all. First one in wins; anyone
+	// after it just parks.
+	static bool reporting = false;
+	if (!reporting) {
+		reporting = true;
+		deluge_fault_ranges(&s_ranges);
+		printPointers(addrSYSLR, addrSYSSP, addrUSRLR, addrUSRSP, true);
+	}
 	// if we start using user mode then we'd want to do this to get an accurate call stack. We don't so just don't
 	//__asm__("CPS  0x10"); // Go to USR mode
 

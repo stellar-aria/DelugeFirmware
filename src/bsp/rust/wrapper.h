@@ -7,6 +7,7 @@
                                     midi_io, system, types */
 #include <libdeluge/app.h>
 #include <libdeluge/encoder_io.h>
+#include <libdeluge/fault.h>
 #include <libdeluge/flash.h>
 #include <libdeluge/signals.h>
 #include <libdeluge/storage_wait.h>

@@ -93,6 +93,13 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
     }
 
+    // The pad-grid crash reporter (src/deluge/io/debug/fault_pattern.c). Its ONLY
+    // reference is the deliberately-weak one from the HAL's UNDEF vector, and a weak
+    // undefined reference does not pull a member out of an archive -- so without this
+    // root the reporter is silently left out and every fault falls back to the bare
+    // spin, which is precisely the invisible-crash behaviour this exists to end.
+    println!("cargo:rustc-link-arg=-Wl,-u,handle_cpu_fault");
+
     // ---------------------------------------------------------------------
     // Link the portable C++ application (built by CMake into the `build/` dir).
     // deluge_app is an OBJECT lib (no .a), so archive its objects here, then

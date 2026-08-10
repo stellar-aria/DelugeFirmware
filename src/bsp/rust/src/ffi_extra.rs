@@ -66,15 +66,11 @@ pub extern "C" fn openUSBPeripheral() {}
 // FatFS diskio glue (disk_initialize/status/ioctl/read/write/timerproc,
 // get_fattime) is implemented in `sd` (SD card over deluge_bsp::sd).
 
-// --- The app's FREEZE_WITH_ERROR macro calls this BSP fault reporter. ---
-#[unsafe(no_mangle)]
-pub extern "C" fn fault_handler_print_freeze_pointers(
-    sys_lr: u32,
-    sys_sp: u32,
-    usr_lr: u32,
-    usr_sp: u32,
-) {
-}
+// `fault_handler_print_freeze_pointers` (the app's FREEZE_WITH_ERROR reporter) used to
+// be an empty stub here, so a FREEZE_WITH_ERROR on this BSP silently reported nothing.
+// The real pad-grid renderer is now portable (src/deluge/io/debug/fault_pattern.c) and
+// links into this image, with [`crate::fault`] supplying its board half — so the stub
+// is gone rather than shadowing it.
 
 // --- C runtime shim: with -nostartfiles there's no crtn _fini. ---
 // Device-only: the host build uses the normal glibc crt (crti/crtn), which

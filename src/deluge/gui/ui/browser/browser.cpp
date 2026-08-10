@@ -139,10 +139,6 @@ void Browser::runPendingListing() {
 }
 
 void Browser::onListingFailed(Error error) {
-	// Worth a log even in shipping builds: a listing failure surfaces as a bare popup whose text cannot
-	// distinguish the underlying causes (a missing card, an I/O error and a refused-from-this-context
-	// answer all render alike), and on the Rust BSP there is no other diagnostic channel for it.
-	D_PRINTLN("listing failed: error=%d action=%d dir=%s", (int)error, (int)pendingListing_.action, currentDir.c_str());
 	display->displayError(error);
 	// close(), not exitAction(): exitAction() is virtual and some subclasses override it with side
 	// effects a plain listing failure shouldn't trigger (e.g. LoadSongUI::exitAction() shows a

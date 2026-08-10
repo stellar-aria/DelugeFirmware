@@ -1104,29 +1104,7 @@ void routine() {
 	if (!stemExport.processStarted || (stemExport.processStarted && !stemExport.renderOffline)) {
 		// The BSP flushes previously-rendered audio toward the DAC and calls
 		// deluge_app_render() for as many new frames as its pacing policy asks.
-		// Split the ~17ms observed between render calls into "time spent rendering" vs "time spent
-		// elsewhere": deluge_audio_drive() hands us at most 2x128 frames (5.8ms of audio) per call, so if
-		// this duration is the bulk of the gap the DSP is compute-bound, and if it is small the render is
-		// being starved by something outside it.
-		double driveStart = getSystemTime();
 		uint32_t renders = deluge_audio_drive();
-		double driveMs = (getSystemTime() - driveStart) * 1000.;
-		// Rate-limited for the same reason as the latency warning above: unthrottled it fires on nearly
-		// every call while the engine is behind, and the logging then becomes part of what it is measuring.
-		static double lastDriveWarn = 0.;
-		static uint32_t suppressedDriveWarns = 0;
-		if (driveMs > 2.) {
-			double nowMs = getSystemTime();
-			if (nowMs - lastDriveWarn >= 1.0) {
-				D_PRINTLN("audio drive took %.3fms renders=%d (+%d more in the last second)", driveMs, (int)renders,
-				          (int)suppressedDriveWarns);
-				lastDriveWarn = nowMs;
-				suppressedDriveWarns = 0;
-			}
-			else {
-				suppressedDriveWarns++;
-			}
-		}
 		if (renders == 0 && calledFromScheduler) {
 			ignoreForStats();
 		}

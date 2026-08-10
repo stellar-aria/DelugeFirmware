@@ -724,6 +724,91 @@ mod tests {
         assert!(!unsafe { deluge_resource_loader_has_lowest(mgr) });
     }
 
+    /// `loader_next` serves only leased chunks, but nothing made the *enqueuer* keep a lease alive:
+    /// a caller that enqueued and then dropped its own lease left an entry the queue silently
+    /// discarded, so the chunk never loaded. That is why the display-only waveform overview pre-scan
+    /// never converged on device — it re-requested and re-enqueued the same cluster every tick,
+    /// throwing its own progress away. `loader_enqueue_owned` closes it by giving the queue the
+    /// lease it requires; this test pins both halves, and the release discipline that keeps a
+    /// queue-owned lease from pinning the chunk forever.
+    #[test]
+    fn loader_enqueue_owned_survives_the_requester_dropping_its_lease() {
+        let (_buf, h) = arena(256 * 1024);
+        let mgr = unsafe { deluge_resource_create(h, 16, 64) };
+        let a = unsafe {
+            deluge_resource_define_asset(
+                mgr,
+                owner(13),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        let acq = |i: u32| unsafe { deluge_resource_acquire(mgr, a, i, 64 * 1024) };
+        let slot = |p| unsafe { deluge_resource_slot_of(mgr, p) };
+        let leases = |s| unsafe { deluge_resource_lease_count_by_slot(mgr, s) };
+        let external = |s| unsafe { deluge_resource_external_lease_count_by_slot(mgr, s) };
+        let (p0, p1) = (acq(0), acq(1));
+        let (s0, s1) = (slot(p0), slot(p1));
+
+        // The plain protocol, and the bug: the enqueuer drops its lease and the entry is discarded.
+        unsafe { deluge_resource_loader_enqueue(mgr, s0, 0) };
+        unsafe { deluge_resource_release(mgr, p0) };
+        assert!(
+            unsafe { deluge_resource_loader_next(mgr) }.is_null(),
+            "plain enqueue: dropping the requester's lease discards the queue entry"
+        );
+
+        // The owned protocol: same sequence, but the queue holds a lease of its own.
+        unsafe { deluge_resource_loader_enqueue_owned(mgr, s1, 0) };
+        assert_eq!(leases(s1), 2, "the requester's lease plus the queue's own");
+        assert_eq!(external(s1), 1, "external count excludes the queue's own");
+        unsafe { deluge_resource_release(mgr, p1) }; // the requester walks away
+        assert_eq!(external(s1), 0, "nobody outside the queue wants it now");
+        assert_eq!(
+            unsafe { deluge_resource_loader_next(mgr) },
+            p1,
+            "the owned entry survives the requester dropping its lease"
+        );
+
+        // The drain's terminal path releases it: nothing is left pinning the chunk.
+        assert!(
+            unsafe { deluge_resource_loader_release_owned(mgr, s1) },
+            "reports that there was a queue lease to release"
+        );
+        assert_eq!(
+            leases(s1),
+            0,
+            "no lease left behind — the chunk is evictable"
+        );
+        assert!(
+            !unsafe { deluge_resource_loader_release_owned(mgr, s1) },
+            "idempotent: a second release is a no-op, not an underflow"
+        );
+
+        // Idempotent in the lease: a re-enqueue updates the priority without taking a second one.
+        unsafe { deluge_resource_loader_enqueue_owned(mgr, s1, 5) };
+        unsafe { deluge_resource_loader_enqueue_owned(mgr, s1, 1) };
+        assert_eq!(leases(s1), 1, "one queue lease however many enqueues");
+
+        // Erasing an entry drops its queue lease too, or `loader_remove` would pin the chunk.
+        unsafe { deluge_resource_loader_remove(mgr, s1) };
+        assert_eq!(leases(s1), 0, "remove released the queue's lease");
+        assert!(unsafe { deluge_resource_loader_next(mgr) }.is_null());
+
+        // A chunk enqueued under the plain protocol has no queue lease to release.
+        let p2 = acq(2);
+        let s2 = slot(p2);
+        unsafe { deluge_resource_loader_enqueue(mgr, s2, 0) };
+        assert!(
+            !unsafe { deluge_resource_loader_release_owned(mgr, s2) },
+            "plain-protocol chunk: nothing for the queue to release"
+        );
+        assert_eq!(leases(s2), 1, "and its requester's own lease is untouched");
+    }
+
     #[test]
     fn stats_track_acquires_hits_materializes_evictions() {
         let (_buf, h) = arena(256 * 1024);

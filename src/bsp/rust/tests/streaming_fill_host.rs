@@ -23,7 +23,7 @@
 #![cfg(not(target_os = "none"))]
 
 use core::ffi::c_void;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 #[path = "../src/fiber.rs"]
 mod fiber;
@@ -41,6 +41,7 @@ enum Call {
     Read { byte_offset: u32, count: u32 },
     Finish { chunk: usize, read_ok: bool },
     LeaseCount(usize),
+    ReleaseOwned(usize),
     EnqueueLowest(usize),
 }
 
@@ -54,9 +55,15 @@ struct FakeChunk {
     begin_ok: bool,
     /// What `is_unloadable` reports for this chunk.
     unloadable: bool,
-    /// What `lease_count` reports for this chunk (only consulted by
-    /// `fill_once` after a failed read).
+    /// What `external_lease_count` reports for this chunk — leases held by anyone
+    /// other than the load queue itself (only consulted by `fill_once` after a
+    /// failed read).
     lease_count: u32,
+    /// Whether the queue holds its own lease on this chunk
+    /// (`deluge_resource_loader_enqueue_owned`). `release_owned` clears it, and
+    /// tests assert it ends false on every terminal path — a queue lease left
+    /// held would pin the real chunk against eviction for the rest of the run.
+    queue_leased: Cell<bool>,
     buf: RefCell<Vec<u8>>,
     /// Non-zero selects the efatfs-handle read path in `begin`'s descriptor —
     /// see `fill_once_efatfs_handle_plumbs_descriptor_into_read`. Zero (the
@@ -194,11 +201,18 @@ impl FillOps for FakeOps {
         read_ok
     }
 
-    fn lease_count(&self, chunk: *mut c_void) -> u32 {
+    fn external_lease_count(&self, chunk: *mut c_void) -> u32 {
         // SAFETY: same pointer `begin`/`read` were just called with.
         let fc = unsafe { Self::chunk_from_ptr(chunk) };
         self.calls.borrow_mut().push(Call::LeaseCount(fc.id));
         fc.lease_count
+    }
+
+    fn release_owned(&self, chunk: *mut c_void) {
+        // SAFETY: same pointer the other ops were just called with.
+        let fc = unsafe { Self::chunk_from_ptr(chunk) };
+        self.calls.borrow_mut().push(Call::ReleaseOwned(fc.id));
+        fc.queue_leased.set(false);
     }
 
     fn enqueue_lowest(&self, chunk: *mut c_void) {
@@ -217,6 +231,9 @@ fn one_chunk(id: usize, begin_ok: bool) -> FakeChunk {
         begin_ok,
         unloadable: false,
         lease_count: 1, // still wanted by default; the read-failure-drop test overrides this
+        // Every chunk reaching the drain came through `loader_enqueue_owned` (both branches of
+        // `deluge_streaming_fill_chunk_blocking` use it), so the queue lease starts held.
+        queue_leased: Cell::new(true),
         buf: RefCell::new(vec![0u8; (num_sectors as usize) * 512]),
         handle: 0,
         byte_offset: 100 + id as u32,
@@ -247,12 +264,16 @@ fn fill_once_happy_path_drains_one_cluster() {
                 chunk: 0,
                 read_ok: true
             },
+            Call::ReleaseOwned(0),
             Call::Next,
         ]
     );
     // The read really did land in the chunk's own buffer.
     assert!(ops.chunk_by_id(0).buf.borrow().iter().all(|&b| b == 0xAB));
     assert!(ops.pending.borrow().is_empty());
+    // The queue's own lease is gone: a filled chunk is left ready-but-unpinned, so a
+    // fire-and-forget requester takes a cache hit on its next tick and eviction still works.
+    assert!(!ops.chunk_by_id(0).queue_leased.get());
 }
 
 /// Read failure while still leased: `read` returns false → `finish` is NOT
@@ -284,6 +305,9 @@ fn fill_once_read_failure_reenqueues_lowest_and_stops() {
         ]
     );
     assert_eq!(*ops.pending.borrow(), vec![(0, u32::MAX)]);
+    // The one path that must NOT release: the queue entry lives on, so its lease must too, or the
+    // re-queued chunk would be discarded by the next `loader_next` exactly as an unleased one is.
+    assert!(ops.chunk_by_id(0).queue_leased.get());
 }
 
 /// Read failure while UNLEASED: `read` returns false, and by the time it's
@@ -318,6 +342,7 @@ fn fill_once_read_failure_unleased_drops_and_continues() {
                 count: 2
             },
             Call::LeaseCount(0),
+            Call::ReleaseOwned(0),
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
@@ -326,11 +351,17 @@ fn fill_once_read_failure_unleased_drops_and_continues() {
                 count: 2
             },
             Call::LeaseCount(1),
+            Call::ReleaseOwned(1),
             Call::Next,
         ]
     );
     // Nothing was re-enqueued for either chunk — both were dropped, not requeued.
     assert!(ops.pending.borrow().is_empty());
+    // And neither is left pinned. This is the bound on retrying a permanently failing read (a
+    // pulled card): without the release, every abandoned chunk would keep its queue lease and the
+    // table would fill with chunks that can never be evicted.
+    assert!(!ops.chunk_by_id(0).queue_leased.get());
+    assert!(!ops.chunk_by_id(1).queue_leased.get());
 }
 
 /// `begin` reports `ok = false` (unloadable / geometry error) → that chunk is
@@ -353,6 +384,7 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
             Call::Next,
             Call::IsUnloadable(0),
             Call::Begin(0),
+            Call::ReleaseOwned(0),
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
@@ -364,9 +396,12 @@ fn fill_once_skips_chunk_when_begin_not_ok() {
                 chunk: 1,
                 read_ok: true
             },
+            Call::ReleaseOwned(1),
             Call::Next,
         ]
     );
+    // The skipped chunk isn't left pinned either.
+    assert!(!ops.chunk_by_id(0).queue_leased.get());
 }
 
 /// Proves the descriptor→read plumbing for the efatfs path: when `begin()`
@@ -417,6 +452,7 @@ fn fill_once_efatfs_handle_plumbs_descriptor_into_read() {
                 chunk: 0,
                 read_ok: true
             },
+            Call::ReleaseOwned(0),
             Call::Next,
         ]
     );
@@ -443,6 +479,7 @@ fn fill_once_skips_unloadable_chunk() {
         vec![
             Call::Next,
             Call::IsUnloadable(0),
+            Call::ReleaseOwned(0),
             Call::Next,
             Call::IsUnloadable(1),
             Call::Begin(1),
@@ -454,7 +491,10 @@ fn fill_once_skips_unloadable_chunk() {
                 chunk: 1,
                 read_ok: true
             },
+            Call::ReleaseOwned(1),
             Call::Next,
         ]
     );
+    // The unloadable chunk isn't left pinned.
+    assert!(!ops.chunk_by_id(0).queue_leased.get());
 }

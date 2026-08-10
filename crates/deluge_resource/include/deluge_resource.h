@@ -182,11 +182,39 @@ uint32_t deluge_resource_slot_of(DelugeResource* mgr, void* ptr);
 /// single source of truth for a cluster's reason count, read via the C++ slot handle (no scan).
 uint32_t deluge_resource_lease_count_by_slot(DelugeResource* mgr, uint32_t slot);
 
+/// @brief Hard leases on the chunk at `slot` excluding the load queue's own.
+///
+/// Answers "does any consumer besides the queue still want this chunk?", and equals
+/// deluge_resource_lease_count_by_slot for a chunk the queue holds no lease on. The async drain's
+/// abandonment check: with a queue-owned lease held, the raw count never reaches 0.
+/// @see deluge_resource_loader_enqueue_owned
+uint32_t deluge_resource_external_lease_count_by_slot(DelugeResource* mgr, uint32_t slot);
+
 /// Cluster load queue (per-slot state inside the manager; replaces the C++ ClusterPriorityQueue). The
 /// priority is the caller's audio-domain rating — lower = more urgent.
-/// enqueue the chunk at `slot` (re-enqueue updates the priority); remove de-queues it.
+/// enqueue the chunk at `slot` (re-enqueue updates the priority); remove de-queues it (and drops any
+/// queue-owned lease, so an erased entry cannot leave the chunk pinned).
 void deluge_resource_loader_enqueue(DelugeResource* mgr, uint32_t slot, uint32_t priority);
 void deluge_resource_loader_remove(DelugeResource* mgr, uint32_t slot);
+
+/// @brief Enqueue the chunk at `slot` AND take a queue-owned hard lease.
+///
+/// deluge_resource_loader_next serves only leased chunks (filling an evictable one could write into a
+/// recycled slot) and silently discards the rest, so a caller that cannot hold its own lease until the
+/// load lands — a fire-and-forget "fill this eventually" — must enqueue through this instead, letting
+/// the queue hold the lease the guard requires. Idempotent in the lease: re-enqueueing updates the
+/// priority without taking a second one.
+///
+/// @warning Every terminal path of the loader MUST pair this with
+/// deluge_resource_loader_release_owned. A stranded queue lease pins the chunk against eviction for
+/// the rest of the run.
+void deluge_resource_loader_enqueue_owned(DelugeResource* mgr, uint32_t slot, uint32_t priority);
+
+/// @brief Release the queue-owned lease taken by deluge_resource_loader_enqueue_owned.
+/// @return Whether there was one to release — false for a chunk enqueued under the plain protocol,
+///         whose enqueuer owns its own lease.
+/// @note Idempotent, and does not de-queue.
+bool deluge_resource_loader_release_owned(DelugeResource* mgr, uint32_t slot);
 /// Pop the most-urgent queued + still-leased chunk's backing ptr (clears its queued flag), else NULL.
 /// Queued-but-unleased chunks are de-queued and left resident for normal eviction (not freed here).
 void* deluge_resource_loader_next(DelugeResource* mgr);

@@ -108,8 +108,9 @@ unsafe extern "C" {
     fn deluge_streaming_resource_manager() -> *mut c_void;
     /// The chunk-table slot backing `ptr` (`deluge_resource.h`), for the loader-queue enqueue below.
     fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
-    /// Enqueue the chunk at `slot` for loading at `priority` (`deluge_resource.h`).
-    fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
+    /// Enqueue the chunk at `slot` at `priority` AND take a queue-owned lease, so the entry survives
+    /// the requester dropping its own (`deluge_resource.h`).
+    fn deluge_resource_loader_enqueue_owned(mgr: *mut c_void, slot: u32, priority: u32);
     /// Non-destructive "loader queue non-empty" predicate (`deluge_resource.h`): true while any
     /// queued+leased chunk remains — the condition the drain-all-queued wait below polls to empty.
     fn deluge_resource_loader_has_any(mgr: *mut c_void) -> bool;
@@ -154,6 +155,21 @@ impl core::future::Future for WaitChunkLoaded {
 /// chunk's `loaded` flag flips (byte-equivalent to the synchronous fill, same `native_finish`
 /// tail), off-fiber return false immediately (degrade-to-eventual — no stack to suspend, and a
 /// non-yielding `block_on` here is the very livelock this replaces).
+///
+/// # Why the enqueue takes a queue-owned lease
+///
+/// `deluge_resource_loader_next` only serves a chunk with a live lease, and *silently de-queues* any
+/// other. The off-fiber degrade returns false, whereupon the reader drops the lease it was holding
+/// (`Reader::acquire_and_fill`'s `if !filled` arm) — so the entry this call had just enqueued was
+/// discarded on the drain's very next poll, and the chunk never loaded. That is why the display-only
+/// overview pre-scan never converged on device: every `slowRoutine` tick re-requested the same
+/// cluster, re-enqueued it at the most-urgent priority against the live streaming queue, and threw
+/// its own progress away. Enqueueing through `deluge_resource_loader_enqueue_owned` gives the queue
+/// the lease it requires, so a fire-and-forget fill survives the requester walking away: the drain
+/// lands it, `native_finish` marks it ready, and the scan's next tick takes a cache hit.
+///
+/// Both branches use the owned enqueue, so the drain has one protocol to honour rather than two.
+/// On-fiber that is redundant but harmless (the suspended reader holds its own lease throughout).
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_streaming_fill_chunk_blocking(chunk_backing: *mut c_void) -> bool {
     if chunk_backing.is_null() {
@@ -165,7 +181,7 @@ pub extern "C" fn deluge_streaming_fill_chunk_blocking(chunk_backing: *mut c_voi
     let mgr = unsafe { deluge_streaming_resource_manager() };
     if !mgr.is_null() {
         let slot = unsafe { deluge_resource_slot_of(mgr, chunk_backing) };
-        unsafe { deluge_resource_loader_enqueue(mgr, slot, BLOCKING_FILL_PRIORITY) };
+        unsafe { deluge_resource_loader_enqueue_owned(mgr, slot, BLOCKING_FILL_PRIORITY) };
     }
     FILL_WAKE.signal(());
 
@@ -176,7 +192,8 @@ pub extern "C" fn deluge_streaming_fill_chunk_blocking(chunk_backing: *mut c_voi
         })
     } else {
         // Off the worker fiber (the display-only overview pre-scan): no stack to suspend. The chunk
-        // is enqueued; return not-ready so the consumer retries on its next tick.
+        // is enqueued under a queue-owned lease (see above), so it loads without us; return
+        // not-ready and the consumer's next tick finds it resident.
         false
     }
 }
@@ -292,12 +309,23 @@ pub trait FillOps {
     /// (`deluge_sample_fill::native_finish`). Only called after a *successful*
     /// read — the convert/stitch/publish tail never runs on a failed read.
     fn finish(&self, chunk: *mut c_void, read_ok: bool) -> bool;
-    /// `chunk`'s current hard-lease count (`deluge_resource_slot_of` +
-    /// `deluge_resource_lease_count_by_slot`), consulted only after a failed
-    /// read to decide drop-vs-requeue (see `fill_once`).
-    fn lease_count(&self, chunk: *mut c_void) -> u32;
+    /// `chunk`'s hard-lease count EXCLUDING the load queue's own
+    /// (`deluge_resource_slot_of` + `deluge_resource_external_lease_count_by_slot`),
+    /// consulted only after a failed read to decide drop-vs-requeue (see
+    /// `fill_once`). Excluding the queue's own lease is what makes that decision
+    /// answerable: a chunk enqueued through
+    /// `deluge_resource_loader_enqueue_owned` carries a lease the queue itself
+    /// holds, so the raw count never reaches 0 and an abandoned chunk would be
+    /// retried — and pinned — forever.
+    fn external_lease_count(&self, chunk: *mut c_void) -> u32;
+    /// Release the queue-owned lease on `chunk`, if it has one
+    /// (`deluge_resource_loader_release_owned`). A no-op for a chunk whose
+    /// enqueuer holds its own lease. Must be called on every path that stops
+    /// caring about `chunk`, or the lease pins it against eviction for good.
+    fn release_owned(&self, chunk: *mut c_void);
     /// Re-enqueue `chunk` at [`LOWEST_PRIORITY`] (`deluge_resource_loader_enqueue`)
-    /// — the read failed while the chunk was still wanted.
+    /// — the read failed while the chunk was still wanted. Any queue-owned lease
+    /// stays held: the entry lives on, so its lease must too.
     fn enqueue_lowest(&self, chunk: *mut c_void);
 }
 
@@ -310,10 +338,17 @@ pub trait FillOps {
 /// - on a **successful** read: run the convert/stitch/publish `finish` tail,
 ///   then keep draining;
 /// - on a **failed** read: `finish` is never called (it's a success-only
-///   tail). Instead check the lease count: if it dropped to 0 while loading,
-///   the chunk is already unwanted — drop it and keep draining. Otherwise a
-///   caller still wants it — re-enqueue at lowest priority and stop, else
-///   we'd keep re-popping the same cluster until the card is back.
+///   tail). Instead check the external lease count: if it dropped to 0 while
+///   loading, the chunk is already unwanted — drop it and keep draining.
+///   Otherwise a caller still wants it — re-enqueue at lowest priority and
+///   stop, else we'd keep re-popping the same cluster until the card is back.
+///
+/// Every path that stops caring about a chunk releases its queue-owned lease
+/// ([`FillOps::release_owned`], a no-op unless it was enqueued through
+/// `deluge_resource_loader_enqueue_owned`). Only the re-enqueue path keeps it,
+/// because there the queue entry lives on. Missing one of these would pin the
+/// chunk against eviction for the rest of the run — on a pulled card, every
+/// queued chunk at once.
 #[cfg(feature = "async_streaming_loader")]
 pub async fn fill_once<O: FillOps>(ops: &O) {
     loop {
@@ -325,6 +360,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         if ops.is_unloadable(chunk) {
             // Safety net: already de-queued by `next()`, so skipping can't
             // loop. Doesn't count against the fill budget.
+            ops.release_owned(chunk);
             continue;
         }
 
@@ -332,6 +368,7 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         if !d.ok {
             // Unloadable / geometry error — already dequeued by `next`; skip it,
             // don't loop on it, keep draining the rest of the queue.
+            ops.release_owned(chunk);
             continue;
         }
 
@@ -344,16 +381,24 @@ pub async fn fill_once<O: FillOps>(ops: &O) {
         let read_ok = ops.read(&d, buf).await;
 
         if read_ok {
-            // Success tail: convert/stitch/publish, then keep draining.
+            // Success tail: convert/stitch/publish (which marks the chunk ready), then release the
+            // queue's lease and keep draining. For a fire-and-forget enqueuer that was the only
+            // lease, the chunk is now ready-but-unleased: available as a cache hit to whoever asked
+            // for it, and evictable again under memory pressure (so a scan that loses the race
+            // simply re-requests).
             ops.finish(chunk, true);
+            ops.release_owned(chunk);
             continue;
         }
 
-        // Read failed. If the cluster already dropped to 0 leases while
-        // loading, it's already unwanted — drop it and keep draining.
-        // Otherwise a caller still wants it: re-queue at lowest priority and
-        // stop.
-        if ops.lease_count(chunk) == 0 {
+        // Read failed. If nobody outside the queue still holds a lease, the chunk is already
+        // unwanted — release the queue's own lease and keep draining. This is also the bound on
+        // retrying a permanently failing read (a pulled card): a fire-and-forget chunk is dropped
+        // here rather than re-queued forever while pinned.
+        // Otherwise a caller still wants it: re-queue at lowest priority (keeping the queue lease,
+        // since the entry survives) and stop.
+        if ops.external_lease_count(chunk) == 0 {
+            ops.release_owned(chunk);
             continue;
         }
         ops.enqueue_lowest(chunk);
@@ -384,7 +429,8 @@ mod prod {
         fn deluge_resource_loader_next(mgr: *mut c_void) -> *mut c_void;
         fn deluge_resource_loader_enqueue(mgr: *mut c_void, slot: u32, priority: u32);
         fn deluge_resource_slot_of(mgr: *mut c_void, ptr: *mut c_void) -> u32;
-        fn deluge_resource_lease_count_by_slot(mgr: *mut c_void, slot: u32) -> u32;
+        fn deluge_resource_external_lease_count_by_slot(mgr: *mut c_void, slot: u32) -> u32;
+        fn deluge_resource_loader_release_owned(mgr: *mut c_void, slot: u32) -> bool;
     }
 
     /// The real [`FillOps`], wired to `libdeluge/streaming_fill.h` +
@@ -454,11 +500,19 @@ mod prod {
             deluge_sample_fill::native_finish(chunk, read_ok)
         }
 
-        fn lease_count(&self, chunk: *mut c_void) -> u32 {
+        fn external_lease_count(&self, chunk: *mut c_void) -> u32 {
             // SAFETY: `mgr`/`chunk` are both still valid (the chunk hasn't been
             // freed — it's still leased, just its read failed).
             let slot = unsafe { deluge_resource_slot_of(self.mgr, chunk) };
-            unsafe { deluge_resource_lease_count_by_slot(self.mgr, slot) }
+            unsafe { deluge_resource_external_lease_count_by_slot(self.mgr, slot) }
+        }
+
+        fn release_owned(&self, chunk: *mut c_void) {
+            // SAFETY: `mgr`/`chunk` are both still valid — the chunk is still resident here (this
+            // runs before anything can free it), and a release on a chunk the queue holds no lease
+            // on is a checked no-op inside the manager.
+            let slot = unsafe { deluge_resource_slot_of(self.mgr, chunk) };
+            unsafe { deluge_resource_loader_release_owned(self.mgr, slot) };
         }
 
         fn enqueue_lowest(&self, chunk: *mut c_void) {

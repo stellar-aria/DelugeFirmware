@@ -139,6 +139,20 @@ struct ChunkSlot {
     // resets the slot to EMPTY, which auto-de-queues — no dangling queue entry. See the loader_* fns.
     queued: bool,
     queue_priority: u32,
+    /// One of this slot's `leases` belongs to the load queue itself, taken by
+    /// `loader_enqueue_owned` and released by `loader_release_owned`.
+    ///
+    /// `loader_next` only serves a chunk with `leases > 0`, because filling an unleased (therefore
+    /// evictable) chunk could write into a slot that has since been recycled. But nothing made the
+    /// *enqueuer* keep a lease alive: a caller that enqueued and then dropped its own lease left an
+    /// entry `loader_next` silently discards. That is a lease the queue needs, so the queue takes
+    /// it — this flag records that it did, which keeps the release idempotent and makes
+    /// `external_lease_count_by_slot` ("does anyone BESIDES the queue still want this?") answerable.
+    ///
+    /// Both protocols coexist per chunk: a caller that holds its own lease across the whole load
+    /// (the passive-lookahead prefetch, whose lease lives in the reader's reservation window) still
+    /// uses the plain `loader_enqueue`, leaves this false, and is unaffected.
+    queue_leased: bool,
     // Adopt mode (asset == NONE): the chunk carries its own cost + evict callback, because
     // an adopted block is an externally-allocated object, not a chunk of a Source asset.
     // The owner allocated it; the manager only owns its eviction. (Unused when asset != NONE.)
@@ -159,6 +173,7 @@ impl ChunkSlot {
         generation: 0,
         queued: false,
         queue_priority: 0,
+        queue_leased: false,
         cost: 0,
         adopt_evict: None,
         adopt_ctx: ptr::null_mut(),
@@ -317,6 +332,25 @@ impl Manager {
         s.leases
     }
 
+    /// Hard leases on the chunk at `slot` EXCLUDING the load queue's own (see
+    /// `ChunkSlot::queue_leased`) — "does any consumer besides the loader queue still want this
+    /// chunk?". Identical to `lease_count_by_slot` for a chunk the queue does not hold a lease on.
+    ///
+    /// This is the count the drain's abandonment check needs: with a queue-owned lease held, the
+    /// raw count never reaches 0, so a chunk nobody wants any more would be retried forever instead
+    /// of dropped.
+    pub(crate) fn external_lease_count_by_slot(&self, slot: u32) -> u32 {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return 0;
+        }
+        let s = m_get(&self.chunks[i]);
+        if s.backing.is_null() {
+            return 0;
+        }
+        s.leases.saturating_sub(s.queue_leased as u32)
+    }
+
     /// The `(asset, index)` identity of the resident chunk backing `p` (the manager's `ChunkSlot`
     /// holds both), or `None` if `p` isn't resident. `asset == NONE` (`u32::MAX`) for an adopted
     /// (object-lifecycle) chunk — mirrors `ChunkSlot::asset`'s own sentinel; `index` is meaningless
@@ -402,7 +436,60 @@ impl Manager {
         });
     }
 
+    /// Enqueue the chunk at `slot` at `priority` AND take a queue-owned hard lease, so the entry
+    /// survives the enqueuer dropping its own lease. For a caller that cannot hold a lease until the
+    /// load lands — a fire-and-forget "fill this eventually" — because `loader_next` serves only
+    /// leased chunks and silently discards the rest. See `ChunkSlot::queue_leased`.
+    ///
+    /// Idempotent in the lease: re-enqueueing an already-queue-leased chunk updates the priority
+    /// without taking a second lease. Every terminal path in the drain must pair this with
+    /// `loader_release_owned`, and `loader_remove` releases it too — a stranded queue lease pins the
+    /// chunk against eviction forever.
+    ///
+    /// No-op if `slot` is out of range / free.
+    pub(crate) fn loader_enqueue_owned(&self, slot: u32, priority: u32) {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return;
+        }
+        m_rmw(&self.chunks[i], |s| {
+            if s.backing.is_null() {
+                return;
+            }
+            if !s.queue_leased {
+                s.leases += 1;
+                s.queue_leased = true;
+            }
+            s.queued = true;
+            s.queue_priority = priority;
+        });
+    }
+
+    /// Release the queue-owned lease taken by `loader_enqueue_owned`. Returns whether there was one
+    /// to release, so a caller can distinguish "this chunk was queue-owned" from "the enqueuer owns
+    /// its own lease" (the plain `loader_enqueue` protocol). Idempotent; a no-op on an
+    /// out-of-range/free slot or a chunk without a queue lease.
+    ///
+    /// Does NOT de-queue: the drain's read-failure path releases nothing and re-queues, while its
+    /// terminal paths release a chunk `loader_next` has already de-queued.
+    pub(crate) fn loader_release_owned(&self, slot: u32) -> bool {
+        let i = slot as usize;
+        if i >= self.chunks.len() {
+            return false;
+        }
+        self.rmw_by_ptr_slot(i, |s| {
+            if s.backing.is_null() || !s.queue_leased {
+                return false;
+            }
+            s.leases = s.leases.saturating_sub(1);
+            s.queue_leased = false;
+            true
+        })
+    }
+
     /// Remove the chunk at `slot` from the load queue (the C++ `erase`). No-op if not queued.
+    /// Also drops any queue-owned lease (`loader_enqueue_owned`): erasing the entry ends the
+    /// queue's interest in the chunk, and a lease left behind here would pin it permanently.
     pub(crate) fn loader_remove(&self, slot: u32) {
         let i = slot as usize;
         if i >= self.chunks.len() {
@@ -412,6 +499,10 @@ impl Manager {
             if s.queued {
                 s.queued = false;
             }
+            if s.queue_leased {
+                s.leases = s.leases.saturating_sub(1);
+                s.queue_leased = false;
+            }
         });
     }
 
@@ -419,6 +510,12 @@ impl Manager {
     /// `queued` and return its backing. Queued-but-unleased chunks (abandoned prefetch) are silently
     /// de-queued and left resident (the manager evicts them normally — they are NOT destroyed here, so
     /// the owner pointer is only ever nulled via the proper on_evict path). Returns null if none.
+    ///
+    /// The lease requirement is a correctness guard, not a policy: an unleased chunk is evictable, so
+    /// filling one could write into a slot already recycled for another chunk. A caller that cannot
+    /// hold its own lease across the load must therefore enqueue via `loader_enqueue_owned`, which
+    /// gives the queue a lease of its own — a chunk popped here may hold one, and the caller of this
+    /// function owns releasing it (`loader_release_owned`) on every terminal path.
     /// O(n) scan, consistent with `evict_lowest`.
     pub(crate) fn loader_next(&self) -> *mut u8 {
         // Scan unmasked (coherent per-slot m_get, mask released between slots) for the
@@ -1409,6 +1506,21 @@ pub unsafe extern "C" fn deluge_resource_lease_count_by_slot(
     mgr(handle).lease_count_by_slot(slot)
 }
 
+/// Hard leases on the chunk at `slot` excluding the load queue's own (see
+/// `deluge_resource_loader_enqueue_owned`) — "does any consumer besides the queue still want this?".
+/// Same value as `deluge_resource_lease_count_by_slot` for a chunk the queue holds no lease on. The
+/// async drain's abandonment check: with a queue-owned lease held, the raw count never reaches 0.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_external_lease_count_by_slot(
+    handle: *mut DelugeResource,
+    slot: u32,
+) -> u32 {
+    if handle.is_null() {
+        return 0;
+    }
+    mgr(handle).external_lease_count_by_slot(slot)
+}
+
 // ---- cluster load queue (per-slot; the C++ ClusterPriorityQueue moved into the manager) -----------
 
 /// Enqueue the chunk at `slot` for loading at `priority` (lower = more urgent; re-enqueue updates it).
@@ -1423,7 +1535,35 @@ pub unsafe extern "C" fn deluge_resource_loader_enqueue(
     }
 }
 
-/// Remove the chunk at `slot` from the load queue (the C++ `erase`).
+/// Enqueue the chunk at `slot` at `priority` AND take a queue-owned hard lease, so the entry
+/// survives the enqueuer dropping its own lease — for a caller that cannot hold a lease until the
+/// load lands (`deluge_resource_loader_next` serves only leased chunks and silently discards the
+/// rest). Idempotent in the lease. Every terminal path of the loader MUST pair this with
+/// `deluge_resource_loader_release_owned`; a stranded queue lease pins the chunk forever.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_loader_enqueue_owned(
+    handle: *mut DelugeResource,
+    slot: u32,
+    priority: u32,
+) {
+    if !handle.is_null() {
+        mgr(handle).loader_enqueue_owned(slot, priority);
+    }
+}
+
+/// Release the queue-owned lease taken by `deluge_resource_loader_enqueue_owned`. Returns whether
+/// there was one to release (false for a chunk enqueued under the plain protocol, whose enqueuer
+/// owns its own lease). Idempotent; does not de-queue.
+#[no_mangle]
+pub unsafe extern "C" fn deluge_resource_loader_release_owned(
+    handle: *mut DelugeResource,
+    slot: u32,
+) -> bool {
+    !handle.is_null() && mgr(handle).loader_release_owned(slot)
+}
+
+/// Remove the chunk at `slot` from the load queue (the C++ `erase`). Also drops any queue-owned
+/// lease, so an erased entry cannot leave the chunk pinned.
 #[no_mangle]
 pub unsafe extern "C" fn deluge_resource_loader_remove(handle: *mut DelugeResource, slot: u32) {
     if !handle.is_null() {

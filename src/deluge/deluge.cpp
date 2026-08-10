@@ -769,6 +769,11 @@ static void deluge_boot(const DelugeBoard* board) {
 	// Settings have been read and the UI is up: start the idle countdown.
 	deluge::hid::display::Screensaver::settingsChanged();
 
+	// Arm the screensaver once at boot. Without this it is only ever armed from noteActivity() (input) or
+	// settingsChanged(), so a powered-on unit that is never touched never engages burn-in protection --
+	// which is the case that needs it most.
+	deluge::hid::display::Screensaver::noteActivity();
+
 	D_PRINTLN("going into main loop");
 	deluge_board_unlock_data_cache();
 	// (The SD-routine reentrancy flag is scheduler-owned and starts clear; no reset needed here.)

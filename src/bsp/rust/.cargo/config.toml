@@ -30,6 +30,16 @@ rustflags = [
   "-C", "target-feature=+neon",
   "-C", "linker-flavor=gcc",
   "-C", "link-arg=-nostartfiles",
+  # Float ABI for the LINK, not just codegen. Without these, arm-none-eabi-g++ resolves -lm/-lstdc++/
+  # -lsupc++/-lgcc from its DEFAULT multilib ("."), which is SOFT-float, while everything we compile is
+  # hard-float armv7a-none-eabihf. Any libm function actually called then reads its argument from r0
+  # instead of s0 and returns garbage -- silently, because functions the compiler inlines (floor, fabs)
+  # keep working, so only the out-of-line ones break. That is how the screensaver's std::lround() came
+  # back 0 for every drop, collapsing the rainfall onto a single x == y diagonal, while the identical
+  # code passed on the host. Selects thumb/v7-a+simd/hard; ARM/Thumb interworking makes that fine.
+  "-C", "link-arg=-mcpu=cortex-a9",
+  "-C", "link-arg=-mfpu=neon",
+  "-C", "link-arg=-mfloat-abi=hard",
 ]
 
 [env]

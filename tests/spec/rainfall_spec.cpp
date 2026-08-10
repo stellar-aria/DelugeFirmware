@@ -534,6 +534,23 @@ describe rainfall("Rainfall", $ {
 		expect(framesWithOverlap).to_be_less_than(kFrames / 5);
 		expect(totalOverlapPixels).to_be_less_than(framesWithOverlap * 8 + 1);
 	});
+
+	// Regression: the whole field once collapsed onto the x == y diagonal on device, because a soft-float
+	// libm was linked into the hard-float firmware and place()'s out-of-line std::lround() returned 0 for
+	// every drop. This spec is what proved the source innocent -- it passes on the host, where the ABI
+	// matches -- so it earns its keep as the invariant the collapse violated.
+	it("scatters drops off the x == y diagonal", _ {
+		Rainfall field;
+		field.scatter();
+		size_t onDiagonal = 0;
+		for (size_t drop = 0; drop < Rainfall::kNumDrops; drop++) {
+			const Rainfall::Block lead = field.cellAt(drop, 0);
+			if (lead.x == lead.y) {
+				onDiagonal++;
+			}
+		}
+		expect(onDiagonal).to_be_less_than(Rainfall::kNumDrops);
+	});
 });
 
 CPPSPEC_SPEC(rainfall)

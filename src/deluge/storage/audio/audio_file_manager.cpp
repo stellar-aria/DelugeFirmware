@@ -450,6 +450,24 @@ bool AudioFileManager::tryToDeleteAudioFileFromMemoryIfItExists(char const* file
 	return true; // We're fine - it got deleted
 }
 
+int32_t AudioFileManager::releaseUnleasedAudioFiles() {
+	// Walk downwards: deleting shifts every later index down by one, and going backwards
+	// means the indices ahead of us are the ones we have already passed.
+	int32_t released = 0;
+	for (int32_t i = static_cast<int32_t>(audioFiles.size()) - 1; i >= 0; i--) {
+		AudioFile* audioFile = audioFiles[i];
+		// leaseCount() > 0 covers everything that would make this unsafe: a playing voice,
+		// a recorder, a project reference, and the protect-during-setup lease a sample
+		// being loaded right now holds. Zero leases means nobody can reach it.
+		if (audioFile->isProjectReferenced()) {
+			continue;
+		}
+		deleteUnusedAudioFileFromMemory(*audioFile, i);
+		released++;
+	}
+	return released;
+}
+
 void AudioFileManager::deleteUnusedAudioFileFromMemoryIndexUnknown(AudioFile& audioFile) {
 	int32_t i = audioFiles.searchForExactObject(&audioFile);
 	if (i < 0) {

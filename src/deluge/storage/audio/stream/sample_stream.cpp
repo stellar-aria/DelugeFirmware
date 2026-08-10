@@ -22,6 +22,7 @@
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "processing/engines/audio_engine.h"
+#include "storage/audio/audio_file_manager.h" // releaseUnleasedAudioFiles() on a full handle table
 #include "storage/cluster/cluster.h"
 #include <memory>
 #include <new>
@@ -133,6 +134,22 @@ Error SampleStream::open_read_stream(std::string_view path) {
 	std::string cpath{path}; // NUL-terminate for the C-ABI (path is a non-terminated string_view)
 	bool table_full = false;
 	uint32_t handle = deluge_sample_stream_open(cpath.c_str(), &table_full);
+	if (handle == 0 && table_full) {
+		// The handle table is a scarce resource with no eviction policy of its own. A
+		// resident Sample pins a handle for its whole residency, and residency normally ends
+		// only under MEMORY pressure — but a browser preview leaves each sample cached, and
+		// samples are small, so the handle table fills long before the heap does. Without
+		// this, browsing past the table's capacity made every later preview fail with
+		// "Too many samples open at once" until reboot, even with most of the heap free.
+		//
+		// So make running out of handles trigger reclaim the way running out of memory does:
+		// drop the unleased residents (their destructors close the handles) and try once
+		// more. If it still fails, the streams really are all in use and the error is honest.
+		if (audioFileManager.releaseUnleasedAudioFiles() > 0) {
+			table_full = false;
+			handle = deluge_sample_stream_open(cpath.c_str(), &table_full);
+		}
+	}
 	if (handle == 0) {
 		return table_full ? Error::TOO_MANY_OPEN_STREAMS : Error::FILE_NOT_FOUND;
 	}

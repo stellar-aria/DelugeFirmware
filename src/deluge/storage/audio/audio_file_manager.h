@@ -113,6 +113,20 @@ public:
 	                                      std::string* songName);
 	void deleteAnyTempRecordedSamplesFromMemory();
 	void deleteUnusedAudioFileFromMemory(AudioFile& audioFile, int32_t i);
+
+	/// @brief Drop every resident AudioFile nothing holds a lease on. Returns how many went.
+	///
+	/// Residency is normally ended by memory pressure, but a streamed Sample also pins a
+	/// scarce *file handle* for its whole residency, and handles run out first: previewing
+	/// samples in the browser leaves each one cached, so the handle table fills while the
+	/// heap is still nearly empty and opening the next stream fails with
+	/// Error::TOO_MANY_OPEN_STREAMS. This gives that resource the reclaim path it was
+	/// missing — see SampleStream::open_read_stream(), its only caller.
+	///
+	/// Safe because `leaseCount() > 0` is what it skips on, which covers a playing voice, a
+	/// recorder, a project reference and the protect-during-setup lease held by a sample
+	/// mid-load. Cheap to over-call: with nothing reclaimable it just walks the list.
+	int32_t releaseUnleasedAudioFiles();
 	void deleteUnusedAudioFileFromMemoryIndexUnknown(AudioFile& audioFile);
 	bool tryToDeleteAudioFileFromMemoryIfItExists(char const* filePath);
 

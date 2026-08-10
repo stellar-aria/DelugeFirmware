@@ -134,6 +134,7 @@ pub extern "C" fn deluge_display_freeze(pixels: *const u8) {
     // Hold here until the user acknowledges. The PIC's receive DMA is hardware and keeps
     // filling its ring with no interrupt or task needed, so polling it works even from a
     // fault context.
+    #[cfg(target_os = "none")]
     loop {
         // SAFETY: reads the PIC channel's DMA receive ring; `uart::init_dma_rx` ran at
         // boot, and a read is side-effect-free beyond consuming the byte.
@@ -143,5 +144,16 @@ pub extern "C" fn deluge_display_freeze(pixels: *const u8) {
             }
         }
         core::hint::spin_loop();
+    }
+
+    // Host builds (the golden renderer, the Embassy host harness) have no PIC and no user, so
+    // there is no acknowledgement to wait for — blocking would hang a batch render instead of
+    // stopping a device in front of someone. Log it and return, which is exactly what this
+    // function did on every target before the device wait above existed: an assertion firing
+    // under the host harness surfaces through the log, not through a halt.
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = PIC_SELECT_KNOB_PRESS;
+        log::error!("deluge-rust: display freeze (assertion) — no PIC on this build, continuing");
     }
 }

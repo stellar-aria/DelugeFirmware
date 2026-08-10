@@ -87,8 +87,11 @@ public:
 	static int32_t searchFileItems(char const* searchString, bool* foundExact = nullptr);
 	static int32_t numFileItemsDeletedAtStart;
 	static int32_t numFileItemsDeletedAtEnd;
-	static char const* firstFileItemRemaining;
-	static char const* lastFileItemRemaining;
+	/// Names of the entries that bracket the culled window, remembered ACROSS the cull that erases them.
+	/// Owning copies, deliberately: these used to be `char const*` aliases into FileItem::filename, i.e.
+	/// pointers into vector elements this very code then erased.
+	static std::string firstFileItemRemaining;
+	static std::string lastFileItemRemaining;
 
 	static OutputType outputTypeToLoad;
 	static char const* filenameToStartSearchAt;
@@ -228,7 +231,7 @@ inline void printInstrumentFileList(const char* where) {
 	D_PRINT(where);
 	D_PRINT(" List: \n");
 	for (FileItem const& fileItem : Browser::fileItems) {
-		D_PRINTLN(" - %s", fileItem.displayName);
+		D_PRINTLN(" - %s", fileItem.displayName());
 	}
 	D_PRINT("\n");
 }

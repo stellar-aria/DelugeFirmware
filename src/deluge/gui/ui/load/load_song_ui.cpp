@@ -757,7 +757,40 @@ void LoadSongUI::exitAction() {
 	timerCallback();
 }
 
+void LoadSongUI::previewTrampoline(void* self) {
+	auto* ui = static_cast<LoadSongUI*>(self);
+	ui->previewPending_ = false;
+	ui->drawSongPreviewImpl(ui->previewToStore_);
+	// We rendered from the owner, outside the normal UI render pass, so ask for a repaint - otherwise
+	// the pads keep whatever was on them until something else happens to trigger one.
+	renderingNeededRegardlessOfUI();
+
+	if (ui->previewPending_) {
+		// The selection moved again while we were reading, and Coalescer::request() DROPS requests made
+		// while one is in flight ("a dispatch is already in flight - it covers this demand", which only
+		// holds if the in-flight fill has not yet read the state). Without this catch-up, scrolling faster
+		// than one preview round-trip leaves the pads showing an older song with nothing to correct it.
+		// Dispatched directly rather than through the coalescer, whose in-flight guard is still held here;
+		// a dropped enqueue is harmless because the next detent requests again.
+		deluge::storage::Owner::run(&LoadSongUI::previewTrampoline, ui);
+	}
+}
+
 void LoadSongUI::drawSongPreview(bool toStore) {
+	// The preview reads the song file, which only the storage owner may do: this is called from the
+	// scroll path on the interaction tier, where the Rust BSP refuses the open outright (and
+	// openXMLFile() reports that refusal as Error::FILE_NOT_FOUND -- which is how every scrolled entry
+	// came to claim "FILE NOT FOUND" for songs that load fine). Dispatch and let the owner render.
+	if (!deluge::storage::Owner::on_owner()) {
+		previewToStore_ = toStore;
+		previewPending_ = true;
+		previewCoalescer_.request(&LoadSongUI::previewTrampoline, this);
+		return;
+	}
+	drawSongPreviewImpl(toStore);
+}
+
+void LoadSongUI::drawSongPreviewImpl(bool toStore) {
 
 	if (qwertyAlwaysVisible) {
 		return;
@@ -783,12 +816,12 @@ void LoadSongUI::drawSongPreview(bool toStore) {
 	Deserializer* reader;
 	char const* tagName;
 	std::string filePath = currentDir + "/" + currentFileItem->getFilenameWithExtension();
+	// We are on the owner (drawSongPreview() guarantees it), so a failure here is a real one about this
+	// file, not the storage tier declining to answer -- worth showing.
 	error = StorageManager::openDelugeFile(filePath.c_str(), "song");
 	if (error != Error::NONE) {
-		if (error != Error::NONE) {
-			display->displayError(error);
-			return;
-		}
+		display->displayError(error);
+		return;
 	}
 	reader = activeDeserializer;
 	if (activeDeserializer == &smJsonDeserializer) {

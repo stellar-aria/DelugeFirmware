@@ -571,8 +571,29 @@ extern "C" void deluge_app_render(const DelugeStereoSample* in, DelugeStereoSamp
 	static double last_call_time = getSystemTime();
 	double current_time = getSystemTime();
 	if (current_time - last_call_time > 0.003) {
-		// If the audio routine is called at less than a 3ms interval, something is wrong
-		D_PRINTLN("Audio routine latency high: %.3fms", (current_time - last_call_time) * 1000.);
+		// If the audio routine is called at less than a 3ms interval, something is wrong. `frames` is
+		// logged alongside because the two failure shapes look identical in the interval alone: a driver
+		// handing over one huge late window (frames tracks the gap) versus the render being starved while
+		// the window stays small (frames stays nominal).
+		//
+		// RATE-LIMITED to once a second, reporting how many it swallowed. Unthrottled this fires on EVERY
+		// render call once the engine falls behind, which made it three problems at once: formatting and
+		// pushing thousands of lines a second costs real time on the audio path, so the warning helped
+		// cause the condition it reports; it exhausted a 10000-line RTT capture within ten seconds, so no
+		// later event could be observed at all; and it turned every latency figure into a measurement of
+		// the logging rather than of the engine. A diagnostic that changes what it measures is worse than
+		// none.
+		static double lastWarnTime = 0.;
+		static uint32_t suppressedWarnings = 0;
+		if (current_time - lastWarnTime >= 1.0) {
+			D_PRINTLN("Audio routine latency high: %.3fms frames=%d (+%d more in the last second)",
+			          (current_time - last_call_time) * 1000., (int)frames, (int)suppressedWarnings);
+			lastWarnTime = current_time;
+			suppressedWarnings = 0;
+		}
+		else {
+			suppressedWarnings++;
+		}
 	}
 	last_call_time = current_time;
 

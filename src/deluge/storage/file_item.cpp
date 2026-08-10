@@ -27,7 +27,6 @@ Error FileItem::setupWithInstrument(Instrument* newInstrument, bool hibernating)
 	instrument = newInstrument;
 	isFolder = false;
 	instrumentAlreadyInSong = !hibernating;
-	displayName = filename.c_str();
 	maybeExistsOnCard = newInstrument->mightExistOnCard;
 
 	return Error::NONE;

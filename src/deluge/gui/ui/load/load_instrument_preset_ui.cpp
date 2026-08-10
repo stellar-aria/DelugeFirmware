@@ -1288,7 +1288,7 @@ startDoingFolders:
 	// Store rightmost display name before filtering, for later.
 	std::string lastFileItemDisplayNameBeforeFiltering;
 	auto* rightmostFileItemBeforeFiltering = &fileItems[fileItems.size() - 1];
-	lastFileItemDisplayNameBeforeFiltering = rightmostFileItemBeforeFiltering->displayName;
+	lastFileItemDisplayNameBeforeFiltering = rightmostFileItemBeforeFiltering->displayName();
 
 	deleteFolderAndDuplicateItems(availabilityRequirement);
 
@@ -1339,7 +1339,7 @@ startDoingFolders:
 	if (false) {
 doThisFolder:
 		bool anyMoreForLater = numFileItemsDeletedAtEnd || (i < (static_cast<int32_t>(fileItems.size()) - 1));
-		searchNameLocalCopy = fileItem->displayName;
+		searchNameLocalCopy = fileItem->displayName();
 
 		currentDir.append("/");
 		currentDir.append(fileItem->filename);
@@ -1409,7 +1409,7 @@ needToGrabLeftmostButHaveToReadFirst:
 	// Store rightmost display name before filtering, for later.
 	std::string lastFileItemDisplayNameBeforeFiltering;
 	auto* rightmostFileItemBeforeFiltering = &fileItems[fileItems.size() - 1];
-	lastFileItemDisplayNameBeforeFiltering = rightmostFileItemBeforeFiltering->displayName;
+	lastFileItemDisplayNameBeforeFiltering = rightmostFileItemBeforeFiltering->displayName();
 
 	deleteFolderAndDuplicateItems(availabilityRequirement);
 
@@ -1524,7 +1524,7 @@ noErrorButGetOut:
 	else {
 	    int32_t oldNameLength = strlen(oldNameChars);
 	    FileItem* searchResultItem = &fileItems[i];
-	    if (memcasecmp(oldNameChars, searchResultItem->displayName, oldNameLength)) {
+	    if (memcasecmp(oldNameChars, searchResultItem->displayName(), oldNameLength)) {
 notFound:	if (offset < 0) {
 	            i--;
 	            if (i < 0) i += static_cast<int32_t>(fileItems.size());
@@ -1532,11 +1532,11 @@ notFound:	if (offset < 0) {
 	        goto doneMoving;
 	    }
 	    if (searchResultItem->filenameIncludesExtension) {
-	        if (strrchr(searchResultItem->displayName, '.') != &searchResultItem->displayName[oldNameLength]) goto
+	        if (strrchr(searchResultItem->displayName(), '.') != &searchResultItem->displayName()[oldNameLength]) goto
 notFound;
 	    }
 	    else {
-	        if (searchResultItem->displayName[oldNameLength] != 0) goto notFound;
+	        if (searchResultItem->displayName()[oldNameLength] != 0) goto notFound;
 	    }
 	}
 */
@@ -1599,7 +1599,7 @@ doneMoving:
 	}
 	else {
 		newName = toReturn.fileItem->getFilenameWithoutExtension();
-		oldNameString = toReturn.fileItem->displayName;
+		oldNameString = toReturn.fileItem->displayName();
 		toReturn.error = Error::NONE;
 		if (toReturn.error != Error::NONE) {
 			emptyFileItems();

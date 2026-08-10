@@ -103,9 +103,25 @@ pub extern "C" fn deluge_display_service() {}
 pub extern "C" fn deluge_display_timer_event() {}
 
 /// Synchronously blit a framebuffer and show it from a frozen (fault) context,
-/// bypassing the async queue. `pixels` is the full 768-byte framebuffer.
+/// bypassing the async queue, then BLOCK until the user presses the select knob.
+///
+/// The blocking half is not decoration — it is the whole meaning of "freeze". This used
+/// to draw and return, which quietly turned every `FREEZE_WITH_ERROR` on this BSP into
+/// "print a code and carry on", so an assertion proceeded into exactly the corruption it
+/// was placed there to prevent. Observed doing precisely that: an E199
+/// ("voice being freed is not in this Sound's list") drew its error screen and then ran
+/// on into `freeActiveVoice` for that stale voice, ending in a wild branch to 0x20.
+/// The legacy BSP's implementation blocks the same way (`display_freeze.cpp`), so this
+/// restores the shared contract rather than inventing one.
+///
+/// Polls the PIC receive path directly rather than awaiting [`crate::control`]'s queue:
+/// callers are mid-assertion with the world deliberately stopped, and on the fault-vector
+/// path there is no executor left to service an `async` read.
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_display_freeze(pixels: *const u8) {
+    /// PIC byte for a select-knob press — the resume gesture, matching the legacy BSP.
+    const PIC_SELECT_KNOB_PRESS: u8 = 175;
+
     let mut fb = oled::FrameBuffer::new();
     // SAFETY: the fault handler passes a full-framebuffer pointer.
     unsafe {
@@ -113,5 +129,19 @@ pub extern "C" fn deluge_display_freeze(pixels: *const u8) {
         fb.pages.as_flattened_mut().copy_from_slice(src);
         // draw_blocking is a no-op until oled::init() has run (checks INITIALISED).
         oled::draw_blocking(&fb);
+    }
+
+    // Hold here until the user acknowledges. The PIC's receive DMA is hardware and keeps
+    // filling its ring with no interrupt or task needed, so polling it works even from a
+    // fault context.
+    loop {
+        // SAFETY: reads the PIC channel's DMA receive ring; `uart::init_dma_rx` ran at
+        // boot, and a read is side-effect-free beyond consuming the byte.
+        if let Some(byte) = unsafe { rza1l_hal::uart::try_read_dma(deluge_bsp::uart::PIC_CH) } {
+            if byte == PIC_SELECT_KNOB_PRESS {
+                return;
+            }
+        }
+        core::hint::spin_loop();
     }
 }

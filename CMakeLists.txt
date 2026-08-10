@@ -64,6 +64,11 @@ endif(ENABLE_VERSIONED_OUTPUT)
 # RTT option
 option(ENABLE_RTT "Enable RTT output" ON)
 
+# Optimization level for the DEBUG config. -Og by default (debuggable). The Rust/Embassy device build
+# sets -O2, because it must link DEBUG objects -- Release's slim-LTO objects are unreadable to its
+# linker -- and -Og is too slow for real-time audio on hardware. See the use site for the full story.
+set(DELUGE_DEBUG_OPT_LEVEL "-Og" CACHE STRING "Optimization flag for the Debug config (e.g. -Og, -O2)")
+
 # SYSEX Load option
 option(ENABLE_SYSEX_LOAD "Enable loading firmware over midi sysex" OFF)
 
@@ -163,8 +168,19 @@ add_compile_options(
     # Debug symbols, also for release so we get a full ELF
     $<$<CONFIG:DEBUG,RELEASE,RELWITHDEBINFO>:-ggdb3> # Include
 
-    # Optimization level
-    $<$<CONFIG:DEBUG>:-Og>
+    # Optimization level.
+    #
+    # DELUGE_DEBUG_OPT_LEVEL exists for the Rust/Embassy device build. build.rs links the C++ app from
+    # pre-built object files, and it cannot read Release/RelWithDebInfo's slim-LTO objects, so the device
+    # firmware is forced to consume DEBUG objects. At the default -Og (plus the unconditional
+    # -fno-inline-functions below) that app is far too slow for real-time audio on the RZ/A1L: the engine
+    # reports 15-19 ms routine latencies and force-culls voices continuously. Set this to -O2 to get an
+    # optimized, non-LTO app the Rust link can still consume:
+    #
+    #   cmake -B build -DDELUGE_DEBUG_OPT_LEVEL=-O2 && ./dbt rust && (cd src/bsp/rust && cargo device --release)
+    #
+    # The default stays -Og so ordinary Debug builds remain debuggable.
+    $<$<CONFIG:DEBUG>:${DELUGE_DEBUG_OPT_LEVEL}>
     $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-O2>
 
     # does not block inlining, just blocks considering all functions for inlining

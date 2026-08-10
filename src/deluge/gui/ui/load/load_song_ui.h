@@ -19,6 +19,7 @@
 
 #include "gui/ui/load/load_ui.h"
 #include "hid/button.h"
+#include "storage/owner.h"
 
 class LoadSongUI final : public LoadUI {
 public:
@@ -51,8 +52,29 @@ protected:
 	void onBrowserOpened() override;
 
 private:
+	/// @brief Render the highlighted song's saved pad layout onto the grid.
+	///
+	/// Reads the song file, so it must run on the storage owner. Called from the scroll path (the
+	/// interaction tier), where an off-owner read is refused outright, so this dispatches onto the owner
+	/// via @ref previewCoalescer_ and returns; the render happens in @ref drawSongPreviewImpl.
+	/// @param toStore true to render into PadLEDs::imageStore (behind a scroll), false for the live image.
 	void drawSongPreview(bool toStore = true);
+
+	/// @brief The actual preview read + render. ONLY valid on the storage owner.
+	/// @param toStore As @ref drawSongPreview.
+	void drawSongPreviewImpl(bool toStore);
+
+	/// @brief `Owner::run` trampoline for @ref drawSongPreviewImpl, using @ref previewToStore_.
+	static void previewTrampoline(void* self);
+
 	void displayArmedPopup();
+
+	/// Coalesces scroll-driven preview requests: fast scrolling would otherwise overrun the owner's
+	/// 4-deep queue, and only the newest preview is worth rendering anyway.
+	deluge::storage::Coalescer previewCoalescer_{};
+
+	/// `toStore` argument for the dispatched @ref drawSongPreviewImpl (the trampoline takes no args).
+	bool previewToStore_{true};
 
 	bool performingLoad;
 	bool scrollingIntoSlot{};

@@ -571,8 +571,11 @@ extern "C" void deluge_app_render(const DelugeStereoSample* in, DelugeStereoSamp
 	static double last_call_time = getSystemTime();
 	double current_time = getSystemTime();
 	if (current_time - last_call_time > 0.003) {
-		// If the audio routine is called at less than a 3ms interval, something is wrong
-		D_PRINTLN("Audio routine latency high: %.3fms", (current_time - last_call_time) * 1000.);
+		// If the audio routine is called at less than a 3ms interval, something is wrong. `frames` is
+		// logged alongside because the two failure shapes look identical in the interval alone: a driver
+		// handing over one huge late window (frames tracks the gap) versus the render being starved while
+		// the window stays small (frames stays nominal).
+		D_PRINTLN("Audio routine latency high: %.3fms frames=%d", (current_time - last_call_time) * 1000., (int)frames);
 	}
 	last_call_time = current_time;
 
@@ -1083,7 +1086,16 @@ void routine() {
 	if (!stemExport.processStarted || (stemExport.processStarted && !stemExport.renderOffline)) {
 		// The BSP flushes previously-rendered audio toward the DAC and calls
 		// deluge_app_render() for as many new frames as its pacing policy asks.
+		// Split the ~17ms observed between render calls into "time spent rendering" vs "time spent
+		// elsewhere": deluge_audio_drive() hands us at most 2x128 frames (5.8ms of audio) per call, so if
+		// this duration is the bulk of the gap the DSP is compute-bound, and if it is small the render is
+		// being starved by something outside it.
+		double driveStart = getSystemTime();
 		uint32_t renders = deluge_audio_drive();
+		double driveMs = (getSystemTime() - driveStart) * 1000.;
+		if (driveMs > 2.) {
+			D_PRINTLN("audio drive took %.3fms renders=%d", driveMs, (int)renders);
+		}
 		if (renders == 0 && calledFromScheduler) {
 			ignoreForStats();
 		}

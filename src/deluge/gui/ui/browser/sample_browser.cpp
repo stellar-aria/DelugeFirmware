@@ -122,11 +122,10 @@ bool SampleBrowser::opened() {
 		instrumentClipView.cancelAllAuditioning();
 	}
 
-	Error error = StorageManager::initSD();
-	if (error != Error::NONE) {
-		display->displayError(error);
-		return false;
-	}
+	// No inline initSD() pre-flight — see the comment in SlotBrowser::beginSlotSession(). This runs on
+	// the interaction tier, where an off-owner initSD() reports Error::SD_CARD for "ask me from the
+	// owner", failing the browser on a healthy card. The dispatched listing checks the card on the
+	// owner and reports real failures via Browser::onListingFailed().
 
 	std::string currentPath;
 	currentPath = soundEditor.getCurrentAudioFileHolder()->filePath;

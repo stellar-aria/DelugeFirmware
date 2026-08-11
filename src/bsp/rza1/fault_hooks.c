@@ -28,6 +28,7 @@
 #include "RZA1/system/iodefines/dmac_iodefine.h"
 #include "RZA1/uart/sio_char.h"
 #include "definitions.h"
+#include "drivers/ssi/ssi.h" // clearTxBuffer()
 #include "drivers/uart/uart.h"
 
 extern uint32_t program_stack_start;

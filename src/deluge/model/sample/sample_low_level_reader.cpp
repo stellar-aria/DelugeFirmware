@@ -385,6 +385,10 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	// as an underrun — so nothing downstream dereferences a null source. (deluge_sample_region_acquire is
 	// itself null-tolerant too; this is the explicit, self-documenting guard.)
 	if (source_ == nullptr) {
+		// Diagnostic: this and the region_acquire failure below both used to return a bare false, so a
+		// caller's "setupClustersForPlayFromByte fail" could not distinguish "no source to read through"
+		// from "the chunk would not come resident" — two unrelated causes with different fixes.
+		D_PRINTLN("assignClusters fail: source_ null (source pool exhausted)");
 		return false;
 	}
 
@@ -394,6 +398,13 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	DelugeSampleRegion region;
 	if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
 	                                  static_cast<uint32_t>(priorityRating), &region)) {
+		// Diagnostic: NotReady from the region port — it could neither find nor load the chunk. The
+		// cluster index is logged because "cluster 0 will not come resident" (what the sample-preview
+		// E199 shows) and "cluster N mid-stream missed its prefetch" are different problems. This does
+		// NOT yet say WHY the port refused: absent vs. reserved-but-unloaded vs. no evictable slot all
+		// land here, so if this is the line that fires, the next step is inside the port.
+		D_PRINTLN("assignClusters fail: region_acquire NotReady cluster %d dir %d prio %d", clusterIndex,
+		          (int32_t)guide->playDirection, priorityRating);
 		return false;
 	}
 

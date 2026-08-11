@@ -79,17 +79,17 @@ extern void logDebug(enum DebugPrintMode mode, const char* file, int line, size_
 /// Board bounds, fetched once per report (a fault vector is not a place to re-ask).
 static DelugeFaultRanges s_ranges;
 
-[[gnu::always_inline]] inline void sendToPIC(uint8_t msg) {
+[[gnu::always_inline]] static inline void sendToPIC(uint8_t msg) {
 	deluge_fault_pad_write(msg);
 }
 
-[[gnu::always_inline]] inline void sendColor(uint8_t r, uint8_t g, uint8_t b) {
+[[gnu::always_inline]] static inline void sendColor(uint8_t r, uint8_t g, uint8_t b) {
 	sendToPIC(r);
 	sendToPIC(g);
 	sendToPIC(b);
 }
 
-[[gnu::always_inline]] inline void drawByte(uint8_t byte, uint8_t r, uint8_t g, uint8_t b) {
+[[gnu::always_inline]] static inline void drawByte(uint8_t byte, uint8_t r, uint8_t g, uint8_t b) {
 	for (int32_t idxBit = 7; idxBit >= 0; --idxBit) {
 		if (((byte >> idxBit) & 0x01) == 0x01) {
 			sendColor(r, g, b);
@@ -101,8 +101,8 @@ static DelugeFaultRanges s_ranges;
 }
 
 // Requires 32 pads so two double cloumns
-[[gnu::always_inline]] inline int32_t drawPointer(uint32_t idxColumnPairStart, uint32_t pointerValue, uint8_t r,
-                                                  uint8_t g, uint8_t b) {
+[[gnu::always_inline]] static inline int32_t drawPointer(uint32_t idxColumnPairStart, uint32_t pointerValue, uint8_t r,
+                                                         uint8_t g, uint8_t b) {
 	sendToPIC(1 + idxColumnPairStart);
 	++idxColumnPairStart;
 
@@ -126,25 +126,27 @@ static DelugeFaultRanges s_ranges;
 // raised on a stack other than the program one (the Rust BSP's storage worker fiber has its own, in a
 // different region): the walk below is gated on this, so missing that stack reduced the report to a
 // single address with no call chain — see DelugeFaultRanges::alt_stack_start.
-[[gnu::always_inline]] inline bool isStackPointer(uint32_t value) {
+[[gnu::always_inline]] static inline bool isStackPointer(uint32_t value) {
 	return (s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end)
 	       || (s_ranges.alt_stack_start != 0 && value >= s_ranges.alt_stack_start && value < s_ranges.alt_stack_end);
 }
 
 // The end of whichever declared stack `value` sits in — the limit for walking upward from it.
 // Walking to the wrong stack's end would either stop immediately or run off into unrelated memory.
-[[gnu::always_inline]] inline uint32_t stackEndFor(uint32_t value) {
+// `static` because a non-static C `inline` has external linkage, which makes referencing the static
+// `s_ranges` ill-formed (C11 6.7.4p3) and warns. The neighbours here predate this and still warn.
+[[gnu::always_inline]] static inline uint32_t stackEndFor(uint32_t value) {
 	if (s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end) {
 		return s_ranges.stack_end;
 	}
 	return s_ranges.alt_stack_end;
 }
 
-[[gnu::always_inline]] inline bool isCodePointer(uint32_t value) {
+[[gnu::always_inline]] static inline bool isCodePointer(uint32_t value) {
 	return s_ranges.code_start != 0 && value >= s_ranges.code_start && value < s_ranges.code_end;
 }
 
-[[gnu::always_inline]] inline uint8_t getHexCharValue(char input) {
+[[gnu::always_inline]] static inline uint8_t getHexCharValue(char input) {
 	uint8_t result = 0;
 	if (input >= '0' && input <= '9') {
 		result = input - '0';
@@ -157,8 +159,8 @@ static DelugeFaultRanges s_ranges;
 
 #define MIN(a, b) ((a) > (b) ? (b) : (a))
 #define MAX_POINTER_COUNT 4
-[[gnu::always_inline]] inline void printPointers(uint32_t addrSYSLR, uint32_t addrSYSSP, uint32_t addrUSRLR,
-                                                 uint32_t addrUSRSP, bool hardFault) {
+[[gnu::always_inline]] static inline void printPointers(uint32_t addrSYSLR, uint32_t addrSYSSP, uint32_t addrUSRLR,
+                                                        uint32_t addrUSRSP, bool hardFault) {
 	// Search for stack pointers
 	uint32_t stackPointer = 0;
 	if (isStackPointer(addrUSRSP)) {

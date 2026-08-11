@@ -396,14 +396,19 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	// the port could neither find nor load the chunk (null, or present-but-not-yet-loaded) -- and leaves
 	// `out` untouched.
 	DelugeSampleRegion region;
-	if (!deluge_sample_region_acquire(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
-	                                  static_cast<uint32_t>(priorityRating), &region)) {
-		// Diagnostic: NotReady from the region port — it could neither find nor load the chunk. The
-		// cluster index is logged because "cluster 0 will not come resident" (what the sample-preview
-		// E199 shows) and "cluster N mid-stream missed its prefetch" are different problems. This does
-		// NOT yet say WHY the port refused: absent vs. reserved-but-unloaded vs. no evictable slot all
-		// land here, so if this is the line that fires, the next step is inside the port.
-		D_PRINTLN("assignClusters fail: region_acquire NotReady cluster %d dir %d prio %d", clusterIndex,
+	DelugeRegionState state =
+	    deluge_sample_region_acquire_ex(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
+	                                    static_cast<uint32_t>(priorityRating), &region);
+	if (state != DELUGE_REGION_READY) {
+		// Diagnostic: the port refused. The tri-state form is used here purely so the log can say WHICH
+		// refusal it was — the two collapse to the same `false` through the boolean `acquire`, and they
+		// have opposite fixes. LOADING means the chunk was reserved and enqueued but the fill had not
+		// landed yet (a race between the note starting and its own load); UNAVAILABLE means the port
+		// could not reserve at all, or `clusterIndex >= num_clusters` (the geometry says this sample has
+		// no such cluster). The cluster index matters too: "cluster 0 will not come resident" (the
+		// sample-preview E199) and "cluster N mid-stream missed its prefetch" are different problems.
+		D_PRINTLN("assignClusters fail: acquire %s cluster %d dir %d prio %d",
+		          state == DELUGE_REGION_LOADING ? "LOADING" : "UNAVAILABLE", clusterIndex,
 		          (int32_t)guide->playDirection, priorityRating);
 		return false;
 	}

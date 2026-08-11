@@ -169,6 +169,18 @@ fn worker_stack_top() -> u32 {
     (base + WORKER_STACK_SIZE as u32) & !7
 }
 
+/// Bounds of the worker fiber's stack, `[start, end)`, for the fault reporter.
+///
+/// The fiber runs application code on its own stack, in a different region from the program stack.
+/// The crash reporter's pointer walk only walks a stack it was told about, so without this a fault
+/// on the fiber reported one address and no call chain — and storage, sample-preview and browser
+/// operations all run here, which makes those the faults most worth reporting.
+#[cfg(target_os = "none")]
+pub fn worker_stack_bounds() -> (usize, usize) {
+    let base = core::ptr::addr_of!(WORKER_STACK) as usize;
+    (base, base + WORKER_STACK_SIZE)
+}
+
 /// First-entry trampoline: runs the assigned operation, then marks the fiber done
 /// and parks by switching back to main. Never returns (it sits at the base of the
 /// worker stack — returning would pop garbage).

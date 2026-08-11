@@ -122,8 +122,22 @@ static DelugeFaultRanges s_ranges;
 	return idxColumnPairStart;
 }
 
+// Whether `value` points into any stack the board declared. Both are checked because a fault can be
+// raised on a stack other than the program one (the Rust BSP's storage worker fiber has its own, in a
+// different region): the walk below is gated on this, so missing that stack reduced the report to a
+// single address with no call chain — see DelugeFaultRanges::alt_stack_start.
 [[gnu::always_inline]] inline bool isStackPointer(uint32_t value) {
-	return s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end;
+	return (s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end)
+	       || (s_ranges.alt_stack_start != 0 && value >= s_ranges.alt_stack_start && value < s_ranges.alt_stack_end);
+}
+
+// The end of whichever declared stack `value` sits in — the limit for walking upward from it.
+// Walking to the wrong stack's end would either stop immediately or run off into unrelated memory.
+[[gnu::always_inline]] inline uint32_t stackEndFor(uint32_t value) {
+	if (s_ranges.stack_start != 0 && value >= s_ranges.stack_start && value < s_ranges.stack_end) {
+		return s_ranges.stack_end;
+	}
+	return s_ranges.alt_stack_end;
 }
 
 [[gnu::always_inline]] inline bool isCodePointer(uint32_t value) {
@@ -159,8 +173,10 @@ static DelugeFaultRanges s_ranges;
 
 	// Search for stack pointers before any printing
 	if (stackPointer != 0x00000000) {
+		// Walk to the end of the stack this SP actually belongs to, not always the program stack's.
+		const uint32_t stackEnd = stackEndFor(stackPointer);
 		stackPointer = stackPointer - (stackPointer % 4); // Align to 4 bytes
-		while (stackPointer < s_ranges.stack_end) {
+		while (stackPointer < stackEnd) {
 			uint32_t stackValue = *((uint32_t*)stackPointer);
 
 			// Print any pointer that is pointing to code, different from the LRs and not the same as before

@@ -67,9 +67,6 @@ else()
     set(EXECUTABLE_VERSION_SUFFIX "")
 endif(ENABLE_VERSIONED_OUTPUT)
 
-# RTT option
-option(ENABLE_RTT "Enable RTT output" ON)
-
 # Optimization level for the DEBUG config. -Og by default (debuggable). The Rust/Embassy device build
 # sets -O2, because it must link DEBUG objects -- Release's slim-LTO objects are unreadable to its
 # linker -- and -Og is too slow for real-time audio on hardware. See the use site for the full story.
@@ -241,58 +238,6 @@ add_compile_options(
 # Add libraries
 add_subdirectory(lib)
 
-# Add the main executable target
-add_executable(deluge)
-
-# Link external libraries
-target_link_libraries(deluge PUBLIC
-        argon
-        etl::etl
-        deluge_foundation # foundation tier (formatting, timer-count, panic contract)
-        deluge_midi       # MIDI protocol library (message + USB-MIDI event spec)
-)
-
-# --- Rust core (crates/ workspace: deluge_rust umbrella = alloc + slab + resource) -
-# Build the umbrella as an armv7a no_std staticlib and link it into the device
-# image. Only for the cross build; the host-sim and unit tests link their own
-# (i686/x86_64) variant of the same workspace. cpu/fpu/float-abi are matched in
-# crates/.cargo/config.toml; build-std uses the nightly + rust-src pinned by
-# crates/rust-toolchain.toml. The umbrella owns the single panic handler and
-# re-exports the deluge_alloc + deluge_resource C ABIs.
-if (CMAKE_CROSSCOMPILING)
-    set(DELUGE_RUST_WS ${CMAKE_CURRENT_SOURCE_DIR}/crates)
-    set(DELUGE_RUST_TARGET armv7a-none-eabihf)
-    set(DELUGE_RUST_CARGO_LIB
-        ${DELUGE_RUST_WS}/target/${DELUGE_RUST_TARGET}/release/libdeluge_rust.a)
-    # Stage the staticlib into a per-config path so Ninja Multi-Config doesn't emit
-    # colliding rules for one shared output. The release build is config-independent;
-    # cargo no-ops after the first config.
-    set(DELUGE_RUST_STAGED ${CMAKE_BINARY_DIR}/$<CONFIG>/libdeluge_rust.a)
-    file(GLOB_RECURSE DELUGE_RUST_SOURCES CONFIGURE_DEPENDS
-        ${DELUGE_RUST_WS}/deluge_alloc/src/*.rs
-        ${DELUGE_RUST_WS}/deluge_resource/src/*.rs
-        ${DELUGE_RUST_WS}/deluge_rust/src/*.rs)
-    add_custom_command(
-        OUTPUT ${DELUGE_RUST_STAGED}
-        COMMAND cargo build -p deluge_rust --release --target ${DELUGE_RUST_TARGET}
-                -Z build-std=core -Z build-std-features=compiler-builtins-mem
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DELUGE_RUST_CARGO_LIB} ${DELUGE_RUST_STAGED}
-        WORKING_DIRECTORY ${DELUGE_RUST_WS}
-        DEPENDS
-            ${DELUGE_RUST_SOURCES}
-            ${DELUGE_RUST_WS}/Cargo.lock
-            ${DELUGE_RUST_WS}/Cargo.toml
-            ${DELUGE_RUST_WS}/deluge_alloc/Cargo.toml
-            ${DELUGE_RUST_WS}/deluge_resource/Cargo.toml
-            ${DELUGE_RUST_WS}/deluge_rust/Cargo.toml
-        COMMENT "Building Rust deluge_rust staticlib (${DELUGE_RUST_TARGET})"
-        VERBATIM
-    )
-    add_custom_target(deluge_rust_rs DEPENDS ${DELUGE_RUST_STAGED})
-    add_dependencies(deluge deluge_rust_rs)
-    target_link_libraries(deluge PUBLIC ${DELUGE_RUST_STAGED})
-endif ()
-
 option(MAINTAINER_MODE "Enables all warnings and errors" OFF)
 
 # Project-only compile options (warnings, etc.)
@@ -325,8 +270,6 @@ list(APPEND DELUGE_COMMON_COMPILE_OPTIONS
     $<$<CONFIG:DEBUG>:-Wstack-usage=2000>
     $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-Wstack-usage=2000>
 )
-
-target_compile_options(deluge PUBLIC ${DELUGE_COMMON_COMPILE_OPTIONS})
 
 # Freestanding UndefinedBehaviorSanitizer layer (see src/deluge/io/debug/ubsan_handlers.cpp). Off by default; enable
 # with -DDELUGE_UBSAN=ON. We compile with -fsanitize=undefined but do NOT add it to link options - there is no libubsan
@@ -371,125 +314,8 @@ if(DELUGE_ANALYZER)
     endforeach()
 endif()
 
-set_target_properties(deluge
-    PROPERTIES
-        C_STANDARD ${DELUGE_C_STANDARD}
-        C_STANDARD_REQUIRED ON
-        CXX_STANDARD ${DELUGE_CXX_STANDARD}
-        CXX_STANDARD_REQUIRED ON
-        CXX_EXTENSIONS ON
-        SUFFIX "${EXECUTABLE_VERSION_SUFFIX}.elf"
-)
-
-set(BIN_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.bin)
-set(HEX_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.hex)
-set(MAP_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.map)
-
-# set(OBJDUMP_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.objdump)
-set(NMDUMP_FILE $<CONFIG>/deluge${EXECUTABLE_VERSION_SUFFIX}.nmdump)
-
-# add link options to generate memory map
-target_link_options(deluge PUBLIC
-
-    -T ${PROJECT_SOURCE_DIR}/linker_script_rz_a1l.ld
-    LINKER:-Map=${MAP_FILE}
-    LINKER:--cref
-    LINKER:--gc-sections
-    LINKER:--entry=start # Set the entrypoint to 'start' (see RZA1/compiler/asm/start.S)
-
-    # Enabled to generate a full ELF, objcopy will do the stripping
-    # $<$<CONFIG:RELEASE>:LINKER:--strip-all> # Strip
-    -nostartfiles # Don't emit startfiles
-
-    # Print details
-    LINKER:--warn-common
-    LINKER:--stats
-
-    # $<$<CXX_COMPILER_ID:GNU>:LINKER:--print-memory-usage>
-
-    # Link-Time Optimization (GCC spellings; see the compile-options block above)
-    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-flto=auto>
-    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-fuse-linker-plugin>
-        # this makes the optimization better at the cost of linking being REALLY slow
-        $<$<AND:$<CONFIG:RELEASE>,$<CXX_COMPILER_ID:GNU>>:-flto-partition=none>
-    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:Clang>>:-flto=thin>
-
-    # Coloring
-    $<$<CXX_COMPILER_ID:GNU>:-fdiagnostics-color=always>
-        -save-temps=obj
-        LINKER:-plugin-opt=-save-temps
-
-)
-
-# generate .bin firmware file
-add_custom_command(TARGET deluge
-    POST_BUILD
-        COMMAND ${CMAKE_OBJCOPY} -O binary -S $<TARGET_FILE:deluge> ${BIN_FILE}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Objcopying deluge to firmware ${BIN_FILE}"
-        BYPRODUCTS ${BIN_FILE})
-
-# generate .hex firmware file
-add_custom_command(TARGET deluge
-    POST_BUILD
-        COMMAND ${CMAKE_OBJCOPY} -O ihex -S $<TARGET_FILE:deluge> ${HEX_FILE}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Objcopying deluge to firmware ${HEX_FILE}"
-        BYPRODUCTS ${HEX_FILE})
-
-# # generate .objdump file
-# add_custom_command(TARGET deluge
-# POST_BUILD
-# COMMAND ${CMAKE_OBJDUMP} -t $<TARGET_FILE:deluge> > ${OBJDUMP_FILE}
-# WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-# COMMENT "Objdumping deluge firmware ${OBJDUMP_FILE}"
-# DEPENDS deluge
-# BYPRODUCTS ${OBJDUMP_FILE})
-
-# generate .nmdump file
-add_custom_command(TARGET deluge
-    POST_BUILD
-        COMMAND ${CMAKE_NM} -t d -S -C -r --special-syms --size-sort $<TARGET_FILE:deluge> > ${NMDUMP_FILE}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "NM dumping deluge firmware ${NMDUMP_FILE}"
-        BYPRODUCTS ${NMDUMP_FILE}
-)
-
-# Print size
-add_custom_command(TARGET deluge
-    POST_BUILD
-        COMMAND ${CMAKE_SIZE} $<TARGET_FILE:deluge>
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-# Clean up artefacts
-set_target_properties(deluge
-    PROPERTIES
-        ADDITIONAL_CLEAN_FILES ${BIN_FILE} ${MAP_FILE} ${HEX_FILE}
-)
-
 # Deluge sources
 add_subdirectory(src)
-
-# --- Legacy RZA1 BSP retirement guard -------------------------------------
-# efatfs (the streaming sample-read path) is Rust-BSP-only, so the RZA1
-# firmware links only the weak `deluge_efatfs_open` no-op and its sample loading
-# is non-functional at runtime (see scripts/cmake/retired_rza1_bsp_guard.cmake).
-# Fail the RZA1 executable build LOUDLY so a dead image can't ship silently.
-# PRE_LINK on the `deluge` executable => fires only when that image is actually
-# linked: the Rust BSP builds the `deluge_app` staticlib (never links `deluge`),
-# and the host-sim is a separate CMake project (DelugeHostSim, no `deluge`
-# target), so neither is affected. Overridable for deliberate non-streaming
-# bring-up / bisecting. (Must live here in the root scope where `deluge` is
-# created — add_custom_command(TARGET) requires the target's own directory.)
-option(DELUGE_ALLOW_RETIRED_RZA1_BSP
-    "Build the retired legacy C/C++ RZA1 firmware anyway (its streaming sample-read path is non-functional as of R1)."
-    OFF)
-if(NOT DELUGE_ALLOW_RETIRED_RZA1_BSP)
-    add_custom_command(TARGET deluge PRE_LINK
-        COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/scripts/cmake/retired_rza1_bsp_guard.cmake
-        VERBATIM)
-endif()
 
 # find_program(PRETTYSIZE_CMD prettysize prettysize.py)
 

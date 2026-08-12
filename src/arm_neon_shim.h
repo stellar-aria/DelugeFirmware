@@ -28,11 +28,12 @@
 // The host-sim build (DELUGE_HOST) gets its NEON types from SIMDe via the compat
 // <arm_neon.h> shim — including SIMDe *and* the hand-rolled typedefs below would be a
 // redefinition clash under clang — so route the host build through "arm_neon.h" too.
-// Only a bare-metal clang firmware build (no SIMDe) falls through to the manual typedefs.
-// PROTOTYPE(clang-lto): a real bare-metal clang *compile* has clang's own
-// arm_neon.h and the manual typedefs below then collide with it (211
-// redefinitions). That #else branch was only ever exercised by clangd, never by
-// a clang that actually codegens. Route every clang through the real header.
+// That leaves only a bare-metal clang build reaching the manual typedefs — and even
+// then only when __ARM_NEON is undefined. A clang build that actually generates NEON
+// code defines __ARM_NEON and pulls in clang's own <arm_neon.h>, which would collide
+// with the typedefs below (211 redefinitions), so route that through the real header
+// too. What remains is clangd, which never defines __ARM_NEON: the manual-typedef
+// branch exists for it alone, and a real clang compile never takes it.
 #if !defined(__clang__) || defined(DELUGE_HOST) || defined(__ARM_NEON)
 #include "arm_neon.h" // IWYU pragma: export
 #else

@@ -321,15 +321,3 @@ if(DELUGE_ANALYZER)
         endif()
     endforeach()
 endif()
-
-# find_program(PRETTYSIZE_CMD prettysize prettysize.py)
-
-# if(NOT PRETTYSIZE_CMD STREQUAL "PRETTYSIZE_CMD-NOTFOUND")
-# add_custom_command(
-# TARGET deluge POST_BUILD
-# COMMAND prettysize
-# -l ${CMAKE_CURRENT_LIST_DIR}/linker_script_rz_a1l.ld
-# -s ${CMAKE_SIZE} $<TARGET_FILE:deluge>
-# WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-# COMMENT "Displaying usage graph for deluge")
-# endif()

@@ -35,10 +35,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// `scripts/cmake/CMakeToolchainDeluge.cmake`'s `ARCH_FLAGS` (`-mcpu`/`-mfpu`/`-mfloat-abi`/`-mthumb`/
-/// `-mthumb-interwork`/`-mlittle-endian`) plus `-funsafe-math-optimizations` ("required to use NEON
-/// instead of VFPv3 for floating point", same file) — verified against that file directly, not just
-/// copied from the pre-existing [`arm_compile_check`]. Shared by the HOST-side verify-only compile and
-/// the DEVICE-side real compile ([`build_device`]) so the two can never drift apart.
+/// `-mthumb-interwork`/`-mlittle-endian`) plus `-funsafe-math-optimizations`, which that file notes is
+/// "required to use NEON instead of VFPv3 for floating point".
+///
+/// Shared by the HOST-side verify-only compile and the DEVICE-side real compile ([`build_device`]) so
+/// the two can never drift apart.
 const ARM_ARCH_FLAGS: [&str; 7] = [
     "-mcpu=cortex-a9",
     "-mfpu=neon",
@@ -91,9 +92,8 @@ fn main() {
     );
     let argon_inc = argon_dir.join("include");
 
-    // This crate now has a real consumer (`deluge-bsp-rust`'s native fill task), which
-    // links it on the ACTUAL armv7a-none-eabihf device target, not just the x86 host test binary. Same
-    // `CARGO_CFG_TARGET_OS` check `deluge-bsp-rust`'s own build.rs uses to distinguish device from host.
+    // Mode 2 (see the module docs). `target_os = "none"` means we are being built as a dependency of
+    // `deluge-bsp-rust`'s real armv7a-none-eabihf device build — the same check its own build.rs uses.
     let device = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none");
     if device {
         build_device(
@@ -122,12 +122,9 @@ fn main() {
     );
     let simde_root = simde_dir;
 
-    // C-host sim ("host, standing in for the app link"): the sim's deluge_app already compiles
-    // convert.cpp/stitch.cpp/audio_format_helpers.cpp (shared deluge_SOURCES glob), so recompiling them
-    // here would double-define convert_word/stitch_boundaries. Compile ONLY cpp/shim.cpp — the SAME
-    // duplicate-avoidance the device path does above — and skip the ARM verify (not relevant to the
-    // sim). shim.cpp's references to the app's convert/stitch symbols stay undefined in this archive and
-    // resolve against deluge_app at the final sim link.
+    // Mode 3 (see the module docs): the sim's own deluge_app already compiles convert.cpp/stitch.cpp/
+    // audio_format_helpers.cpp, so recompiling them here would double-define convert_word and
+    // stitch_boundaries.
     let app_convert = std::env::var("CARGO_FEATURE_APP_CONVERT").is_ok();
     if app_convert {
         let mut build = cc::Build::new();
@@ -381,14 +378,14 @@ fn build_device(
     shim_cpp: &Path,
 ) {
     let bin = repo.join("toolchain/current/arm-none-eabi-gcc/bin");
-    // PROTOTYPE(clang-lto): the device C++ compiler is overridable so this shim can
-    // be built by the same compiler as the rest of the app. It MUST match: GCC
-    // mangles int32_t as `long` on arm-none-eabi where clang mangles it as `int`,
-    // so a GCC-built shim's references to convert_word/stitch_boundaries do not
-    // resolve against a clang-built deluge_app (and vice versa).
+    // The device C++ compiler is overridable (via DELUGE_DEVICE_CXX) so this shim can be built by
+    // the same compiler as the rest of the app. This MUST match: GCC mangles int32_t as `long` on
+    // arm-none-eabi where clang mangles it as `int`, so a GCC-built shim's references to
+    // convert_word/stitch_boundaries do not resolve against a clang-built deluge_app (and vice
+    // versa).
     //
-    // DELUGE_DEVICE_CXXFLAGS REPLACES ARM_ARCH_FLAGS rather than adding to it:
-    // clang rejects -mthumb-interwork, so the caller supplies the whole arch set.
+    // DELUGE_DEVICE_CXXFLAGS replaces ARM_ARCH_FLAGS rather than adding to it: clang rejects
+    // -mthumb-interwork, so the caller supplies the whole arch set.
     println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_CXX");
     println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_CXXFLAGS");
     let gxx = std::env::var("DELUGE_DEVICE_CXX")

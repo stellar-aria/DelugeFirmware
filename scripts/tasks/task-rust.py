@@ -5,12 +5,11 @@ By default this builds the actual firmware that runs on Deluge hardware: the
 portable C++ application (Debug, `build-gcc/`) plus the Rust BSP, linked for
 `armv7a-none-eabihf`. CI does not yet build this target — the armv7a BSP job
 in .github/workflows/rust.yml is a commented-out TODO, pending a reproducible
-device build in CI. The Rust BSP
-(`src/bsp/rust`) links the C++ application as a static archive; its `build.rs`
-does NOT compile the C++ itself on this path — it expects the app objects to
-already exist in `build-gcc/` (the GCC fallback tree; the clang tree that
-ships lives in `build/`, see `dbt build`) and panics otherwise. So the device
-build is a two-step flow:
+device build in CI. The Rust BSP (`src/bsp/rust`) links the C++ application
+as a static archive; its `build.rs` does NOT compile the C++ itself on this
+path — it expects the app objects to already exist in `build-gcc/` (the GCC
+fallback tree; the clang tree that ships lives in `build/`, see `dbt build`)
+and panics otherwise. So the device build is a two-step flow:
 
   1. cmake builds the C++ app objects (Debug — Release uses GCC slim-LTO objects
      that rust's lld can't read).

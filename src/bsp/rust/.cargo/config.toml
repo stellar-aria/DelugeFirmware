@@ -41,7 +41,9 @@ rustflags = [
 ]
 
 # ---------------------------------------------------------------------------
-# PROTOTYPE: clang/lld cross-language LTO target (armv7a-deluge-eabihf.json).
+# clang/lld cross-language LTO target (armv7a-deluge-eabihf.json). This is the
+# shipping device build; see scripts/cmake/CMakeToolchainDelugeClang.cmake for
+# the C++ side.
 #
 # Separate from the block above because the whole point of the custom target is
 # a feature set matching clang's — stock armv7a-none-eabihf sets +strict-align,
@@ -67,8 +69,7 @@ rustflags = [
 # list from discovered toolchain paths:
 #   CARGO_TARGET_ARMV7A_DELUGE_EABIHF_LINKER
 #   CARGO_TARGET_ARMV7A_DELUGE_EABIHF_RUSTFLAGS
-# They are not spelled here because they used to carry one developer's absolute
-# paths and a hardcoded GCC version. A per-target RUSTFLAGS env var REPLACES
+# They are not spelled here because a per-target RUSTFLAGS env var REPLACES
 # this array rather than merging, so a partial copy here would be a trap.
 # See scripts/tasks/task-build.py's device_cxx_env().
 linker = "clang++"

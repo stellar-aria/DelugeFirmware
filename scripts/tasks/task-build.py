@@ -15,15 +15,15 @@ not resolve against a clang-built one. Mixing is all-or-nothing across any
 C++ interface using the fixed-width integer types, hence `build/` (this,
 shipping) alongside `build-gcc/` (fallback).
 
-`dbt rust` remains the GCC path, and now builds the ARM device image by
-default. Its C++ objects cannot use LTO — the Rust link cannot read GCC's
-slim-LTO objects — so it builds Debug objects at -O2 (see
-DELUGE_DEBUG_OPT_LEVEL in the root CMakeLists). This task has no such
-restriction, which is most of the point: measured on Release, the clang image
-is ~315 KB smaller and leaves 537 KB of SRAM free against 222 KB.
+`dbt rust` remains the GCC path, and builds the ARM device image by default.
+Its C++ objects cannot use LTO — the Rust link cannot read GCC's slim-LTO
+objects — so it builds Debug objects at -O2 (see DELUGE_DEBUG_OPT_LEVEL in
+the root CMakeLists). This task has no such restriction, which is most of
+the point: measured on Release, the clang image is ~315 KB smaller and
+leaves 537 KB of SRAM free against 222 KB.
 
-NOTE: the legacy C++-only `deluge` executable is retired; CMake now produces
-only library targets.
+NOTE: CMake produces only library targets — there is no standalone C++-only
+`deluge` executable target to build against.
 """
 
 import argparse
@@ -138,7 +138,8 @@ def device_cxx_env(root: Path, config: str) -> dict[str, str]:
         raise SystemExit("llvm-ar not found on PATH (GNU ar cannot index bitcode)")
 
     # The clang/lld device link's flags, emitted here rather than hardcoded in
-    # .cargo/config.toml (which had this machine's absolute paths baked in).
+    # .cargo/config.toml, because the toolchain/sysroot paths are per-checkout
+    # (derived from the repo root, not one developer's absolute paths).
     # A per-target RUSTFLAGS env var REPLACES the config's rustflags array, so
     # this list must be complete.
     gcc_lib = sorted((gcc / "lib/gcc/arm-none-eabi").glob("*"))
@@ -188,8 +189,8 @@ def stage_artifacts(root: Path, config: str) -> int:
 
     cargo owns the real output path (target/<triple>/<profile>/deluge-rust), but
     dbt loadfw, dbt sizediff and the VS Code launch configs all expect the
-    historical build/<Config>/deluge.* layout. Staging keeps that contract
-    without teaching every consumer about cargo's directory scheme.
+    build/<Config>/deluge.* layout. Staging keeps that contract without
+    teaching every consumer about cargo's directory scheme.
     """
     profile = "release" if config in CARGO_RELEASE_CONFIGS else "debug"
     triple = Path(RUST_TARGET).stem  # armv7a-deluge-eabihf

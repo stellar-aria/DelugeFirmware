@@ -1,4 +1,4 @@
-# Clang variant of CMakeToolchainDeluge.cmake — PROTOTYPE.
+# Clang variant of CMakeToolchainDeluge.cmake.
 #
 # Compiles the portable C++ application with clang for armv7a-none-eabihf while
 # taking the entire C/C++ library stack (newlib, libstdc++, libsupc++, libgcc)
@@ -54,7 +54,7 @@ list(GET DELUGE_CXX_INCLUDE_DIRS 0 DELUGE_CXX_INCLUDE)
 file(GLOB DELUGE_GCC_LIB_DIRS ${ARM_TOOLCHAIN_ROOT}/lib/gcc/arm-none-eabi/*)
 list(GET DELUGE_GCC_LIB_DIRS 0 DELUGE_GCC_LIB)
 
-# Host clang for the prototype; ATfE's clang once the toolchain ships one.
+# Host clang; ATfE's clang once the toolchain ships one.
 find_program(DELUGE_CLANG   NAMES clang   REQUIRED)
 find_program(DELUGE_CLANGXX NAMES clang++ REQUIRED)
 

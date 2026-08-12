@@ -51,7 +51,7 @@ const ARM_ARCH_FLAGS: [&str; 7] = [
 
 // Pins — MUST match the CMake FetchContent tags (tests/spec_audio_stream/CMakeLists.txt, sim/CMakeLists.txt).
 const ARGON_URL: &str = "https://github.com/stellar-aria/argon";
-const ARGON_SHA: &str = "b04f7e82ff33523875aca36167fa5bf7ffaf507b";
+const ARGON_SHA: &str = "5897db725c1cdee452b5f288614796364468f2ea";
 const SIMDE_URL: &str = "https://github.com/simd-everywhere/simde";
 const SIMDE_SHA: &str = "71fd833d9666141edcd1d3c109a80e228303d8d7"; // == tag v0.8.2
 
@@ -381,11 +381,26 @@ fn build_device(
     shim_cpp: &Path,
 ) {
     let bin = repo.join("toolchain/current/arm-none-eabi-gcc/bin");
-    let gxx = bin.join("arm-none-eabi-g++");
+    // PROTOTYPE(clang-lto): the device C++ compiler is overridable so this shim can
+    // be built by the same compiler as the rest of the app. It MUST match: GCC
+    // mangles int32_t as `long` on arm-none-eabi where clang mangles it as `int`,
+    // so a GCC-built shim's references to convert_word/stitch_boundaries do not
+    // resolve against a clang-built deluge_app (and vice versa).
+    //
+    // DELUGE_DEVICE_CXXFLAGS REPLACES ARM_ARCH_FLAGS rather than adding to it:
+    // clang rejects -mthumb-interwork, so the caller supplies the whole arch set.
+    println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_CXX");
+    println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_CXXFLAGS");
+    let gxx = std::env::var("DELUGE_DEVICE_CXX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| bin.join("arm-none-eabi-g++"));
+    let arch_flags: Vec<String> = std::env::var("DELUGE_DEVICE_CXXFLAGS")
+        .map(|s| s.split_whitespace().map(String::from).collect())
+        .unwrap_or_else(|_| ARM_ARCH_FLAGS.iter().map(|s| s.to_string()).collect());
     let ar = bin.join("arm-none-eabi-ar");
     assert!(
         gxx.is_file(),
-        "arm-none-eabi-g++ not found at {}",
+        "device C++ compiler not found at {}",
         gxx.display()
     );
     assert!(
@@ -397,7 +412,7 @@ fn build_device(
     let obj = out_dir.join("shim.cpp.o");
     let status = Command::new(&gxx)
         .args(["-std=c++26", "-c"])
-        .args(ARM_ARCH_FLAGS)
+        .args(&arch_flags)
         // Native <arm_neon.h> — no SIMDe, no compat shim on the real target (matches
         // `arm_compile_check`'s device recipe).
         .arg(format!("-I{}", argon_inc.display()))

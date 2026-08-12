@@ -86,33 +86,25 @@ rustflags = [
   # the std::lround()-returns-0 failure described in the block above.
   "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/arm-none-eabi/lib/thumb/v7-a+simd/hard",
   "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/lib/gcc/arm-none-eabi/15.2.1/thumb/v7-a+simd/hard",
-  # Inlining budget. The C++ side drops -fno-inline-functions under clang (see
-  # the root CMakeLists): clang implements that flag as a hard `noinline`
-  # attribute, which forbids exactly the cross-module inlining ThinLTO exists
-  # for. This replaces it with the granular equivalent of GCC's remaining
-  # inlining set — threshold 0 means "inline only when it is free or better",
-  # while the built-in last-call-to-static bonus and -inlinehint-threshold (325)
-  # still apply, mirroring GCC's -finline-small-functions /
-  # -finline-functions-called-once / explicit-inline behaviour.
+  # NO inline-threshold override here, deliberately. -Wl,-mllvm,-inline-threshold=0
+  # was tried and measured to be a no-op: with it and without it the image is
+  # byte-identical (.text 1,464,564, exidx 37,672). The flag does reach the LTO
+  # backend — threshold=1000 overflows SRAM by 1,873,096 bytes — the default at
+  # -O2 simply already sits where 0 does for this code.
   #
-  # Measured on the Release image (blanket noinline -> threshold=0):
-  #   .text        1,381,508 -> 1,254,540   (-126,968, -9.2%)
-  #   .ARM.exidx      68,704 ->    39,904   (-28,800; inlined-away statics lose
-  #                                          their per-function exidx entry)
-  #   SRAM used          89% ->     83.2%   (324 KB free -> 493 KB)
-  #   Rust FFI symbols fully inlined away: 26 of 170
-  # Removing the restraint entirely does NOT fit: clang's -O2 inliner overflows
-  # SRAM by ~226 KB.
+  # The C++ side keeps -fno-inline-functions for clang as well as GCC (root
+  # CMakeLists). Gating it off for clang was measured on clean trees and is worse
+  # on every axis:
+  #                        blanket noinline        gated off
+  #   .text                     1,381,508          1,464,564  (+83,056)
+  #   .ARM.exidx                   68,704             37,672  (-31,032)
+  #   SRAM                2,638,944 (87.5%)  2,687,412 (89.1%) (+48,468)
+  #   Rust FFI symbols inlined         34                 26
   #
-  # TODO(tuning): 0 is the conservative end of a curve, not a tuned value.
-  # threshold=50 also links, at .text 1,325,612. Worth sweeping once there is a
-  # hardware performance measurement to optimise against — the audio-latency
-  # complaint above DELUGE_DEBUG_OPT_LEVEL is the obvious metric. Also note
-  # -mllvm -inline-threshold= is an INTERNAL LLVM option with no cross-version
-  # stability guarantee; re-measure on any toolchain bump. The supported
-  # driver-level alternative is -finline-hint-functions, which is stricter (only
-  # explicitly/implicitly inline functions) and leaves some of the win unclaimed.
-  "-C", "link-arg=-Wl,-mllvm,-inline-threshold=0",
+  # Note the direction of that last row: clang's `noinline` stops a C++ function
+  # being inlined INTO callers, it does not stop callees being inlined into it, so
+  # cross-language inlining survives — and more of it happens, presumably because
+  # the budget is not spent duplicating C++ into C++ first.
 ]
 
 [env]

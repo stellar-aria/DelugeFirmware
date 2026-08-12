@@ -195,13 +195,13 @@ add_compile_options(
     # does not block inlining, just blocks considering all functions for inlining
     # https://developer.arm.com/documentation/100067/0600/Compiler-Command-line-Options/-finline-functions---fno-inline-functions?lang=en
     #
-    # GCC only: that description holds for GCC, but clang implements the flag by
-    # stamping the `noinline` ATTRIBUTE on every function it compiles (verified in
-    # the emitted bitcode: `attributes #0 = { mustprogress noinline ... }`). That is
-    # far stronger than "don't consider them" — it forbids the inline outright, and
-    # under LTO it suppresses exactly the cross-module inlining the ThinLTO build
-    # exists to get. Clang is left on its -O2/-Os inliner heuristics instead.
-    $<$<CXX_COMPILER_ID:GNU>:-fno-inline-functions>
+    # Applies to clang too, despite meaning something stronger there: GCC disables
+    # only its -finline-functions pass (verified at -O2: -finline-small-functions,
+    # -findirect-inlining, -finline-functions-called-once, -fearly-inlining and
+    # -fpartial-inlining all stay enabled), whereas clang stamps the `noinline`
+    # ATTRIBUTE on every definition. Gating it off for clang was measured and is
+    # worse on every axis — see the note in src/bsp/rust/.cargo/config.toml.
+    -fno-inline-functions
 
     # Link time optimizations
     #

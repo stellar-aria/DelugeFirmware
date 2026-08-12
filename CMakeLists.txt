@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.23)
 cmake_policy(SET CMP0135 NEW)
 
-set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/scripts/cmake/CMakeToolchainDeluge.cmake)
+# Default to the GCC toolchain, but let -DCMAKE_TOOLCHAIN_FILE=... win. An
+# unconditional set() here shadows the cache variable the command line creates,
+# so an alternative toolchain (e.g. the clang prototype) was silently ignored
+# and the build fell back to GCC while appearing to succeed.
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/scripts/cmake/CMakeToolchainDeluge.cmake)
+endif()
 
 project(Deluge
     LANGUAGES CXX C ASM

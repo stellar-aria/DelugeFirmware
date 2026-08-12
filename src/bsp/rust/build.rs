@@ -110,6 +110,17 @@ fn main() {
     // (`cmake --build build --target deluge_app NE10 …`). Parametrize the
     // build dir / config later; this is the two-step flow from the plan.
     // ---------------------------------------------------------------------
+    // Switching which CMake tree (or config within it) we archive from must itself
+    // trigger a rerun — the same hazard `run_host_app` documents for
+    // DELUGE_HOSTAPP_BUILD_DIR. Without these, Cargo holds no directive from a
+    // PRIOR run that mentions the new dir at all, so pointing DELUGE_BUILD_DIR
+    // somewhere new silently relinks whatever was last archived.
+    //
+    // This is not hypothetical: it invalidated a whole round of GCC-vs-clang and
+    // inlining size measurements, which looked byte-identical across configs
+    // precisely because they were the same archive every time.
+    println!("cargo:rerun-if-env-changed=DELUGE_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=DELUGE_BUILD_CONFIG");
     let build_dir = env::var("DELUGE_BUILD_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo_root.join("build"));

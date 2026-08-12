@@ -231,7 +231,9 @@ inline void printInstrumentFileList(const char* where) {
 	D_PRINT(where);
 	D_PRINT(" List: \n");
 	for (FileItem const& fileItem : Browser::fileItems) {
-		D_PRINTLN(" - %s", fileItem.displayName());
+		// .c_str(): displayName() returns const std::string&, and passing a
+		// non-trivial type through a variadic function is undefined behaviour.
+		D_PRINTLN(" - %s", fileItem.displayName().c_str());
 	}
 	D_PRINT("\n");
 }

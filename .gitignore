@@ -55,3 +55,6 @@ docs/superpowers/
 /rtt.log
 tools/__pycache__/
 __pycache__/
+
+# Local deluge-sdk path override for the Rust BSP (see src/bsp/rust/local-sdk.toml)
+/src/bsp/rust/local-sdk.toml

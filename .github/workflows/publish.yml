@@ -1,5 +1,10 @@
 name: Publish Pre Release
 
+# NOTE: the `build` job in build.yml is disabled (see its `if: false` and the
+# comment there). That skips the calling `nightly-build`/`beta-build` jobs in
+# turn, which skips `nightly-publish`/`beta-publish` (they `need` those jobs
+# with no `if:` override) — so this workflow's `publish` job never runs for
+# those callers, and nothing gets published.
 on:
   workflow_call:
     inputs:

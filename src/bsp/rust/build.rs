@@ -1,7 +1,53 @@
+//! Links the CMake-built portable C++ `deluge_app` (an OBJECT lib, plus its
+//! static-lib closure) against this crate for three targets: the clang
+//! device target (`armv7a-deluge-eabihf`), the GCC device target
+//! (`armv7a-none-eabihf`, `cargo device`), and a host target (`--features
+//! host_app`). This script does not invoke CMake itself — the relevant tree
+//! must already be built (see the panic messages below for the exact
+//! commands).
+//!
+//! The two device CMake trees are **ABI-incompatible**: GCC mangles
+//! `int32_t` as `long`, clang as `int`. Debug objects are plain ELF, so
+//! mixing them across trees *links successfully with a corrupt ABI* instead
+//! of failing loudly — see [`resolve_build_dir`] for how the default tree
+//! is chosen so this can't happen silently.
+
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// `deluge_sample_stream_*`: no C++ caller exists yet, so nothing in this
+/// crate or the archived C++ closure leaves an unresolved reference into the
+/// rlib. Lazy `.a` extraction would never pull the object in at all, and these
+/// `#[no_mangle]` symbols would be absent from the final ELF even though the
+/// crate compiled clean.
+const SAMPLE_STREAM_ROOTS: [&str; 6] = [
+    "deluge_sample_stream_open",
+    "deluge_sample_stream_close",
+    "deluge_sample_stream_set_geometry",
+    "deluge_sample_stream_get_asset_id",
+    "deluge_sample_stream_set_asset_id",
+    "deluge_sample_stream_read_at",
+];
+
+/// The efatfs mount C-ABI. All four have real C++ callers today (via
+/// `storage_manager.cpp` / `audio_file_manager.cpp`), so these roots are
+/// belt-and-suspenders: harmless, and they keep the link robust against a
+/// refactor that drops the last caller of any one of them.
+const EFATFS_ROOTS: [&str; 4] = [
+    "deluge_efatfs_mount",
+    "deluge_efatfs_remount",
+    "deluge_efatfs_cluster_size",
+    "deluge_efatfs_is_mounted",
+];
+
+/// Emits `-Wl,-u,SYM` for each symbol, forcing it as a link root.
+fn force_link_roots(syms: &[&str]) {
+    for sym in syms {
+        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
+    }
+}
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -9,7 +55,7 @@ fn main() {
     let repo_root = manifest_dir.join("../../..").canonicalize().unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Host (platform-std) build: most of the below is device-only (the rza1l
+    // Host (platform-std) build: everything below is device-only (the rza1l
     // linker script, the arm-eabi archived C++ deluge_app closure). Under
     // `--features host_app` we instead bindgen the host ABI and link the
     // host-built `deluge_app` object closure, letting the host binary reach
@@ -22,19 +68,69 @@ fn main() {
         return;
     }
 
-    // ---------------------------------------------------------------------
-    // bindgen: generate the libdeluge POD types from the canonical headers
-    // (include/libdeluge/*.h). Types only — we DEFINE the service functions
-    // ourselves in src/ffi.rs (#[no_mangle]); the C contract drives the types
-    // so a layout/type change is a compile error.
-    // ---------------------------------------------------------------------
     run_bindgen(&repo_root, &manifest_dir, &out_dir, "armv7a-none-eabihf");
+    setup_linker_script(&manifest_dir, &out_dir);
+    emit_forced_link_roots();
 
-    // ---------------------------------------------------------------------
-    // Linker script + memory layout (rza1l-hal's build.rs puts rza1l.x on the
-    // link search path; we supply the matching memory.x). Mirrors deluge-sdk's
-    // firmwares/controller-firmware.
-    // ---------------------------------------------------------------------
+    let (build_dir, cfg, ar) = resolve_build_dir(&repo_root);
+    let app_objs_archive = archive_app_objects(&build_dir, &cfg, &ar, &out_dir);
+    link_app_closure(&build_dir, &cfg, &app_objs_archive);
+    emit_runtime_link_args();
+
+    warn_if_heap_hack_active(&manifest_dir);
+}
+
+/// Generates the libdeluge POD types (`include/libdeluge/*.h`) via bindgen
+/// for `clang_target`, writing `libdeluge_sys.rs` into `out_dir`. Types
+/// only — we DEFINE the service functions ourselves in src/ffi.rs
+/// (`#[no_mangle]`); the C contract drives the types so a layout/type
+/// change is a compile error. Shared by the device path
+/// (`--target=armv7a-none-eabihf`) and the `host_app` path
+/// (`--target=x86_64-unknown-linux-gnu`) — same allowlist/flags otherwise,
+/// so the two `mod sys`es stay structurally identical modulo target.
+///
+/// # Why no `-fshort-enums`
+///
+/// It is deliberately absent from both bindgen paths, and irrelevant to enum
+/// sizing here: all 11 libdeluge FFI enums pin their underlying type
+/// explicitly in the header (`enum DelugeStatus : int8_t`, and so on). An
+/// explicit underlying type is authoritative in both C and C++ — no flag or
+/// ABI default overrides it — so bindgen sizes them identically on every
+/// target.
+///
+/// That explicitness is load-bearing, not incidental. Without it the arm
+/// device (which defaults to short enums) and an un-flagged bindgen target
+/// would silently disagree on enum width, mislaying every enum-bearing POD
+/// across the FFI boundary. `--target` is passed purely for pointer width,
+/// alignment and calling convention.
+fn run_bindgen(repo_root: &Path, manifest_dir: &Path, out_dir: &Path, clang_target: &str) {
+    let include_dir = repo_root.join("include");
+    let wrapper = manifest_dir.join("wrapper.h");
+    let bindings = bindgen::Builder::default()
+        .header(wrapper.to_str().unwrap())
+        .clang_arg(format!("-I{}", include_dir.display()))
+        .allowlist_type("Deluge.*")
+        .allowlist_type("RunCondition")
+        .use_core()
+        .clang_arg(format!("--target={clang_target}"))
+        // Layouts match the app being linked on every target (explicit
+        // fixed-width enums throughout), and the asserts would run host-side
+        // anyway.
+        .layout_tests(false)
+        .generate()
+        .expect("bindgen failed on libdeluge headers");
+    bindings
+        .write_to_file(out_dir.join("libdeluge_sys.rs"))
+        .expect("write libdeluge_sys.rs");
+    println!("cargo:rerun-if-changed={}", wrapper.display());
+    println!("cargo:rerun-if-changed={}", include_dir.display());
+}
+
+/// Copies the linker script + memory-layout fragment for the active `rtt`
+/// feature into `out_dir` and points the linker at them. rza1l-hal's own
+/// build.rs puts `rza1l.x` on the link search path; this supplies the
+/// matching `memory.x` (mirrors deluge-sdk's `firmwares/controller-firmware`).
+fn setup_linker_script(manifest_dir: &Path, out_dir: &Path) {
     let rtt = env::var("CARGO_FEATURE_RTT").is_ok();
     let (memory_src, linker_script) = if rtt {
         ("memory_rtt.x", "rza1l_rtt.x")
@@ -58,69 +154,79 @@ fn main() {
     println!("cargo:rerun-if-changed=linker/memory.x");
     println!("cargo:rerun-if-changed=linker/memory_rtt.x");
     println!("cargo:rerun-if-changed=linker/sdram_sections.x");
+}
 
-    // No C++ caller of `deluge_sample_stream_*` exists yet — unlike `deluge_app_init` below,
-    // nothing in this crate's own Rust code or the archived C++ closure has an unresolved
-    // reference into `deluge_sample_stream`'s rlib, so ordinary lazy `.a` extraction would never
-    // pull its object in at all and its `#[no_mangle]` symbols would be absent from the final ELF
-    // even though the crate compiled clean. Force EACH of the six ABI entry points as a link root
-    // (rustc passes `--gc-sections` by default, which prunes unreached function sections one at a
-    // time even within an already-extracted object — a single `-u` root only keeps the one
-    // function its own call graph reaches, so each symbol needs its own root here). Mirrors
-    // `deluge_app_init`'s own `-u` just below, for the analogous reason on the C++ side.
-    for sym in [
-        "deluge_sample_stream_open",
-        "deluge_sample_stream_close",
-        "deluge_sample_stream_set_geometry",
-        "deluge_sample_stream_get_asset_id",
-        "deluge_sample_stream_set_asset_id",
-        "deluge_sample_stream_read_at",
-    ] {
-        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
-    }
-
-    // The efatfs mount C-ABI (efatfs_fs.rs). All four now have real C++ callers via
-    // storage_manager.cpp / audio_file_manager.cpp (`_mount`/`_is_mounted` in initSD,
-    // `_remount` in reinitEjectedCard, `_cluster_size` in init/cardReinserted), so these
-    // `-u` roots are belt-and-suspenders — harmless, and they keep the link robust against a
-    // future refactor that drops the last caller of any one of them.
-    for sym in [
-        "deluge_efatfs_mount",
-        "deluge_efatfs_remount",
-        "deluge_efatfs_cluster_size",
-        "deluge_efatfs_is_mounted",
-    ] {
-        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
-    }
+/// Forces (`-Wl,-u,SYM`) every device-side ABI entry point whose only
+/// reference wouldn't otherwise pull its archive member out of the link, so
+/// `--gc-sections` can't silently drop it. Each symbol is listed
+/// individually (not just one root per translation unit) because
+/// `--gc-sections` prunes unreached function sections one at a time even
+/// within an already-extracted object.
+fn emit_forced_link_roots() {
+    force_link_roots(&SAMPLE_STREAM_ROOTS);
+    force_link_roots(&EFATFS_ROOTS);
 
     // The pad-grid crash reporter (src/deluge/io/debug/fault_pattern.c). Its ONLY
     // reference is the deliberately-weak one from the HAL's UNDEF vector, and a weak
-    // undefined reference does not pull a member out of an archive -- so without this
+    // undefined reference does not pull a member out of an archive — so without this
     // root the reporter is silently left out and every fault falls back to the bare
-    // spin, which is precisely the invisible-crash behaviour this exists to end.
-    println!("cargo:rustc-link-arg=-Wl,-u,handle_cpu_fault");
+    // spin, which is precisely the invisible-crash behaviour it exists to end.
+    force_link_roots(&["handle_cpu_fault"]);
+}
 
-    // ---------------------------------------------------------------------
-    // Link the portable C++ application (built by CMake into the `build/` dir).
-    // deluge_app is an OBJECT lib (no .a), so archive its objects here, then
-    // link that + the static-lib closure as one --start-group (mutual refs:
-    // C++ calls our deluge_* services, we call its deluge_main()).
-    //
-    // BRING-UP: assumes the Release config is already built in <root>/build
-    // (`cmake --build build --target deluge_app NE10 …`). Parametrize the
-    // build dir / config later; this is the two-step flow from the plan.
-    // ---------------------------------------------------------------------
+/// Resolves the CMake build dir, build config, and archiver for the device
+/// link, each overridable by the matching `DELUGE_*` env var.
+///
+/// Every override gets a `rerun-if-env-changed`: without one Cargo holds no
+/// directive mentioning the new value, so repointing any of them would
+/// silently relink whatever was last archived.
+///
+/// **Build dir** defaults by target, not to the clang tree: this script also
+/// serves `cargo device` (`armv7a-none-eabihf`, GCC), and defaulting that to
+/// `build/` would archive clang objects into a GCC link — see the module docs
+/// for why that is worse than a build failure. Cargo sets `TARGET` to a custom
+/// target's JSON file stem, so the two device trees are distinguishable here.
+///
+/// **Archiver** defaults to `arm-none-eabi-ar`, which is correct for Debug:
+/// those objects are plain ELF. Release enables LTO (GCC slim-LTO, or ThinLTO
+/// bitcode on the clang tree), and GNU `ar` cannot read bitcode symbols — it
+/// writes an archive whose index is empty for every member, so the linker
+/// silently pulls in none of them. LTO builds must override this with an
+/// LTO-aware archiver (`gcc-ar` / `llvm-ar`).
+fn resolve_build_dir(repo_root: &Path) -> (PathBuf, String, PathBuf) {
+    println!("cargo:rerun-if-env-changed=DELUGE_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=DELUGE_BUILD_CONFIG");
     let build_dir = env::var("DELUGE_BUILD_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("build"));
-    // Bring-up uses Debug: Release compiles the app with -flto=auto (GCC slim-LTO
-    // objects whose symbols rust's lld can't read). Debug objects are plain ELF
-    // (and carry debug_info). Switch to Release later via bfd ld if LTO is wanted.
+        .unwrap_or_else(|_| {
+            let default_tree = if env::var("TARGET").as_deref() == Ok("armv7a-deluge-eabihf") {
+                "build"
+            } else {
+                "build-gcc"
+            };
+            repo_root.join(default_tree)
+        });
     let cfg = env::var("DELUGE_BUILD_CONFIG").unwrap_or_else(|_| "Debug".into());
     // `toolchain/current` symlinks to the active toolchain version's host dir,
-    // so this survives version bumps (was a hardcoded, now-stale toolchain/v22).
-    let ar = repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
+    // so this survives toolchain version bumps.
+    println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_AR");
+    let ar = env::var("DELUGE_DEVICE_AR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar")
+        });
+    (build_dir, cfg, ar)
+}
 
+/// Archives `deluge_app`'s object closure (an OBJECT lib, so no `.a` exists
+/// yet) into `libdeluge_app_objs.a`, panicking with the exact CMake command
+/// if the app hasn't been built at `build_dir`/`cfg`. Registers
+/// `rerun-if-changed` on each object's own path (content, not just
+/// presence): a directory-level `rerun-if-changed` only fires on add/remove,
+/// so editing a `.cpp` and rebuilding `deluge_app` in place wouldn't
+/// otherwise trigger a re-archive, leaving a stale link. The directory
+/// itself is also watched, to catch objects being added or removed.
+fn archive_app_objects(build_dir: &Path, cfg: &str, ar: &Path, out_dir: &Path) -> PathBuf {
     let app_objs_dir = build_dir.join(format!("src/deluge/CMakeFiles/deluge_app.dir/{cfg}"));
     if !app_objs_dir.is_dir() {
         panic!(
@@ -132,29 +238,33 @@ fn main() {
         );
     }
 
-    // Collect all deluge_app .obj files and archive them into libdeluge_app_objs.a.
     let mut objs = Vec::new();
     collect_objs(&app_objs_dir, &mut objs);
     objs.sort();
-    // Re-run (re-archive) when any object's CONTENT changes — a dir rerun-if-changed
-    // only fires on add/remove, so editing a .cpp + rebuilding deluge_app wouldn't
-    // otherwise re-archive, leaving a stale link.
     for o in &objs {
         println!("cargo:rerun-if-changed={}", o.display());
     }
+    println!("cargo:rerun-if-changed={}", app_objs_dir.display());
+
     let app_objs_archive = out_dir.join("libdeluge_app_objs.a");
     let _ = fs::remove_file(&app_objs_archive);
-    let status = Command::new(&ar)
+    let status = Command::new(ar)
         .arg("crs")
         .arg(&app_objs_archive)
         .args(&objs)
         .status()
         .expect("run arm-none-eabi-ar");
     assert!(status.success(), "archiving deluge_app objects failed");
+    app_objs_archive
+}
 
-    // The portable static-lib closure (argon/etl are header-only). No fatfs entry: src/fatfs
-    // (C-FatFS) is retired and no longer part of the CMake build graph — deluge_app's storage
-    // calls go through the efatfs C-ABI (deluge_efatfs_*), implemented natively in this crate.
+/// Emits the link args for the app archive plus the portable static-lib
+/// closure (argon/etl are header-only; no fatfs entry — C-FatFS is retired
+/// and no longer part of the CMake build graph, deluge_app's storage calls
+/// go through the efatfs C-ABI implemented natively in this crate), as one
+/// `--start-group` because the references are mutual: C++ calls the
+/// `deluge_*` services, this crate calls `deluge_main()`.
+fn link_app_closure(build_dir: &Path, cfg: &str, app_objs_archive: &Path) {
     let deps: [(&str, &str); 6] = [
         ("src/NE10", "libNE10.a"),
         ("src/lib", "libeyalroz_printf.a"),
@@ -164,38 +274,40 @@ fn main() {
         ("src/midi", "libdeluge_midi.a"),
     ];
 
-    // One link group so the mutual C++/Rust refs resolve.
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     println!("cargo:rustc-link-arg={}", app_objs_archive.display());
     for (dir, lib) in deps {
-        let p = build_dir.join(dir).join(&cfg).join(lib);
+        let p = build_dir.join(dir).join(cfg).join(lib);
         assert!(p.is_file(), "missing dep archive {}", p.display());
         println!("cargo:rustc-link-arg={}", p.display());
     }
     println!("cargo:rustc-link-arg=-Wl,--end-group");
+}
 
-    // C++/C runtime: rustc passes -nodefaultlibs, so re-add the g++ runtime the
-    // app needs (libstdc++/libsupc++ for std::, __cxa_*, vtables; libgcc for
-    // helpers like __popcountsi2; newlib libc/libm; libnosys for unhosted
-    // syscall stubs). g++'s own search paths resolve these. Grouped for the
-    // libstdc++<->libc<->libgcc circular refs.
+/// Re-adds the C++/C runtime that `deluge_app` needs: rustc passes
+/// `-nodefaultlibs`, so libstdc++/libsupc++ (std::, `__cxa_*`, vtables),
+/// libgcc (helpers like `__popcountsi2`), newlib libc/libm, and libnosys
+/// (unhosted syscall stubs) all need re-adding explicitly. g++'s own search
+/// paths resolve these. Grouped for the libstdc++<->libc<->libgcc circular
+/// refs.
+///
+/// `__exidx_start`/`__exidx_end` are defined by rza1l.x's `.ARM.exidx`
+/// section (kept, not discarded) so C++ exception unwinding works.
+fn emit_runtime_link_args() {
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     for l in ["-lstdc++", "-lsupc++", "-lc", "-lm", "-lgcc", "-lnosys"] {
         println!("cargo:rustc-link-arg={l}");
     }
     println!("cargo:rustc-link-arg=-Wl,--end-group");
+}
 
-    // __exidx_start/__exidx_end are now defined by rza1l.x's .ARM.exidx section
-    // (kept, not discarded) so C++ exception unwinding works.
-
-    println!("cargo:rerun-if-changed={}", app_objs_dir.display());
-
-    // Self-clearing nag for the temporary rza1l.x stack/heap-overlap workaround
-    // (program_stack_start retargeted to __sram_heap_end so the C++ app's
-    // GeneralMemoryAllocator can't overrun the mode stacks). Warns on every build
-    // while the HACK tag is present in the sibling deluge-sdk linker scripts;
-    // goes silent automatically once the proper fix (app sources heap bounds via
-    // libdeluge/memory.h) removes it.
+/// Self-clearing nag for the temporary rza1l.x stack/heap-overlap workaround
+/// (`program_stack_start` retargeted to `__sram_heap_end` so the C++ app's
+/// GeneralMemoryAllocator can't overrun the mode stacks). Warns on every
+/// build while the HACK tag is present in the sibling deluge-sdk linker
+/// scripts; goes silent automatically once the proper fix (app sources heap
+/// bounds via libdeluge/memory.h) removes it.
+fn warn_if_heap_hack_active(manifest_dir: &Path) {
     let sdk = manifest_dir.join("../../../../deluge-sdk/crates/rza1l-hal");
     for s in ["rza1l.x", "rza1l_rtt.x"] {
         let p = sdk.join(s);
@@ -210,57 +322,6 @@ fn main() {
     }
 }
 
-/// Run bindgen over the canonical libdeluge headers (`include/libdeluge/*.h`)
-/// for `clang_target`, writing `libdeluge_sys.rs` into `out_dir`. Shared by the
-/// device path (`--target=armv7a-none-eabihf`) and the `host_app` path
-/// (`--target=x86_64-unknown-linux-gnu`) — same allowlist/flags otherwise, so
-/// the two `mod sys`es stay structurally identical modulo target.
-fn run_bindgen(
-    repo_root: &std::path::Path,
-    manifest_dir: &std::path::Path,
-    out_dir: &std::path::Path,
-    clang_target: &str,
-) {
-    let include_dir = repo_root.join("include");
-    let wrapper = manifest_dir.join("wrapper.h");
-    let bindings = bindgen::Builder::default()
-        .header(wrapper.to_str().unwrap())
-        .clang_arg(format!("-I{}", include_dir.display()))
-        // Types only (incl. the fn-pointer aliases). The service functions are
-        // DEFINED in src/ffi.rs; emitting bindgen's `extern "C"` decls too would
-        // trip edition-2024's "extern blocks must be unsafe" (bindgen 0.70).
-        .allowlist_type("Deluge.*")
-        .allowlist_type("RunCondition")
-        .use_core()
-        // NO `-fshort-enums`: it stays out of both bindgen paths (device and host_app)
-        // deliberately, and is IRRELEVANT to enum sizing. Every one of the 11 libdeluge FFI enums
-        // (DelugeInputEventKind, DelugeCardEvent, DelugeStatus, DelugeRegionState, …) pins its
-        // underlying type explicitly in its header (e.g. `enum DelugeInputEventKind : uint8_t`,
-        // `enum DelugeStatus : int8_t`) at its arm-none-eabi-gcc `-fshort-enums` width (1 byte,
-        // all 11). An explicit underlying type is authoritative in both C and C++ — no compiler
-        // flag or ABI default can override it — so bindgen sizes every one of these enums
-        // identically on every target (arm device, x86_64 host_app, host stand-ins) regardless of
-        // `-fshort-enums`.
-        //
-        // Warning: without an explicit underlying type, the arm device (which defaults to short
-        // enums) and an un-flagged bindgen target would silently disagree on enum width,
-        // mislaying out every enum-bearing POD (DelugeInputEvent, DelugeBoard, MIDI/card
-        // events, …) across the FFI boundary. Point libclang at the actual target purely for
-        // pointer width / alignment / calling convention.
-        .clang_arg(format!("--target={clang_target}"))
-        // Layouts now match the app being linked on every target (explicit
-        // fixed-width enums everywhere); the asserts would run host-side
-        // anyway.
-        .layout_tests(false)
-        .generate()
-        .expect("bindgen failed on libdeluge headers");
-    bindings
-        .write_to_file(out_dir.join("libdeluge_sys.rs"))
-        .expect("write libdeluge_sys.rs");
-    println!("cargo:rerun-if-changed={}", wrapper.display());
-    println!("cargo:rerun-if-changed={}", include_dir.display());
-}
-
 /// `host_app` feature: bindgen the host ABI (x86-64; every libdeluge enum is
 /// pinned to an explicit fixed-width underlying type in its header, so this
 /// matches build-embassy-hostapp's CMake config byte-for-byte regardless of
@@ -268,81 +329,83 @@ fn run_bindgen(
 /// archive the host-built C++ `deluge_app` object closure and emit link
 /// directives so the crate reaches the linker against real provider-symbol
 /// references.
-fn run_host_app(
-    repo_root: &std::path::Path,
-    manifest_dir: &std::path::Path,
-    out_dir: &std::path::Path,
-) {
-    // Switching which CMake tree we archive from (e.g. the plain
-    // build-embassy-hostapp vs. a clang+TSan build-embassy-hostapp-tsan, see
-    // HOST_HARNESS.md) must itself trigger a rerun: without this, Cargo has no
-    // rerun-if-changed/rerun-if-env-changed directive from a PRIOR run that
-    // mentions the new dir at all, so pointing DELUGE_HOSTAPP_BUILD_DIR
-    // somewhere new can silently keep linking whatever was last archived.
-    println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
+fn run_host_app(repo_root: &Path, manifest_dir: &Path, out_dir: &Path) {
+    let build_dir = resolve_host_build_dir(repo_root);
 
     run_bindgen(repo_root, manifest_dir, out_dir, "x86_64-unknown-linux-gnu");
+    emit_host_forced_link_roots();
 
-    // This link is expected to fail on undefined provider symbols while the
-    // host-side callers are still being wired up — lift lld's default error
-    // cap so a single `cargo build` run surfaces the complete set instead of
-    // truncating after the first batch.
-    println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
-    // No host Rust code calls `deluge_app_init` yet. Force it as a link root
-    // (`-u`) so lld extracts deluge.cpp.o from the archive and keeps its whole
-    // transitively-reachable graph under the default --gc-sections — without
-    // that, gc-sections would strip everything down to just the C++
-    // global-constructor subset.
-    println!("cargo:rustc-link-arg=-Wl,-u,deluge_app_init");
-    // Same reasoning as the device path's identical block above — no C++ caller of
-    // `deluge_sample_stream_*` exists yet, so without these roots `--gc-sections` (rustc's default)
-    // would prune every one of its `#[no_mangle]` functions from the final link.
-    for sym in [
-        "deluge_sample_stream_open",
-        "deluge_sample_stream_close",
-        "deluge_sample_stream_set_geometry",
-        "deluge_sample_stream_get_asset_id",
-        "deluge_sample_stream_set_asset_id",
-        "deluge_sample_stream_read_at",
-    ] {
-        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
-    }
-    // The efatfs mount C-ABI (efatfs_host_shim.rs) — belt-and-suspenders roots; see the
-    // device path's block above for the caller list.
-    for sym in [
-        "deluge_efatfs_mount",
-        "deluge_efatfs_remount",
-        "deluge_efatfs_cluster_size",
-        "deluge_efatfs_is_mounted",
-    ] {
-        println!("cargo:rustc-link-arg=-Wl,-u,{sym}");
-    }
+    let app_objs_dir = host_app_objs_dir(&build_dir);
+    let objs = archive_host_app_objects(&app_objs_dir, out_dir);
+    emit_host_staleness_hash(&app_objs_dir, &objs, out_dir);
+    link_host_app_closure(&build_dir, &out_dir.join("libdeluge_app_objs.a"));
+    emit_host_runtime_link_args();
 
-    // CMake-built host tree (`cmake -S sim -B build-embassy-hostapp
-    // -DDELUGE_HOST_EMBASSY=... ; ninja -C build-embassy-hostapp deluge_app`).
-    // Overridable so CI/devs can point at a differently-named build dir.
-    let build_dir = env::var("DELUGE_HOSTAPP_BUILD_DIR")
+    println!("cargo:rerun-if-changed={}", app_objs_dir.display());
+}
+
+/// Resolves the CMake host tree, defaulting to `build-embassy-hostapp`
+/// (`cmake -S sim -B build-embassy-hostapp -DDELUGE_HOST_EMBASSY=…`).
+///
+/// Overridable via `DELUGE_HOSTAPP_BUILD_DIR` so CI and the sanitizer
+/// harnesses can point at a differently-named tree (e.g. a clang+TSan
+/// `build-embassy-hostapp-tsan`, see HOST_HARNESS.md). The
+/// `rerun-if-env-changed` is what makes repointing safe: without it Cargo
+/// holds no directive from a prior run mentioning the new dir, so the link
+/// would silently keep using whatever was last archived.
+fn resolve_host_build_dir(repo_root: &Path) -> PathBuf {
+    println!("cargo:rerun-if-env-changed=DELUGE_HOSTAPP_BUILD_DIR");
+    env::var("DELUGE_HOSTAPP_BUILD_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("build-embassy-hostapp"));
-    // Single-config Ninja generator (unlike the device path's multi-config
-    // `.../{cfg}` layout) — objects land directly under deluge_app.dir, no
-    // Debug/Release subdir.
-    let app_objs_dir = build_dir.join("app/CMakeFiles/deluge_app.dir");
+        .unwrap_or_else(|_| repo_root.join("build-embassy-hostapp"))
+}
+
+/// The host tree's object directory. Its generator is single-config Ninja,
+/// unlike the device tree's multi-config `…/{cfg}` layout, so objects land
+/// directly under `deluge_app.dir` with no Debug/Release subdir.
+fn host_app_objs_dir(build_dir: &Path) -> PathBuf {
+    build_dir.join("app/CMakeFiles/deluge_app.dir")
+}
+
+/// Forces the host link roots, and lifts lld's error cap.
+///
+/// The cap is lifted because this link is expected to fail on undefined
+/// provider symbols while the host-side callers are still being wired up —
+/// one `cargo build` should surface the complete set rather than truncating
+/// after the first batch.
+///
+/// `deluge_app_init` needs `-u` for the same reason the device path's roots
+/// do: no host Rust code calls it, so without a root lld never extracts
+/// `deluge.cpp.o`, and the default `--gc-sections` strips everything down to
+/// the C++ global-constructor subset. Forcing it keeps its whole
+/// transitively-reachable graph.
+fn emit_host_forced_link_roots() {
+    println!("cargo:rustc-link-arg=-Wl,--error-limit=0");
+    force_link_roots(&["deluge_app_init"]);
+    force_link_roots(&SAMPLE_STREAM_ROOTS);
+    force_link_roots(&EFATFS_ROOTS);
+}
+
+/// Archives the host-built `deluge_app` object closure into
+/// `libdeluge_app_objs.a`, returning the sorted object list for the staleness
+/// hash. Panics with the exact ninja command if the tree hasn't been built.
+///
+/// Registers `rerun-if-changed` per object path for the same reason the device
+/// path does: a directory-level watch only fires on add/remove, so editing a
+/// `.cpp` and rebuilding in place would otherwise leave a stale link.
+fn archive_host_app_objects(app_objs_dir: &Path, out_dir: &Path) -> Vec<PathBuf> {
     if !app_objs_dir.is_dir() {
         panic!(
             "host C++ app objects not found at {}. Build them first:\n  \
-             ninja -C {} deluge_app NE10 eyalroz_printf deluge_dsp \
+             ninja -C <host tree> deluge_app NE10 eyalroz_printf deluge_dsp \
              deluge_scheduler deluge_foundation deluge_midi",
             app_objs_dir.display(),
-            build_dir.display()
         );
     }
 
     let mut objs = Vec::new();
-    collect_objs(&app_objs_dir, &mut objs);
+    collect_objs(app_objs_dir, &mut objs);
     objs.sort();
-    // Re-archive on object content change, not just add/remove (see the device
-    // path's identical rationale above).
     for o in &objs {
         println!("cargo:rerun-if-changed={}", o.display());
     }
@@ -356,25 +419,25 @@ fn run_host_app(
         .status()
         .expect("run host ar");
     assert!(status.success(), "archiving host deluge_app objects failed");
+    objs
+}
 
-    // This hash-based staleness check is load-bearing, not a defensive extra:
-    // a reconfigured/rebuilt CMake tree (e.g. flipping on -fsanitize=thread)
-    // whose objects Cargo's mtime-based `rerun-if-changed` failed to notice
-    // gets the OUT_DIR archive above rebuilt this run from fresh objects, but
-    // downstream the rustc-link-arg lines below are byte-identical to the
-    // previous run (same archive path) — from Cargo's fingerprint's point of
-    // view, "nothing about this build script's output changed", so it can
-    // decide the final `deluge-rust` binary doesn't need relinking even
-    // though `libdeluge_app_objs.a`'s CONTENT just changed underneath that
-    // unchanged path. Hash the actual object closure and thread the hash
-    // through `cargo:rustc-env`: Cargo diffs a build script's full emitted
-    // metadata (rustc-env/rustc-cfg/rustc-link-*) run over run, so a changed
-    // hash value forces this crate — and therefore the final link — to be
-    // considered stale and rebuilt, independent of whether any individual
-    // `.o`'s mtime was itself trusted. This directly targets the failure mode
-    // where an instrumented `.o` sits on disk but an uninstrumented archive is
-    // still linked in, without requiring a `target/` wipe.
-    let content_hash = hash_objs_content(&objs);
+/// Threads a content hash of the object closure through `cargo:rustc-env`, to
+/// force a relink when the objects change underneath an unchanged path.
+///
+/// This is load-bearing, not a defensive extra. If a reconfigured tree (say,
+/// flipping on `-fsanitize=thread`) produces objects whose mtimes Cargo's
+/// `rerun-if-changed` fails to notice, the archive above is rebuilt from fresh
+/// objects — but every `rustc-link-arg` below is byte-identical to last run,
+/// because the archive's *path* didn't change. Cargo compares a build script's
+/// emitted metadata run over run, sees no difference, and can skip relinking
+/// the final binary even though the archive's contents just changed. Emitting
+/// the hash makes that change visible in the metadata.
+///
+/// The failure this prevents: an instrumented `.o` on disk, an uninstrumented
+/// archive in the link, and no way to tell short of wiping `target/`.
+fn emit_host_staleness_hash(app_objs_dir: &Path, objs: &[PathBuf], out_dir: &Path) {
+    let content_hash = hash_objs_content(objs);
     let hash_str = format!("{content_hash:016x}");
     let hash_stamp = out_dir.join("host_app_objs_hash.txt");
     let prev_hash = fs::read_to_string(&hash_stamp).ok();
@@ -388,11 +451,15 @@ fn run_host_app(
     }
     fs::write(&hash_stamp, &hash_str).expect("write host_app_objs_hash.txt");
     println!("cargo:rustc-env=DELUGE_APP_OBJS_HASH={hash_str}");
+}
 
-    // The portable static-lib closure, built alongside deluge_app in the same
-    // host tree (see the panic message above). Paths mirror build-embassy-hostapp's
-    // actual layout (NE10 at the build root, dsp under app/, not src/deluge/ —
-    // both differ from the device tree's layout; see collect step above).
+/// Emits the link args for the host app archive plus the portable static-lib
+/// closure, as one `--start-group` for the mutual C++/Rust references.
+///
+/// The dep paths mirror the host tree's own layout, which differs from the
+/// device tree's: NE10 sits at the build root and dsp under `app/`, not under
+/// `src/deluge/`.
+fn link_host_app_closure(build_dir: &Path, app_objs_archive: &Path) {
     let deps: [(&str, &str); 6] = [
         (".", "libNE10.a"),
         ("printf", "libeyalroz_printf.a"),
@@ -402,9 +469,6 @@ fn run_host_app(
         ("midi", "libdeluge_midi.a"),
     ];
 
-    // One link group so the mutual C++/Rust refs resolve (the `-u` above is
-    // what actually pulls deluge_app_init — and everything it transitively
-    // reaches — out of this archive; see the comment there).
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     println!("cargo:rustc-link-arg={}", app_objs_archive.display());
     for (dir, lib) in deps {
@@ -413,19 +477,21 @@ fn run_host_app(
         println!("cargo:rustc-link-arg={}", p.display());
     }
     println!("cargo:rustc-link-arg=-Wl,--end-group");
+}
 
-    // Host runtime: rustc passes -nodefaultlibs, so re-add what the app needs
-    // (libstdc++ for std::/vtables, libgcc for compiler helpers, libc/libm).
-    // Unlike the device (arm-eabi/newlib) group, host glibc pulls libsupc++ in
-    // via libstdc++ and needs no unhosted syscall stubs, so NO -lsupc++/-lnosys
-    // here. Grouped for the libstdc++<->libc<->libgcc circular refs.
+/// Re-adds the C/C++ runtime the host app needs, since rustc passes
+/// `-nodefaultlibs`: libstdc++ (`std::`, vtables), libgcc (compiler helpers),
+/// libc and libm. Grouped for the libstdc++ ↔ libc ↔ libgcc circular refs.
+///
+/// Unlike the device's arm-eabi/newlib group, glibc pulls libsupc++ in via
+/// libstdc++ and needs no unhosted syscall stubs — hence no `-lsupc++` or
+/// `-lnosys` here.
+fn emit_host_runtime_link_args() {
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     for l in ["-lstdc++", "-lm", "-lc", "-lgcc"] {
         println!("cargo:rustc-link-arg={l}");
     }
     println!("cargo:rustc-link-arg=-Wl,--end-group");
-
-    println!("cargo:rerun-if-changed={}", app_objs_dir.display());
 }
 
 /// Content hash over a sorted object closure (path + bytes of each `.o`), used
@@ -447,7 +513,7 @@ fn hash_objs_content(objs: &[PathBuf]) -> u64 {
     hasher.finish()
 }
 
-fn collect_objs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+fn collect_objs(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
         let p = entry.unwrap().path();
         if p.is_dir() {

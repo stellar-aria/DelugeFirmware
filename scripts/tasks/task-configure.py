@@ -7,6 +7,14 @@ from collections.abc import Sequence
 
 import util
 
+# Toolchain trees. The shipping device build is clang (default, `build/`); the
+# GCC tree is a fallback second opinion (`build-gcc/`). They can never share
+# objects: GCC mangles int32_t as `long`, clang as `int`.
+TREES = {
+    "clang": ("build", "scripts/cmake/CMakeToolchainDelugeClang.cmake"),
+    "gcc": ("build-gcc", "scripts/cmake/CMakeToolchainDeluge.cmake"),
+}
+
 
 class CondensedChoiceFormatter(argparse.ArgumentDefaultsHelpFormatter):
     def _format_action_invocation(self, action):
@@ -42,6 +50,12 @@ def argparser() -> argparse.ArgumentParser:
         default="dev",
         choices=["dev", "nightly", "alpha", "beta", "rc", "release"],
     )
+    parser.add_argument(
+        "--toolchain",
+        help="Which toolchain tree to configure",
+        default="clang",
+        choices=list(TREES.keys()),
+    )
     parser.group = "Building"
     return parser
 
@@ -50,7 +64,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     (args, unknown_args) = argparser().parse_known_args(argv)
 
     project_root = util.get_git_root()
-    build_dir = project_root.absolute() / "build"
+    (tree_dir, toolchain_file) = TREES[args.toolchain]
+    build_dir = project_root.absolute() / tree_dir
     source_dir = project_root.absolute()
 
     if args.force:
@@ -67,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-DCMAKE_CROSS_CONFIGS:STRING=all",  # which configs will reference others
         "-DCMAKE_DEFAULT_CONFIGS=Debug;Release",  # set the default (empty) configs
         "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE",  # export compile commands
+        f"-DCMAKE_TOOLCHAIN_FILE={project_root.absolute() / toolchain_file}",
     ]
 
     # Append unknown arguments to CMake arglist

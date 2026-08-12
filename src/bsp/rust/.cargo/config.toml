@@ -20,11 +20,9 @@ device = "build --target armv7a-none-eabihf -Zbuild-std=core,alloc"
 # archive (libdeluge_app.a) and its runtime (libstdc++/libsupc++/libgcc/libm/
 # newlib) and the correct hard-float NEON multilib resolve automatically.
 # `-nostartfiles`: our entry is rza1l-hal's `_start`, not gcc's crt0.
-# BRING-UP: absolute path to the in-repo toolchain (this machine). Uses the
-# `current` symlink (-> the active toolchain version) so it survives version
-# bumps. Parametrize later via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER from the
-# build driver.
-linker = "/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
+# Relative to the cargo invocation dir (src/bsp/rust). `dbt rust` overrides this
+# with an absolute path via CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER.
+linker = "../../../toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
 rustflags = [
   "-C", "target-cpu=cortex-a9",
   "-C", "target-feature=+neon",
@@ -57,55 +55,36 @@ rustflags = [
 # after building the C++ side into a clang Release tree, and with
 # DELUGE_BUILD_DIR / DELUGE_DEVICE_CXX / DELUGE_DEVICE_CXXFLAGS / DELUGE_DEVICE_AR
 # pointed at that tree (see the clang toolchain file).
-#
-# BRING-UP: absolute paths, as in the block above. Same parametrization TODO.
 [target.armv7a-deluge-eabihf]
+# Driven entirely by `dbt build`, which emits the linker and the full rustflags
+# list from discovered toolchain paths:
+#   CARGO_TARGET_ARMV7A_DELUGE_EABIHF_LINKER
+#   CARGO_TARGET_ARMV7A_DELUGE_EABIHF_RUSTFLAGS
+# They are not spelled here because they used to carry one developer's absolute
+# paths and a hardcoded GCC version. A per-target RUSTFLAGS env var REPLACES
+# this array rather than merging, so a partial copy here would be a trap.
+# See scripts/tasks/task-build.py's device_cxx_env().
 linker = "clang++"
-rustflags = [
-  "-C", "linker-plugin-lto",
-  "-C", "linker-flavor=gcc",
-  "-C", "link-arg=--target=armv7a-none-eabihf",
-  "-C", "link-arg=-mcpu=cortex-a9",
-  # neon-fp16, not neon: clang's -mfpu=neon explicitly DISABLES fp16, which the
-  # cortex-a9 model otherwise has on, making the Rust callee a non-subset again.
-  "-C", "link-arg=-mfpu=neon-fp16",
-  "-C", "link-arg=-mfloat-abi=hard",
-  "-C", "link-arg=-nostartfiles",
-  "-C", "link-arg=-fuse-ld=lld",
-  "-C", "link-arg=-flto=thin",
-  "-C", "link-arg=--sysroot=/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/arm-none-eabi",
-  "-C", "link-arg=--gcc-toolchain=/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc",
-  "-C", "link-arg=-stdlib=libstdc++",
-  # libgcc, and unwindlib=none because a bare-metal GCC sysroot has no
-  # libgcc_eh: the unwinder lives inside libgcc.a itself.
-  "-C", "link-arg=--rtlib=libgcc",
-  "-C", "link-arg=--unwindlib=none",
-  # Clang does not implement GCC multilib selection for Arm (it warns
-  # -Wmultilib-not-found and otherwise reaches for the SOFT-float base multilib),
-  # so the hard-float NEON multilib is named explicitly. Getting this wrong is
-  # the std::lround()-returns-0 failure described in the block above.
-  "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/arm-none-eabi/lib/thumb/v7-a+simd/hard",
-  "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/lib/gcc/arm-none-eabi/15.2.1/thumb/v7-a+simd/hard",
-  # NO inline-threshold override here, deliberately. -Wl,-mllvm,-inline-threshold=0
-  # was tried and measured to be a no-op: with it and without it the image is
-  # byte-identical (.text 1,464,564, exidx 37,672). The flag does reach the LTO
-  # backend — threshold=1000 overflows SRAM by 1,873,096 bytes — the default at
-  # -O2 simply already sits where 0 does for this code.
-  #
-  # The C++ side keeps -fno-inline-functions for clang as well as GCC (root
-  # CMakeLists). Gating it off for clang was measured on clean trees and is worse
-  # on every axis:
-  #                        blanket noinline        gated off
-  #   .text                     1,381,508          1,464,564  (+83,056)
-  #   .ARM.exidx                   68,704             37,672  (-31,032)
-  #   SRAM                2,638,944 (87.5%)  2,687,412 (89.1%) (+48,468)
-  #   Rust FFI symbols inlined         34                 26
-  #
-  # Note the direction of that last row: clang's `noinline` stops a C++ function
-  # being inlined INTO callers, it does not stop callees being inlined into it, so
-  # cross-language inlining survives — and more of it happens, presumably because
-  # the budget is not spent duplicating C++ into C++ first.
-]
+# NO inline-threshold override in that emitted flag list, deliberately.
+# -Wl,-mllvm,-inline-threshold=0 was tried and measured to be a no-op: with it
+# and without it the image is byte-identical (.text 1,464,564, exidx 37,672).
+# The flag does reach the LTO backend — threshold=1000 overflows SRAM by
+# 1,873,096 bytes — the default at -O2 simply already sits where 0 does for
+# this code.
+#
+# The C++ side keeps -fno-inline-functions for clang as well as GCC (root
+# CMakeLists). Gating it off for clang was measured on clean trees and is worse
+# on every axis:
+#                        blanket noinline        gated off
+#   .text                     1,381,508          1,464,564  (+83,056)
+#   .ARM.exidx                   68,704             37,672  (-31,032)
+#   SRAM                2,638,944 (87.5%)  2,687,412 (89.1%) (+48,468)
+#   Rust FFI symbols inlined         34                 26
+#
+# Note the direction of that last row: clang's `noinline` stops a C++ function
+# being inlined INTO callers, it does not stop callees being inlined into it, so
+# cross-language inlining survives — and more of it happens, presumably because
+# the budget is not spent duplicating C++ into C++ first.
 
 [env]
 EMBASSY_USB_MAX_INTERFACE_COUNT = "8"

@@ -3,7 +3,9 @@
 
 By default this builds the actual firmware that runs on Deluge hardware: the
 portable C++ application (Debug, `build-gcc/`) plus the Rust BSP, linked for
-`armv7a-none-eabihf` — the same device flow CI has always used. The Rust BSP
+`armv7a-none-eabihf`. CI does not yet build this target — the armv7a BSP job
+in .github/workflows/rust.yml is a commented-out TODO, pending a reproducible
+device build in CI. The Rust BSP
 (`src/bsp/rust`) links the C++ application as a static archive; its `build.rs`
 does NOT compile the C++ itself on this path — it expects the app objects to
 already exist in `build-gcc/` (the GCC fallback tree; the clang tree that
@@ -152,6 +154,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         **os.environ,
         "DELUGE_BUILD_DIR": str(Path(util.get_git_root()).absolute() / BUILD_DIR),
         "DELUGE_BUILD_CONFIG": CONFIG,
+        "CARGO_TARGET_ARMV7A_NONE_EABIHF_LINKER": str(
+            Path(util.get_git_root()).absolute()
+            / "toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-g++"
+        ),
     }
     return subprocess.run(cargo_args, cwd=RUST_BSP_DIR, env=env, check=False).returncode
 

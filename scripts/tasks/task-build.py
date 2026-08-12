@@ -136,12 +136,49 @@ def device_cxx_env(root: Path, config: str) -> dict[str, str]:
     if llvm_ar is None:
         raise SystemExit("llvm-ar not found on PATH (GNU ar cannot index bitcode)")
 
+    # The clang/lld device link's flags, emitted here rather than hardcoded in
+    # .cargo/config.toml (which had this machine's absolute paths baked in).
+    # A per-target RUSTFLAGS env var REPLACES the config's rustflags array, so
+    # this list must be complete.
+    gcc_lib = sorted((gcc / "lib/gcc/arm-none-eabi").glob("*"))
+    if not gcc_lib:
+        raise SystemExit(f"no libgcc under {gcc / 'lib/gcc/arm-none-eabi'}")
+    link_args = [
+        "--target=armv7a-none-eabihf",
+        "-mcpu=cortex-a9",
+        # neon-fp16, not neon: clang's -mfpu=neon DISABLES fp16, which rustc
+        # leaves on by the cortex-a9 default, and that one callee-only feature
+        # mismatch blocks every cross-language inline.
+        "-mfpu=neon-fp16",
+        "-mfloat-abi=hard",
+        "-nostartfiles",
+        "-fuse-ld=lld",
+        "-flto=thin",
+        f"--sysroot={sysroot}",
+        f"--gcc-toolchain={gcc}",
+        "-stdlib=libstdc++",
+        # libgcc, and unwindlib=none because a bare-metal GCC sysroot has no
+        # libgcc_eh: the unwinder lives inside libgcc.a itself.
+        "--rtlib=libgcc",
+        "--unwindlib=none",
+        # Clang does not implement GCC multilib selection for Arm, so the
+        # hard-float NEON multilib is named explicitly. Getting this wrong is
+        # the std::lround()-returns-0 failure.
+        f"-L{sysroot}/lib/{MULTILIB}",
+        f"-L{gcc_lib[0]}/{MULTILIB}",
+    ]
+    rustflags = ["-Clinker-plugin-lto", "-Clinker-flavor=gcc"]
+    for arg in link_args:
+        rustflags.append(f"-Clink-arg={arg}")
+
     return {
         "DELUGE_BUILD_DIR": str(root / BUILD_DIR),
         "DELUGE_BUILD_CONFIG": config,
         "DELUGE_DEVICE_CXX": clangxx,
         "DELUGE_DEVICE_CXXFLAGS": " ".join(flags),
         "DELUGE_DEVICE_AR": llvm_ar,
+        "CARGO_TARGET_ARMV7A_DELUGE_EABIHF_LINKER": clangxx,
+        "CARGO_TARGET_ARMV7A_DELUGE_EABIHF_RUSTFLAGS": " ".join(rustflags),
     }
 
 

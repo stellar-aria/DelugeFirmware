@@ -44,6 +44,14 @@ permissions:
 jobs:
   build:
     name: Build
+    # DISABLED: the device firmware is built by `dbt build`, which needs host
+    # clang, the Rust nightly with rust-src, the armv7a-deluge-eabihf JSON
+    # target and a resolvable deluge-sdk — none of which the dbt-toolchain
+    # container provides. The legacy C++-only image this job used to produce was
+    # removed from the build system (its sample loading had been non-functional
+    # since efatfs became Rust-BSP-only). Re-enable together with the container
+    # and workflow work tracked for reproducible Rust firmware in CI.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch

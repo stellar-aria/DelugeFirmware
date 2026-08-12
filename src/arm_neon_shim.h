@@ -29,11 +29,18 @@
 // <arm_neon.h> shim — including SIMDe *and* the hand-rolled typedefs below would be a
 // redefinition clash under clang — so route the host build through "arm_neon.h" too.
 // That leaves only a bare-metal clang build reaching the manual typedefs — and even
-// then only when __ARM_NEON is undefined. A clang build that actually generates NEON
-// code defines __ARM_NEON and pulls in clang's own <arm_neon.h>, which would collide
-// with the typedefs below (211 redefinitions), so route that through the real header
-// too. What remains is clangd, which never defines __ARM_NEON: the manual-typedef
-// branch exists for it alone, and a real clang compile never takes it.
+// then only when __ARM_NEON is undefined. Any clang invocation carrying the device
+// flags defines __ARM_NEON (the armv7a-none-eabihf/cortex-a9 target implies it, with
+// or without an explicit -mfpu) and pulls in clang's own <arm_neon.h>, which would
+// collide with the typedefs below (211 redefinitions) — so route that through the
+// real header too.
+//
+// What is left is tooling parsing a translation unit WITHOUT those flags: clangd
+// falling back to a guessed command line for a file with no compile_commands.json
+// entry, which lands on the host target and so leaves __ARM_NEON undefined. The
+// manual typedefs exist for that case alone. Note this branch is NOT what clangd
+// takes for a file the database does cover — there it sees --target and reads the
+// real header, same as the compiler.
 #if !defined(__clang__) || defined(DELUGE_HOST) || defined(__ARM_NEON)
 #include "arm_neon.h" // IWYU pragma: export
 #else

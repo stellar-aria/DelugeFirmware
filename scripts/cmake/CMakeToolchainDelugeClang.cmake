@@ -98,9 +98,13 @@ set(CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG" CACHE STRING "" FORCE)
 # neon-fp16 also replaces a `bl __aeabi_h2f` call with one vcvtb.f32.f16, and
 # selects the same thumb/v7-a+simd/hard multilib.
 #
-# PREREQUISITE: confirm the RZ/A1L's Cortex-A9 implements the half-precision
-# extension. If it does not, revert to -mfpu=neon here and strip fp16 on the
-# Rust side instead.
+# Half-precision is a property of the Cortex-A9 core, not of Renesas' integration:
+# the NEON MPE this part demonstrably has (existing builds run with -mfpu=neon)
+# brings VFPv3 with the half-precision extension. Both toolchains agree
+# independently — LLVM's cortex-a9 model enables +fp16 by default, and GCC's
+# -mfpu=auto for -mcpu=cortex-a9 reports __ARM_FP=14 (half+single+double) where
+# the explicit -mfpu=neon reports 12. So -mfpu=neon is subtracting a capability
+# the CPU has, and neon-fp16 restores it.
 set(ARCH_FLAGS
   --target=armv7a-none-eabihf
   -mcpu=cortex-a9

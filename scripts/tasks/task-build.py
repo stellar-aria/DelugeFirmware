@@ -30,6 +30,7 @@ import importlib
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -52,7 +53,16 @@ BUILD_DIR = "build"
 RUST_TARGET = "./armv7a-deluge-eabihf.json"
 MULTILIB = "thumb/v7-a+simd/hard"
 
-BUILD_CONFIGS = {"release": "Release", "debug": "Debug"}
+BUILD_CONFIGS = {
+    "release": "Release",
+    "relwithdebinfo": "RelWithDebInfo",
+    "debug": "Debug",
+}
+
+# Cargo profile per CMake config. RelWithDebInfo ships the optimised Rust half:
+# it is the device dev build (-O2 + ThinLTO, and ENABLE_TEXT_OUTPUT is defined
+# for it, so D_PRINTLN survives — see src/deluge/CMakeLists.txt).
+CARGO_RELEASE_CONFIGS = {"Release", "RelWithDebInfo"}
 
 
 def argparser() -> argparse.ArgumentParser:
@@ -75,7 +85,12 @@ def argparser() -> argparse.ArgumentParser:
         nargs="?",
         default="release",
         choices=list(BUILD_CONFIGS.keys()) + list(BUILD_CONFIGS.values()),
-        help="Build configuration (default: release — where ThinLTO pays off)",
+        help=(
+            "Build configuration (default: release). release = shipping image, "
+            "no D_PRINTLN output. relwithdebinfo = device dev build, same -O2 "
+            "plus debug logging. debug = -Og, debuggable but too slow for "
+            "glitch-free audio on hardware."
+        ),
     )
     # Anything unrecognised is forwarded to `cargo build` (e.g. --features).
     return parser
@@ -130,6 +145,60 @@ def device_cxx_env(root: Path, config: str) -> dict[str, str]:
     }
 
 
+def stage_artifacts(root: Path, config: str) -> int:
+    """Copy the cargo-linked ELF into build/<config>/ and derive .bin/.hex/.nmdump.
+
+    cargo owns the real output path (target/<triple>/<profile>/deluge-rust), but
+    dbt loadfw, dbt sizediff and the VS Code launch configs all expect the
+    historical build/<Config>/deluge.* layout. Staging keeps that contract
+    without teaching every consumer about cargo's directory scheme.
+    """
+    profile = "release" if config in CARGO_RELEASE_CONFIGS else "debug"
+    triple = Path(RUST_TARGET).stem  # armv7a-deluge-eabihf
+    src_elf = root / RUST_BSP_DIR / "target" / triple / profile / "deluge-rust"
+    if not src_elf.is_file():
+        print(f"stage: no ELF at {src_elf}", file=sys.stderr)
+        return 1
+
+    out_dir = root / BUILD_DIR / config
+    out_dir.mkdir(parents=True, exist_ok=True)
+    elf = out_dir / "deluge.elf"
+    shutil.copy2(src_elf, elf)
+
+    gcc_bin = root / "toolchain/current/arm-none-eabi-gcc/bin"
+    objcopy = gcc_bin / "arm-none-eabi-objcopy"
+    nm = gcc_bin / "arm-none-eabi-nm"
+
+    for fmt, suffix in (("binary", ".bin"), ("ihex", ".hex")):
+        result = util.run(
+            [str(objcopy), "-O", fmt, "-S", str(elf), str(out_dir / f"deluge{suffix}")]
+        )
+        if result != 0:
+            return result
+
+    with open(out_dir / "deluge.nmdump", "w") as f:
+        result = subprocess.run(
+            [
+                str(nm),
+                "-t",
+                "d",
+                "-S",
+                "-C",
+                "-r",
+                "--special-syms",
+                "--size-sort",
+                str(elf),
+            ],
+            stdout=f,
+            check=False,
+        ).returncode
+        if result != 0:
+            return result
+
+    print(f"Staged {elf.relative_to(root)} (+ .bin/.hex/.nmdump)")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     (args, cargo_extra) = argparser().parse_known_args(argv)
 
@@ -178,14 +247,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-Zbuild-std=core,alloc",
         "-Zjson-target-spec",
     ]
-    if config == "Release":
+    if config in CARGO_RELEASE_CONFIGS:
         cargo_args += ["--release"]
     if args.verbose:
         cargo_args += ["--verbose"]
     cargo_args += cargo_extra
 
     env = {**os.environ, **device_cxx_env(root, config)}
-    return subprocess.run(cargo_args, cwd=RUST_BSP_DIR, env=env, check=False).returncode
+    result = subprocess.run(
+        cargo_args, cwd=RUST_BSP_DIR, env=env, check=False
+    ).returncode
+    if result != 0:
+        return result
+
+    return stage_artifacts(root, config)
 
 
 if __name__ == "__main__":

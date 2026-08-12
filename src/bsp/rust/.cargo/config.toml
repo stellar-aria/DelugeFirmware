@@ -42,5 +42,78 @@ rustflags = [
   "-C", "link-arg=-mfloat-abi=hard",
 ]
 
+# ---------------------------------------------------------------------------
+# PROTOTYPE: clang/lld cross-language LTO target (armv7a-deluge-eabihf.json).
+#
+# Separate from the block above because the whole point of the custom target is
+# a feature set matching clang's — stock armv7a-none-eabihf sets +strict-align,
+# which clang does not, and that one callee-only feature blocks every
+# cross-language inline (LLVM requires the callee's features to be a SUBSET of
+# the caller's).
+#
+# Build with:
+#   cargo build --release --target ./armv7a-deluge-eabihf.json \
+#     -Zbuild-std=core,alloc -Zjson-target-spec
+# after building the C++ side into a clang Release tree, and with
+# DELUGE_BUILD_DIR / DELUGE_DEVICE_CXX / DELUGE_DEVICE_CXXFLAGS / DELUGE_DEVICE_AR
+# pointed at that tree (see the clang toolchain file).
+#
+# BRING-UP: absolute paths, as in the block above. Same parametrization TODO.
+[target.armv7a-deluge-eabihf]
+linker = "clang++"
+rustflags = [
+  "-C", "linker-plugin-lto",
+  "-C", "linker-flavor=gcc",
+  "-C", "link-arg=--target=armv7a-none-eabihf",
+  "-C", "link-arg=-mcpu=cortex-a9",
+  # neon-fp16, not neon: clang's -mfpu=neon explicitly DISABLES fp16, which the
+  # cortex-a9 model otherwise has on, making the Rust callee a non-subset again.
+  "-C", "link-arg=-mfpu=neon-fp16",
+  "-C", "link-arg=-mfloat-abi=hard",
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-fuse-ld=lld",
+  "-C", "link-arg=-flto=thin",
+  "-C", "link-arg=--sysroot=/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/arm-none-eabi",
+  "-C", "link-arg=--gcc-toolchain=/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc",
+  "-C", "link-arg=-stdlib=libstdc++",
+  # libgcc, and unwindlib=none because a bare-metal GCC sysroot has no
+  # libgcc_eh: the unwinder lives inside libgcc.a itself.
+  "-C", "link-arg=--rtlib=libgcc",
+  "-C", "link-arg=--unwindlib=none",
+  # Clang does not implement GCC multilib selection for Arm (it warns
+  # -Wmultilib-not-found and otherwise reaches for the SOFT-float base multilib),
+  # so the hard-float NEON multilib is named explicitly. Getting this wrong is
+  # the std::lround()-returns-0 failure described in the block above.
+  "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/arm-none-eabi/lib/thumb/v7-a+simd/hard",
+  "-C", "link-arg=-L/home/kate/GitHub/DelugeFirmware/toolchain/current/arm-none-eabi-gcc/lib/gcc/arm-none-eabi/15.2.1/thumb/v7-a+simd/hard",
+  # Inlining budget. The C++ side drops -fno-inline-functions under clang (see
+  # the root CMakeLists): clang implements that flag as a hard `noinline`
+  # attribute, which forbids exactly the cross-module inlining ThinLTO exists
+  # for. This replaces it with the granular equivalent of GCC's remaining
+  # inlining set — threshold 0 means "inline only when it is free or better",
+  # while the built-in last-call-to-static bonus and -inlinehint-threshold (325)
+  # still apply, mirroring GCC's -finline-small-functions /
+  # -finline-functions-called-once / explicit-inline behaviour.
+  #
+  # Measured on the Release image (blanket noinline -> threshold=0):
+  #   .text        1,381,508 -> 1,254,540   (-126,968, -9.2%)
+  #   .ARM.exidx      68,704 ->    39,904   (-28,800; inlined-away statics lose
+  #                                          their per-function exidx entry)
+  #   SRAM used          89% ->     83.2%   (324 KB free -> 493 KB)
+  #   Rust FFI symbols fully inlined away: 26 of 170
+  # Removing the restraint entirely does NOT fit: clang's -O2 inliner overflows
+  # SRAM by ~226 KB.
+  #
+  # TODO(tuning): 0 is the conservative end of a curve, not a tuned value.
+  # threshold=50 also links, at .text 1,325,612. Worth sweeping once there is a
+  # hardware performance measurement to optimise against — the audio-latency
+  # complaint above DELUGE_DEBUG_OPT_LEVEL is the obvious metric. Also note
+  # -mllvm -inline-threshold= is an INTERNAL LLVM option with no cross-version
+  # stability guarantee; re-measure on any toolchain bump. The supported
+  # driver-level alternative is -finline-hint-functions, which is stricter (only
+  # explicitly/implicitly inline functions) and leaves some of the win unclaimed.
+  "-C", "link-arg=-Wl,-mllvm,-inline-threshold=0",
+]
+
 [env]
 EMBASSY_USB_MAX_INTERFACE_COUNT = "8"

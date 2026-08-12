@@ -8,11 +8,12 @@ Two steps, same shape as `dbt rust`, different toolchain:
   2. cargo archives them and links the Rust firmware with lld, running LTO
      across the Rust/C++ boundary.
 
-Why this is a separate tree from `dbt rust`'s `build/`: that one is GCC, and the
-two are NOT interchangeable. arm-none-eabi GCC mangles int32_t as `long` where
-clang mangles it as `int`, so a GCC-built object's references do not resolve
-against a clang-built one. Mixing is all-or-nothing across any C++ interface
-using the fixed-width integer types, hence `build-clang/` alongside `build/`.
+Why this is a separate tree from `dbt rust`'s `build-gcc/`: that one is GCC,
+and the two are NOT interchangeable. arm-none-eabi GCC mangles int32_t as
+`long` where clang mangles it as `int`, so a GCC-built object's references do
+not resolve against a clang-built one. Mixing is all-or-nothing across any
+C++ interface using the fixed-width integer types, hence `build/` (this,
+shipping) alongside `build-gcc/` (fallback).
 
 `dbt rust` remains the GCC path and is unchanged. Its C++ objects cannot use
 LTO — the Rust link cannot read GCC's slim-LTO objects — so it builds Debug
@@ -20,12 +21,12 @@ objects at -O2 (see DELUGE_DEBUG_OPT_LEVEL in the root CMakeLists). This task
 has no such restriction, which is most of the point: measured on Release, the
 clang image is ~315 KB smaller and leaves 537 KB of SRAM free against 222 KB.
 
-NOTE: this no longer builds the legacy C++-only `deluge` executable, which is
-retired (see scripts/cmake/retired_rza1_bsp_guard.cmake). To build it anyway:
-  cmake --build build --target deluge -DDELUGE_ALLOW_RETIRED_RZA1_BSP=ON
+NOTE: the legacy C++-only `deluge` executable is retired; CMake now produces
+only library targets (see scripts/cmake/retired_rza1_bsp_guard.cmake).
 """
 
 import argparse
+import importlib
 import os
 import shutil
 import subprocess
@@ -46,8 +47,7 @@ CPP_TARGETS = [
 ]
 
 RUST_BSP_DIR = Path("src/bsp/rust")
-BUILD_DIR = "build-clang"
-TOOLCHAIN_FILE = "scripts/cmake/CMakeToolchainDelugeClang.cmake"
+BUILD_DIR = "build"
 # Feature set matching clang's, so LLVM will inline across the language boundary.
 RUST_TARGET = "./armv7a-deluge-eabihf.json"
 MULTILIB = "thumb/v7-a+simd/hard"
@@ -138,18 +138,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = BUILD_CONFIGS.get(args.config, args.config)
 
     # ── Configure the clang tree if it isn't already ─────────────────────────
+    # Via task-configure so the generator, cross-configs and compile_commands
+    # export stay identical to `dbt configure` (which clang-tidy CI relies on).
     if not os.path.exists(BUILD_DIR):
-        configure = [
-            "cmake",
-            "-S",
-            ".",
-            "-B",
-            BUILD_DIR,
-            "-G",
-            "Ninja Multi-Config",
-            f"-DCMAKE_TOOLCHAIN_FILE={root / TOOLCHAIN_FILE}",
-        ]
-        result = util.run(configure)
+        result = importlib.import_module("task-configure").main(
+            ["--toolchain", "clang"]
+        )
         if result != 0:
             return result
 

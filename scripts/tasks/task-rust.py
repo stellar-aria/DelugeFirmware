@@ -3,8 +3,9 @@
 
 The Rust BSP (`src/bsp/rust`) links the portable C++ application as a static
 archive. Its `build.rs` does NOT compile the C++ itself — it expects the app
-objects to already exist in `build/` and panics otherwise. So a full build is a
-two-step flow:
+objects to already exist in `build-gcc/` (the GCC fallback tree; the clang
+tree that ships lives in `build/`, see `dbt build`) and panics otherwise. So a
+full build is a two-step flow:
 
   1. cmake builds the C++ app objects (Debug — Release uses GCC slim-LTO objects
      that rust's lld can't read).
@@ -19,8 +20,8 @@ import argparse
 import importlib
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import util
 
@@ -36,6 +37,8 @@ CPP_TARGETS = [
 ]
 
 RUST_BSP_DIR = Path("src/bsp/rust")
+# The GCC fallback tree. The clang/lld shipping build owns `build/` (dbt build).
+BUILD_DIR = "build-gcc"
 # build.rs links Debug objects (see module docstring); keep both steps in sync.
 CONFIG = "Debug"
 
@@ -59,14 +62,14 @@ def argparser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     (args, cargo_extra) = argparser().parse_known_args(argv)
 
     os.chdir(util.get_git_root())
 
-    # Configure the CMake tree if it isn't already (mirrors task-build).
-    if not os.path.exists("build"):
-        result = importlib.import_module("task-configure").main()
+    # Configure the GCC fallback tree if it isn't already.
+    if not os.path.exists(BUILD_DIR):
+        result = importlib.import_module("task-configure").main(["--toolchain", "gcc"])
         if result != 0:
             return result
 
@@ -74,7 +77,7 @@ def main(argv: Sequence[str] = None) -> int:
     cmake_args = [
         "cmake",
         "--build",
-        "build",
+        BUILD_DIR,
         "--config",
         CONFIG,
         "--target",
@@ -95,7 +98,14 @@ def main(argv: Sequence[str] = None) -> int:
     if args.verbose:
         cargo_args += ["--verbose"]
     cargo_args += cargo_extra
-    return subprocess.run(cargo_args, cwd=RUST_BSP_DIR, env=os.environ).returncode
+
+    # Explicit, because build.rs's default is `<root>/build` — the clang tree.
+    env = {
+        **os.environ,
+        "DELUGE_BUILD_DIR": str(Path(util.get_git_root()).absolute() / BUILD_DIR),
+        "DELUGE_BUILD_CONFIG": CONFIG,
+    }
+    return subprocess.run(cargo_args, cwd=RUST_BSP_DIR, env=env, check=False).returncode
 
 
 if __name__ == "__main__":

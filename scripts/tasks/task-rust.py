@@ -1,19 +1,27 @@
 #! /usr/bin/env python3
-"""Build the Rust/Embassy BSP firmware (the C++ app + the Rust BSP, in one go).
+"""Build the Rust/Embassy BSP firmware. Default: the real ARM device image.
 
-The Rust BSP (`src/bsp/rust`) links the portable C++ application as a static
-archive. Its `build.rs` does NOT compile the C++ itself — it expects the app
-objects to already exist in `build-gcc/` (the GCC fallback tree; the clang
-tree that ships lives in `build/`, see `dbt build`) and panics otherwise. So a
-full build is a two-step flow:
+By default this builds the actual firmware that runs on Deluge hardware: the
+portable C++ application (Debug, `build-gcc/`) plus the Rust BSP, linked for
+`armv7a-none-eabihf` — the same device flow CI has always used. The Rust BSP
+(`src/bsp/rust`) links the C++ application as a static archive; its `build.rs`
+does NOT compile the C++ itself on this path — it expects the app objects to
+already exist in `build-gcc/` (the GCC fallback tree; the clang tree that
+ships lives in `build/`, see `dbt build`) and panics otherwise. So the device
+build is a two-step flow:
 
   1. cmake builds the C++ app objects (Debug — Release uses GCC slim-LTO objects
      that rust's lld can't read).
-  2. cargo archives those objects and links the Rust firmware.
+  2. cargo archives those objects and links the ARM Rust firmware.
 
 Doing step 1 explicitly each time also avoids a stale-object pitfall: `cargo
 build` alone does not track the C++ sources, so editing a .cpp without a fresh
 cmake build can link an out-of-date object.
+
+Pass `--host` to instead build the platform-std host image (`cargo build`,
+no `--target`) for host-side testing — no ARM C++ compile, no `build-gcc`.
+See `src/bsp/rust/HOST_HARNESS.md` for how the host binary gets its C++
+objects (`DELUGE_HOSTAPP_BUILD_DIR` / `build-embassy-hostapp`).
 """
 
 import argparse
@@ -46,7 +54,11 @@ CONFIG = "Debug"
 def argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rust",
-        description="Build the Rust/Embassy BSP firmware (C++ app + Rust)",
+        description=(
+            "Build the Rust/Embassy BSP firmware. Default: the ARM device image "
+            "(C++ app in build-gcc/ + Rust, linked for armv7a-none-eabihf). "
+            "--host builds the platform-std host image instead."
+        ),
     )
     parser.group = "Building"
     parser.add_argument(
@@ -55,7 +67,16 @@ def argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-c",
         "--clean-first",
-        help="Clean the C++ app objects before rebuilding",
+        help="Clean the C++ app objects before rebuilding (device build only)",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--host",
+        help=(
+            "Build the platform-std host image (plain `cargo build`, no "
+            "--target) instead of the ARM device image. Skips the build-gcc "
+            "C++ compile entirely."
+        ),
         action="store_true",
     )
     # Anything after `--` is forwarded to `cargo build` (e.g. --release, --features).
@@ -66,6 +87,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     (args, cargo_extra) = argparser().parse_known_args(argv)
 
     os.chdir(util.get_git_root())
+
+    if args.host:
+        # Host (platform-std) image: build.rs's host branch reads
+        # DELUGE_HOSTAPP_BUILD_DIR (default build-embassy-hostapp/), not the
+        # ARM CPP_TARGETS below — so skip build-gcc entirely, it would be
+        # pure waste. See src/bsp/rust/HOST_HARNESS.md.
+        print(
+            "Building the HOST image (--host): C++ objects come from "
+            "build-embassy-hostapp (DELUGE_HOSTAPP_BUILD_DIR), not build-gcc. "
+            "See src/bsp/rust/HOST_HARNESS.md if build.rs panics on missing objects."
+        )
+        cargo_args = ["cargo", "build"]
+        if args.verbose:
+            cargo_args += ["--verbose"]
+        cargo_args += cargo_extra
+        return subprocess.run(
+            cargo_args, cwd=RUST_BSP_DIR, env=os.environ, check=False
+        ).returncode
+
+    # ── Device (default): build the ARM firmware image ───────────────────────
 
     # Configure the GCC fallback tree if it isn't already.
     if not os.path.exists(BUILD_DIR):
@@ -91,10 +132,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result != 0:
         return result
 
-    # ── Step 2: archive the C++ objects + link the Rust firmware ─────────────
+    # ── Step 2: archive the C++ objects + link the ARM Rust firmware ─────────
     # rust-toolchain.toml selects the nightly toolchain + armv7a target; the rtt
-    # logging feature is on by default.
-    cargo_args = ["cargo", "build"]
+    # logging feature is on by default. Matches the `device` alias in
+    # src/bsp/rust/.cargo/config.toml.
+    cargo_args = [
+        "cargo",
+        "build",
+        "--target",
+        "armv7a-none-eabihf",
+        "-Zbuild-std=core,alloc",
+    ]
     if args.verbose:
         cargo_args += ["--verbose"]
     cargo_args += cargo_extra

@@ -58,8 +58,15 @@ deluge_sample_fill = { path = "../../../crates/deluge_sample_fill", features = [
 # `flash` feature: deluge-bsp gates its `flash` module behind an opt-in feature
 # (only flash-writing firmwares need it). We do — src/flash.rs reads device
 # settings from the reserved SPI-flash sector via deluge_bsp::flash.
-deluge-bsp = { path = "../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
-rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
+#
+# Pinned to a deluge-sdk revision so any checkout can build this firmware. For
+# live SDK co-development, `src/bsp/rust/local-sdk.toml` (gitignored) patches
+# these back to a sibling ../deluge-sdk checkout; `dbt build` and `dbt rust`
+# pass it via `cargo --config` when it exists.
+deluge-bsp = { git = "https://github.com/FirestormAudio/deluge-embassy.git", rev = "07c4aabc477c44524afc87907eb703c24c88b674", features = [
+    "flash",
+] }
+rza1l-hal = { git = "https://github.com/FirestormAudio/deluge-embassy.git", rev = "07c4aabc477c44524afc87907eb703c24c88b674" }
 
 # ── Device (the Deluge, armv7a-none-eabihf) ──────────────────────────────────
 # `deluge-alloc` (the general-purpose Rust heap) has no host meaning — the host
@@ -70,7 +77,7 @@ rza1l-hal = { path = "../../../../deluge-sdk/crates/rza1l-hal" }
 # by embassy-executor's `check_at_most_one!`, so they must live in disjoint
 # `[target...]` sections rather than both landing in `[dependencies]`.
 [target.'cfg(target_os = "none")'.dependencies]
-deluge-alloc = { path = "../../../../deluge-sdk/crates/deluge-alloc" }
+deluge-alloc = { git = "https://github.com/FirestormAudio/deluge-embassy.git", rev = "07c4aabc477c44524afc87907eb703c24c88b674" }
 
 # SP1: the device `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
 # (`fat_block_device.rs`) — same vendored crates `fs_differential`'s host

@@ -52,6 +52,17 @@ BUILD_DIR = "build-gcc"
 CONFIG = "Debug"
 
 
+def sdk_config_args() -> list[str]:
+    """`cargo --config local-sdk.toml` when the local deluge-sdk override exists.
+
+    Cargo.toml pins the deluge-sdk crates to a revision so any checkout can
+    build. local-sdk.toml (gitignored) patches them back to a sibling
+    ../deluge-sdk working copy for live SDK development.
+    """
+    override = Path(util.get_git_root()).absolute() / RUST_BSP_DIR / "local-sdk.toml"
+    return ["--config", "local-sdk.toml"] if override.is_file() else []
+
+
 def argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rust",
@@ -103,6 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.verbose:
             cargo_args += ["--verbose"]
         cargo_args += cargo_extra
+        cargo_args += sdk_config_args()
         return subprocess.run(
             cargo_args, cwd=RUST_BSP_DIR, env=os.environ, check=False
         ).returncode
@@ -147,6 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verbose:
         cargo_args += ["--verbose"]
     cargo_args += cargo_extra
+    cargo_args += sdk_config_args()
 
     # Explicit, because build.rs's default is `<root>/build` — the clang tree.
     env = {

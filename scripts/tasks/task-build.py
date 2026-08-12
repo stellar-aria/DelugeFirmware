@@ -272,6 +272,18 @@ def check_tree_is_clang(build_dir: str) -> int:
     return 1
 
 
+def sdk_config_args(root: Path) -> list[str]:
+    """`cargo --config local-sdk.toml` when the local deluge-sdk override exists.
+
+    Cargo.toml pins the deluge-sdk crates to a revision so any checkout can
+    build. local-sdk.toml (gitignored) patches them back to a sibling
+    ../deluge-sdk working copy for live SDK development; absent it, the build
+    uses exactly what the pinned revision gives everyone else.
+    """
+    override = root / RUST_BSP_DIR / "local-sdk.toml"
+    return ["--config", "local-sdk.toml"] if override.is_file() else []
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     (args, cargo_extra) = argparser().parse_known_args(argv)
 
@@ -329,6 +341,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verbose:
         cargo_args += ["--verbose"]
     cargo_args += cargo_extra
+    cargo_args += sdk_config_args(root)
 
     env = {**os.environ, **device_cxx_env(root, config)}
     result = subprocess.run(

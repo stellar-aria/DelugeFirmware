@@ -197,14 +197,26 @@ add_compile_options(
     -fno-inline-functions
 
     # Link time optimizations
-    $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-flto=auto>
-        $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-save-temps=obj>
+    #
+    # Split by compiler. GCC's slim-LTO objects are what the Rust device link
+    # cannot consume (see DELUGE_DEBUG_OPT_LEVEL above), which is why that path
+    # is pinned to Debug objects. Clang emits ThinLTO bitcode, which lld reads
+    # directly — so the clang build can use real LTO in Release. -flto=auto,
+    # -fuse-linker-plugin, -flto-partition and -fdevirtualize-at-ltrans are all
+    # GCC spellings clang rejects.
+    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-flto=auto>
+        $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-save-temps=obj>
 
-        $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-fuse-linker-plugin>
+        $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-fuse-linker-plugin>
     # this makes the optimization better at the cost of linking being REALLY slow
-        $<$<CONFIG:RELEASE>:-flto-partition=none>
+        $<$<AND:$<CONFIG:RELEASE>,$<CXX_COMPILER_ID:GNU>>:-flto-partition=none>
 
-        $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-fdevirtualize-at-ltrans>
+        $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-fdevirtualize-at-ltrans>
+
+    # COMPILE_LANGUAGE guard: CXX_COMPILER_ID is true whatever language is being
+    # compiled, and assembly goes through arm-none-eabi-gcc, which rejects
+    # -flto=thin.
+        $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:Clang>,$<COMPILE_LANGUAGE:C,CXX>>:-flto=thin>
     -ffunction-sections
     -fdata-sections
     -DUSE_TASK_MANAGER
@@ -388,11 +400,12 @@ target_link_options(deluge PUBLIC
 
     # $<$<CXX_COMPILER_ID:GNU>:LINKER:--print-memory-usage>
 
-    # Link-Time Optimization
-    $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-flto=auto>
-    $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-fuse-linker-plugin>
+    # Link-Time Optimization (GCC spellings; see the compile-options block above)
+    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-flto=auto>
+    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:GNU>>:-fuse-linker-plugin>
         # this makes the optimization better at the cost of linking being REALLY slow
-        $<$<CONFIG:RELEASE>:-flto-partition=none>
+        $<$<AND:$<CONFIG:RELEASE>,$<CXX_COMPILER_ID:GNU>>:-flto-partition=none>
+    $<$<AND:$<CONFIG:RELEASE,RELWITHDEBINFO>,$<CXX_COMPILER_ID:Clang>>:-flto=thin>
 
     # Coloring
     $<$<CXX_COMPILER_ID:GNU>:-fdiagnostics-color=always>

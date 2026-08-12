@@ -119,7 +119,18 @@ fn main() {
     let cfg = env::var("DELUGE_BUILD_CONFIG").unwrap_or_else(|_| "Debug".into());
     // `toolchain/current` symlinks to the active toolchain version's host dir,
     // so this survives version bumps (was a hardcoded, now-stale toolchain/v22).
-    let ar = repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar");
+    //
+    // PROTOTYPE(clang-lto): overridable because a ThinLTO app is LLVM bitcode, not
+    // ELF, and GNU ar cannot read bitcode symbols — it would write an archive whose
+    // index is empty for every member, so the linker would silently pull none of
+    // them in. llvm-ar indexes bitcode correctly. Plain (non-LTO) builds are
+    // unaffected and keep using arm-none-eabi-ar.
+    println!("cargo:rerun-if-env-changed=DELUGE_DEVICE_AR");
+    let ar = std::env::var("DELUGE_DEVICE_AR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            repo_root.join("toolchain/current/arm-none-eabi-gcc/bin/arm-none-eabi-ar")
+        });
 
     let app_objs_dir = build_dir.join(format!("src/deluge/CMakeFiles/deluge_app.dir/{cfg}"));
     if !app_objs_dir.is_dir() {

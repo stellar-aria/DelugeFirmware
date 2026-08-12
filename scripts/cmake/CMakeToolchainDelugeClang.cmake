@@ -60,7 +60,14 @@ find_program(DELUGE_CLANGXX NAMES clang++ REQUIRED)
 
 set(CMAKE_C_COMPILER   ${DELUGE_CLANG}   CACHE FILEPATH "Path to C Compiler.")
 set(CMAKE_CXX_COMPILER ${DELUGE_CLANGXX} CACHE FILEPATH "Path to C++ Compiler.")
-set(CMAKE_ASM_COMPILER ${DELUGE_CLANG}   CACHE FILEPATH "Path to ASM compiler.")
+
+# Assembly stays with GCC. The .S sources use GNU as directives clang's
+# integrated assembler does not implement (.func/.endfunc, in chainload.S and
+# the RZA1 asm) — debug-info aids with no effect on codegen. Handing them to
+# arm-none-eabi-gcc keeps those sources working unchanged for both toolchains.
+# (-fno-integrated-as is NOT the fix: clang then reaches for the host
+# /usr/bin/as, which promptly rejects -EL.)
+set(CMAKE_ASM_COMPILER ${ARM_TOOLCHAIN_BIN_PATH}/arm-none-eabi-gcc CACHE FILEPATH "Path to ASM compiler.")
 
 # Binutils stay GCC's: they understand this sysroot's archives and the ARM
 # attributes, and nothing here needs llvm-* equivalents.
@@ -110,8 +117,31 @@ set(SYSROOT_FLAGS
   -stdlib=libstdc++
 )
 
-add_compile_options(${ARCH_FLAGS} ${SYSROOT_FLAGS})
+# GCC spelling of the same architecture, for the assembler. No --target, no
+# --sysroot/--gcc-toolchain/-stdlib: those are clang driver options and
+# arm-none-eabi-gcc rejects them.
+set(ASM_ARCH_FLAGS
+  -mcpu=cortex-a9
+  -mfpu=neon-fp16
+  -mfloat-abi=hard
+  -mthumb
+  -mlittle-endian
+)
+
+# Per-flag genexes rather than one wrapping the whole list: a list inside a
+# generator expression keeps its semicolons and arrives as a single argument.
+foreach(flag IN LISTS ARCH_FLAGS SYSROOT_FLAGS)
+  add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:${flag}>")
+endforeach()
+foreach(flag IN LISTS ASM_ARCH_FLAGS)
+  add_compile_options("$<$<COMPILE_LANGUAGE:ASM>:${flag}>")
+endforeach()
+
 add_link_options(${ARCH_FLAGS} ${SYSROOT_FLAGS})
+
+# The shared warning set names GCC-only options (-Warray-bounds=1,
+# -Wstack-usage=). They are harmless but produce a warning per translation unit.
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-warning-option>)
 
 # Multilib-correct libstdc++ configuration header (C++ only).
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-isystem${DELUGE_CXX_INCLUDE}/arm-none-eabi/${DELUGE_MULTILIB}>)
@@ -120,6 +150,11 @@ add_compile_options(
   -fmessage-length=0
   -funsafe-math-optimizations # required to use NEON instead of VFPv3 for floating point
 )
+
+# validateParams()'s static_assert in modulation/params/param.cpp walks far
+# enough to exceed clang's default constexpr budget (GCC's is higher). This is
+# an evaluation-limit difference, not a defect in the assertion.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fconstexpr-steps=100000000>)
 
 # -mthumb-interwork has no clang equivalent and is a no-op on v7-A, so it is
 # dropped rather than translated.

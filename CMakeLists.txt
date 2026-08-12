@@ -83,7 +83,10 @@ option(ENABLE_MATRIX_DEBUG "Enable logging of pad events" OFF)
 
 # Colored output
 set(CMAKE_COLOR_DIAGNOSTICS ON)
-add_compile_options($<$<CXX_COMPILER_ID:Clang>:-fansi-escape-codes>)
+# COMPILE_LANG_AND_ID, not CXX_COMPILER_ID: the latter queries the CXX compiler
+# whatever language is being compiled, so with a clang C++ compiler the flag also
+# lands on the ASM command line — which fails if ASM is assembled by GCC.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,Clang>:-fansi-escape-codes>)
 
 # ##### Documentation generation #######
 # check if Doxygen is installed

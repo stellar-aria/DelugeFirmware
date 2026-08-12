@@ -282,16 +282,6 @@ list(APPEND DELUGE_COMMON_COMPILE_OPTIONS
 option(DELUGE_UBSAN "Enable the freestanding UndefinedBehaviorSanitizer layer" OFF)
 set(DELUGE_UBSAN_SOURCE_DIRS "memory;util/container"
     CACHE STRING "Semicolon-separated subdirs under src/deluge to instrument when DELUGE_UBSAN is ON")
-if(DELUGE_UBSAN)
-    target_compile_definitions(deluge PUBLIC DELUGE_UBSAN=1)
-    foreach(_ubsan_dir ${DELUGE_UBSAN_SOURCE_DIRS})
-        file(GLOB_RECURSE _ubsan_srcs CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/deluge/${_ubsan_dir}/*.cpp)
-        if(_ubsan_srcs)
-            set_source_files_properties(${_ubsan_srcs} TARGET_DIRECTORY deluge
-                PROPERTIES COMPILE_OPTIONS "-fsanitize=undefined;-fno-sanitize=alignment")
-        endif()
-    endforeach()
-endif()
 
 # GCC static analyzer (-fanalyzer). Off by default; enable with -DDELUGE_ANALYZER=ON. This is a compile-time (not
 # runtime) pass: it walks each function's paths looking for leaks, use-after-free, double-free, mismatched alloc/dealloc
@@ -304,18 +294,33 @@ endif()
 option(DELUGE_ANALYZER "Run GCC's -fanalyzer over selected source dirs" OFF)
 set(DELUGE_ANALYZER_SOURCE_DIRS "memory;util/container"
     CACHE STRING "Semicolon-separated subdirs under src/deluge to analyze when DELUGE_ANALYZER is ON")
-if(DELUGE_ANALYZER)
-    foreach(_an_dir ${DELUGE_ANALYZER_SOURCE_DIRS})
-        file(GLOB_RECURSE _an_srcs CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/deluge/${_an_dir}/*.cpp)
-        if(_an_srcs)
-            set_source_files_properties(${_an_srcs} TARGET_DIRECTORY deluge
-                PROPERTIES COMPILE_OPTIONS "-fanalyzer")
+
+# Deluge sources
+add_subdirectory(src)
+
+# DELUGE_UBSAN / DELUGE_ANALYZER apply their target-scoped properties here, after add_subdirectory(src) has
+# created deluge_app (src/deluge/CMakeLists.txt) -- target_compile_definitions() and set_source_files_properties()
+# TARGET_DIRECTORY both require the target to already exist.
+if(DELUGE_UBSAN)
+    target_compile_definitions(deluge_app PUBLIC DELUGE_UBSAN=1)
+    foreach(_ubsan_dir ${DELUGE_UBSAN_SOURCE_DIRS})
+        file(GLOB_RECURSE _ubsan_srcs CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/deluge/${_ubsan_dir}/*.cpp)
+        if(_ubsan_srcs)
+            set_source_files_properties(${_ubsan_srcs} TARGET_DIRECTORY deluge_app
+                PROPERTIES COMPILE_OPTIONS "-fsanitize=undefined;-fno-sanitize=alignment")
         endif()
     endforeach()
 endif()
 
-# Deluge sources
-add_subdirectory(src)
+if(DELUGE_ANALYZER)
+    foreach(_an_dir ${DELUGE_ANALYZER_SOURCE_DIRS})
+        file(GLOB_RECURSE _an_srcs CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/deluge/${_an_dir}/*.cpp)
+        if(_an_srcs)
+            set_source_files_properties(${_an_srcs} TARGET_DIRECTORY deluge_app
+                PROPERTIES COMPILE_OPTIONS "-fanalyzer")
+        endif()
+    endforeach()
+endif()
 
 # find_program(PRETTYSIZE_CMD prettysize prettysize.py)
 

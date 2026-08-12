@@ -106,17 +106,24 @@
 			// The Rust/Embassy image links the C++ app's object closure, but
 			// cargo does NOT track src/deluge/**.cpp — editing a .cpp and
 			// rebuilding only via cargo silently links STALE objects. So the
-			// Rust BSP build tasks below always run this first. Targets and
-			// Debug config mirror src/bsp/rust/build.rs (DELUGE_BUILD_DIR /
-			// DELUGE_BUILD_CONFIG defaults: <root>/build, Debug — Release
-			// compiles with -flto=auto, whose slim-LTO objects rust's linker
-			// can't read).
-			"type": "shell",
+			// Rust BSP build tasks below always run this first. `./dbt rust`
+			// is the two-step flow itself: it builds the C++ app objects in
+			// the GCC fallback tree (build-gcc/, Debug — Release compiles
+			// with -flto=auto, whose slim-LTO objects rust's linker can't
+			// read) AND links the ARM device Rust firmware, so it already
+			// produces the same result as the "Build Rust BSP (device,
+			// debug)" task below. NOTE: `fatfs` has not been a CMake target
+			// since C-FatFS was deleted; `./dbt rust` names its own targets
+			// and does not have that problem.
+			"type": "process",
 			"label": "Build C++ app objects (for Rust BSP)",
-			"command": "cmake --build build --config Debug --target deluge_app fatfs NE10 eyalroz_printf deluge_dsp deluge_scheduler deluge_foundation deluge_midi",
-			"options": {
-				"cwd": "${workspaceFolder}"
+			"command": "./dbt",
+			"windows": {
+				"command": "./dbt.cmd",
 			},
+			"args": [
+				"rust"
+			],
 			"problemMatcher": {
 				"base": "$gcc",
 				"fileLocation": "absolute"

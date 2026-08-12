@@ -121,9 +121,26 @@ fn main() {
     // precisely because they were the same archive every time.
     println!("cargo:rerun-if-env-changed=DELUGE_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=DELUGE_BUILD_CONFIG");
+    // The default MUST depend on which device target we're building, not just
+    // default to the clang tree: this build.rs also serves `cargo device`
+    // (armv7a-none-eabihf, GCC), and defaulting that to `build/` would silently
+    // archive clang objects into a GCC link -- the two trees' objects are
+    // ABI-incompatible (GCC mangles int32_t as `long`, clang as `int`), and
+    // Debug objects are plain ELF, so the link would SUCCEED with a corrupt
+    // ABI instead of failing loudly. Cargo sets TARGET to the JSON target
+    // spec's file stem for a custom target, so this is exactly
+    // "armv7a-deluge-eabihf" for the clang tree and "armv7a-none-eabihf" for
+    // the GCC one.
     let build_dir = env::var("DELUGE_BUILD_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("build"));
+        .unwrap_or_else(|_| {
+            let default_tree = if env::var("TARGET").as_deref() == Ok("armv7a-deluge-eabihf") {
+                "build"
+            } else {
+                "build-gcc"
+            };
+            repo_root.join(default_tree)
+        });
     // Bring-up uses Debug: Release compiles the app with -flto=auto (GCC slim-LTO
     // objects whose symbols rust's lld can't read). Debug objects are plain ELF
     // (and carry debug_info). Switch to Release later via bfd ld if LTO is wanted.

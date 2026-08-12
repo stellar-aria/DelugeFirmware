@@ -15,14 +15,15 @@ not resolve against a clang-built one. Mixing is all-or-nothing across any
 C++ interface using the fixed-width integer types, hence `build/` (this,
 shipping) alongside `build-gcc/` (fallback).
 
-`dbt rust` remains the GCC path and is unchanged. Its C++ objects cannot use
-LTO — the Rust link cannot read GCC's slim-LTO objects — so it builds Debug
-objects at -O2 (see DELUGE_DEBUG_OPT_LEVEL in the root CMakeLists). This task
-has no such restriction, which is most of the point: measured on Release, the
-clang image is ~315 KB smaller and leaves 537 KB of SRAM free against 222 KB.
+`dbt rust` remains the GCC path, and now builds the ARM device image by
+default. Its C++ objects cannot use LTO — the Rust link cannot read GCC's
+slim-LTO objects — so it builds Debug objects at -O2 (see
+DELUGE_DEBUG_OPT_LEVEL in the root CMakeLists). This task has no such
+restriction, which is most of the point: measured on Release, the clang image
+is ~315 KB smaller and leaves 537 KB of SRAM free against 222 KB.
 
 NOTE: the legacy C++-only `deluge` executable is retired; CMake now produces
-only library targets (see scripts/cmake/retired_rza1_bsp_guard.cmake).
+only library targets.
 """
 
 import argparse
@@ -236,6 +237,40 @@ def stage_artifacts(root: Path, config: str) -> int:
     return 0
 
 
+def check_tree_is_clang(build_dir: str) -> int:
+    """Fail loudly if an existing build_dir was configured with a non-clang compiler.
+
+    A checkout that ran `dbt configure`/`dbt build` before build/ and build-gcc/
+    swapped trees may still have a GCC-configured build/ on disk. Reusing it
+    would archive GCC-mangled objects into what this task treats as the clang
+    tree -- and because Debug objects are plain ELF, the link SUCCEEDS with a
+    corrupt ABI instead of failing here, surfacing later as baffling
+    "undefined reference to ...(long)" errors. Refuse instead of silently
+    deleting the developer's tree for them.
+    """
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.is_file():
+        return 0
+    compiler_line = next(
+        (
+            line
+            for line in cache.read_text().splitlines()
+            if line.startswith("CMAKE_CXX_COMPILER:")
+        ),
+        "",
+    )
+    if "clang" in compiler_line:
+        return 0
+    print(
+        f"{build_dir}/ exists but was not configured with clang "
+        f"({compiler_line or 'CMAKE_CXX_COMPILER not found in CMakeCache.txt'}). "
+        f"This tree must be clang's -- its objects cannot be mixed with a "
+        f"GCC-configured tree. Run `rm -rf {build_dir}` and retry.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     (args, cargo_extra) = argparser().parse_known_args(argv)
 
@@ -250,6 +285,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = importlib.import_module("task-configure").main(
             ["--toolchain", "clang"]
         )
+        if result != 0:
+            return result
+    else:
+        result = check_tree_is_clang(BUILD_DIR)
         if result != 0:
             return result
 

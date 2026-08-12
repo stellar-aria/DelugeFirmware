@@ -55,6 +55,13 @@ rustflags = [
 # after building the C++ side into a clang Release tree, and with
 # DELUGE_BUILD_DIR / DELUGE_DEVICE_CXX / DELUGE_DEVICE_CXXFLAGS / DELUGE_DEVICE_AR
 # pointed at that tree (see the clang toolchain file).
+#
+# Hand-run like that, this link gets NO rustflags at all: the [target.armv7a-
+# deluge-eabihf] block below deliberately spells no `rustflags` array, because
+# CARGO_TARGET_ARMV7A_DELUGE_EABIHF_RUSTFLAGS (a per-target RUSTFLAGS env var)
+# REPLACES rather than merges with one. Use `./dbt build` instead — it computes
+# and exports both CARGO_TARGET_ARMV7A_DELUGE_EABIHF_LINKER and _RUSTFLAGS from
+# discovered toolchain paths (see device_cxx_env() in scripts/tasks/task-build.py).
 [target.armv7a-deluge-eabihf]
 # Driven entirely by `dbt build`, which emits the linker and the full rustflags
 # list from discovered toolchain paths:

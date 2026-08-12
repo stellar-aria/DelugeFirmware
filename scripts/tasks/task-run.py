@@ -105,9 +105,9 @@ def build_rust_device():
     heap, and with RTT enabled it does not even link, because the image collides with the reserved RTT
     window. See src/bsp/rust/.cargo/config.toml.
     """
-    return importlib.import_module("task-rust").main(
-        ["--target", RUST_TARGET, "-Zbuild-std=core,alloc", "--release"]
-    )
+    # task-rust's device path already supplies --target/-Zbuild-std=core,alloc
+    # itself; only --release needs forwarding.
+    return importlib.import_module("task-rust").main(["--release"])
 
 
 def find_elf(config):

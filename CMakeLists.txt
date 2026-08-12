@@ -183,7 +183,7 @@ add_compile_options(
     # reports 15-19 ms routine latencies and force-culls voices continuously. Set this to -O2 to get an
     # optimized, non-LTO app the Rust link can still consume:
     #
-    #   cmake -B build -DDELUGE_DEBUG_OPT_LEVEL=-O2 && ./dbt rust && (cd src/bsp/rust && cargo device --release)
+    #   cmake -B build-gcc -DDELUGE_DEBUG_OPT_LEVEL=-O2 && ./dbt rust --release
     #
     # The default stays -Og so ordinary Debug builds remain debuggable.
     $<$<CONFIG:DEBUG>:${DELUGE_DEBUG_OPT_LEVEL}>

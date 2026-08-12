@@ -1,9 +1,10 @@
 name: Publish Pre Release
 
-# NOTE: the `build` job in build.yml is disabled (see its `if: false`), so
-# callers of this workflow (nightly-build's `nightly-publish`, beta-build's
-# `beta-publish`) have no `<tag>_Release_build_bundle` artifact to download —
-# the "Download Build Artifact" step below will fail.
+# NOTE: the `build` job in build.yml is disabled (see its `if: false` and the
+# comment there). That job being skipped skips the calling `nightly-build`/
+# `beta-build` jobs, which in turn skips `nightly-publish`/`beta-publish`
+# (they `need` those jobs with no `if:` override) — so this workflow's steps
+# never run for those callers, and nothing gets published.
 on:
   workflow_call:
     inputs:

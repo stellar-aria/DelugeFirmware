@@ -31,12 +31,15 @@ MAX_UPLOAD_BYTES = 0x00C0_0000  # 12 MiB
 BAUD = 115200
 CHUNK = 4096
 
-# The Rust/Embassy BSP firmware. Its build is not a CMake config, so it cannot come from find_elf()'s
-# build/<config>/ glob: cmake produces the C++ app objects and cargo links the ARM image from them.
-RUST_CONFIGS = ("rust", "embassy")
+# The GCC-front-end BSP firmware (arm-none-eabi-gcc + cargo, out of build-gcc/). Its build is
+# not a CMake config, so it cannot come from find_elf()'s build/<config>/ glob: cmake produces
+# the C++ app objects and cargo links the ARM image from them.
+GCC_CONFIGS = ("gcc",)
+# RUST_BSP_DIR names the crate directory itself (src/bsp/rust/), not a toolchain choice --
+# both the clang and the GCC front ends build into that crate, so this stays as-is.
 RUST_BSP_DIR = "src/bsp/rust"
-RUST_TARGET = "armv7a-none-eabihf"
-RUST_ELF = f"{RUST_BSP_DIR}/target/{RUST_TARGET}/release/deluge-rust"
+GCC_TARGET = "armv7a-none-eabihf"
+GCC_ELF = f"{RUST_BSP_DIR}/target/{GCC_TARGET}/release/deluge-rust"
 
 
 def argparser():
@@ -44,8 +47,13 @@ def argparser():
         prog="run",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Build the firmware and upload it to a Deluge over USB (dev mode)",
-        epilog="""\nusage example: dbt run rust
-                  Build the Rust/Embassy BSP firmware and push it to a Deluge sitting on the
+        epilog="""\nEvery config here builds Rust firmware; the axis is which C++ front end built
+                the app -- `debug`/`release`/`relwithdebinfo` use clang with cross-language
+                ThinLTO (out of build/), while `gcc` uses arm-none-eabi-gcc, linked by cargo (out
+                of build-gcc/).
+
+                usage example: dbt run gcc
+                  Build the GCC-front-end BSP firmware and push it to a Deluge sitting on the
                   app-loader boot menu with DEV MODE: ON.
 
                 usage example: dbt run release
@@ -59,9 +67,9 @@ def argparser():
         default="debug",
         choices=list(BUILD_CONFIGS.keys())
         + list(BUILD_CONFIGS.values())
-        + list(RUST_CONFIGS),
+        + list(GCC_CONFIGS),
         help="""Firmware build configuration to build and upload (default: debug).
-                `rust` (or `embassy`) builds and uploads the Rust/Embassy BSP image instead of a
+                `gcc` builds and uploads the arm-none-eabi-gcc-built BSP image instead of a
                 CMake config.""",
     )
     parser.add_argument(
@@ -94,12 +102,12 @@ def build_frame(elf_bytes):
     return bytes(frame)
 
 
-def build_rust_device():
-    """Build the Rust/Embassy ARM firmware: cmake makes the C++ app objects, cargo links them.
+def build_gcc_device():
+    """Build the GCC-front-end ARM firmware: cmake makes the C++ app objects, cargo links them.
 
-    Delegates to the `rust` task with the device target appended, rather than re-implementing the
-    two-step flow (and its stale-object pitfall: cargo does not track the C++ sources, so the cmake
-    build must happen first).
+    Delegates to the `rust` task, which builds the device image by default, rather than
+    re-implementing the two-step flow (and its stale-object pitfall: cargo does not track the
+    C++ sources, so the cmake build must happen first).
 
     RELEASE deliberately. The dev profile is not a runnable device image -- it leaves zero internal SRAM
     heap, and with RTT enabled it does not even link, because the image collides with the reserved RTT
@@ -111,14 +119,14 @@ def build_rust_device():
 
 
 def find_elf(config):
-    if config in RUST_CONFIGS:
-        if not os.path.isfile(RUST_ELF):
+    if config in GCC_CONFIGS:
+        if not os.path.isfile(GCC_ELF):
             raise RuntimeError(
-                f"No Rust/Embassy firmware at {RUST_ELF}. Build it with:\n"
+                f"No GCC-front-end firmware at {GCC_ELF}. Build it with:\n"
                 f"  ./dbt run {config}    # builds and uploads\n"
-                f"or by hand: ./dbt rust && (cd {RUST_BSP_DIR} && cargo device --release)"
+                "or by hand: ./dbt rust --release"
             )
-        return RUST_ELF
+        return GCC_ELF
     cmake_config = BUILD_CONFIGS.get(config, config)
     pattern = os.path.join("build", cmake_config, "deluge*.elf")
     matches = sorted(glob.glob(pattern))
@@ -213,8 +221,8 @@ def main():
             util.note(f"ERROR: {elf} does not exist.")
             return 1
     else:
-        if args.config in RUST_CONFIGS:
-            result = build_rust_device()
+        if args.config in GCC_CONFIGS:
+            result = build_gcc_device()
         else:
             result = importlib.import_module("task-build").main([args.config])
         if result != 0:

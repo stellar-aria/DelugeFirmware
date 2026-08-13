@@ -23,7 +23,7 @@
 //!
 //! `embassy_executor::raw::Executor` + a custom `AtomicBool` `__pender` + a
 //! `PeekableMockDriver` ([`clock`] — the same discrete-event shape
-//! `../lens1_vt_sim/src/clock.rs`/`../spike_mock_clock/` use). The driver loop:
+//! `../lens1_vt_sim/` uses). The driver loop:
 //! poll the executor to quiescence, peek the next due deadline, jump the
 //! virtual clock to exactly that deadline, repeat. No `platform-std`/
 //! `executor-thread` embassy-executor feature is enabled (see `Cargo.toml`),

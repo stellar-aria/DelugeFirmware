@@ -10,10 +10,9 @@
 //! that peek, hence [`PeekableMockDriver`] — an independent implementation
 //! of the same `embassy_time_driver::Driver` trait with the peek added.
 //!
-//! Copied rather than shared as a library with the structurally identical
-//! driver in `../../spike_mock_clock/src/main.rs`: that one backs a
-//! throwaway spike, this backs the real harness, and a second reviewed copy
-//! costs nothing while keeping this package self-contained.
+//! Independently implemented (rather than shared as a library) to keep this
+//! package self-contained: [`PeekableMockDriver`] adds the necessary peek
+//! accessor to the standard `embassy_time::MockDriver` trait.
 use core::cell::RefCell;
 use core::task::Waker;
 

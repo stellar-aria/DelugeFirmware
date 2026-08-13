@@ -13,7 +13,7 @@
 # `_embassy_time_schedule_wake` — a hard duplicate-symbol compile error if
 # both land in one package's dependency graph (Cargo unifies a dependency's
 # features across every target in one Cargo.toml; there is no per-`[[bin]]`
-# override). Same shape as `../lens1_vt_sim/` and `../spike_mock_clock/`.
+# override). Same shape as `../lens1_vt_sim/`.
 #
 # Reuses deluge-bsp-rust's own source files via `#[path]` (see src/main.rs) —
 # the same pattern `lens1_vt_sim`/`tests/*.rs` already use — so this is a
@@ -33,7 +33,7 @@ test = false
 
 [dependencies]
 # No `platform-*` feature (see src/main.rs's driver, same shape as
-# `lens1_vt_sim`/the sibling `spike_mock_clock`): keeps the crate from
+# `lens1_vt_sim`): keeps the crate from
 # defining its own `__pender`, so we supply one ourselves and drive a
 # poll-to-quiescence/advance-to-next-deadline loop instead of a
 # thread-parking executor.

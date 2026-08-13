@@ -10,8 +10,8 @@
 //! Two `embassy_executor::raw::Executor` instances — MAIN (this file's driver loop) and
 //! `HP_EXEC` (Task 2's host emulation of a device interrupt executor, see [`preempt`]) —
 //! plus a custom context-routed `__pender` (two `AtomicBool` flags, one per executor, see
-//! `preempt::note_pend`) and a `PeekableMockDriver` ([`clock`] — the same discrete-event
-//! shape prototyped in `../spike_mock_clock/`). The driver loop: poll MAIN to quiescence,
+//! `preempt::note_pend`) and a `PeekableMockDriver` ([`clock`] — custom discrete-event shape
+//! for virtual-time simulation). The driver loop: poll MAIN to quiescence,
 //! draining `HP_EXEC` alongside it (`preempt::pump_hp`), peek the next due deadline, jump
 //! the virtual clock to exactly that deadline, repeat. No `platform-std`/`executor-thread`
 //! embassy-executor feature is enabled (see `Cargo.toml`), so there is no executor-supplied

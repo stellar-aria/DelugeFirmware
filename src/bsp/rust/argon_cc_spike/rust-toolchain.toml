@@ -1,4 +1,0 @@
-# rust-toolchain.toml — mirror src/bsp/rust/fs_differential/rust-toolchain.toml.
-[toolchain]
-channel = "nightly"
-components = ["rust-src", "clippy", "rustfmt"]

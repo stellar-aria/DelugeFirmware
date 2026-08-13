@@ -6,8 +6,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 /// The cluster-index-dependent, byte-distinguishable seed pattern: cluster
-/// `index`'s byte `k` is `(index * 100 + k) & 0xFF`. Identical formula to
-/// `region_differential::ops::make_ramp` / `region_fill_differential::ramp`.
+/// `index`'s byte `k` is `(index * 100 + k) & 0xFF`. Identical formula to the
+/// retired region_differential harness's `ops::make_ramp` / `region_fill_differential::ramp`.
 #[must_use]
 pub fn make_ramp(index: u32, n: usize) -> Vec<u8> {
     (0..n)

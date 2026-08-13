@@ -7,9 +7,12 @@
 //! `fill_logic` lives in the shared `deluge_sample_fill` crate, so this test depends on the crate
 //! directly rather than pulling the file in via `#[path]`. `fill_logic` has no CS/extern dependencies of its own (pure
 //! buffer arithmetic plus calls into `deluge_sample_convert`, which has none either), so unlike
-//! `region_differential`/`tests/host_end_to_end.rs` this file needs no critical-section stubs.
+//! the retired region_differential harness and this crate's own `tests/host_end_to_end.rs`, this file
+//! needs no critical-section stubs.
 //!
-//! Two validating shapes, mirroring `region_differential`'s own tests/differential.rs:
+//! Two validating shapes — a byte-identity differential and a non-vacuity
+//! perturbation check — the pattern this crate inherited from the retired
+//! region_differential harness:
 //!   1. BYTE-IDENTICAL cases across the required coverage (every `RawDataFormat`, the SIMD-prefix/
 //!      scalar-tail boundary, a short last cluster, misaligned-both-neighbours mid-stream).
 //!   2. NON-VACUITY: the Rust side's OWN output is deliberately perturbed (one output byte flipped)
@@ -268,8 +271,8 @@ fn native_format_still_stitches_overhang() {
 /// Deliberately corrupts the RUST side's own output after both sides have run — standing in for a
 /// hypothetical bug in `fill_logic::finish_convert_stitch` that diverges from the real C++
 /// orchestration — and asserts [`diff`] DETECTS it. A C++-vs-Rust diff that only ever compares equal
-/// values proves nothing; this is what proves the comparison above has teeth (mirrors
-/// `region_differential`'s own `Perturb`/non-vacuity test).
+/// values proves nothing; this is what proves the comparison above has teeth (the same pattern the
+/// retired region_differential harness's own `Perturb`/non-vacuity test used).
 #[test]
 fn perturbed_rust_output_is_detected() {
     let geo = simd_geo(3); // ENDIANNESS_WRONG_16

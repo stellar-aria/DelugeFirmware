@@ -15,7 +15,7 @@ pub mod mapping;
 
 /// The buffer-role/index-dependent, byte-distinguishable seed pattern used across the differential:
 /// tag `t`'s byte `k` is `(t*100 + k) & 0xFF`. Mirrors `region_fill_differential::ramp`'s (and
-/// `region_differential::ops::make_ramp`'s) exact formula, reused here unchanged so a cluster's
+/// the retired region_differential harness's `ops::make_ramp`'s) exact formula, reused here unchanged so a cluster's
 /// expected post-seed bytes are trivial to compute independently of this crate's own harness code.
 #[must_use]
 pub fn ramp(tag: u32, n: usize) -> Vec<u8> {

@@ -6,13 +6,13 @@ publish = false
 license = "GPL-3.0-or-later"
 
 # SR2d-5's payload-offset gate. Standalone harness crate (NOT a workspace
-# member -- mirrors region_differential/region_fill_differential): host-only,
+# member -- mirrors region_fill_differential): host-only,
 # proves the Rust region-port cursor (`deluge_sample_source::cursor::SampleSource<
 # ManagerResidency>`) resolves a region's PAYLOAD -- not its chunk header --
 # when driven over a REAL streamed chunk backing.
 #
-# region_differential's own RustBackend/HarnessResidency (`rust_backend.rs`)
-# seeds each cluster's "payload" directly into a bare `Vec<u8>` -- payload ==
+# The retired region_differential harness's RustBackend/HarnessResidency (`rust_backend.rs`)
+# seeded each cluster's "payload" directly into a bare `Vec<u8>` -- payload ==
 # backing there, so `ManagerPin::payload()`'s pre-fix bug (returning the raw
 # manager backing pointer, i.e. the chunk HEADER, instead of routing through
 # `deluge_streaming_chunk_payload` == `backing + payload_offset`) was
@@ -25,7 +25,8 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 # Nothing: src/lib.rs is a pure, dependency-free `make_ramp` helper (the SAME
-# formula as region_differential::ops::make_ramp / region_fill_differential::ramp).
+# formula the retired region_differential harness's `ops::make_ramp` used, and
+# `region_fill_differential::ramp` uses today).
 
 [dev-dependencies]
 # The cursor under test.
@@ -43,5 +44,5 @@ deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill" }
 # `deluge_sample_source`'s cursor) calls out to three `extern "C"`
 # critical-section primitives; this crate links both as plain non-test rlibs,
 # so `tests/real_chunk_gate.rs` supplies host stand-ins backed by this crate,
-# same pattern as region_differential's own `tests/differential.rs`.
+# same pattern the retired region_differential harness's own `tests/differential.rs` used.
 critical-section = { version = "1", features = ["std"] }

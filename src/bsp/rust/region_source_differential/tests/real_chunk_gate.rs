@@ -1,10 +1,10 @@
 //! A payload-offset gate: drives the Rust region-port cursor
 //! (`deluge_sample_source::cursor::SampleSource<ManagerResidency>`) over a REAL
 //! `deluge_resource` manager whose chunk backing is a REAL streamed chunk — not
-//! the Vec-backed fake `region_differential`'s own `RustBackend`/`HarnessResidency`
-//! seeds (`rust_backend.rs`), which stores each cluster's "payload" directly in a
-//! bare `Vec<u8>` with NO header in front of it, so `payload == backing` there by
-//! construction. That made `ManagerPin::payload()`'s pre-fix bug — returning the
+//! the Vec-backed fake that the retired region_differential harness's own
+//! `RustBackend`/`HarnessResidency` seeded (`rust_backend.rs`), which stored each cluster's
+//! "payload" directly in a bare `Vec<u8>` with NO header in front of it, so `payload == backing`
+//! there by construction. That made `ManagerPin::payload()`'s pre-fix bug — returning the
 //! raw manager backing pointer (the chunk HEADER) instead of routing through
 //! `deluge_sample_fill::chunk::payload` (`backing + payload_offset`, the real
 //! PAYLOAD) — invisible to every existing gate. This test proves the fix
@@ -76,8 +76,8 @@ use deluge_sample_source::manager_residency::ManagerResidency;
 // `--cfg test` on THEIR compilations, only ours), so their own `#[cfg(test)]`
 // stubs are compiled out of what this binary pulls in — this test binary must
 // supply the three symbols itself, or the link fails with `undefined symbol:
-// ENTER_CRITICAL_SECTION` (etc). Identical pattern to
-// `region_differential::tests::differential::host_critical_section_stubs` and
+// ENTER_CRITICAL_SECTION` (etc). Identical pattern to the retired region_differential harness's
+// `tests::differential::host_critical_section_stubs` and
 // `deluge_sample_source::host_critical_section_stubs`. `deluge_in_interrupt` is
 // hard-wired `false` — this gate never models the audio-ISR context — so masking
 // is genuinely exercised, not bypassed.
@@ -129,8 +129,8 @@ mod host_critical_section_stubs {
 /// (`sample_stream.cpp`'s `get_cluster`), absent here since this test never spawns
 /// a real loader/fill task and drives every index straight to `Ready` via
 /// `ChunkHarness::seed_and_mark_ready` before the cursor ever sees it (mirrors
-/// `region_differential::rust_backend::HarnessResidency`, which likewise never
-/// simulates a fill landing mid-run). A Loading acquire can still fire during
+/// the retired region_differential harness's `rust_backend::HarnessResidency`, which likewise
+/// never simulated a fill landing mid-run). A Loading acquire can still fire during
 /// this gate's own op sequence (e.g. an out-of-range/not-yet-seeded index, or a
 /// prefetch neighbour this test didn't pre-seed) and must not stall/panic — a
 /// no-op stand-in is correct here, same tier as the critical-section stubs above.
@@ -181,8 +181,8 @@ unsafe extern "C" fn construct_streamed_chunk(
 /// `cargo test` runs `#[test]`s in parallel threads; `deluge_resource::sync::Masked`
 /// and the critical-section stubs above are process-global state, so any two
 /// tests building a manager at once would race it. Every test takes this lock for
-/// its whole run — same pattern as `region_differential`'s/`deluge_sample_source`'s
-/// own `TEST_LOCK`s.
+/// its whole run — same pattern as the retired region_differential harness's and
+/// `deluge_sample_source`'s own `TEST_LOCK`s.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const CLUSTER_SIZE: u32 = 64;
@@ -297,7 +297,7 @@ impl ChunkHarness {
 /// `geo`'s last cluster (index `NUM_CLUSTERS - 1`) has a short tail: `SHORT_TAIL`
 /// bytes instead of a full `CLUSTER_SIZE`, so `resident_bytes_for`'s short-last-
 /// cluster clamp is genuinely exercised (mirrors
-/// `region_differential::cpp_backend::Scenario::dense`'s own short-tail choice).
+/// the retired region_differential harness's `cpp_backend::Scenario::dense` short-tail choice).
 const NUM_CLUSTERS: u32 = 6;
 const SHORT_TAIL: u32 = 20;
 
@@ -338,10 +338,9 @@ fn assert_payload_matches_ramp(out: &RegionOut, index: u32, label: &str) {
 /// The gate itself: an `Op` sequence (acquire forward, re-acquire, forward walk,
 /// reverse, state, short-last-cluster, retain/release/close) driven through a
 /// real `SampleSource<ManagerResidency>` over the real-`StreamedChunk` harness
-/// above — reusing `region_differential`'s op vocabulary in spirit (this crate
-/// doesn't depend on `region_differential` itself; there is no second backend to
-/// diff against here, only the `make_ramp` oracle each `Ready` acquire's payload
-/// must match).
+/// above — reusing the retired region_differential harness's op vocabulary in spirit; there is no
+/// second backend to diff against here, only the `make_ramp` oracle each `Ready` acquire's payload
+/// must match.
 #[test]
 fn cursor_resolves_real_streamed_chunk_payload_offset_correctly() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -437,7 +436,7 @@ fn cursor_resolves_real_streamed_chunk_payload_offset_correctly() {
     );
 }
 
-/// Non-vacuity: mirrors `region_differential::perturb`'s "corrupt one captured
+/// Non-vacuity: mirrors the retired region_differential harness's `perturb` "corrupt one captured
 /// byte, assert the comparison detects it" pattern. Proves the ramp comparison
 /// `assert_payload_matches_ramp` performs above actually has teeth — a captured
 /// payload that has been tampered with must NOT equal `make_ramp` any more; if

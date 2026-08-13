@@ -5,8 +5,8 @@
 //! the underlying convert/stitch primitives (`convert_cluster_data`/`stitch_boundaries`), which
 //! `sample_convert`'s own suite already proved byte-identical against SIMDe.
 //!
-//! Mirrors `region_differential`'s structure: a standalone Cargo crate (NOT a workspace
-//! member — keeps this test-only harness off the firmware/BSP Cargo graph); `build.rs` `cc`-compiles a
+//! Inherits its structure from the retired region_differential harness: a standalone Cargo crate (NOT a
+//! workspace member — keeps this test-only harness off the firmware/BSP Cargo graph); `build.rs` `cc`-compiles a
 //! C++ reference slice ([`cpp_ref`]) into the test binary; `tests/` holds the differential gate
 //! (`tests/differential.rs`, including its non-vacuity/perturb case) and the host end-to-end pipeline
 //! test (`tests/host_end_to_end.rs`).
@@ -20,8 +20,8 @@
 pub mod cpp_ref;
 
 /// The buffer-role/index-dependent, byte-distinguishable seed pattern used across the differential and
-/// host end-to-end tests: tag `t`'s byte `k` is `(t*100 + k) & 0xFF`. Mirrors
-/// `region_differential::ops::make_ramp`'s exact formula, generalized from "cluster index" to a
+/// host end-to-end tests: tag `t`'s byte `k` is `(t*100 + k) & 0xFF`. This is the retired
+/// region_differential harness's ramp formula, generalized from "cluster index" to a
 /// plain `tag` so a test can seed self/prev/next with
 /// distinguishable patterns even when two of them share a cluster index across different scenarios.
 #[must_use]

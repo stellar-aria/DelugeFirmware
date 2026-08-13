@@ -6,7 +6,7 @@ publish = false
 license = "GPL-3.0-or-later"
 
 # SR2d-4 Task 6: the rung's gate. Standalone harness crate (NOT a workspace member — mirrors
-# `region_differential`/`sample_convert`): it `cc`-compiles a slice of the app's C++ into its own test
+# `sample_convert`): it `cc`-compiles a slice of the app's C++ into its own test
 # binary and must not perturb the firmware/BSP Cargo graph.
 #
 # `edition = "2024"`: this crate's test files use `unsafe extern "C"` blocks (matching the shared

@@ -89,8 +89,9 @@ def argparser() -> argparse.ArgumentParser:
         help=(
             "Build configuration (default: release). release = shipping image, "
             "no D_PRINTLN output. relwithdebinfo = device dev build, same -O2 "
-            "plus debug logging. debug = -Og, debuggable but too slow for "
-            "glitch-free audio on hardware."
+            "plus debug logging. debug = -Og plus debug logging; whether that is "
+            "fast enough for glitch-free audio on hardware is UNMEASURED (see "
+            "DELUGE_DEBUG_OPT_LEVEL in the root CMakeLists)."
         ),
     )
     # Anything unrecognised is forwarded to `cargo build` (e.g. --features).

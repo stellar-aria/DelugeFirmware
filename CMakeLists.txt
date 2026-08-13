@@ -68,8 +68,9 @@ else()
 endif(ENABLE_VERSIONED_OUTPUT)
 
 # Optimization level for the DEBUG config. -Og by default (debuggable). The Rust/Embassy device build
-# sets -O2, because it must link DEBUG objects -- Release's slim-LTO objects are unreadable to its
-# linker -- and -Og is too slow for real-time audio on hardware. See the use site for the full story.
+# can raise this to -O2, because it must link DEBUG objects -- Release's slim-LTO objects are
+# unreadable to its linker. Whether -Og is actually too slow for real-time audio on hardware is
+# UNMEASURED; see the use site for what is and is not known.
 set(DELUGE_DEBUG_OPT_LEVEL "-Og" CACHE STRING "Optimization flag for the Debug config (e.g. -Og, -O2)")
 
 # SYSEX Load option
@@ -178,14 +179,36 @@ add_compile_options(
     #
     # DELUGE_DEBUG_OPT_LEVEL exists for the Rust/Embassy device build. build.rs links the C++ app from
     # pre-built object files, and it cannot read Release/RelWithDebInfo's slim-LTO objects, so the device
-    # firmware is forced to consume DEBUG objects. At the default -Og (plus the unconditional
-    # -fno-inline-functions below) that app is far too slow for real-time audio on the RZ/A1L: the engine
-    # reports 15-19 ms routine latencies and force-culls voices continuously. Set this to -O2 to get an
-    # optimized, non-LTO app the Rust link can still consume:
+    # firmware is forced to consume DEBUG objects. Set this to -O2 to get an optimized, non-LTO app the
+    # Rust link can still consume:
     #
     #   cmake -B build-gcc -DDELUGE_DEBUG_OPT_LEVEL=-O2 && ./dbt rust --release
     #
     # The default stays -Og so ordinary Debug builds remain debuggable.
+    #
+    # This comment used to assert that -Og (plus the unconditional -fno-inline-functions below) is "far
+    # too slow for real-time audio on the RZ/A1L", citing 15-19 ms routine latencies and continuous voice
+    # culling. That claim is RETRACTED as unsupported -- not disproven, but not established either, and it
+    # should not be repeated until someone measures it. Both cited symptoms come from wall-clock
+    # instruments that a halted core corrupts, and every observation behind them was taken with a debug
+    # probe attached:
+    #
+    #   - The latency figure is `current_time - last_call_time` in deluge_app_render
+    #     (audio_engine.cpp) -- ENTRY-TO-ENTRY period, not compute time. Anything that stops the core
+    #     between two renders inflates it while the code runs exactly as fast as before.
+    #   - Culling keys off `dspTime = getAverageRunTimeForTask(routine_task_id) * 44100`
+    #     (AudioEngine::setDireness), the measured elapsed run time of the render task. A probe halt
+    #     landing inside a render inflates that too.
+    #
+    # So the two are not independent confirmations; they are one apparatus reported twice, and neither
+    # separates "the code got slower" from "the core stopped". probe-rs is independently suspected of
+    # stalling this target (it is why tools/deluge_jlink.py exists), and deluge_app_render's own warning
+    # already had to be rate-limited once because unthrottled logging turned the latency figure into a
+    # measurement of the logging.
+    #
+    # To settle it: flash ONE -Og image and run it under tools/deluge_run.py (probe-rs) and then
+    # tools/deluge_jlink.py (J-Link), same SD card, comparing the "Audio routine latency high" lines and
+    # cull counts. If J-Link reports nominal figures, the slowness was the probe and -Og is usable.
     $<$<CONFIG:DEBUG>:${DELUGE_DEBUG_OPT_LEVEL}>
     $<$<CONFIG:RELEASE,RELWITHDEBINFO>:-O2>
 

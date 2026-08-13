@@ -445,7 +445,7 @@ endif()
 # NOTE: the C-host `deluge_render` / `deluge_recorder_roundtrip` renderers and their CTests
 # (the padsweep layout-invariance guard + the SampleRecorder round-trip oracle) were retired
 # when the sample-streaming golden moved onto the async Embassy renderer: `deluge_render` is
-# superseded by `src/bsp/rust/golden_vt_render` (`scripts/golden_embassy_diff.sh`), and the
+# superseded by `src/bsp/rust/harness/golden_vt_render` (`scripts/golden_embassy_diff.sh`), and the
 # recorder round-trip oracle now runs there too (`GOLDEN_SCENARIO=recorder_roundtrip`). The
 # padsweep layout-invariance guard has no Embassy replacement yet — a tracked follow-up.
 # `deluge_loadcheck` (parse-only, no sample streaming) stays.

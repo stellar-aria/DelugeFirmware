@@ -127,7 +127,7 @@ mod control;
 #[path = "../../../src/display.rs"]
 mod display;
 /// Storage-generic core of the efatfs read path — see
-/// `../../src/main.rs`'s `mod efatfs_core` doc. Gated on `host_app` (always on
+/// `../../../src/main.rs`'s `mod efatfs_core` doc. Gated on `host_app` (always on
 /// for this package) to mirror that file's cfg exactly, even though this
 /// package's own `#[cfg(feature = "efatfs_streaming")]` is what actually
 /// drives `mount()` (below, in `boot_task`).
@@ -135,7 +135,7 @@ mod display;
 #[path = "../../../src/efatfs_core.rs"]
 mod efatfs_core;
 /// Host counterpart of the device `efatfs_fs.rs` — see
-/// `../../src/main.rs`'s `mod efatfs_host_shim` doc.
+/// `../../../src/main.rs`'s `mod efatfs_host_shim` doc.
 #[cfg(feature = "host_app")]
 #[path = "../../../src/efatfs_host_shim.rs"]
 mod efatfs_host_shim;
@@ -161,7 +161,7 @@ mod sd_image;
 mod services;
 #[path = "../../../src/sim_block.rs"]
 mod sim_block;
-/// Mirrors `../../src/main.rs`'s `mod streaming_loader` — the
+/// Mirrors `../../../src/main.rs`'s `mod streaming_loader` — the
 /// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
 /// symbols (`deluge_streaming_async_active`/`deluge_streaming_signal_fill`)
 /// are always compiled so their call sites link regardless of the
@@ -573,7 +573,7 @@ fn main() {
         // loop and the C++ enqueue path run on — NOT `HP_EXEC` (see the module
         // doc's "Executor + clock"); R5a Phase 1 is what moves this task there,
         // per `preempt::init`'s doc comment above.
-        // Mirrors `../../src/main.rs`'s `host_app` spawn of the same task. Owns the
+        // Mirrors `../../../src/main.rs`'s `host_app` spawn of the same task. Owns the
         // loader queue only once `deluge_streaming_async_active()` reports true
         // (i.e. only under this feature); inert otherwise.
         #[cfg(feature = "async_streaming_loader")]

@@ -2,7 +2,7 @@
 #
 # Lens 1 (streaming-underrun harness) margin sweep + negative controls: a repeatable,
 # deterministic sweep of `lens1-vt-sim` over modeled SD latency (the `sim_latency`
-# throughput/overhead lever — see `../src/sd.rs`'s `latency_for`), reporting the underrun
+# throughput/overhead lever — see `../../src/sd.rs`'s `latency_for`), reporting the underrun
 # curve and the THRESHOLD throughput at which underruns first appear (the "margin": "keeps
 # up for SD latency better than L"), plus negative control A §9 of the spec requires
 # as an ACCEPTANCE criterion, not just supplementary data:

@@ -1,4 +1,0 @@
-# rust-toolchain.toml — mirror region_differential/region_fill_differential.
-[toolchain]
-channel = "nightly"
-components = ["rust-src", "clippy", "rustfmt"]

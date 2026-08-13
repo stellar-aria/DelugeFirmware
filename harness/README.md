@@ -71,6 +71,19 @@ workspace, and they are worth knowing before adding a tenth:
 3. Feature unification makes a shared workspace build a hazard even where the
    symbols do not collide.
 
+## Build artifacts
+
+`./dbt harness run` points every Rust harness at one shared
+`target/harness/` directory. Cargo namespaces artifacts by fingerprint, so
+packages with different `[patch]` sections coexist there safely — but cargo
+takes an exclusive lock per target directory, so two harness runs at once will
+serialize rather than run in parallel.
+
+Running `cargo` by hand inside a harness directory bypasses this and creates a
+local `target/`. That is what produced the 26 GB across 13 directories this
+layout replaced. Prefer `./dbt harness run`; `./dbt harness clean` drops the
+shared tree.
+
 ## Adding a harness
 
 Add a `[[harness]]` block to `registry.toml` and regenerate the table. `gates`

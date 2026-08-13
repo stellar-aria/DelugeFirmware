@@ -65,6 +65,12 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            harness/rust/fs_differential
+            harness/rust/region_fill_differential
+            harness/rust/region_read_differential
+            harness/rust/region_source_differential
       # Host target only. The device target needs -Zbuild-std plus the
       # deluge-sdk setup and stays the separate TODO at the bottom of this file.
       - name: clippy (harness packages)
@@ -133,7 +139,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "crates"
+          workspaces: |
+            harness/rust/fs_differential
+            harness/rust/region_fill_differential
+            harness/rust/region_read_differential
+            harness/rust/region_source_differential
 
       # Prerequisites the registry's probes look for. Cheap enough to install
       # unconditionally rather than per-harness; `dbt harness doctor` is the

@@ -133,7 +133,7 @@ mod board;
 mod control;
 #[path = "../../../src/display.rs"]
 mod display;
-/// Storage-generic core of the efatfs read path — see `../../src/main.rs`'s
+/// Storage-generic core of the efatfs read path — see `../../../src/main.rs`'s
 /// `mod efatfs_core` doc. Gated on `host_app` (always on for this package) to
 /// mirror that file's cfg exactly, even though this package's own
 /// `#[cfg(feature = "efatfs_streaming")]` is what actually drives `mount()`
@@ -141,7 +141,7 @@ mod display;
 #[cfg(feature = "host_app")]
 #[path = "../../../src/efatfs_core.rs"]
 mod efatfs_core;
-/// Host counterpart of the device `efatfs_fs.rs` — see `../../src/main.rs`'s
+/// Host counterpart of the device `efatfs_fs.rs` — see `../../../src/main.rs`'s
 /// `mod efatfs_host_shim` doc.
 #[cfg(feature = "host_app")]
 #[path = "../../../src/efatfs_host_shim.rs"]

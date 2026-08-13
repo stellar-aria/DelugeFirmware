@@ -52,6 +52,8 @@ jobs:
   harness-nightly-matrix:
     name: harness matrix (nightly)
     runs-on: ubuntu-latest
+    needs: nightly-detect
+    if: needs.nightly-detect.outputs.new-commits > 0
     outputs:
       harness: ${{ steps.emit.outputs.harness }}
     steps:
@@ -61,7 +63,8 @@ jobs:
 
   harness-nightly:
     name: harness (${{ matrix.harness }})
-    needs: harness-nightly-matrix
+    needs: [nightly-detect, harness-nightly-matrix]
+    if: needs.nightly-detect.outputs.new-commits > 0
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -70,6 +73,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/bsp/rust/harness/golden_vt_render
       - name: Install prerequisites
         run: sudo apt-get update && sudo apt-get install -y clang ninja-build qemu-user g++-arm-linux-gnueabihf mtools
       - name: Check out the sibling deluge-sdk

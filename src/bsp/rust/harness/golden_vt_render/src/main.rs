@@ -323,7 +323,9 @@ fn stem_export_mode() -> i32 {
 /// fills drained, sample-content correctness.
 #[embassy_executor::task]
 async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBool) {
-    log::info!("golden_vt_render: run_stem_export_scenario: fixture={fixture}, awaiting boot+mount");
+    log::info!(
+        "golden_vt_render: run_stem_export_scenario: fixture={fixture}, awaiting boot+mount"
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if BOOT_MOUNTED.load(Ordering::Acquire) {
@@ -364,14 +366,18 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
             break;
         }
         if Instant::now() >= deadline {
-            log::error!("golden_vt_render: song-load dispatch did not run within the 30s wait budget — wedged");
+            log::error!(
+                "golden_vt_render: song-load dispatch did not run within the 30s wait budget — wedged"
+            );
             hard_exit(2);
         }
         Timer::after_millis(5).await;
     }
     // SAFETY: as above.
     if !unsafe { deluge_scenario_song_load_begin_ok() } {
-        log::error!("golden_vt_render: deluge_scenario_begin_song_load('{song_path}') returned false");
+        log::error!(
+            "golden_vt_render: deluge_scenario_begin_song_load('{song_path}') returned false"
+        );
         hard_exit(2);
     }
 
@@ -382,7 +388,9 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
             break;
         }
         if Instant::now() >= deadline {
-            log::error!("golden_vt_render: song listing did not complete within the 30s wait budget — wedged");
+            log::error!(
+                "golden_vt_render: song listing did not complete within the 30s wait budget — wedged"
+            );
             hard_exit(2);
         }
         Timer::after_millis(5).await;
@@ -391,7 +399,9 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
     // SAFETY: as above.
     let committed = unsafe { deluge_scenario_commit_song_load() };
     if !committed {
-        log::error!("golden_vt_render: deluge_scenario_commit_song_load() returned false (owner queue rejected it)");
+        log::error!(
+            "golden_vt_render: deluge_scenario_commit_song_load() returned false (owner queue rejected it)"
+        );
         hard_exit(2);
     }
 
@@ -402,7 +412,9 @@ async fn run_stem_export_scenario(fixture: &'static str, done: &'static AtomicBo
             break;
         }
         if Instant::now() >= deadline {
-            log::error!("golden_vt_render: song load did not complete within the 60s wait budget — wedged");
+            log::error!(
+                "golden_vt_render: song load did not complete within the 60s wait budget — wedged"
+            );
             hard_exit(2);
         }
         Timer::after_millis(5).await;
@@ -471,13 +483,17 @@ async fn run_recorder_roundtrip_scenario(done: &'static AtomicBool) {
             break;
         }
         if Instant::now() >= deadline {
-            log::error!("golden_vt_render: boot+mount did not complete within the 30s wait budget — wedged");
+            log::error!(
+                "golden_vt_render: boot+mount did not complete within the 30s wait budget — wedged"
+            );
             hard_exit(2);
         }
         Timer::after_millis(5).await;
     }
 
-    log::info!("golden_vt_render: boot+mount confirmed; dispatching recorder round-trip onto the worker fiber");
+    log::info!(
+        "golden_vt_render: boot+mount confirmed; dispatching recorder round-trip onto the worker fiber"
+    );
     // SAFETY: DELUGE_HOST harness C-ABI; boot (confirmed above) has run `deluge_app_init`.
     unsafe { deluge_scenario_start_recorder_roundtrip() };
 
@@ -499,7 +515,9 @@ async fn run_recorder_roundtrip_scenario(done: &'static AtomicBool) {
     // SAFETY: as above.
     let failures = unsafe { deluge_scenario_recorder_roundtrip_failures() };
     if failures != 0 {
-        log::error!("golden_vt_render: recorder round-trip FAILED ({failures} case(s) — see the log above)");
+        log::error!(
+            "golden_vt_render: recorder round-trip FAILED ({failures} case(s) — see the log above)"
+        );
         hard_exit(1);
     }
     log::info!("golden_vt_render: recorder round-trip PASSED (0 failures); exiting cleanly");
@@ -541,7 +559,9 @@ fn main() {
     // records into it rather than loading a corpus song.
     let recorder_mode = std::env::var("GOLDEN_SCENARIO").as_deref() == Ok("recorder_roundtrip");
 
-    log::info!("golden_vt_render: fixture={fixture} budget_ms={budget_ms} recorder_mode={recorder_mode}");
+    log::info!(
+        "golden_vt_render: fixture={fixture} budget_ms={budget_ms} recorder_mode={recorder_mode}"
+    );
 
     // Pack (or reuse) a real FAT SD image from the golden corpus — same
     // tooling `../lens1_vt_sim/`'s scenario driver uses. Must run before
@@ -558,8 +578,7 @@ fn main() {
         // stem-export golden packs the fixture's corpus song + samples.
         let img = if recorder_mode {
             sd_image::format_empty_image()
-        }
-        else {
+        } else {
             sd_image::pack_golden_fixture(&repo_root, &fixture)
         };
         // SAFETY: single-threaded at this point (before any task/executor exists).
@@ -617,8 +636,7 @@ fn main() {
     static DONE: AtomicBool = AtomicBool::new(false);
     if recorder_mode {
         spawner.spawn(run_recorder_roundtrip_scenario(&DONE).unwrap());
-    }
-    else {
+    } else {
         let fixture_static: &'static str = Box::leak(fixture.into_boxed_str());
         spawner.spawn(run_stem_export_scenario(fixture_static, &DONE).unwrap());
     }

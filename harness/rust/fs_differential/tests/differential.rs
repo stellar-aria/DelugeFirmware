@@ -251,7 +251,7 @@ fn assert_write_corpus_result() {
     let e = EFatFs::mount();
 
     let mut want_take01 = vec![0xABu8; 40_000];
-    want_take01.extend(std::iter::repeat(0xCDu8).take(9_000));
+    want_take01.extend(std::iter::repeat_n(0xCDu8, 9_000));
     assert_eq!(
         e.read_file("/REC/take 01.wav"),
         want_take01,

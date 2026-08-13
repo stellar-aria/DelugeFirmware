@@ -70,7 +70,13 @@ fn main() {
 
     let mut objs = Vec::new();
     let mut skipped = Vec::new();
-    collect_objs(&app_objs_dir, &app_objs_dir, &repo_root, &mut objs, &mut skipped);
+    collect_objs(
+        &app_objs_dir,
+        &app_objs_dir,
+        &repo_root,
+        &mut objs,
+        &mut skipped,
+    );
     objs.sort();
     for o in &objs {
         println!("cargo:rerun-if-changed={}", o.display());
@@ -296,7 +302,10 @@ fn assert_build_dir_matches_repo_root(build_dir: &std::path::Path, repo_root: &s
         )
     });
     let expected = repo_root.join("sim").canonicalize().unwrap_or_else(|e| {
-        panic!("expected CMake source root {}/sim missing: {e}", repo_root.display())
+        panic!(
+            "expected CMake source root {}/sim missing: {e}",
+            repo_root.display()
+        )
     });
     if home_dir != expected {
         panic!(

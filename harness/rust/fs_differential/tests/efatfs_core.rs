@@ -424,7 +424,7 @@ fn efatfs_core_adversarial_seek_transfer_overhead() {
         let cluster_at = |i: usize| -> usize {
             if reverse {
                 clusters - 1 - i
-            } else if i % 2 == 0 {
+            } else if i.is_multiple_of(2) {
                 i / 2
             } else {
                 clusters - 1 - i / 2
@@ -1159,7 +1159,7 @@ fn efatfs_write_at_middle_cluster_rewrite_fat32() {
 
     // Rewrite ONLY the middle cluster, in place, at its own byte offset -- alterFile's mid-loop
     // `Stream::write_at(currentWriteClusterIndex << Cluster::size_magnitude, span)`.
-    let new_middle: Vec<u8> = (0..CB).map(|i| (0xC3u8 ^ (i as u8)) & 0xff).collect();
+    let new_middle: Vec<u8> = (0..CB).map(|i| 0xC3u8 ^ (i as u8)).collect();
     let (nc, w) = e.write_at_via_context_noflush(&alter_ctx, MIDDLE * CB as u32, &new_middle);
     assert_eq!(w, CB, "in-place rewrite must write a whole cluster");
     alter_ctx = nc;

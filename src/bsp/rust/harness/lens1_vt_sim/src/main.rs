@@ -441,9 +441,10 @@ fn main() {
     // Same env-var-driven plumbing as every other `LENS1_*` knob above/below (no CLI parser
     // in this binary — see `post_load_sim_latency`'s `LENS1_THROUGHPUT_BPS`/`LENS1_OVERHEAD_US`
     // for the established pattern this follows).
-    let concurrent_listing_every_blocks: Option<u64> = std::env::var("LENS1_CONCURRENT_LISTING_EVERY_BLOCKS")
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let concurrent_listing_every_blocks: Option<u64> =
+        std::env::var("LENS1_CONCURRENT_LISTING_EVERY_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse().ok());
     // A whole-process WALL-clock budget for the driver loop below (Steps 8-9 of
     // `task-0-brief.md`) — real time, never compared against virtual time or
     // against `step_timeout_s` above. PROVISIONAL default: 300s was picked

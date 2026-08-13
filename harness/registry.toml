@@ -69,6 +69,9 @@ requires = ["cargo", "build-embassy-hostapp", "deluge-sdk-sibling", "mtools"]
 ci = "nightly"
 runtime = "~5m"
 
+# ci = "never": needs song-corpus, a directory of real songs on the maintainer's
+# machine that cannot be committed or fixtured. Runs locally via
+# `dbt harness run`; revisit if a synthetic corpus fixture is ever built.
 [[harness]]
 name = "lens1-vt-sim"
 path = "src/bsp/rust/harness/lens1_vt_sim"
@@ -78,9 +81,12 @@ gates = "measures streaming-underrun margin against modeled SD latency; determin
 build = []
 run = ["./sweep.sh"]
 requires = ["cargo", "build-embassy-hostapp", "deluge-sdk-sibling", "mtools", "song-corpus"]
-ci = "nightly"
+ci = "never"
 runtime = "~25m"
 
+# ci = "never": needs song-corpus, a directory of real songs on the maintainer's
+# machine that cannot be committed or fixtured. Runs locally via
+# `dbt harness run`; revisit if a synthetic corpus fixture is ever built.
 [[harness]]
 name = "preemptive-race-tsan"
 path = "src/bsp/rust/harness/preemptive_race_tsan"
@@ -90,7 +96,7 @@ gates = "sustained playback-while-record must report no new data race under Thre
 build = []
 run = ["./run.sh"]
 requires = ["cargo", "clang-tsan", "build-embassy-hostapp", "mtools", "song-corpus"]
-ci = "nightly"
+ci = "never"
 runtime = "~30m"
 
 [[harness]]
@@ -129,6 +135,9 @@ requires = ["song-corpus"]
 ci = "never"
 runtime = "n/a — does not build"
 
+# ci = "never": needs song-corpus, a directory of real songs on the maintainer's
+# machine that cannot be committed or fixtured. Runs locally via
+# `dbt harness run`; revisit if a synthetic corpus fixture is ever built.
 [[harness]]
 name = "golden-embassy-diff"
 path = "."
@@ -138,7 +147,7 @@ gates = "the Embassy host BSP's mixdown must match the C-host golden renderer's 
 build = []
 run = ["scripts/golden_embassy_diff.sh", "cordae"]
 requires = ["cargo", "build-embassy-hostapp", "song-corpus", "mtools", "deluge-sdk-sibling"]
-ci = "nightly"
+ci = "never"
 runtime = "~20m"
 
 [[harness]]

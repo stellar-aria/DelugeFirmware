@@ -10,9 +10,9 @@
 //! that peek, hence [`PeekableMockDriver`] — an independent implementation
 //! of the same `embassy_time_driver::Driver` trait with the peek added.
 //!
-//! Independently implemented (rather than shared as a library) to keep this
-//! package self-contained: [`PeekableMockDriver`] adds the necessary peek
-//! accessor to the standard `embassy_time::MockDriver` trait.
+//! Kept as a copy rather than shared as a library: this file is byte-identical
+//! to the one in the sibling harness package (`golden_vt_render`),
+//! duplicated so each package stays self-contained. Keep the two in sync.
 use core::cell::RefCell;
 use core::task::Waker;
 

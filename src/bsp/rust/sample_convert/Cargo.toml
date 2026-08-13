@@ -8,8 +8,8 @@
 # Standalone crate (NOT a member of crates/'s no_std workspace): it has a std test
 # harness that links the cc-built C++ objects, and its own pinned C++ deps — so it
 # stays isolated from the panic=abort/no_std workspace profiles. Mirrors the
-# proven layout of src/bsp/rust/argon_cc_spike (the SR2b de-risk spike this
-# productionizes) and src/bsp/rust/fs_differential.
+# proven layout of the SR2b de-risk spike (since retired, which this
+# productionizes) and the sibling src/bsp/rust/fs_differential.
 #
 # Dep ownership: build.rs fetches argon + SIMDe pinned to the SAME SHAs the CMake
 # FetchContent uses, into a gitignored third_party/ cache. The crate owns its deps;

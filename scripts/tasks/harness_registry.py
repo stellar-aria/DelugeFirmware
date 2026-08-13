@@ -12,7 +12,7 @@ from pathlib import Path
 
 import tomllib
 
-STATUSES = ("gate", "investigative", "superseded")
+STATUSES = ("gate", "investigative", "unavailable")
 CI_TIERS = ("pr", "nightly", "never")
 
 # Requirement key -> how to satisfy it. Every key a registry entry may name must

@@ -115,8 +115,8 @@ def cmd_run(root: Path, name: str, skip_checks: bool) -> int:
         print(f"known: {', '.join(h.name for h in entries)}", file=sys.stderr)
         return 1
 
-    if match.status == "superseded":
-        print(f"warning: '{name}' is marked superseded -- {match.gates}\n")
+    if match.status == "unavailable":
+        print(f"warning: '{name}' is marked unavailable -- {match.gates}\n")
 
     missing = [r for r in match.requires if not hr.probe(r, root)]
     if missing and not skip_checks:
@@ -144,7 +144,7 @@ def cmd_run(root: Path, name: str, skip_checks: bool) -> int:
 
 def cmd_ci(root: Path, tier: str) -> int:
     entries = _load(root)
-    names = [h.name for h in entries if h.ci == tier and h.status != "superseded"]
+    names = [h.name for h in entries if h.ci == tier and h.status != "unavailable"]
     print(json.dumps({"harness": names}))
     return 0
 

@@ -137,7 +137,7 @@ status = "gate"
 gates = "the Embassy host BSP's mixdown must match the C-host golden renderer's for the same fixture"
 build = []
 run = ["scripts/golden_embassy_diff.sh", "cordae"]
-requires = ["cargo", "build-embassy-hostapp", "song-corpus", "mtools"]
+requires = ["cargo", "build-embassy-hostapp", "song-corpus", "mtools", "deluge-sdk-sibling"]
 ci = "nightly"
 runtime = "~20m"
 

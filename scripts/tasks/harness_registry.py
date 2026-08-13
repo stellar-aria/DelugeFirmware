@@ -5,6 +5,7 @@ Split from task-harness.py so the parsing and probing logic is unit-testable
 without invoking dbt or spawning a build. See test_harness_registry.py.
 """
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,7 @@ PROBES = {
         "cmake -B build-embassy-hostapp -S sim -G Ninja -DDELUGE_SIM_X64=ON && "
         "cmake --build build-embassy-hostapp"
     ),
-    "song-corpus": "set DELUGE_SONG_CORPUS to a directory of .XML songs",
+    "song-corpus": "set DELUGE_BACKUP (default ~/Deluge Backup) or DELUGE_SONG_CORPUS to a directory of .XML songs",
     "deluge-sdk-sibling": (
         "clone https://github.com/FirestormAudio/deluge-embassy as a sibling "
         "checkout at ../deluge-sdk -- lens1_vt_sim and golden_vt_render carry a "
@@ -119,10 +120,11 @@ def probe(requirement: str, root: Path) -> bool:
             # inside it -- hence `root.parent`.
             return (root.parent / "deluge-sdk").is_dir()
         case "song-corpus":
-            import os
-
-            corpus = os.environ.get("DELUGE_SONG_CORPUS")
-            return bool(corpus) and Path(corpus).is_dir()
+            for var in ("DELUGE_SONG_CORPUS", "DELUGE_BACKUP"):
+                value = os.environ.get(var)
+                if value and Path(value).is_dir():
+                    return True
+            return (Path.home() / "Deluge Backup").is_dir()
         case _:
             return False
 
@@ -134,8 +136,11 @@ def markdown_table(harnesses: list[Harness]) -> str:
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for h in harnesses:
+        # Escape pipes in fields to preserve table structure
+        escaped_gates = h.gates.replace("|", "\\|")
+        escaped_runtime = h.runtime.replace("|", "\\|")
         lines.append(
-            f"| {h.name} | {h.kind} | {h.status} | {h.gates} | {h.ci} | {h.runtime} |"
+            f"| {h.name} | {h.kind} | {h.status} | {escaped_gates} | {h.ci} | {escaped_runtime} |"
         )
     return "\n".join(lines) + "\n"
 

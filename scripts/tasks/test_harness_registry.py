@@ -5,10 +5,12 @@ Run directly with:
     python3 scripts/tasks/test_harness_registry.py
 """
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -91,6 +93,16 @@ class ProbeTest(unittest.TestCase):
     def test_unknown_requirement_probes_false(self):
         self.assertFalse(hr.probe("a-pony", Path.cwd()))
 
+    def test_song_corpus_via_deluge_backup(self):
+        # Test that song-corpus probe returns True when DELUGE_BACKUP points
+        # at a real directory and DELUGE_SONG_CORPUS is unset.
+        backup_dir = Path(tempfile.mkdtemp())
+        root = Path("/home/kate/GitHub/DelugeFirmware")
+        with mock.patch.dict(
+            os.environ, {"DELUGE_SONG_CORPUS": "", "DELUGE_BACKUP": str(backup_dir)}
+        ):
+            self.assertTrue(hr.probe("song-corpus", root))
+
 
 class MarkdownTableTest(unittest.TestCase):
     def test_table_has_a_row_per_harness(self):
@@ -100,10 +112,35 @@ class MarkdownTableTest(unittest.TestCase):
         self.assertIn("alpha must equal beta", table)
         self.assertTrue(table.startswith("|"))
 
+    def test_table_escapes_pipes_in_gates(self):
+        # Ensure pipes in gates text are escaped to preserve table structure
+        entries = hr.load_registry(self._root_with_pipe())
+        table = hr.markdown_table(entries)
+        # The pipe in "alpha|beta" should be escaped as "alpha\|beta"
+        self.assertIn("alpha\\|beta", table)
+        # Count pipes in header row and data row to verify structure is preserved
+        lines = table.split("\n")
+        header_row = lines[0]
+        data_row = lines[2]
+        # Both should have the same number of pipes (7: leading + 5 separators + trailing)
+        self.assertEqual(header_row.count("|"), 7)
+        # Data row has 8 because of the escaped pipe, but that's just the escaped
+        # version, not an extra separator
+        self.assertGreaterEqual(data_row.count("|"), 7)
+
     def _root(self):
         root = Path(tempfile.mkdtemp())
         (root / "harness").mkdir()
         (root / "harness" / "registry.toml").write_text(MINIMAL)
+        return root
+
+    def _root_with_pipe(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "harness").mkdir()
+        toml_with_pipe = MINIMAL.replace(
+            'gates = "alpha must equal beta"', 'gates = "alpha|beta must equal charlie"'
+        )
+        (root / "harness" / "registry.toml").write_text(toml_with_pipe)
         return root
 
 

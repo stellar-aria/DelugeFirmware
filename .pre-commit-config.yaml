@@ -33,6 +33,13 @@ repos:
         types: [rust]
         files: ^src/bsp/rust/.*\.rs$
         pass_filenames: false
+      - id: cargo-fmt-harness
+        name: rustfmt (harness)
+        entry: bash -c 'for m in harness/rust/*/Cargo.toml; do cargo fmt --manifest-path "$m" --check -- || exit 1; done'
+        language: system
+        types: [rust]
+        files: ^harness/rust/.*\.rs$
+        pass_filenames: false
       - id: libdeluge-boundary
         name: libdeluge platform boundary
         description: src/deluge must include <libdeluge/...>, not HAL headers directly

@@ -16,7 +16,7 @@ device target. It does **not** integrate anything into the firmware — no fiber
 no `file_io.h`/`stream_io.h` wiring, no C FatFS deletion. That's SP1+.
 
 The instrument is a host-only **differential test harness**
-(`src/bsp/rust/fs_differential/`): both filesystems mounted over the *same* in-RAM FAT
+(`harness/rust/fs_differential/`): both filesystems mounted over the *same* in-RAM FAT
 image, driven through a common `FsOps`/`FsOpsMut` trait, and diffed byte-for-byte on
 content and entry-for-entry on directory-listing metadata. C FatFS is compiled for real
 (via `cc`, from the actual vendored `src/fatfs/ff.c`/`ffconf.h`) — this is not a
@@ -38,7 +38,7 @@ both bugs red, then proved the fixes green.
 pseudo-entries for non-root directories; C FatFS's `f_readdir` never does (it suppresses
 them internally). This is an API-convention difference, not a data/metadata bug in
 either library — the harness filters `.`/`..` out of `EFatFs::read_dir` so both backends
-present the same logical directory view (`src/bsp/rust/fs_differential/src/efatfs.rs`).
+present the same logical directory view (`harness/rust/fs_differential/src/efatfs.rs`).
 
 **Proven non-vacuous:** the differential was validated against itself via deliberate
 fault injection (a 1-byte content mutation, an extra directory entry, a size-only
@@ -161,10 +161,10 @@ see each stack's own **per-operation software overhead** (allocation, buffer cop
 FAT-chain walking, cluster-boundary bookkeeping) relative to the other — it is a
 gross-overhead sanity check, **not a throughput-parity verdict**.
 
-Test: `src/bsp/rust/fs_differential/tests/differential.rs::throughput_proxy_fat32`. Run:
+Test: `harness/rust/fs_differential/tests/differential.rs::throughput_proxy_fat32`. Run:
 
 ```
-cd src/bsp/rust/fs_differential
+cd harness/rust/fs_differential
 fixtures/mk_fixture.sh /tmp
 SP0_FAT16=/tmp/fat16.img SP0_FAT32=/tmp/fat32.img cargo test --release throughput_proxy_fat32 -- --nocapture
 ```

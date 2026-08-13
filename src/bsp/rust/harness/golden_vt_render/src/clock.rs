@@ -10,9 +10,10 @@
 //! that peek, hence [`PeekableMockDriver`] — an independent implementation
 //! of the same `embassy_time_driver::Driver` trait with the peek added.
 //!
-//! Kept as a copy rather than shared as a library: this file is byte-identical
-//! to the one in the sibling harness package (`lens1_vt_sim`),
-//! duplicated so each package stays self-contained. Keep the two in sync.
+//! Kept as a copy rather than shared as a library: this file is kept in sync
+//! by hand with the near-identical copy in the sibling harness package
+//! (`lens1_vt_sim`) -- the two differ only in this comment, which names each
+//! file's own sibling -- duplicated so each package stays self-contained.
 use core::cell::RefCell;
 use core::task::Waker;
 

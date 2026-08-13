@@ -36,6 +36,18 @@ jobs:
       - name: rustfmt (bsp)
         run: cargo fmt --manifest-path src/bsp/rust/Cargo.toml --check
 
+      # Excluded from the crates/ workspace (see crates/Cargo.toml's `exclude`),
+      # so `cargo fmt --manifest-path crates/Cargo.toml --all` skips it. Check
+      # it explicitly rather than leave it with no rustfmt coverage at all.
+      - name: rustfmt (deluge_sample_convert)
+        run: cargo fmt --manifest-path crates/deluge_sample_convert/Cargo.toml --check
+
+      - name: rustfmt (harness)
+        run: |
+          for m in harness/rust/*/Cargo.toml src/bsp/rust/harness/*/Cargo.toml; do
+            cargo fmt --manifest-path "$m" --check
+          done
+
   clippy:
     name: clippy (crates)
     runs-on: ubuntu-latest
@@ -51,6 +63,38 @@ jobs:
 
       - name: clippy (crates)
         run: cargo clippy --manifest-path crates/Cargo.toml --all-targets -- -D warnings
+
+      # Excluded from the crates/ workspace (see crates/Cargo.toml's `exclude`),
+      # so the --all-targets sweep above skips it. Check it explicitly rather
+      # than leave it with no clippy coverage at all.
+      - name: clippy (deluge_sample_convert)
+        run: cargo clippy --manifest-path crates/deluge_sample_convert/Cargo.toml --all-targets -- -D warnings
+
+  clippy-harness:
+    name: clippy (harness/rust, host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            harness/rust/fs_differential
+            harness/rust/region_fill_differential
+            harness/rust/region_read_differential
+            harness/rust/region_source_differential
+      # Host target only. The BSP and its two Embassy harnesses
+      # (src/bsp/rust/harness/{golden_vt_render,lens1_vt_sim}) are deliberately
+      # excluded here: they need the sibling deluge-sdk checkout and a C++
+      # object closure that this job doesn't build. The device target also
+      # needs -Zbuild-std plus the deluge-sdk setup and stays the separate
+      # TODO at the bottom of this file.
+      - name: clippy (harness packages)
+        run: |
+          for m in harness/rust/*/Cargo.toml; do
+            echo "== $m"
+            cargo clippy --manifest-path "$m" --all-targets -- -D warnings
+          done
 
   test:
     name: test (crates)
@@ -87,6 +131,59 @@ jobs:
         with:
           name: Event File
           path: ${{ github.event_path }}
+
+  harness-matrix:
+    name: harness matrix (pr)
+    runs-on: ubuntu-latest
+    outputs:
+      harness: ${{ steps.emit.outputs.harness }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: emit
+        run: echo "harness=$(DBT_NOENV=1 DBT_NO_SYNC=1 ./dbt harness ci --tier pr | jq -c .harness)" >> "$GITHUB_OUTPUT"
+
+  harness:
+    name: harness (${{ matrix.harness }})
+    needs: harness-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.harness-matrix.outputs.harness) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            harness/rust/fs_differential
+            harness/rust/region_fill_differential
+            harness/rust/region_read_differential
+            harness/rust/region_source_differential
+
+      # Prerequisites the registry's probes look for. Cheap enough to install
+      # unconditionally rather than per-harness; `dbt harness doctor` is the
+      # authority on what each one needs.
+      - name: Install harness prerequisites
+        run: sudo apt-get update && sudo apt-get install -y mtools clang
+
+      - name: Run harness
+        run: DBT_NOENV=1 DBT_NO_SYNC=1 ./dbt harness run ${{ matrix.harness }}
+
+  harness-index:
+    name: harness index up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Regenerate the table and diff
+        run: |
+          DBT_NOENV=1 DBT_NO_SYNC=1 ./dbt harness list --markdown > /tmp/table.md
+          sed -n '/BEGIN GENERATED TABLE/,/END GENERATED TABLE/p' harness/README.md \
+            | sed '1d;$d' > /tmp/committed.md
+          diff -u /tmp/committed.md /tmp/table.md || {
+            echo "harness/README.md's table is stale -- regenerate it (see the README)."
+            exit 1
+          }
 
   # TODO: BSP clippy/build for armv7a-none-eabihf. Needs nightly -Z build-std
   # (rust-src is already pinned in src/bsp/rust/rust-toolchain.toml) and the

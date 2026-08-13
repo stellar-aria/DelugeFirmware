@@ -1,4 +1,0 @@
-# rust-toolchain.toml — mirror crates/rust-toolchain.toml channel
-[toolchain]
-channel = "nightly"
-components = ["rust-src", "clippy", "rustfmt"]

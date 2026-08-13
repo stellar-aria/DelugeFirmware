@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Embassy-vs-golden differential: renders `golden_vt_render` (the Embassy-host-BSP
-# golden renderer, `src/bsp/rust/golden_vt_render/`) in MIXDOWN mode for one fixture
+# golden renderer, `src/bsp/rust/harness/golden_vt_render/`) in MIXDOWN mode for one fixture
 # and byte-compares its output against the SAME established golden baseline
 # `scripts/golden_mixdown.sh` gates the C-host `deluge_render` sim against — not a
 # fresh reference, the actual `<fixture>_MIXDOWN.golden.wav.sha256` in
@@ -50,7 +50,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$REPO/build-embassy-hostapp}"
 GOLDEN_DIR="${DELUGE_GOLDEN_DIR:-$HOME/.cache/deluge-golden}"
-CRATE_DIR="$REPO/src/bsp/rust/golden_vt_render"
+CRATE_DIR="$REPO/src/bsp/rust/harness/golden_vt_render"
 
 FIXTURE="${1:-}"
 case "$FIXTURE" in

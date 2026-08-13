@@ -19,9 +19,9 @@ crate-type = ["rlib"]
 
 [dependencies]
 # fill_logic::finish_convert_stitch calls convert_cluster/stitch_boundaries. Path to the
-# existing crate under src/bsp/rust (NOT a crates/ workspace member — its build.rs is
+# sibling crate under crates/ (NOT itself a crates/ workspace member — its build.rs is
 # target-aware).
-deluge_sample_convert = { path = "../../src/bsp/rust/sample_convert" }
+deluge_sample_convert = { path = "../deluge_sample_convert" }
 # The FILL_CONTEXTS static is a blocking Mutex<CriticalSectionRawMutex, _>. Blocking
 # primitive only — no embassy-executor.
 embassy-sync = "0.8.0"

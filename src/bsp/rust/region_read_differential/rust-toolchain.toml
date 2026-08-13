@@ -1,4 +1,0 @@
-# rust-toolchain.toml — mirror src/bsp/rust/region_fill_differential / sample_convert.
-[toolchain]
-channel = "nightly"
-components = ["rust-src", "clippy", "rustfmt"]

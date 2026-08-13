@@ -63,7 +63,7 @@ std::fprintf(stderr, "PROBE_OVERVIEW_SCAN_HIT cluster=%d investigated=%d count=%
 ninja -C build-embassy-hostapp deluge_app NE10 eyalroz_printf deluge_dsp deluge_scheduler deluge_foundation deluge_midi
 ```
 
-— then rebuilt and ran the Lens 1 harness (`src/bsp/rust/lens1_vt_sim`) under a hard timeout, `stdout`
+— then rebuilt and ran the Lens 1 harness (`src/bsp/rust/harness/lens1_vt_sim`) under a hard timeout, `stdout`
 and `stderr` combined so the probe lines and the `LENS1_RESULT` line land in the same capture:
 
 ```
@@ -693,7 +693,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 `lens1_vt_sim` selftest (`NO_BUILD=1`, binary already built), **both modes PASS**:
 
 ```
-$ cd src/bsp/rust/lens1_vt_sim && NO_BUILD=1 ./sweep.sh selftest
+$ cd src/bsp/rust/harness/lens1_vt_sim && NO_BUILD=1 ./sweep.sh selftest
   --selftest-block:        PASS
   --selftest-block-nested: PASS
 SELFTEST: PASS

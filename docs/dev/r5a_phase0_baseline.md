@@ -101,7 +101,7 @@ disposable working copy first.
 ### Run 1 — default features (`efatfs_streaming`/`async_streaming_loader` OFF)
 
 ```
-cd src/bsp/rust/lens1_vt_sim
+cd src/bsp/rust/harness/lens1_vt_sim
 cargo build --release
 cp --sparse=always /tmp/deluge-lens1-task4-shared.img /tmp/deluge-lens1-task6-work.img
 timeout 180 env DELUGE_SD_IMAGE=/tmp/deluge-lens1-task6-work.img LENS1_FIXTURE=cordae \

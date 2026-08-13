@@ -9,7 +9,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$here/../.." && pwd)"
+root="$(cd "$here/../../.." && pwd)"
 src="$here/dsp_diff.cpp"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT

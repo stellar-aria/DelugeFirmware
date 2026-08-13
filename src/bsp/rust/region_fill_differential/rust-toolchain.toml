@@ -1,4 +1,4 @@
-# rust-toolchain.toml — mirror src/bsp/rust/sample_convert / region_differential.
+# rust-toolchain.toml — mirror crates/deluge_sample_convert / region_differential.
 [toolchain]
 channel = "nightly"
 components = ["rust-src", "clippy", "rustfmt"]

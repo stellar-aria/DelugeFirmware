@@ -58,9 +58,9 @@ const SIMDE_SHA: &str = "71fd833d9666141edcd1d3c109a80e228303d8d7"; // == tag v0
 
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // src/bsp/rust/sample_convert -> repo root is four levels up.
+    // crates/deluge_sample_convert -> repo root is two levels up.
     let repo = manifest
-        .join("../../../..")
+        .join("../..")
         .canonicalize()
         .expect("resolve repo root");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());

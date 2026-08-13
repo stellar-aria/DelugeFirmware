@@ -40,7 +40,7 @@
 //! ## Reusing `sample_convert`'s fetched argon + SIMDe, not fetching a second copy
 //!
 //! `deluge_sample_convert`'s build.rs fetches argon + SIMDe (pinned by SHA) into its own
-//! `sample_convert/third_party/` cache. Since `deluge_sample_convert` is THIS crate's normal
+//! `crates/deluge_sample_convert/third_party/` cache. Since `deluge_sample_convert` is THIS crate's normal
 //! dependency, Cargo always finishes building it (running its build.rs to completion) before running
 //! this one — so that cache is guaranteed to exist by the time this script needs it, from ANY directory
 //! `cargo test`/`cargo build` is invoked from (Cargo resolves the whole dependency graph bottom-up
@@ -66,24 +66,24 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shim_cpp.display());
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Reused from sample_convert's own fetch (see the module doc above) — NOT fetched again here.
+    // Reused from deluge_sample_convert's own fetch (see the module doc above) — NOT fetched again here.
     let sample_convert_dir = manifest
-        .join("../sample_convert")
+        .join("../../../../crates/deluge_sample_convert")
         .canonicalize()
-        .expect("resolve sample_convert dir");
+        .expect("resolve deluge_sample_convert dir");
     let argon_inc = sample_convert_dir.join("third_party/argon/include");
     let simde_root = sample_convert_dir.join("third_party/simde");
     assert!(
         argon_inc.join("argon.hpp").is_file(),
-        "sample_convert's fetched argon cache not found at {} — expected sample_convert's build.rs \
-         to have fetched it first (it's this crate's normal dependency, built before this script \
-         runs). Try `cargo build` from src/bsp/rust/sample_convert/ first if invoking this crate in \
-         isolation somehow skipped that.",
+        "deluge_sample_convert's fetched argon cache not found at {} — expected deluge_sample_convert's \
+         build.rs to have fetched it first (it's this crate's normal dependency, built before this \
+         script runs). Try `cargo build` from crates/deluge_sample_convert/ first if invoking this \
+         crate in isolation somehow skipped that.",
         argon_inc.display()
     );
     assert!(
         simde_root.join("simde/arm/neon.h").is_file(),
-        "sample_convert's fetched SIMDe cache not found at {}",
+        "deluge_sample_convert's fetched SIMDe cache not found at {}",
         simde_root.display()
     );
 

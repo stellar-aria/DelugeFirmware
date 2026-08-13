@@ -9,7 +9,12 @@ resolver = "2"
 members = ["deluge_alloc", "deluge_resource", "deluge_rust", "deluge_sample_source", "deluge_sample_fill", "deluge_sample_reader", "deluge_sample_stream"]
 # cargo-fuzz crate has its own [profile] + is nightly/standalone — keep it out of
 # the workspace (it still path-deps deluge_alloc directly).
-exclude = ["deluge_alloc/fuzz"]
+# `deluge_sample_convert` is likewise standalone: its build.rs `cc`-compiles app
+# C++ and it has a std test harness, so it must stay clear of this workspace's
+# no_std / panic="abort" profiles. It is a production dependency of the Rust BSP
+# all the same — it lives here because that is what it is, not because it is a
+# member.
+exclude = ["deluge_alloc/fuzz", "deluge_sample_convert"]
 
 # Profiles must live at the workspace root (cargo ignores [profile] in members).
 [profile.release]

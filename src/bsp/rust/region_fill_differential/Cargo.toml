@@ -18,7 +18,7 @@ license = "GPL-3.0-or-later"
 # already-`cc`-compiled `convert_word`/`stitch_boundaries` object code the C++ reference slice
 # (`cpp/harness_shim.cpp`) links against — see build.rs's doc for why this crate deliberately does
 # NOT recompile convert.cpp/stitch.cpp itself.
-deluge_sample_convert = { path = "../sample_convert" }
+deluge_sample_convert = { path = "../../../../crates/deluge_sample_convert" }
 
 [dev-dependencies]
 # Host end-to-end test only: a real `deluge_resource` manager over a test heap, and the heap it's

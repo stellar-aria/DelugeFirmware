@@ -38,7 +38,7 @@ heapless = { version = "0.8", default-features = false }
 # `fill_logic` compiles on every tier this crate builds (device, host_app, plain host) -- see that
 # module's doc. Its own build.rs is target-aware (device vs host; SR2d-4 Task 5), so this resolves
 # correctly on all three.
-deluge_sample_convert = { path = "sample_convert" }
+deluge_sample_convert = { path = "../../../crates/deluge_sample_convert" }
 
 # C2a: the relocated cluster-fill core. `fill_logic` (Task 1) lands here; deluge-bsp-rust's
 # streaming_loader imports it instead of its own `mod fill_logic`. `native_fill` (Task 3) pulls in

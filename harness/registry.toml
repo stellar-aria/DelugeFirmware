@@ -1,0 +1,166 @@
+# The harness estate. `dbt harness` reads this; harness/README.md's table is
+# generated from it. Every entry must state what it gates -- a harness that
+# cannot say what regression it catches is one nobody can decide to delete.
+#
+# status: gate          -- a standing regression gate; breakage is a real signal
+#         investigative -- a rig for answering a question, run on demand
+#         superseded    -- kept for reference, scheduled for deletion
+# ci:     pr | nightly | never
+
+[[harness]]
+name = "fs-differential"
+path = "harness/rust/fs_differential"
+kind = "differential"
+status = "gate"
+gates = "embedded-fatfs must agree with the reference FAT implementation on every filesystem operation"
+build = ["fixtures/mk_fixture.sh"]
+run = ["cargo", "test"]
+env = { SP0_FAT32 = "fixtures/fat32.img", SP0_FAT16 = "fixtures/fat16.img" }
+requires = ["cargo", "mtools"]
+ci = "pr"
+runtime = "~1m"
+
+[[harness]]
+name = "region-fill-differential"
+path = "harness/rust/region_fill_differential"
+kind = "differential"
+status = "gate"
+gates = "the Rust cluster fill must stay byte-identical to the C++ convert/stitch reference"
+build = ["cargo", "build", "--tests"]
+run = ["cargo", "test"]
+requires = ["cargo"]
+ci = "pr"
+runtime = "~1m"
+
+[[harness]]
+name = "region-read-differential"
+path = "harness/rust/region_read_differential"
+kind = "differential"
+status = "gate"
+gates = "the sample range-reader must resolve the same frames as the chunk-payload oracle"
+build = ["cargo", "build", "--tests"]
+run = ["cargo", "test"]
+requires = ["cargo"]
+ci = "pr"
+runtime = "~1m"
+
+[[harness]]
+name = "region-source-differential"
+path = "harness/rust/region_source_differential"
+kind = "differential"
+status = "gate"
+gates = "the region cursor must resolve a chunk's payload, not its header, over real streamed backing"
+build = ["cargo", "build", "--tests"]
+run = ["cargo", "test"]
+requires = ["cargo"]
+ci = "pr"
+runtime = "~1m"
+
+[[harness]]
+name = "golden-vt-render"
+path = "src/bsp/rust/harness/golden_vt_render"
+kind = "simulation"
+status = "gate"
+gates = "the SampleRecorder record-then-read-back round trip must be byte-exact on the Embassy host BSP (the ex-deluge_recorder_roundtrip oracle, converged onto Embassy)"
+build = ["cargo", "build", "--release"]
+run = ["cargo", "run", "--release"]
+env = { GOLDEN_SCENARIO = "recorder_roundtrip" }
+requires = ["cargo", "build-embassy-hostapp", "deluge-sdk-sibling", "mtools"]
+ci = "nightly"
+runtime = "~5m"
+
+[[harness]]
+name = "lens1-vt-sim"
+path = "src/bsp/rust/harness/lens1_vt_sim"
+kind = "simulation"
+status = "investigative"
+gates = "measures streaming-underrun margin against modeled SD latency; deterministic virtual time"
+build = []
+run = ["./sweep.sh"]
+requires = ["cargo", "build-embassy-hostapp", "deluge-sdk-sibling", "mtools", "song-corpus"]
+ci = "nightly"
+runtime = "~25m"
+
+[[harness]]
+name = "preemptive-race-tsan"
+path = "src/bsp/rust/harness/preemptive_race_tsan"
+kind = "sanitizer"
+status = "gate"
+gates = "sustained playback-while-record must report no new data race under ThreadSanitizer"
+build = []
+run = ["./run.sh"]
+requires = ["cargo", "clang-tsan", "build-embassy-hostapp", "mtools", "song-corpus"]
+ci = "nightly"
+runtime = "~30m"
+
+[[harness]]
+name = "snapshot-primitive-tsan"
+path = "harness/cpp/tsan"
+kind = "sanitizer"
+status = "gate"
+gates = "Published<T> and SpscRing<E,N> must be race-free under concurrent stress"
+build = []
+run = ["./run.sh", "10"]
+requires = ["clang-tsan"]
+ci = "pr"
+runtime = "~3m"
+
+[[harness]]
+name = "dsp-diff"
+path = "harness/cpp/dsp_diff"
+kind = "differential"
+status = "gate"
+gates = "the ARM/NEON DSP fast paths must be byte-identical to the portable host fallback"
+build = []
+run = ["./run.sh"]
+requires = ["arm-linux-gnueabihf-gcc", "qemu-arm"]
+ci = "nightly"
+runtime = "~5m"
+
+[[harness]]
+name = "golden-mixdown"
+path = "."
+kind = "differential"
+status = "superseded"
+gates = "superseded by golden-embassy-diff: the C-host deluge_render target this script's check/update/padsweep verbs drove was deleted (sim/CMakeLists.txt) when the sample-streaming golden moved onto the async Embassy renderer; running `check`/`update`/`padsweep` now fails at the cmake build step (no such target). Only this script's `reconstruct` verb still works, and it is a fixture-prep helper the Rust harnesses call internally, not a standalone gate."
+build = []
+run = ["scripts/golden_mixdown.sh", "check"]
+requires = ["song-corpus"]
+ci = "never"
+runtime = "n/a — does not build"
+
+[[harness]]
+name = "golden-embassy-diff"
+path = "."
+kind = "differential"
+status = "gate"
+gates = "the Embassy host BSP's mixdown must match the C-host golden renderer's for the same fixture"
+build = []
+run = ["scripts/golden_embassy_diff.sh", "cordae"]
+requires = ["cargo", "build-embassy-hostapp", "song-corpus", "mtools"]
+ci = "nightly"
+runtime = "~20m"
+
+[[harness]]
+name = "alloc-fuzz"
+path = "crates/deluge_alloc/fuzz"
+kind = "fuzz"
+status = "superseded"
+gates = "the TLSF allocator must not corrupt its free lists under arbitrary alloc/free sequences -- UNRUNNABLE as it stands: `cargo build`/`cargo fuzz run` on this package fails with cargo error \"current package believes it's in a workspace when it's not\" (crates/Cargo.toml's `exclude = [\"deluge_alloc/fuzz\", ...]` is not taking effect), reproduced on stable, 1.85, and nightly cargo. The brief's `run` target name (\"alloc\") was also wrong -- the real targets, per fuzz_targets/, are \"ops\" and \"slab\"."
+build = []
+run = ["cargo", "+nightly", "fuzz", "run", "ops"]
+requires = ["cargo"]
+ci = "never"
+runtime = "unbounded"
+
+[[harness]]
+name = "memmove-fuzz"
+path = "tests/fuzz"
+kind = "fuzz"
+status = "superseded"
+gates = "the hand-written memmove must match libc semantics on arbitrary overlapping ranges -- UNRUNNABLE as it stands: this is a standalone CMake project (its own top-level CMakeLists.txt, no ctest/enable_testing wiring at all, so the brief's `ctest -R memmove_fuzz` draft could never have worked). It hard-codes ARM/NEON flags (-mfpu=neon -mfloat-abi=hard) plus -fsanitize=fuzzer, so the default host GCC toolchain rejects all three flags outright; switching to clang with an arm-linux-gnueabihf sysroot compiles but fails to LINK -- libclang_rt.fuzzer.a and friends are not present for the arm-unknown-linux-gnueabihf target on this machine. No requires key in the closed vocabulary covers a libFuzzer-capable ARM clang + compiler-rt; needs a toolchain this repo does not otherwise depend on."
+build = []
+run = ["cmake", "-S", "tests/fuzz", "-B", "build-memmove-fuzz"]
+requires = []
+ci = "never"
+runtime = "n/a — does not link"

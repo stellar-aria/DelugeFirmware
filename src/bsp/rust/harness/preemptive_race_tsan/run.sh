@@ -62,7 +62,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"          # src/bsp/rust
+RUST_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"       # src/bsp/rust
 REPO_ROOT="$(cd "$RUST_DIR/../../.." && pwd)"
 TSAN_BUILD_DIR="${TSAN_BUILD_DIR:-$REPO_ROOT/build-embassy-hostapp-tsan}"
 

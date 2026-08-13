@@ -125,13 +125,13 @@ mod sys {
 
 // Reuse deluge-bsp-rust's own source files verbatim via `#[path]` — the same
 // pattern `../lens1_vt_sim/`/`tests/*.rs` already use (see `HOST_HARNESS.md`).
-#[path = "../../src/audio_host.rs"]
+#[path = "../../../src/audio_host.rs"]
 mod audio_host;
-#[path = "../../src/board.rs"]
+#[path = "../../../src/board.rs"]
 mod board;
-#[path = "../../src/control.rs"]
+#[path = "../../../src/control.rs"]
 mod control;
-#[path = "../../src/display.rs"]
+#[path = "../../../src/display.rs"]
 mod display;
 /// Storage-generic core of the efatfs read path — see `../../src/main.rs`'s
 /// `mod efatfs_core` doc. Gated on `host_app` (always on for this package) to
@@ -139,30 +139,30 @@ mod display;
 /// `#[cfg(feature = "efatfs_streaming")]` is what actually drives `mount()`
 /// (below, in `boot_task`).
 #[cfg(feature = "host_app")]
-#[path = "../../src/efatfs_core.rs"]
+#[path = "../../../src/efatfs_core.rs"]
 mod efatfs_core;
 /// Host counterpart of the device `efatfs_fs.rs` — see `../../src/main.rs`'s
 /// `mod efatfs_host_shim` doc.
 #[cfg(feature = "host_app")]
-#[path = "../../src/efatfs_host_shim.rs"]
+#[path = "../../../src/efatfs_host_shim.rs"]
 mod efatfs_host_shim;
-#[path = "../../src/ffi.rs"]
+#[path = "../../../src/ffi.rs"]
 mod ffi;
-#[path = "../../src/ffi_extra.rs"]
+#[path = "../../../src/ffi_extra.rs"]
 mod ffi_extra;
-#[path = "../../src/fiber.rs"]
+#[path = "../../../src/fiber.rs"]
 mod fiber;
-#[path = "../../src/flash.rs"]
+#[path = "../../../src/flash.rs"]
 mod flash;
-#[path = "../../src/host_link_stubs.rs"]
+#[path = "../../../src/host_link_stubs.rs"]
 mod host_link_stubs;
-#[path = "../../src/scheduler.rs"]
+#[path = "../../../src/scheduler.rs"]
 mod scheduler;
-#[path = "../../src/sd.rs"]
+#[path = "../../../src/sd.rs"]
 mod sd;
-#[path = "../../src/sd_image.rs"]
+#[path = "../../../src/sd_image.rs"]
 mod sd_image;
-#[path = "../../src/services.rs"]
+#[path = "../../../src/services.rs"]
 mod services;
 /// The async cluster-fill task + its selector/wakeup C ABI. The
 /// selector/wakeup symbols (`deluge_streaming_async_active`/
@@ -172,7 +172,7 @@ mod services;
 /// [`streaming_loader::streaming_fill_task`] stay gated on the feature and are
 /// only spawned (below, in `main`) when it's enabled — on by default for this
 /// package (see `Cargo.toml`).
-#[path = "../../src/streaming_loader.rs"]
+#[path = "../../../src/streaming_loader.rs"]
 mod streaming_loader;
 
 unsafe extern "C" {
@@ -550,8 +550,8 @@ fn main() {
     // "SD-image packing happens BEFORE any task is spawned" section.
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .nth(4)
-        .expect("CARGO_MANIFEST_DIR (src/bsp/rust/golden_vt_render) has a repo root 4 levels up")
+        .nth(5)
+        .expect("CARGO_MANIFEST_DIR (src/bsp/rust/harness/golden_vt_render) has a repo root 5 levels up")
         .to_path_buf();
     if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
         // Recorder mode records into a fresh EMPTY image (it only ever writes new files); the

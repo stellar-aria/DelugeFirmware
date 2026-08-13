@@ -57,14 +57,14 @@ corosensei = "0.3"
 # host `[dependencies]` section carries no embassy-time/-executor/-futures at all —
 # those are gated `[target.'cfg(target_os = "none")'.dependencies]`), so this path
 # dep does not reintroduce the std/mock-driver conflict this package exists to avoid.
-deluge-bsp = { path = "../../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
+deluge-bsp = { path = "../../../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
 
 # The host-built C++ `deluge_app` object closure (build.rs) calls the
 # deluge_resource_* residency C ABI and the deluge_{alloc,slab_*,heap_*} allocator
 # C ABI — same as deluge-bsp-rust's own `host_app` feature (see its main.rs `extern
 # crate deluge_resource` comment). Linked directly (not the `deluge_rust` umbrella,
 # which carries its own #[panic_handler]).
-deluge_resource = { path = "../../../../crates/deluge_resource" }
+deluge_resource = { path = "../../../../../crates/deluge_resource" }
 
 # C2a Task 3: `#[path]`-included `streaming_loader.rs` (see src/main.rs) now sources
 # `StreamingFillDescriptor` and `ProdOps::begin`/`finish`'s `native_begin`/`native_finish`
@@ -72,10 +72,10 @@ deluge_resource = { path = "../../../../crates/deluge_resource" }
 # `streaming_loader.rs::prod` in that task) instead of defining them itself — so this
 # package needs the same dependency `deluge-bsp-rust`/`region_fill_differential` do,
 # with `native_fill` on (this package recompiles `ProdOps`, which calls both).
-deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features = ["native_fill"] }
-deluge_sample_source = { path = "../../../../crates/deluge_sample_source", features = ["host_app"] }
-deluge_sample_reader = { path = "../../../../crates/deluge_sample_reader", features = ["host_app"] }
-deluge_sample_stream = { path = "../../../../crates/deluge_sample_stream", features = ["host_app"] }
+deluge_sample_fill = { path = "../../../../../crates/deluge_sample_fill", features = ["native_fill"] }
+deluge_sample_source = { path = "../../../../../crates/deluge_sample_source", features = ["host_app"] }
+deluge_sample_reader = { path = "../../../../../crates/deluge_sample_reader", features = ["host_app"] }
+deluge_sample_stream = { path = "../../../../../crates/deluge_sample_stream", features = ["host_app"] }
 
 # R0b: the same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
 # `deluge-bsp-rust`'s own `host_app` feature pulls in (see its Cargo.toml
@@ -87,10 +87,10 @@ deluge_sample_stream = { path = "../../../../crates/deluge_sample_stream", featu
 # `#[global_allocator]` needed here either — same reasoning as the main
 # crate's Cargo.toml: host's implicit std allocator already covers
 # embedded-fatfs's `alloc` feature.
-block-device-driver = { path = "../../../../crates/block-device-driver" }
-block-device-adapters = { path = "../../../../crates/block-device-adapters" }
+block-device-driver = { path = "../../../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../../../crates/block-device-adapters" }
 aligned = "0.4"
-embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features = false, features = [
+embedded-fatfs = { path = "../../../../../crates/embedded-fatfs", default-features = false, features = [
     "lfn",
     "alloc",
 ] }

@@ -1,7 +1,7 @@
 # Known Concurrency Bugs — preemptive-audio storage/streaming path
 
 **Status:** PARTIALLY FIXED — **B1 + B2 + B3 + B7 FIXED** (B1/B2/B3 2026-07-19; B1 = the `Manager` chunk-table `Cell<ChunkSlot>` race, synchronized via asymmetric fiber-side critical sections; B2/B3 = the recorder hand-off races. B7 2026-07-21 = the efatfs block device's `SD_BUS` bypass. See each below.). **B4, B5 and B6 remain OPEN**, as do additional pre-existing **streaming-path** races the harness surfaces nondeterministically (see "Additional surfaced races"). A run's `UNCATALOGUED=0` is therefore not guaranteed; the specific, reproducible guarantee is that the recorder B2/B3 races are gone and the B1 `Cell<ChunkSlot>`/`mem::replace`/`loader_next` signatures are synchronized at the source.
-**Found by:** the host streaming-underrun harness (`src/bsp/rust/preemptive_race_tsan/` — ThreadSanitizer over the real `deluge_app` with a preemptive audio thread) and its deterministic timing lens (`src/bsp/rust/lens1_vt_sim/`). All found on host, **without hardware**.
+**Found by:** the host streaming-underrun harness (`src/bsp/rust/harness/preemptive_race_tsan/` — ThreadSanitizer over the real `deluge_app` with a preemptive audio thread) and its deterministic timing lens (`src/bsp/rust/harness/lens1_vt_sim/`). All found on host, **without hardware**.
 
 ## Scope / when these bite
 
@@ -9,7 +9,7 @@ Bug **B5** (plus the pre-existing streaming-path races) is a data race on the au
 
 **⇒ The remaining open races must be fixed before the preemptive-audio architecture ships in combination with SD streaming + record-while-stream.** They are exactly the kind of narrow-window corruption that a device test tends to surface only as a rare, hard-to-repro glitch or crash — TSan makes them deterministic to find (but not to trigger in the field).
 
-Reproduce: `cd src/bsp/rust/preemptive_race_tsan && ./run.sh` (needs a pre-packed `DELUGE_SD_IMAGE`; see `run.sh` header). Findings are catalogued in `preemptive_race_tsan/open_findings_races.txt`; the broad pre-existing cooperative-scheduling debt (UI/song-model/reverb/transport, out of scope here) is baselined in `known_patterns.txt`.
+Reproduce: `cd src/bsp/rust/harness/preemptive_race_tsan && ./run.sh` (needs a pre-packed `DELUGE_SD_IMAGE`; see `run.sh` header). Findings are catalogued in `preemptive_race_tsan/open_findings_races.txt`; the broad pre-existing cooperative-scheduling debt (UI/song-model/reverb/transport, out of scope here) is baselined in `known_patterns.txt`.
 
 ---
 

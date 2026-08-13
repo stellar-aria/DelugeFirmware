@@ -13,8 +13,8 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // DelugeFirmware repo root (crate is at <root>/src/bsp/rust/lens1_vt_sim).
-    let repo_root = manifest_dir.join("../../../..").canonicalize().unwrap();
+    // DelugeFirmware repo root (crate is at <root>/src/bsp/rust/harness/lens1_vt_sim).
+    let repo_root = manifest_dir.join("../../../../..").canonicalize().unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     run_bindgen(&repo_root, &manifest_dir, &out_dir);

@@ -61,21 +61,21 @@ corosensei = "0.3"
 # store) does not itself depend on embassy-time/-executor (checked against
 # `lens1_vt_sim/Cargo.toml`'s identical comment), so this path dep does not
 # reintroduce the std/mock-driver conflict this package exists to avoid.
-deluge-bsp = { path = "../../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
+deluge-bsp = { path = "../../../../../../deluge-sdk/crates/deluge-bsp", features = ["flash"] }
 
 # The host-built C++ `deluge_app` object closure (build.rs) calls the
 # deluge_resource_* residency C ABI and the deluge_{alloc,slab_*,heap_*} allocator
 # C ABI — same as deluge-bsp-rust's own `host_app` feature (see its main.rs `extern
 # crate deluge_resource` comment). Linked directly (not the `deluge_rust` umbrella,
 # which carries its own #[panic_handler]).
-deluge_resource = { path = "../../../../crates/deluge_resource" }
+deluge_resource = { path = "../../../../../crates/deluge_resource" }
 
 # `#[path]`-included `streaming_loader.rs` (see src/main.rs) sources
 # `StreamingFillDescriptor` and `ProdOps::begin`/`finish`'s `native_begin`/`native_finish`
 # straight from this crate (the manager-reaching sync fill core) — so this
 # package needs the same dependency `deluge-bsp-rust`/`lens1_vt_sim` do,
 # with `native_fill` on (this package recompiles `ProdOps`, which calls both).
-deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features = ["native_fill"] }
+deluge_sample_fill = { path = "../../../../../crates/deluge_sample_fill", features = ["native_fill"] }
 
 # The Rust region-port cursor (`deluge_sample_source_*`/`deluge_sample_region_*`) and the
 # sample range-reader C ABI (`deluge_sample_reader_*`) — the SOLE definitions of those C-ABI
@@ -89,12 +89,12 @@ deluge_sample_fill = { path = "../../../../crates/deluge_sample_fill", features 
 # CURRENT `deluge_app` object closure. `host_app` feature widens each crate's own `abi.rs`
 # cfg_attr gate to export these symbols on host (mirrors `deluge-bsp-rust`'s own `host_app`
 # feature list in `../Cargo.toml`).
-deluge_sample_source = { path = "../../../../crates/deluge_sample_source", features = ["host_app"] }
-deluge_sample_reader = { path = "../../../../crates/deluge_sample_reader", features = ["host_app"] }
+deluge_sample_source = { path = "../../../../../crates/deluge_sample_source", features = ["host_app"] }
+deluge_sample_reader = { path = "../../../../../crates/deluge_sample_reader", features = ["host_app"] }
 # U4c Task 2: the streaming-file slot registry C ABI (`deluge_sample_stream_*`) — same reasoning as
 # the pair just above (added here so `golden_vt_render` links against the CURRENT `deluge_app`
 # object closure; no consumer yet, so this proves the symbols are present, nothing more).
-deluge_sample_stream = { path = "../../../../crates/deluge_sample_stream", features = ["host_app"] }
+deluge_sample_stream = { path = "../../../../../crates/deluge_sample_stream", features = ["host_app"] }
 
 # The same `BlockDevice`/`BufStream`/`embedded-fatfs` storage stack
 # `deluge-bsp-rust`'s own `host_app` feature pulls in (see its Cargo.toml
@@ -106,10 +106,10 @@ deluge_sample_stream = { path = "../../../../crates/deluge_sample_stream", featu
 # `#[global_allocator]` needed here either — same reasoning as the main
 # crate's Cargo.toml: host's implicit std allocator already covers
 # embedded-fatfs's `alloc` feature.
-block-device-driver = { path = "../../../../crates/block-device-driver" }
-block-device-adapters = { path = "../../../../crates/block-device-adapters" }
+block-device-driver = { path = "../../../../../crates/block-device-driver" }
+block-device-adapters = { path = "../../../../../crates/block-device-adapters" }
 aligned = "0.4"
-embedded-fatfs = { path = "../../../../crates/embedded-fatfs", default-features = false, features = [
+embedded-fatfs = { path = "../../../../../crates/embedded-fatfs", default-features = false, features = [
     "lfn",
     "alloc",
 ] }

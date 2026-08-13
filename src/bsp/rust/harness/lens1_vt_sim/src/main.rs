@@ -118,13 +118,13 @@ mod sys {
 
 // Reuse deluge-bsp-rust's own source files verbatim via `#[path]` — the same
 // pattern `tests/*.rs` already use for `fiber.rs`/`sd.rs` (see `HOST_HARNESS.md`).
-#[path = "../../src/audio_host.rs"]
+#[path = "../../../src/audio_host.rs"]
 mod audio_host;
-#[path = "../../src/board.rs"]
+#[path = "../../../src/board.rs"]
 mod board;
-#[path = "../../src/control.rs"]
+#[path = "../../../src/control.rs"]
 mod control;
-#[path = "../../src/display.rs"]
+#[path = "../../../src/display.rs"]
 mod display;
 /// Storage-generic core of the efatfs read path — see
 /// `../../src/main.rs`'s `mod efatfs_core` doc. Gated on `host_app` (always on
@@ -132,34 +132,34 @@ mod display;
 /// package's own `#[cfg(feature = "efatfs_streaming")]` is what actually
 /// drives `mount()` (below, in `boot_task`).
 #[cfg(feature = "host_app")]
-#[path = "../../src/efatfs_core.rs"]
+#[path = "../../../src/efatfs_core.rs"]
 mod efatfs_core;
 /// Host counterpart of the device `efatfs_fs.rs` — see
 /// `../../src/main.rs`'s `mod efatfs_host_shim` doc.
 #[cfg(feature = "host_app")]
-#[path = "../../src/efatfs_host_shim.rs"]
+#[path = "../../../src/efatfs_host_shim.rs"]
 mod efatfs_host_shim;
-#[path = "../../src/ffi.rs"]
+#[path = "../../../src/ffi.rs"]
 mod ffi;
-#[path = "../../src/ffi_extra.rs"]
+#[path = "../../../src/ffi_extra.rs"]
 mod ffi_extra;
-#[path = "../../src/fiber.rs"]
+#[path = "../../../src/fiber.rs"]
 mod fiber;
-#[path = "../../src/flash.rs"]
+#[path = "../../../src/flash.rs"]
 mod flash;
-#[path = "../../src/host_link_stubs.rs"]
+#[path = "../../../src/host_link_stubs.rs"]
 mod host_link_stubs;
-#[path = "../../src/scenario.rs"]
+#[path = "../../../src/scenario.rs"]
 mod scenario;
-#[path = "../../src/scheduler.rs"]
+#[path = "../../../src/scheduler.rs"]
 mod scheduler;
-#[path = "../../src/sd.rs"]
+#[path = "../../../src/sd.rs"]
 mod sd;
-#[path = "../../src/sd_image.rs"]
+#[path = "../../../src/sd_image.rs"]
 mod sd_image;
-#[path = "../../src/services.rs"]
+#[path = "../../../src/services.rs"]
 mod services;
-#[path = "../../src/sim_block.rs"]
+#[path = "../../../src/sim_block.rs"]
 mod sim_block;
 /// Mirrors `../../src/main.rs`'s `mod streaming_loader` — the
 /// async cluster-fill task + its selector/wakeup C ABI. The selector/wakeup
@@ -168,7 +168,7 @@ mod sim_block;
 /// `async_streaming_loader` feature (see that file's module doc); the actual
 /// drain machinery + [`streaming_loader::streaming_fill_task`] stay gated on
 /// the feature and are only spawned (below, in `main`) when it's enabled.
-#[path = "../../src/streaming_loader.rs"]
+#[path = "../../../src/streaming_loader.rs"]
 mod streaming_loader;
 
 unsafe extern "C" {
@@ -466,8 +466,8 @@ fn main() {
     if std::env::var_os("DELUGE_SD_IMAGE").is_none() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
-            .nth(4)
-            .expect("CARGO_MANIFEST_DIR (src/bsp/rust/lens1_vt_sim) has a repo root 4 levels up")
+            .nth(5)
+            .expect("CARGO_MANIFEST_DIR (src/bsp/rust/harness/lens1_vt_sim) has a repo root 5 levels up")
             .to_path_buf();
         let img = sd_image::pack_golden_fixture(&repo_root, &fixture);
         // SAFETY: single-threaded at this point (before any task/executor exists).

@@ -159,6 +159,10 @@ struct ChunkSlot {
     cost: u32,
     adopt_evict: Option<AdoptEvictFn>,
     adopt_ctx: *mut c_void,
+    /// Next slot in this chunk's `(asset, index)` hash bucket, or `NONE` at the end of the chain.
+    /// Only meaningful while this slot is indexed — i.e. occupied with `asset != NONE`; see
+    /// [`Manager::index_insert`] for why adopted chunks are excluded.
+    hash_next: u32,
 }
 impl ChunkSlot {
     const EMPTY: ChunkSlot = ChunkSlot {
@@ -177,6 +181,7 @@ impl ChunkSlot {
         cost: 0,
         adopt_evict: None,
         adopt_ctx: ptr::null_mut(),
+        hash_next: NONE,
     };
 }
 
@@ -197,6 +202,19 @@ pub struct Stats {
     pub alloc_failures: u64, // alloc_backing returned null (pool exhausted after reclaim)
     pub adopts: u64,       // objects adopted
     pub evictions_by_cost: [u64; COST_BUCKETS], // evicted-chunk breakdown by cost class
+    // ── Scan-cost instrumentation (THROWAWAY: added 2026-08-16 to size the manager's O(table)
+    // linear scans on device; remove once the indexing decision is made). `*_calls` counts
+    // invocations, `*_slots` counts slots actually visited -- the cost driver, since each visit is a
+    // masked (interrupt-disabling) read of a Cell<ChunkSlot> in SDRAM. Measured conversion on
+    // hardware: a full 6144-slot scan costs ~10.5 ms, i.e. ~1.7 us per slot visited.
+    pub scan_resident_calls: u64,
+    pub scan_resident_slots: u64,
+    pub scan_ptr_calls: u64,
+    pub scan_ptr_slots: u64,
+    pub scan_free_calls: u64,
+    pub scan_free_slots: u64,
+    pub scan_evict_calls: u64,
+    pub scan_evict_slots: u64,
 }
 
 pub struct Manager {
@@ -208,6 +226,20 @@ pub struct Manager {
     slab: Cell<*mut DelugeSlab>,
     assets: &'static [Cell<AssetSlot>],
     chunks: &'static [Cell<ChunkSlot>],
+    /// Hash index over `(asset, index)` -> chunk slot: each entry is the head of an intrusive
+    /// chain linked through `ChunkSlot::hash_next`, or `NONE` when empty. Power-of-two length
+    /// (`>= chunks.len()`), so bucket selection is a mask.
+    ///
+    /// Chaining rather than open addressing because deletion is frequent here (every eviction):
+    /// open addressing needs tombstones, and on a device that runs for hours of churn tombstones
+    /// accumulate until something rehashes. A chain has no tombstones and no rehash, and its
+    /// links live in the chunk slots that already exist.
+    ///
+    /// It replaces what was an unconditional linear scan of the whole table on every lookup MISS.
+    /// Measured on device before this existed: ~5827 slots visited per miss at ~0.92 us each, so
+    /// a cold sample preview spent 21 ms here, and ordinary playback spent 5-27% of CPU in it --
+    /// all with interrupts masked, since each visit is a masked read.
+    buckets: &'static [Cell<u32>],
     tick: Cell<u64>,
     /// Transient self-protection (the `dontStealFromThing` port): while an asset is
     /// allocating a chunk (`request`/`acquire`), its own chunks are not eviction
@@ -271,16 +303,152 @@ impl Manager {
     }
 
     fn find_resident(&self, asset: u32, index: u32) -> Option<usize> {
+        let mut visited = 0u64;
+        let found = if asset == NONE {
+            // Adopted chunks are not indexed (see index_insert); keep the original scan so this
+            // key's semantics are unchanged. No production caller passes NONE here.
+            (0..self.chunks.len()).find(|&i| {
+                visited += 1;
+                let s = m_get(&self.chunks[i]);
+                !s.backing.is_null() && s.asset == asset && s.index == index
+            })
+        } else {
+            // Walk the bucket chain, re-validating each candidate against exactly the predicate
+            // the linear scan used. The re-validation is not belt-and-braces: the chain is read
+            // unmasked between slots (as every scan here is), so a slot can be evicted and reused
+            // under us — the masked per-slot read plus this check is what makes that safe.
+            let mut cur = self.buckets[self.bucket_of(asset, index)].get();
+            let mut hit = None;
+            // Bounded walk. A chain can only be cyclic if the index is corrupt, but this runs on
+            // the audio path, where spinning forever is a dead device and a wrong answer is a
+            // duplicate chunk — degraded, alive, and visible in the stats. Take the survivable
+            // failure. (A dropped `index_remove` produced exactly this cycle in testing.)
+            let mut steps = 0;
+            while cur != NONE && steps <= self.chunks.len() {
+                let i = cur as usize;
+                if i >= self.chunks.len() {
+                    break; // corrupt link; treat as a miss rather than panicking on the audio path
+                }
+                visited += 1;
+                steps += 1;
+                let s = m_get(&self.chunks[i]);
+                if !s.backing.is_null() && s.asset == asset && s.index == index {
+                    hit = Some(i);
+                    break;
+                }
+                cur = s.hash_next;
+            }
+            hit
+        };
+        // One stat update per scan, never per slot: `stat` is itself a masked RMW of the whole
+        // Stats struct, so a per-slot update would cost more than the scan being measured.
+        self.stat(|s| {
+            s.scan_resident_calls += 1;
+            s.scan_resident_slots += visited;
+        });
+        found
+    }
+    /// Bucket for `(asset, index)`. Mixes BOTH halves of the key: cluster indices are small and
+    /// dense and asset ids are small and dense, so any hash that merely concatenates them piles
+    /// every asset's cluster 0 into neighbouring buckets. The two odd constants are the usual
+    /// 32-bit mixing primes (golden-ratio and xxHash's).
+    #[inline]
+    fn bucket_of(&self, asset: u32, index: u32) -> usize {
+        let h = asset.wrapping_mul(0x9E37_79B1).rotate_left(15) ^ index.wrapping_mul(0x85EB_CA6B);
+        (h as usize) & (self.buckets.len() - 1)
+    }
+
+    /// Link slot `i` into its bucket. Caller MUST already hold a masked window covering the write
+    /// of the slot itself, so the slot and the index never disagree even for an instant: a
+    /// preempting lookup that saw the slot but not the link would report "not resident" for a
+    /// chunk that is, and its caller would allocate a SECOND chunk for the same key.
+    ///
+    /// Adopted chunks (`asset == NONE`) are deliberately NOT indexed. They all share the key
+    /// `(NONE, 0)` (see `adopt`), so they would form one chain thousands long, and unlinking from
+    /// it would be exactly the linear scan this index exists to remove. `find_resident` keeps the
+    /// scan for that key instead.
+    fn index_insert(&self, i: usize) {
+        let mut s = self.chunks[i].get();
+        if s.asset == NONE {
+            return;
+        }
+        let b = self.bucket_of(s.asset, s.index);
+        s.hash_next = self.buckets[b].get();
+        self.chunks[i].set(s);
+        self.buckets[b].set(i as u32);
+    }
+
+    /// Unlink slot `i` from its bucket. Same masking contract as [`Manager::index_insert`] — the
+    /// caller holds the window that also clears the slot.
+    ///
+    /// Takes the key explicitly because the caller has usually already overwritten (or is about
+    /// to overwrite) the slot, so the key can no longer be read back from it.
+    fn index_remove(&self, i: usize, asset: u32, index: u32) {
+        if asset == NONE {
+            return; // never indexed — see index_insert
+        }
+        let b = self.bucket_of(asset, index);
+        let head = self.buckets[b].get();
+        if head == i as u32 {
+            self.buckets[b].set(self.chunks[i].get().hash_next);
+            return;
+        }
+        // Walk to the predecessor. Bounded by the chain, which is ~1 entry: live keyed chunks are
+        // capped by slab capacity and the bucket count is >= the chunk table's length.
+        let mut cur = head;
+        let mut steps = 0;
+        while cur != NONE && steps <= self.chunks.len() {
+            let c = cur as usize;
+            if c >= self.chunks.len() {
+                return; // corrupt link — same survivable-failure argument as find_resident's walk
+            }
+            steps += 1;
+            let s = self.chunks[c].get();
+            if s.hash_next == i as u32 {
+                let mut sc = s;
+                sc.hash_next = self.chunks[i].get().hash_next;
+                self.chunks[c].set(sc);
+                return;
+            }
+            cur = s.hash_next;
+        }
+    }
+
+    /// Ground truth for the index tests: the unconditional linear scan `find_resident` used to
+    /// be. Kept test-only so the agreement test compares the index against the definition of
+    /// correctness rather than against the test's own model of what should be resident (which
+    /// eviction, lease drops, and preemption all falsify).
+    #[cfg(test)]
+    pub(crate) fn find_resident_linear(&self, asset: u32, index: u32) -> Option<usize> {
         (0..self.chunks.len()).find(|&i| {
             let s = m_get(&self.chunks[i]);
             !s.backing.is_null() && s.asset == asset && s.index == index
         })
     }
+
     fn find_by_ptr(&self, p: *mut u8) -> Option<usize> {
-        (0..self.chunks.len()).find(|&i| m_get(&self.chunks[i]).backing == p)
+        let mut visited = 0u64;
+        let found = (0..self.chunks.len()).find(|&i| {
+            visited += 1;
+            m_get(&self.chunks[i]).backing == p
+        });
+        self.stat(|s| {
+            s.scan_ptr_calls += 1;
+            s.scan_ptr_slots += visited;
+        });
+        found
     }
     fn find_free_chunk(&self) -> Option<usize> {
-        (0..self.chunks.len()).find(|&i| m_get(&self.chunks[i]).backing.is_null())
+        let mut visited = 0u64;
+        let found = (0..self.chunks.len()).find(|&i| {
+            visited += 1;
+            m_get(&self.chunks[i]).backing.is_null()
+        });
+        self.stat(|s| {
+            s.scan_free_calls += 1;
+            s.scan_free_slots += visited;
+        });
+        found
     }
 
     /// Fiber-safe pointer-keyed RMW: locate the slot whose `backing == p` (heuristic
@@ -641,6 +809,11 @@ impl Manager {
         // Retry loop: a masked commit can bail if the victim got leased/dirtied under us
         // since the unmasked scan; try the next-best candidate. Bounded by table size.
         let mut skip: Option<usize> = None;
+        // Counts only THIS function's own slot visits. `is_highest_resident` (called per candidate
+        // below) runs its own nested O(n) scan for evict_tail_first assets, so the true cost of a
+        // single evict_lowest can exceed what this records -- read it as a floor, not a total.
+        let mut visited = 0u64;
+        let mut result = false;
         for _ in 0..self.chunks.len() {
             let mut best: Option<usize> = None;
             let mut best_rank = (u8::MAX, u64::MAX, u64::MAX);
@@ -648,6 +821,7 @@ impl Manager {
                 if Some(i) == skip {
                     continue;
                 }
+                visited += 1;
                 let s = m_get(&self.chunks[i]);
                 if s.backing.is_null() || s.leases != 0 || s.dirty {
                     continue;
@@ -677,13 +851,18 @@ impl Manager {
                     best = Some(i);
                 }
             }
-            let Some(i) = best else { return false };
+            let Some(i) = best else { break };
             if self.evict_slot(i) {
-                return true;
+                result = true;
+                break;
             }
             skip = Some(i); // commit bailed — exclude and re-scan
         }
-        false
+        self.stat(|s| {
+            s.scan_evict_calls += 1;
+            s.scan_evict_slots += visited;
+        });
+        result
     }
 
     /// Evict the chunk at slot `i`: under a short masked window re-read + re-validate it is
@@ -698,6 +877,10 @@ impl Manager {
             if s.backing.is_null() || s.leases != 0 || s.dirty {
                 return false; // changed under us since the scan — do not evict
             }
+            // Unlink BEFORE clearing: index_remove walks the chain through `hash_next`, which
+            // ChunkSlot::EMPTY would have wiped. Same masked window as the clear, so the slot and
+            // the index are never separately visible (see index_insert).
+            self.index_remove(i, s.asset, s.index);
             self.chunks[i].set(ChunkSlot::EMPTY);
             s
         };
@@ -785,21 +968,26 @@ impl Manager {
         }
         // Lease *before* materialize so a reentrant eviction (if materialize itself
         // allocates) can't steal this just-populated chunk.
-        m_set(
-            &self.chunks[idx],
-            ChunkSlot {
+        // ONE masked window over the slot write AND its index link: see index_insert for why
+        // they must not be separately visible.
+        {
+            let recency = self.bump();
+            let generation = self.next_gen();
+            let _m = Masked::enter();
+            self.chunks[idx].set(ChunkSlot {
                 backing: p,
                 asset,
                 index,
                 leases: 1,
                 dirty: false,
                 ready: true, // acquire materializes synchronously below, before anyone else can run
-                recency: self.bump(),
+                recency,
                 size: size as u32,
-                generation: self.next_gen(),
+                generation,
                 ..ChunkSlot::EMPTY
-            },
-        );
+            });
+            self.index_insert(idx);
+        }
         let a = m_get(&self.assets[ai]);
         let ok = match a.source.materialize {
             Some(f) => {
@@ -810,8 +998,13 @@ impl Manager {
             None => true,
         };
         if !ok {
-            // Reconstruction failed (e.g. source vanished) — roll back the slot.
-            m_set(&self.chunks[idx], ChunkSlot::EMPTY);
+            // Reconstruction failed (e.g. source vanished) — roll back the slot, unlinking it
+            // first (index_remove reads `hash_next`, which EMPTY wipes).
+            {
+                let _m = Masked::enter();
+                self.index_remove(idx, asset, index);
+                self.chunks[idx].set(ChunkSlot::EMPTY);
+            }
             self.free_backing(p, asset);
             return ptr::null_mut();
         }
@@ -887,20 +1080,24 @@ impl Manager {
             return ptr::null_mut();
         }
         // Lease before constructing (mirrors acquire: a reentrant eviction can't steal it).
-        m_set(
-            &self.chunks[idx],
-            ChunkSlot {
+        // ONE masked window over the slot write AND its index link (see index_insert).
+        {
+            let recency = self.bump();
+            let generation = self.next_gen();
+            let _m = Masked::enter();
+            self.chunks[idx].set(ChunkSlot {
                 backing: p,
                 asset,
                 index,
                 leases: 1,
                 dirty: false,
-                recency: self.bump(),
+                recency,
                 size: size as u32,
-                generation: self.next_gen(),
+                generation,
                 ..ChunkSlot::EMPTY
-            },
-        );
+            });
+            self.index_insert(idx);
+        }
         let a = m_get(&self.assets[ai]);
         // SAFETY: owner/ctx/dest come from this asset + the slot we just allocated;
         // construct does no I/O and cannot fail (checked non-None above). Unmasked.
@@ -946,6 +1143,7 @@ impl Manager {
             if s.backing != p {
                 return; // changed under us
             }
+            self.index_remove(c, s.asset, s.index); // before the clear — EMPTY wipes hash_next
             self.chunks[c].set(ChunkSlot::EMPTY);
             s
         };
@@ -1116,7 +1314,9 @@ impl Manager {
             let s = self.chunks[i].get();
             // Clear the slot before the callback (consistent table for any reentrancy),
             // and free the backing *before* clearing the asset slot (free_backing reads
-            // the asset's backing kind to route slab-vs-heap).
+            // the asset's backing kind to route slab-vs-heap). Unlink first: index_remove
+            // reads `hash_next`, which EMPTY wipes.
+            self.index_remove(i, s.asset, s.index);
             self.chunks[i].set(ChunkSlot::EMPTY);
             if let Some(cb) = a.source.on_evict {
                 // SAFETY: owner/ctx come from this asset; valid for the manager lifetime.
@@ -1191,6 +1391,81 @@ pub struct DelugeResource {
 /// `pub(crate)` so the safe `facade` module can build a `Resource` over the same
 /// opaque handle the C ABI wrappers below use — same cast, same safety contract.
 #[inline]
+/// Test-only: assert the hash index and the chunk table describe the same set.
+///
+/// Two directions, because each catches a different bug: every occupied keyed slot must be
+/// reachable from its own bucket exactly once (a missed insert or a lost link makes a resident
+/// chunk invisible, so its caller allocates a duplicate), and every chain entry must point at an
+/// occupied slot that really hashes to that bucket (a missed remove leaves a dangling link into a
+/// recycled slot).
+///
+/// # Safety
+/// `h` must be a live manager handle.
+#[cfg(test)]
+pub(crate) unsafe fn debug_assert_index_consistent(h: *mut DelugeResource) {
+    // SAFETY: caller contract — `h` is a live handle.
+    let m = unsafe { mgr(h) };
+    for b in 0..m.buckets.len() {
+        let mut cur = m.buckets[b].get();
+        let mut guard = 0;
+        while cur != NONE {
+            let i = cur as usize;
+            assert!(
+                i < m.chunks.len(),
+                "bucket {b} links to out-of-range slot {i}"
+            );
+            let s = m.chunks[i].get();
+            assert!(!s.backing.is_null(), "bucket {b} links to free slot {i}");
+            assert_ne!(s.asset, NONE, "adopted slot {i} must not be indexed");
+            assert_eq!(
+                m.bucket_of(s.asset, s.index),
+                b,
+                "slot {i} is in the wrong bucket"
+            );
+            cur = s.hash_next;
+            guard += 1;
+            assert!(guard <= m.chunks.len(), "bucket {b} chain is cyclic");
+        }
+    }
+    for i in 0..m.chunks.len() {
+        let s = m.chunks[i].get();
+        if s.backing.is_null() || s.asset == NONE {
+            continue;
+        }
+        let mut cur = m.buckets[m.bucket_of(s.asset, s.index)].get();
+        let mut seen = 0;
+        while cur != NONE {
+            if cur as usize == i {
+                seen += 1;
+            }
+            cur = m.chunks[cur as usize].get().hash_next;
+        }
+        assert_eq!(
+            seen, 1,
+            "occupied slot {i} appears {seen} times in its bucket"
+        );
+    }
+}
+
+/// Test-only: does the (indexed) `find_resident` agree with the brute-force scan for this key?
+/// Returns `(indexed, linear)` so a failing assertion can report both.
+///
+/// # Safety
+/// `h` must be a live manager handle.
+#[cfg(test)]
+pub(crate) unsafe fn debug_find_resident_both(
+    h: *mut DelugeResource,
+    asset: u32,
+    index: u32,
+) -> (Option<usize>, Option<usize>) {
+    // SAFETY: caller contract — `h` is a live handle, same as every other entry point here.
+    let m = unsafe { mgr(h) };
+    (
+        m.find_resident(asset, index),
+        m.find_resident_linear(asset, index),
+    )
+}
+
 pub(crate) unsafe fn mgr<'a>(h: *mut DelugeResource) -> &'a Manager {
     &*(h as *mut Manager)
 }
@@ -1255,11 +1530,23 @@ unsafe fn create_inner(
         chunk_cap * core::mem::size_of::<Cell<ChunkSlot>>(),
         core::mem::align_of::<Cell<ChunkSlot>>().max(16),
     ) as *mut Cell<ChunkSlot>;
-    if m.is_null() || assets_raw.is_null() || chunks_raw.is_null() {
+    // Hash-index buckets: power of two >= chunk_cap, so bucket selection is a mask and the load
+    // factor stays below 1 even with every slot occupied.
+    let bucket_cap = chunk_cap.next_power_of_two();
+    let buckets_raw = deluge_alloc(
+        heap,
+        bucket_cap * core::mem::size_of::<Cell<u32>>(),
+        core::mem::align_of::<Cell<u32>>().max(16),
+    ) as *mut Cell<u32>;
+    if m.is_null() || assets_raw.is_null() || chunks_raw.is_null() || buckets_raw.is_null() {
         deluge_free(heap, m as *mut u8);
         deluge_free(heap, assets_raw as *mut u8);
         deluge_free(heap, chunks_raw as *mut u8);
+        deluge_free(heap, buckets_raw as *mut u8);
         return ptr::null_mut();
+    }
+    for i in 0..bucket_cap {
+        buckets_raw.add(i).write(Cell::new(NONE));
     }
     for i in 0..asset_cap {
         assets_raw.add(i).write(Cell::new(AssetSlot::EMPTY));
@@ -1271,6 +1558,7 @@ unsafe fn create_inner(
     // sound. From here on the slices are accessed only through safe code.
     let assets: &'static [Cell<AssetSlot>] = &*ptr::slice_from_raw_parts(assets_raw, asset_cap);
     let chunks: &'static [Cell<ChunkSlot>] = &*ptr::slice_from_raw_parts(chunks_raw, chunk_cap);
+    let buckets: &'static [Cell<u32>] = &*ptr::slice_from_raw_parts(buckets_raw, bucket_cap);
     ptr::write(
         m,
         Manager {
@@ -1278,6 +1566,7 @@ unsafe fn create_inner(
             slab: Cell::new(ptr::null_mut()),
             assets,
             chunks,
+            buckets,
             tick: Cell::new(0),
             protect: Cell::new(NONE),
             stats: Cell::new(Stats::default()),

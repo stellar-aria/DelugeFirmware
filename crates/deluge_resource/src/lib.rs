@@ -1436,4 +1436,187 @@ mod tests {
         unsafe { deluge_resource_release(m, p) };
         let _ = buf; // keep the arena alive to here
     }
+
+    /// Build a manager with `chunk_cap` slots and one requestable asset, for the index tests.
+    fn indexed_mgr(
+        chunk_cap: usize,
+        arena_bytes: usize,
+    ) -> (
+        Vec<u128>,
+        *mut DelugeResource,
+        u32,
+        *mut deluge_alloc::DelugeHeap,
+    ) {
+        let (buf, h) = arena(arena_bytes);
+        let m = unsafe { deluge_resource_create(h, 16, chunk_cap) };
+        let a = unsafe {
+            deluge_resource_define_asset(
+                m,
+                owner(1),
+                Some(mock_materialize),
+                Some(mock_on_evict),
+                core::ptr::null_mut(),
+                COST_IO,
+                BACKING_HEAP,
+            )
+        };
+        unsafe { deluge_resource_set_construct(m, a, Some(mock_construct)) };
+        (buf, m, a, h)
+    }
+
+    fn stats_of(m: *mut DelugeResource) -> Stats {
+        let mut s = Stats::default();
+        unsafe { deluge_resource_stats(m, &mut s) };
+        s
+    }
+
+    /// A lookup that MISSES must not walk the whole chunk table.
+    ///
+    /// This is the regression the index exists to prevent, and it is stated in slots-visited
+    /// rather than wall time because that is what was measured on device: a miss walked all
+    /// ~6144 slots at ~0.92 us each, which is where a cold sample preview's 21 ms went. A
+    /// time-based assertion would be flaky; the visit count is exact.
+    #[test]
+    fn a_missing_key_does_not_scan_the_chunk_table() {
+        let chunk_cap = 512;
+        let (buf, m, a, _h) = indexed_mgr(chunk_cap, 4 * 1024 * 1024);
+        // One resident chunk, so the table is non-trivially populated.
+        let p = unsafe { deluge_resource_request(m, a, 0, 4096) };
+        assert!(!p.is_null());
+
+        unsafe { deluge_resource_stats_reset(m) };
+        // Ask for an index that is NOT resident: the miss path.
+        assert!(unsafe { deluge_resource_peek(m, a, 999) }.is_null());
+        let s = stats_of(m);
+
+        assert!(s.scan_resident_calls >= 1, "the lookup should have run");
+        assert!(
+            s.scan_resident_slots < chunk_cap as u64 / 8,
+            "a miss visited {} slots of {chunk_cap} — it is still scanning the table",
+            s.scan_resident_slots
+        );
+        unsafe { deluge_resource_release(m, p) };
+        let _ = buf;
+    }
+
+    /// The index must agree with a brute-force scan for every probed key, across churn.
+    ///
+    /// A false POSITIVE is caught by the manager's own re-validation, but a false NEGATIVE is
+    /// silent and harmful: the caller would allocate a SECOND chunk for a key that is already
+    /// resident, so one cluster would exist twice with independent leases. This test targets
+    /// that directly by comparing against ground truth rather than checking the happy path.
+    #[test]
+    fn indexed_lookup_agrees_with_a_brute_force_scan_across_churn() {
+        // A small arena on purpose: the chunks do not all fit, so eviction runs and the churn
+        // exercises index REMOVAL, not just insertion. That is the half a happy-path test misses.
+        let (buf, m, a, _h) = indexed_mgr(256, 512 * 1024);
+        let mut leased: Vec<(u32, *mut u8)> = Vec::new();
+
+        // Deterministic pseudo-random churn (xorshift): request some indices, release others.
+        let mut x: u32 = 0x1234_5678;
+        let next = |x: &mut u32| {
+            *x ^= *x << 13;
+            *x ^= *x >> 17;
+            *x ^= *x << 5;
+            *x
+        };
+        for _ in 0..300 {
+            let idx = next(&mut x) % 40;
+            if next(&mut x) % 3 == 0 {
+                if let Some(pos) = leased.iter().position(|&(i, _)| i == idx) {
+                    let (_, p) = leased.remove(pos);
+                    unsafe { deluge_resource_release(m, p) }; // now evictable
+                }
+            } else if !leased.iter().any(|&(i, _)| i == idx) {
+                let p = unsafe { deluge_resource_request(m, a, idx, 4096) };
+                if !p.is_null() {
+                    leased.push((idx, p));
+                }
+            }
+
+            // Ground truth is the manager's OWN brute-force scan, not this test's model of what
+            // should be resident — eviction can drop an unleased chunk at any request.
+            for probe in 0..48u32 {
+                let (indexed, linear) = unsafe { debug_find_resident_both(m, a, probe) };
+                assert_eq!(
+                    indexed, linear,
+                    "index disagrees with the linear scan for cluster {probe}"
+                );
+            }
+        }
+        unsafe { debug_assert_index_consistent(m) };
+        for (_, p) in leased {
+            unsafe { deluge_resource_release(m, p) };
+        }
+        let _ = buf;
+    }
+
+    /// The teardown paths clear chunk slots too, and each one that forgets to unlink leaves a
+    /// dangling chain entry pointing into a slot that will be recycled for a different key.
+    /// `evict_chunk` (owner discards a chunk) and `release_asset` (owner teardown) are separate
+    /// clear sites from `evict_slot`, so they get their own coverage.
+    #[test]
+    fn teardown_paths_keep_the_index_consistent() {
+        let (buf, m, a, _h) = indexed_mgr(128, 2 * 1024 * 1024);
+        let ptrs: Vec<*mut u8> = (0..12)
+            .map(|i| {
+                let p = unsafe { deluge_resource_request(m, a, i, 4096) };
+                assert!(!p.is_null());
+                p
+            })
+            .collect();
+        unsafe { debug_assert_index_consistent(m) };
+
+        // evict_chunk: the owner discards two chunks outright.
+        for p in ptrs.iter().take(2) {
+            unsafe { deluge_resource_release(m, *p) };
+            unsafe { deluge_resource_evict_chunk(m, *p) };
+        }
+        unsafe { debug_assert_index_consistent(m) };
+        for probe in 0..12u32 {
+            let (indexed, linear) = unsafe { debug_find_resident_both(m, a, probe) };
+            assert_eq!(indexed, linear, "after evict_chunk, cluster {probe}");
+        }
+
+        // release_asset: full owner teardown drops every remaining chunk.
+        for p in ptrs.iter().skip(2) {
+            unsafe { deluge_resource_release(m, *p) };
+        }
+        unsafe { deluge_resource_release_asset(m, a) };
+        unsafe { debug_assert_index_consistent(m) };
+        for probe in 0..12u32 {
+            let (indexed, linear) = unsafe { debug_find_resident_both(m, a, probe) };
+            assert_eq!(indexed, linear, "after release_asset, cluster {probe}");
+            assert!(indexed.is_none(), "cluster {probe} should be gone");
+        }
+        let _ = buf;
+    }
+
+    /// Adopted chunks are deliberately NOT in the index (they all share `asset == NONE, index
+    /// == 0`, so they would form one long chain whose unlink is the very scan being removed).
+    /// They must still adopt, evict, and coexist with indexed lookups.
+    #[test]
+    fn adopted_chunks_stay_out_of_the_index_without_breaking_lookups() {
+        let (buf, m, a, h) = indexed_mgr(64, 2 * 1024 * 1024);
+        let p = unsafe { deluge_resource_request(m, a, 7, 4096) };
+        assert!(!p.is_null());
+
+        let blocks: Vec<*mut u8> = (0..8)
+            .map(|_| {
+                let raw = unsafe { deluge_alloc::deluge_alloc(h, 1024, 16) };
+                assert!(!raw.is_null());
+                unsafe { deluge_resource_adopt(m, raw, 1024, COST_IO, core::ptr::null_mut(), None) }
+            })
+            .collect();
+        for b in &blocks {
+            assert!(!b.is_null(), "adopt should succeed");
+        }
+
+        // The indexed lookup is unaffected by the adopted chunks sharing a key.
+        assert!(!unsafe { deluge_resource_peek(m, a, 7) }.is_null());
+        assert!(unsafe { deluge_resource_peek(m, a, 8) }.is_null());
+
+        unsafe { deluge_resource_release(m, p) };
+        let _ = buf;
+    }
 }

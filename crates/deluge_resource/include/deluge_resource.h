@@ -243,6 +243,19 @@ typedef struct DelugeResourceStats {
 	uint64_t alloc_failures; // alloc_backing returned null (pool exhausted after reclaim)
 	uint64_t adopts;         // objects adopted
 	uint64_t evictions_by_cost[DELUGE_RESOURCE_COST_BUCKETS]; // evicted-chunk breakdown by cost class
+	// Scan-cost instrumentation (THROWAWAY: added 2026-08-16 to size the manager's O(table) linear
+	// scans on device; remove once the indexing decision is made). `*_calls` counts invocations,
+	// `*_slots` counts slots actually visited -- the cost driver, since each visit is a masked
+	// (interrupt-disabling) read of a chunk slot in SDRAM. Measured on hardware: a full 6144-slot
+	// scan costs ~10.5 ms, i.e. ~1.7 us per slot visited.
+	uint64_t scan_resident_calls;
+	uint64_t scan_resident_slots;
+	uint64_t scan_ptr_calls;
+	uint64_t scan_ptr_slots;
+	uint64_t scan_free_calls;
+	uint64_t scan_free_slots;
+	uint64_t scan_evict_calls;
+	uint64_t scan_evict_slots;
 } DelugeResourceStats;
 
 /// Copy the manager's cumulative counters into `*out`. No-op if either pointer is null.

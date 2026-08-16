@@ -17,13 +17,16 @@
 
 #include "model/sample/sample_low_level_reader.h"
 #include "definitions_cxx.hpp"
+#include "deluge_resource.h" // deluge_resource_peek/slot_of/lease_count_by_slot (diagnostic)
 #include "dsp/interpolate/interpolate.h"
 #include "dsp/stereo_sample.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "hid/display/display.h"
 #include "io/debug/log.h"
 #include "libdeluge/sample_source.h"
+#include "libdeluge/streaming_fill.h" // deluge_streaming_resource_manager() (diagnostic)
 #include "model/sample/sample.h"
+#include "model/sample/sample_reader_bridge.h" // deluge::sample::source_id_for()
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample_playback_guide.h"
 #include "storage/cluster/cluster.h"
@@ -407,9 +410,32 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 		// could not reserve at all, or `clusterIndex >= num_clusters` (the geometry says this sample has
 		// no such cluster). The cluster index matters too: "cluster 0 will not come resident" (the
 		// sample-preview E199) and "cluster N mid-stream missed its prefetch" are different problems.
-		D_PRINTLN("assignClusters fail: acquire %s cluster %d dir %d prio %d",
+		// The asset id is logged so this can be lined up against `sample_holder.cpp`'s "reserve:"
+		// line for the SAME sample: a warm reservation that materialized cluster 0 under a
+		// DIFFERENT asset id than the one this cursor acquires against would explain a LOADING here
+		// despite the chunk being resident -- two ids for one sample, rather than a failed load.
+		// Both asset ids are logged because the cursor does NOT use the one C++ computes here. The
+		// reservation that warms the region keys off `source_id_for` (the Sample's defined Asset),
+		// while the region-port cursor keys off the id MIRRORED onto the stream registry slot. If
+		// those two diverge, the warm hint materializes one asset's cluster 0 while the cursor asks
+		// for another's -- which looks exactly like a chunk that never loaded.
+		// Ask the MANAGER directly what it holds for this exact key. `peek` reports residency without
+		// the ready-gate `acquire` applies, so the two together split the only fork left: peek null
+		// means the chunk is not resident at all under this (asset, index) -- evicted, or never
+		// registered here -- while peek non-null means it IS resident and `acquire` refused it purely
+		// on `ready`, i.e. the fill's mark_ready did not stick. The lease count distinguishes an
+		// eviction (which a live lease should have prevented) from a key mismatch.
+		uint32_t assetId = deluge::sample::source_id_for(*sample);
+		DelugeResource* mgr = deluge_streaming_resource_manager();
+		void* resident = (mgr != nullptr) ? deluge_resource_peek(mgr, assetId, (uint32_t)clusterIndex) : nullptr;
+		int32_t leases = -1;
+		if (mgr != nullptr && resident != nullptr) {
+			leases = (int32_t)deluge_resource_lease_count_by_slot(mgr, deluge_resource_slot_of(mgr, resident));
+		}
+		D_PRINTLN("assignClusters fail: acquire %s cluster %d dir %d asset %d streamAsset %d resident %d leases %d",
 		          state == DELUGE_REGION_LOADING ? "LOADING" : "UNAVAILABLE", clusterIndex,
-		          (int32_t)guide->playDirection, priorityRating);
+		          (int32_t)guide->playDirection, (int32_t)assetId, (int32_t)sample->stream().resource_asset_id(),
+		          (int32_t)(resident != nullptr), leases);
 		return false;
 	}
 

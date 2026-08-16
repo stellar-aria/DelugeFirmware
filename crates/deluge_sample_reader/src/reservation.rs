@@ -261,6 +261,19 @@ impl Reservation {
     pub fn covered_indices(&self) -> &[u32] {
         &self.covered[..self.num_covered]
     }
+
+    /// How many covered clusters this reservation actually holds a lease on.
+    ///
+    /// This is deliberately NOT the same as `covered_indices().len()`: `walk_and_lease` counts a
+    /// cluster as covered as soon as it is in range, *before* asking `load_cluster` for a lease, and
+    /// records `None` when that lease fails. So the two counts diverge exactly when a load failed —
+    /// a `LoadMode::Now` whose synchronous fill returned false, or a reservation the manager could
+    /// not satisfy — and comparing them is the only way to see that from outside. Every such
+    /// failure is otherwise silent: `open` returns a perfectly valid handle either way, so a caller
+    /// that asked for `DELUGE_LOAD_NOW` cannot currently tell whether anything was materialized.
+    pub fn num_leased(&self) -> usize {
+        self.leases.iter().filter(|lease| lease.is_some()).count()
+    }
 }
 
 /// The resolved geometry needed to walk a reservation's covered window from its head cluster — the
@@ -467,6 +480,76 @@ pub unsafe extern "C" fn deluge_sample_reserve_move(
     // underneath).
     let reservation = unsafe { &mut *(res as *mut Reservation) };
     reservation.reanchor(marker_frame, direction, load_mode);
+}
+
+/// How many clusters `res` covers — see the header doc
+/// (`deluge_sample_reserve_covered_count`). `0` on a null `res`.
+///
+/// # Safety
+/// `res`, if non-null, must be a live pointer previously returned by `deluge_sample_reserve_open`
+/// and not yet passed to `deluge_sample_reserve_close`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub unsafe extern "C" fn deluge_sample_reserve_covered_count(
+    res: *const DelugeSampleReservation,
+) -> u32 {
+    if res.is_null() {
+        return 0;
+    }
+    // SAFETY: same cast validity `deluge_sample_reserve_close` relies on (same address,
+    // `Reservation`'s layout underneath); non-null per the check above; live per this fn's contract.
+    // Read-only — no lease is taken, released, or moved.
+    let reservation = unsafe { &*(res as *const Reservation) };
+    reservation.covered_indices().len() as u32
+}
+
+/// How many of `res`'s covered clusters it actually holds a lease on — see the header doc
+/// (`deluge_sample_reserve_leased_count`) and [`Reservation::num_leased`]. `0` on a null `res`.
+///
+/// # Safety
+/// `res`, if non-null, must be a live pointer previously returned by `deluge_sample_reserve_open`
+/// and not yet passed to `deluge_sample_reserve_close`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub unsafe extern "C" fn deluge_sample_reserve_leased_count(
+    res: *const DelugeSampleReservation,
+) -> u32 {
+    if res.is_null() {
+        return 0;
+    }
+    // SAFETY: as `deluge_sample_reserve_covered_count` above — read-only, same cast validity.
+    let reservation = unsafe { &*(res as *const Reservation) };
+    reservation.num_leased() as u32
+}
+
+/// The cluster index `res` covers at walk position `slot`, or `u32::MAX` if `slot` is past its
+/// coverage — see the header doc (`deluge_sample_reserve_covered_index`).
+///
+/// # Safety
+/// `res`, if non-null, must be a live pointer previously returned by `deluge_sample_reserve_open`
+/// and not yet passed to `deluge_sample_reserve_close`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub unsafe extern "C" fn deluge_sample_reserve_covered_index(
+    res: *const DelugeSampleReservation,
+    slot: u32,
+) -> u32 {
+    if res.is_null() {
+        return u32::MAX;
+    }
+    // SAFETY: as `deluge_sample_reserve_covered_count` above — read-only, same cast validity.
+    let reservation = unsafe { &*(res as *const Reservation) };
+    let covered = reservation.covered_indices();
+    match covered.get(slot as usize) {
+        Some(index) => *index,
+        None => u32::MAX,
+    }
 }
 
 /// Release `res` and every lease it still holds. No-op on a null `res`.

@@ -81,6 +81,49 @@ Layers 1 and 2 are independent and separately valuable: Layer 1 without Layer 2
 leaves rare misses fatal; Layer 2 without Layer 1 makes every preview start
 late. Ship both.
 
+## 4a. CORRECTION 2026-08-16 — Layer 1's premise was wrong
+
+§4 below was written believing the preview never warmed its start region. **It does**, and §4 as
+written would have been a no-op. Measured on hardware over five instrumented flashes:
+
+```
+21.8760: reserve: asset 2 covered 2 leased 2 mode 1 headByte 1024 dir 1 cl0 0 cl1 1 audioStart 1024
+23.1153: assignClusters fail: acquire LOADING cluster 0 dir 1 asset 6 streamAsset 6 resident 1 leases 1
+```
+
+`previewSample` calls `loadFile(..., CLUSTER_LOAD_IMMEDIATELY)` → `claimClusterReasons` →
+`loadModeFor` → `DELUGE_LOAD_NOW` → `deluge_sample_reserve_open`. Mode 1 is `NOW`, and
+`leased == covered` under `NOW` means `fill_now` returned true and `mark_ready` ran. Cluster 0 (`cl0
+0`) really is materialized, ~11 ms before the note.
+
+Ruled out by measurement, in order: a failed synchronous fill (`leased == covered` every time); an
+asset-identity mismatch (`asset N == streamAsset N`); a wrong anchor cluster (`cl0 0` is the cluster
+requested); a stale reservation across a sample swap (`AudioFileHolder::setAudioFile` closes it,
+`audio_file_holder.cpp:64`); and duplicate chunks (`Manager::request` dedupes via `find_resident`,
+`manager.rs:859-871`).
+
+**What remains — a residency LIFETIME defect.** At the failure the manager reports `resident 1
+leases 1`. `peek` differs from `try_acquire` only by the `ready` gate, so the chunk is
+resident-but-not-ready; and the lease count is 1, not the 2 it would be if the reservation's lease
+and the cursor's new lease were both on one chunk. So the chunk the cursor holds is a FRESH one:
+the warmed chunk lost its last lease, became evictable, was evicted, and `request` allocated an
+unready replacement under the same key — `ready = false, leases = 1`, reported as `LOADING`.
+
+The warm hint therefore works and is then dropped before the note consumes it. Previews are
+dispatched as worker-fiber ops (`sample_browser.cpp:555`, `Owner::run`) and each `previewSample`
+begins with `stopAnyPreviewing()`, so rapid scrolling — which is how this reproduces — lets a later
+preview release the reservation that an earlier, still-pending note-on was relying on.
+
+**Layer 1 is therefore a lifetime fix, not a new warm hint:** the start region must stay pinned
+until the note it was warmed for has actually started. The next investigation step is to establish
+exactly which release fires between materialization and note-on — the reservation close in
+`stopAnyPreviewing`'s `setAudioFile(nullptr)`, or a `reanchor` — before choosing where the pin is
+extended.
+
+**Layer 2 is unaffected and is now clearly the primary fix.** Whatever drops the residency, a
+note-on that responds to `LOADING` by deferring converges as soon as the refill lands, instead of
+dropping the voice and asserting E199.
+
 ## 4. Layer 1 — warm the preview's start region
 
 The warm-hint mechanism **already exists below the port** and needs no new

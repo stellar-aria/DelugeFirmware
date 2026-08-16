@@ -1435,7 +1435,16 @@ void previewSample(std::string_view path, bool shouldActuallySound) {
 		return;
 	}
 	range->sampleHolder.filePath.assign(path);
-	Error error = range->sampleHolder.loadFile(false, true, true, CLUSTER_LOAD_IMMEDIATELY);
+	// CLUSTER_ENQUEUE, not CLUSTER_LOAD_IMMEDIATELY: the immediate mode reads the covered clusters from
+	// the card SYNCHRONOUSLY, measured at 38.2-40.1 ms on device. That stalls the audio path (a 9.8 ms
+	// late render, plus four more in the same second), which inflates the engine's measured render time,
+	// which makes it declare an overload and force-cull a voice -- the very preview voice the fill was
+	// warming. That is the preview-truncation bug; see the 2026-08-15 async-note-on-residency design
+	// doc, section 4b.
+	//
+	// Enqueueing never blocks. The note-on then sees LOADING and defers (VoiceUnisonPartSource), so the
+	// preview starts a few ms late instead of either stalling audio or dropping the voice.
+	Error error = range->sampleHolder.loadFile(false, true, true, CLUSTER_ENQUEUE);
 
 	if (error != Error::NONE) {
 		display->displayError(error); // Rare, shouldn't cause later problems.

@@ -124,6 +124,54 @@ extended.
 note-on that responds to `LOADING` by deferring converges as soon as the refill lands, instead of
 dropping the voice and asserting E199.
 
+## 4b. ROOT CAUSE PROVEN 2026-08-16 — a reservation re-anchored across an asset change
+
+```
+23.8195: reserve: res 20038b80 resAsset 1 asset 2 covered 2 leased 2 mode 1 headByte 1024 cl0 0 cl1 1
+23.8300: assignClusters fail: acquire LOADING cluster 0 dir 1 asset 2 streamAsset 2 resident 1 leases 1
+```
+
+`resAsset` is the Asset the reservation is BOUND to (read from Rust); `asset` is what C++ just
+computed for the sample now in the holder. **They diverge: 1 against 2.**
+
+### The mechanism
+
+1. `Reservation` captures `asset` in `open()` (`reservation.rs:170-195`). **`reanchor` never changes
+   it** — by design, it slides the window *within* one Asset.
+2. `claimClusterReasonsForMarker` (`sample_holder.cpp:202-207`) chooses open-vs-move on
+   `reservation == nullptr` **alone** — never on whether the underlying sample changed.
+3. A `SampleHolder` reused for a different sample without an intervening close therefore takes the
+   `move` branch, and re-anchors the OLD Asset's window onto the NEW sample's marker.
+
+So the reservation dutifully pins and materializes clusters 0 and 1 **of asset 1** (hence
+`covered 2 leased 2`, which is why the counters looked healthy all along), while the note-on needs
+cluster 0 **of asset 2** — which nothing ever warmed. The cursor then requests it cold:
+`resident 1, leases 1, ready = false` → `LOADING`.
+
+The preview reproduces it because rapid scrolling reuses one holder across samples faster than the
+close path runs: the trace shows a `CLOSE start` before the second preview but **none** before the
+third, which is the one that fails.
+
+### The fix
+
+The invariant "a reservation is bound to one Asset for its whole life" is real and worth keeping —
+what is missing is enforcement at the seam that can violate it. Two options:
+
+1. **Rust (preferred):** give `deluge_sample_reserve_move` the `source_id`. If it differs from the
+   bound Asset, release every lease and rebuild against the new one (a close+open that preserves the
+   handle). No caller can then get this wrong, and `time_stretcher.cpp:1140`'s reservation gets the
+   same protection for free. Costs an ABI parameter change on `move`.
+2. **C++ only:** in `claimClusterReasonsForMarker`, close and reopen when
+   `deluge_sample_reserve_asset(reservation) != sourceId`. Smaller, but leaves the invariant
+   enforced by convention at every call site rather than by the type.
+
+Either way `deluge_sample_reserve_asset` — added for this investigation — stays, since it is what
+makes the invariant checkable.
+
+This is a genuine bug independent of the preview: ANY holder reused across samples mis-pins. It also
+explains the shape of the E199 exactly, and Layer 2 remains the right belt-and-braces fix, since a
+cold cluster 0 should defer the note rather than kill the voice.
+
 ## 4. Layer 1 — warm the preview's start region
 
 The warm-hint mechanism **already exists below the port** and needs no new

@@ -215,6 +215,16 @@ DelugeSampleReservation* deluge_sample_reserve_open(uint32_t source_id, uint64_t
 void deluge_sample_reserve_move(DelugeSampleReservation* res, uint64_t marker_frame, int8_t direction,
                                 DelugeLoadMode load_mode);
 
+/// @brief The Asset id @p res was OPENED for.
+///
+/// NOT re-derived on deluge_sample_reserve_move: a reservation is bound to one Asset for its whole
+/// life, and re-anchoring only slides the window WITHIN that Asset. A caller that reuses one
+/// reservation handle across a change of sample must therefore close and reopen it -- moving it
+/// would pin the OLD sample's clusters at the new sample's marker.
+/// @param res The reservation to query; `nullptr` reports UINT32_MAX.
+/// @return The Asset id this reservation is bound to.
+uint32_t deluge_sample_reserve_asset(const DelugeSampleReservation* res);
+
 /// @brief How many clusters @p res covers — every in-range cluster in its walk window.
 ///
 /// Counts coverage, NOT residency: a cluster is covered as soon as it is in range, before any

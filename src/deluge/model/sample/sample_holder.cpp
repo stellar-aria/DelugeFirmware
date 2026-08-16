@@ -71,6 +71,8 @@ void SampleHolder::beenClonedFrom(SampleHolder const* other, bool reversed) {
 
 void SampleHolder::unassignAllClusterReasons(bool beingDestructed) {
 	if (clustersForStart_ != nullptr) {
+		D_PRINTLN("reserve CLOSE start: res %x destructing %d", (uint32_t)(uintptr_t)clustersForStart_,
+		          (int32_t)beingDestructed);
 		deluge_sample_reserve_close(clustersForStart_);
 		if (!beingDestructed) {
 			clustersForStart_ = nullptr;
@@ -218,9 +220,14 @@ void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reserv
 	// want opposite fixes. Note `leased == covered` alone does NOT mean resident -- under
 	// DELUGE_LOAD_ENQUEUE a lease is held the moment the chunk is enqueued, unfilled. Only
 	// DELUGE_LOAD_NOW (mode 1) implies materialized, which is why the mode is printed.
-	D_PRINTLN("reserve: asset %d covered %d leased %d mode %d headByte %d dir %d cl0 %d cl1 %d audioStart %d",
-	          (int32_t)sourceId, (int32_t)covered, (int32_t)leased, (int32_t)mode, (int32_t)startPlaybackAtByte,
-	          (int32_t)playDirection, (int32_t)deluge_sample_reserve_covered_index(reservation, 0),
-	          (int32_t)deluge_sample_reserve_covered_index(reservation, 1),
-	          (int32_t)((Sample*)audioFile)->audioDataStartPosBytes);
+	// The handle is logged so an open/move can be paired with its own close: the reservation is what
+	// pins the warmed region, so the question "what released cluster 0 between materializing it and
+	// the note-on" is answered by which handle closed, and when.
+	D_PRINTLN(
+	    "reserve: res %x resAsset %d asset %d covered %d leased %d mode %d headByte %d cl0 %d cl1 %d audioStart %d",
+	    (uint32_t)(uintptr_t)reservation, (int32_t)deluge_sample_reserve_asset(reservation), (int32_t)sourceId,
+	    (int32_t)covered, (int32_t)leased, (int32_t)mode, (int32_t)startPlaybackAtByte,
+	    (int32_t)deluge_sample_reserve_covered_index(reservation, 0),
+	    (int32_t)deluge_sample_reserve_covered_index(reservation, 1),
+	    (int32_t)((Sample*)audioFile)->audioDataStartPosBytes);
 }

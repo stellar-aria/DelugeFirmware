@@ -483,6 +483,25 @@ pub unsafe extern "C" fn deluge_sample_reserve_move(
 }
 
 /// How many clusters `res` covers — see the header doc
+/// The Asset id `res` was OPENED for — see the header doc (`deluge_sample_reserve_asset`).
+/// `u32::MAX` on a null `res`.
+///
+/// # Safety
+/// `res`, if non-null, must be a live pointer previously returned by `deluge_sample_reserve_open`
+/// and not yet passed to `deluge_sample_reserve_close`.
+#[cfg_attr(
+    any(target_os = "none", feature = "host_app", feature = "sim"),
+    unsafe(no_mangle)
+)]
+pub unsafe extern "C" fn deluge_sample_reserve_asset(res: *const DelugeSampleReservation) -> u32 {
+    if res.is_null() {
+        return u32::MAX;
+    }
+    // SAFETY: as `deluge_sample_reserve_covered_count` below — read-only, same cast validity.
+    let reservation = unsafe { &*(res as *const Reservation) };
+    reservation.asset
+}
+
 /// (`deluge_sample_reserve_covered_count`). `0` on a null `res`.
 ///
 /// # Safety

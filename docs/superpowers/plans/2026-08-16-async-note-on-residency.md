@@ -365,7 +365,32 @@ git commit -m "fix(preview): enqueue the preview's clusters instead of reading t
 
 ---
 
-### Task 5: Fix the E199 assertion itself
+### Task 5: Fix the E199 assertion itself — RESOLVED 2026-08-16, scope changed
+
+**Outcome:** Step 1's investigation found the remover, and it is a cross-tier race rather than
+anything local to this call: the audio render preempts the fiber-tier note-on and erases the voice
+from `voices_` while `Sound::noteOn` still holds a reference to that element. The full write-up,
+including two further defects the same race causes (vector reallocation under an in-flight
+audio-tier iterator, and ABA on pool-recycled `Voice` addresses), is
+`docs/superpowers/specs/2026-08-16-voices-cross-tier-race.md`.
+
+Steps 2-3 as written are therefore **not implementable as scoped**: the invariant `checkVoiceExists`
+asserts cannot hold at that site, so "fix the cause without touching the assertion" is a
+contradiction there. Fixing the cause properly means mutual exclusion on `voices_`, which is a design
+with its own testing story and belongs with the storage-execution-model tiering.
+
+**Done instead (by decision, 2026-08-16):** the narrow, safe part — `previewSample` now sets
+`bypassCulling = true` **before** its `Sound::noteOn` instead of after, so the preview voice is no
+longer cull-eligible throughout its own note-on. `checkVoiceExists` is untouched. Commit
+`e58f2141a`. Tasks 3 and 4 independently stop `noteOn` returning false for the preview, so E199 is
+unreachable in practice.
+
+**Left open:** the three defects in the race spec. Not scheduled.
+
+<details>
+<summary>Original Task 5 text, kept for the record</summary>
+
+#### Task 5: Fix the E199 assertion itself
 
 **Files:**
 - Modify: `src/deluge/processing/sound/sound.cpp:1665-1680` (only after the investigation below)
@@ -403,6 +428,8 @@ Expected: pass.
 git add src/deluge/processing/sound/sound.cpp tests/
 git commit -m "fix(sound): stop E199 firing on a voice something else already removed"
 ```
+
+</details>
 
 ---
 

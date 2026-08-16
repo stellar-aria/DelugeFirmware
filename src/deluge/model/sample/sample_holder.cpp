@@ -16,6 +16,7 @@
  */
 
 #include "model/sample/sample_holder.h"
+#include "OSLikeStuff/scheduler_api.h" // getSystemTime()
 #include "gui/ui/browser/sample_browser.h"
 #include "hid/display/display.h"
 #include "model/sample/sample.h"
@@ -199,12 +200,20 @@ void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reserv
 	int32_t bytesPerSample = audioFile->numChannels * ((Sample*)audioFile)->byteDepth;
 	uint64_t markerFrame = (startPlaybackAtByte - ((Sample*)audioFile)->audioDataStartPosBytes) / bytesPerSample;
 	DelugeLoadMode mode = loadModeFor(clusterLoadInstruction);
+	// Timed because DELUGE_LOAD_NOW reads the covered clusters from the card SYNCHRONOUSLY. If that
+	// read is long enough to stall the audio path, the engine sees an inflated render time, decides
+	// it is overloaded, and culls voices -- including the very preview voice this fill was warming,
+	// which is the "preview truncates" symptom. The correlation is already visible (a ~9.6 ms
+	// "Audio routine latency high" landing between this call and a force-cull); this makes the cause
+	// direct rather than inferred.
+	double reserveStart = getSystemTime();
 	if (reservation == nullptr) {
 		reservation = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, mode);
 	}
 	else {
 		deluge_sample_reserve_move(reservation, sourceId, markerFrame, playDirection, mode);
 	}
+	double reserveMs = (getSystemTime() - reserveStart) * 1000.;
 
 	// A reservation reports success by handing back a valid handle whether or not it managed to load
 	// anything, so an outright failure to materialize is silent at this seam. Surface it: leased <
@@ -223,11 +232,11 @@ void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reserv
 	// The handle is logged so an open/move can be paired with its own close: the reservation is what
 	// pins the warmed region, so the question "what released cluster 0 between materializing it and
 	// the note-on" is answered by which handle closed, and when.
-	D_PRINTLN(
-	    "reserve: res %x resAsset %d asset %d covered %d leased %d mode %d headByte %d cl0 %d cl1 %d audioStart %d",
-	    (uint32_t)(uintptr_t)reservation, (int32_t)deluge_sample_reserve_asset(reservation), (int32_t)sourceId,
-	    (int32_t)covered, (int32_t)leased, (int32_t)mode, (int32_t)startPlaybackAtByte,
-	    (int32_t)deluge_sample_reserve_covered_index(reservation, 0),
-	    (int32_t)deluge_sample_reserve_covered_index(reservation, 1),
-	    (int32_t)((Sample*)audioFile)->audioDataStartPosBytes);
+	D_PRINTLN("reserve: %.3fms res %x resAsset %d asset %d covered %d leased %d mode %d headByte %d cl0 %d cl1 %d "
+	          "audioStart %d",
+	          reserveMs, (uint32_t)(uintptr_t)reservation, (int32_t)deluge_sample_reserve_asset(reservation),
+	          (int32_t)sourceId, (int32_t)covered, (int32_t)leased, (int32_t)mode, (int32_t)startPlaybackAtByte,
+	          (int32_t)deluge_sample_reserve_covered_index(reservation, 0),
+	          (int32_t)deluge_sample_reserve_covered_index(reservation, 1),
+	          (int32_t)((Sample*)audioFile)->audioDataStartPosBytes);
 }

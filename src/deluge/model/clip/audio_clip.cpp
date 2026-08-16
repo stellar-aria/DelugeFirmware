@@ -424,14 +424,15 @@ doUnassignment:
 			voiceSample->noteOn(&guide, 0, 1);
 			voiceSample->forAudioClip = true;
 			{
-				bool clustersReady =
+				RegionOutcome outcome =
 				    voiceSample->setupClusersForInitialPlay(&guide, ((Sample*)sampleHolder.audioFile), 0, false, 1);
-				// A false return means NotReady - which includes a present-but-not-yet-loaded cold cluster (e.g. a
-				// just-finalized recording's cluster 0, freshly enqueued but not yet fetched). Arm the late-start
-				// retry so render()'s attemptLateSampleStart waits for it instead of falling through with no valid
-				// region, mirroring how other callers already honour this bool (sample_low_level_reader.cpp,
-				// voice_unison_part_source.cpp).
-				if (!clustersReady) {
+				// Anything but Ready arms the late-start retry, which covers both remaining outcomes:
+				// Loading is a present-but-not-yet-loaded cold cluster (e.g. a just-finalized recording's
+				// cluster 0, freshly enqueued but not yet fetched), and Unavailable would otherwise fall
+				// through with no valid region. AudioClips do not use VoiceSample::pendingSamplesLate, so
+				// this -- not the unison-source deferral -- is their retry path; render()'s
+				// attemptLateSampleStart waits for the data either way.
+				if (outcome != RegionOutcome::Ready) {
 					doingLateStart = true;
 				}
 			}

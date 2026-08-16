@@ -91,8 +91,12 @@ public:
 	/// @param byteDepth               Byte depth of the sample; currently unused by this function.
 	void setupForPlayPosMovedIntoNewCluster(SamplePlaybackGuide* guide, Sample* sample, char* clusterBase,
 	                                        int32_t bytePosWithinNewCluster, int32_t byteDepth);
-	bool setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample, int32_t byteOvershoot = 0,
-	                                bool justLooped = false, int32_t priorityRating = 1);
+	/// @brief Set up the reader's clusters for the start of playback, at the guide's start byte.
+	/// @return Ready when playback can begin now; Loading when the first cluster is reserved but its
+	///         fill is still in flight (the caller may defer rather than drop); Unavailable when the
+	///         sample is unplayable or the start byte is out of range.
+	RegionOutcome setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample, int32_t byteOvershoot = 0,
+	                                         bool justLooped = false, int32_t priorityRating = 1);
 	bool moveOnToNextCluster(SamplePlaybackGuide* guide, Sample* sample, int32_t priorityRating = 1);
 	bool changeClusterIfNecessary(SamplePlaybackGuide* guide, Sample* sample, bool loopingAtLowLevel,
 	                              int32_t priorityRating = 1);
@@ -106,8 +110,11 @@ public:
 	int32_t getPlayByteLowLevel(Sample* sample, SamplePlaybackGuide* guide,
 	                            bool compensateForInterpolationBuffer = false);
 
-	bool setupClustersForPlayFromByte(SamplePlaybackGuide* guide, Sample* sample, int32_t startPlaybackAtByte,
-	                                  int32_t priorityRating);
+	/// @brief Set up the reader's clusters to play from @p startPlaybackAtByte.
+	/// @return Ready when playback can begin now; Loading when the covering cluster is reserved but not
+	///         yet filled; Unavailable when @p startPlaybackAtByte lies outside the sample's audio data.
+	RegionOutcome setupClustersForPlayFromByte(SamplePlaybackGuide* guide, Sample* sample, int32_t startPlaybackAtByte,
+	                                           int32_t priorityRating);
 
 	[[nodiscard]] virtual bool shouldObeyMarkers() const { return false; }
 

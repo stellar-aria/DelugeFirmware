@@ -253,8 +253,9 @@ goodToGo:
 			// changes on the re-acquire. startAtByte >> Cluster::size_magnitude == startAtClusterIndex and
 			// startAtByte & (Cluster::size-1) == the byte-within-cluster, so
 			// setupForPlayPosMovedIntoNewCluster() lands on the correct byte-within-cluster position.
-			if (!setupClustersForPlayFromByte(voiceSource, sample, static_cast<int32_t>(startAtByte),
-			                                  static_cast<int32_t>(0xFFFFFFFFU))) {
+			if (setupClustersForPlayFromByte(voiceSource, sample, static_cast<int32_t>(startAtByte),
+			                                 static_cast<int32_t>(0xFFFFFFFFU))
+			    != RegionOutcome::Ready) {
 				// The start cluster was resident-and-loaded a few statements ago (checked above), so a false
 				// here is a shouldn't-happen (reclaimed in the zero-gap, or out of range). Take the same
 				// defer-and-retry the not-loaded checks below take — never a drop — and converge on the single

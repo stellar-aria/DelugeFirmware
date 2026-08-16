@@ -1003,12 +1003,12 @@ bool TimeStretcher::setupNewPlayHead(Sample* sample, VoiceSample* voiceSample, S
                                      LoopType loopingType) {
 	// clear the current reasons since setting up the clusters will add new ones
 	voiceSample->unassignAllReasons(false);
-	bool success = voiceSample->setupClustersForPlayFromByte(guide, sample, newHeadBytePos, priorityRating);
-	if (!success) {
+	if (voiceSample->setupClustersForPlayFromByte(guide, sample, newHeadBytePos, priorityRating)
+	    != RegionOutcome::Ready) {
 		return false;
 	}
 
-	success = voiceSample->changeClusterIfNecessary(
+	bool success = voiceSample->changeClusterIfNecessary(
 	    guide, sample, (loopingType == LoopType::LOW_LEVEL),
 	    priorityRating); // Set looping as false - change in June 2019. Pretty sure this is right...
 	if (!success) {

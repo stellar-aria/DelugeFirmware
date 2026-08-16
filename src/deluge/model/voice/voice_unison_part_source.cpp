@@ -56,7 +56,8 @@ bool VoiceUnisonPartSource::noteOn(Voice* voice, Source* source, VoiceSamplePlay
 		if (samplesLate != 0u) {
 			return true; // We're finished in this case
 		}
-		return voiceSample->setupClusersForInitialPlay(guide, (Sample*)guide->audioFileHolder->audioFile, 0, false, 1);
+		return voiceSample->setupClusersForInitialPlay(guide, (Sample*)guide->audioFileHolder->audioFile, 0, false, 1)
+		       == RegionOutcome::Ready;
 	}
 
 	if (synthMode != SynthMode::FM

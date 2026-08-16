@@ -310,30 +310,31 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 
 // Make sure reasons are unassigned before you call this!
 // Call changeClusterIfNecessary() after this if byteOvershoot isn't 0
-bool SampleLowLevelReader::setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample, int32_t byteOvershoot,
-                                                      bool justLooped, int32_t priorityRating) {
+RegionOutcome SampleLowLevelReader::setupClusersForInitialPlay(SamplePlaybackGuide* guide, Sample* sample,
+                                                               int32_t byteOvershoot, bool justLooped,
+                                                               int32_t priorityRating) {
 
 	if (sample->unplayable) {
-		return false; // TODO: this probably shouldn't be here
+		return RegionOutcome::Unavailable; // TODO: this probably shouldn't be here
 	}
 
 	// Assign all the upcoming Clusters...
 	uint32_t startPlaybackAtByte = guide->getBytePosToStartPlayback(justLooped);
 	startPlaybackAtByte += byteOvershoot * guide->playDirection;
 
-	bool success = setupClustersForPlayFromByte(guide, sample, startPlaybackAtByte, priorityRating);
+	RegionOutcome outcome = setupClustersForPlayFromByte(guide, sample, startPlaybackAtByte, priorityRating);
 
-	if (!success) {
+	if (outcome != RegionOutcome::Ready) {
 		D_PRINTLN("setupClustersForInitialPlay fail");
 	}
 
-	return success;
+	return outcome;
 }
 
 // Make sure reasons are unassigned before you call this!
 // Call changeClusterIfNecessary() after this if byteOvershoot isn't 0
-bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* guide, Sample* sample,
-                                                        int32_t startPlaybackAtByte, int32_t priorityRating) {
+RegionOutcome SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* guide, Sample* sample,
+                                                                 int32_t startPlaybackAtByte, int32_t priorityRating) {
 
 	// Change in Aug 2019 - we return false if stuff is out of range. Seems right? Previously we were constraining
 	// ClusterIndex to the range, but not changing startPlaybackAtByte - didn't seem to make sense. Or, should it maybe
@@ -341,15 +342,16 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 	// play", and on time-stretch hop, which goes and will try some alternative stuff if this fails
 	if (startPlaybackAtByte < sample->audioDataStartPosBytes
 	    || startPlaybackAtByte >= sample->audioDataStartPosBytes + sample->audioDataLengthBytes) {
-		return false;
+		return RegionOutcome::Unavailable; // Out of range — no amount of waiting fixes this.
 	}
 
 	int32_t clusterIndex = startPlaybackAtByte >> Cluster::size_magnitude;
 
-	if (assignClusters(guide, sample, clusterIndex, priorityRating) != RegionOutcome::Ready) {
+	RegionOutcome outcome = assignClusters(guide, sample, clusterIndex, priorityRating);
+	if (outcome != RegionOutcome::Ready) {
 		D_PRINTLN("setupClustersForPlayFromByte fail");
 		D_PRINTLN("byte:  %d", startPlaybackAtByte);
-		return false;
+		return outcome;
 	}
 
 	int32_t bytePosWithinNewCluster = startPlaybackAtByte - clusterIndex * Cluster::size;
@@ -364,7 +366,7 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 	// If caller isn't sure about this, call changeClustersIfNecessary().
 	// changeClustersIfNecessary() itself calls this function when it changes current Cluster, so we absolutely couldn't
 	// call it from here.
-	return true;
+	return RegionOutcome::Ready;
 }
 
 // Unassign the old ones before you call this.
@@ -553,8 +555,8 @@ bool SampleLowLevelReader::changeClusterIfNecessary(SamplePlaybackGuide* guide, 
 		else { // LOOP_OR_STOP
 			unassignAllReasons(false);
 			if (loopingAtLowLevel) {
-				bool success = setupClusersForInitialPlay(guide, sample, byteOvershoot, true, priorityRating);
-				if (!success) {
+				if (setupClusersForInitialPlay(guide, sample, byteOvershoot, true, priorityRating)
+				    != RegionOutcome::Ready) {
 					D_PRINTLN("loop failed");
 					// TODO: shouldn't we set currentPlayPos = 0 here too?
 					return false;

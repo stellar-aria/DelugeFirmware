@@ -93,7 +93,9 @@ if [ "${NO_BUILD:-0}" != 1 ]; then
 	(cd "$CRATE_DIR" && cargo build --release)
 fi
 
-BIN="$CRATE_DIR/target/release/golden_vt_render"
+# Honour CARGO_TARGET_DIR: `dbt harness run` points every rig at the shared target/harness/ tree,
+# so the crate-local target/ is empty there and a hard-coded path fails after a SUCCESSFUL build.
+BIN="${CARGO_TARGET_DIR:-$CRATE_DIR/target}/release/golden_vt_render"
 [ -x "$BIN" ] || { echo "ERROR: '$BIN' not built (see NO_BUILD)"; exit 2; }
 
 OUT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/golden_embassy_diff.${FIXTURE}.XXXXXX")"

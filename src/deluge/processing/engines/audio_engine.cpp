@@ -1460,9 +1460,21 @@ void previewSample(std::string_view path, bool shouldActuallySound) {
 		char modelStackMemory[MODEL_STACK_MAX_SIZE];
 		ModelStackWithThreeMainThings* modelStack = setupModelStackWithThreeMainThingsButNoNoteRow(
 		    modelStackMemory, currentSong, sampleForPreview, NULL, paramManagerForSamplePreview);
+		// Set BEFORE the note-on, not after. Needed - Dec 2021 - because SampleBrowser::selectEncoderAction()
+		// may have gone a while without an audio routine call, so the first render after this sees a huge
+		// apparent load and culls.
+		//
+		// The ordering matters for a second reason: previewSample runs on the worker fiber while the audio
+		// render preempts it on the InterruptExecutor. With the assignment after the call, the preview voice
+		// was cull-eligible for the whole duration of its own note-on -- and cullVoices -> terminateOneVoice
+		// -> freeActiveVoice() erases it from Sound::voices_ while Sound::noteOn still holds a reference to
+		// that element, which is what made the E199 assertion fire on a voice something else had removed.
+		//
+		// This narrows the window; it does not close the underlying cross-tier race on voices_ (bypassCulling
+		// is cleared every render, and the race is reachable from any note-on, not just this one). See
+		// docs/superpowers/specs/2026-08-16-voices-cross-tier-race.md.
+		bypassCulling = true;
 		sampleForPreview->Sound::noteOn(modelStack, &sampleForPreview->arpeggiator, kNoteForDrum, zeroMPEValues);
-		bypassCulling = true; // Needed - Dec 2021. I think it's during SampleBrowser::selectEncoderAction() that we
-		                      // may have gone a while without an audio routine call.
 	}
 }
 

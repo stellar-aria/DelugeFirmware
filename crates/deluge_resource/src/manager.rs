@@ -163,6 +163,10 @@ struct ChunkSlot {
     /// Only meaningful while this slot is indexed — i.e. occupied with `asset != NONE`; see
     /// [`Manager::index_insert`] for why adopted chunks are excluded.
     hash_next: u32,
+    /// Next slot in this chunk's `backing`-pointer hash bucket, or `NONE` at the end of the chain.
+    /// Unlike `hash_next`, EVERY occupied slot is in this index: backing pointers are unique by
+    /// construction, so adopted chunks need no exclusion rule here.
+    ptr_next: u32,
 }
 impl ChunkSlot {
     const EMPTY: ChunkSlot = ChunkSlot {
@@ -182,6 +186,7 @@ impl ChunkSlot {
         adopt_evict: None,
         adopt_ctx: ptr::null_mut(),
         hash_next: NONE,
+        ptr_next: NONE,
     };
 }
 
@@ -240,6 +245,17 @@ pub struct Manager {
     /// a cold sample preview spent 21 ms here, and ordinary playback spent 5-27% of CPU in it --
     /// all with interrupts masked, since each visit is a masked read.
     buckets: &'static [Cell<u32>],
+    /// Hash index over `backing` -> chunk slot, chained through `ChunkSlot::ptr_next`. Same
+    /// structure and length as `buckets`, and it exists for the same reason: `find_by_ptr` backs
+    /// seven entry points (retain/release via `rmw_by_ptr`, `slot_of`, `chunk_ident`,
+    /// `is_ready_by_ptr`, `mark_ready`, `evict_chunk`), and every one of them was a full masked
+    /// scan of the table.
+    ///
+    /// Measured on device once the `(asset, index)` index had removed the larger cost: 25441 calls
+    /// visiting 7.9M slots over ~80 s of playback — 312 slots per call, 12-18% of CPU. Unlike the
+    /// key index this one holds EVERY occupied slot, adopted chunks included, because backing
+    /// pointers are unique.
+    ptr_buckets: &'static [Cell<u32>],
     tick: Cell<u64>,
     /// Transient self-protection (the `dontStealFromThing` port): while an asset is
     /// allocating a chunk (`request`/`acquire`), its own chunks are not eviction
@@ -358,6 +374,59 @@ impl Manager {
         (h as usize) & (self.buckets.len() - 1)
     }
 
+    /// Bucket for a backing pointer. Backings are 16-byte aligned (see `alloc_backing`), so the
+    /// low four bits carry no information and are shifted out before mixing — hashing them in
+    /// would leave a quarter of the buckets unreachable.
+    #[inline]
+    fn ptr_bucket_of(&self, p: *mut u8) -> usize {
+        let h = ((p as usize) >> 4) as u32;
+        (h.wrapping_mul(0x9E37_79B1).rotate_left(15) as usize) & (self.ptr_buckets.len() - 1)
+    }
+
+    /// Link slot `i` into the pointer index. Same masking contract as [`Manager::index_insert`]:
+    /// the caller holds the window that also writes the slot.
+    fn ptr_index_insert(&self, i: usize) {
+        let mut s = self.chunks[i].get();
+        if s.backing.is_null() {
+            return;
+        }
+        let b = self.ptr_bucket_of(s.backing);
+        s.ptr_next = self.ptr_buckets[b].get();
+        self.chunks[i].set(s);
+        self.ptr_buckets[b].set(i as u32);
+    }
+
+    /// Unlink slot `i` from the pointer index. Takes `backing` explicitly for the same reason
+    /// [`Manager::index_remove`] takes the key: the caller is clearing the slot around this call.
+    fn ptr_index_remove(&self, i: usize, backing: *mut u8) {
+        if backing.is_null() {
+            return;
+        }
+        let b = self.ptr_bucket_of(backing);
+        let head = self.ptr_buckets[b].get();
+        if head == i as u32 {
+            self.ptr_buckets[b].set(self.chunks[i].get().ptr_next);
+            return;
+        }
+        let mut cur = head;
+        let mut steps = 0;
+        while cur != NONE && steps <= self.chunks.len() {
+            let c = cur as usize;
+            if c >= self.chunks.len() {
+                return; // corrupt link — survivable failure, as in find_resident's walk
+            }
+            steps += 1;
+            let s = self.chunks[c].get();
+            if s.ptr_next == i as u32 {
+                let mut sc = s;
+                sc.ptr_next = self.chunks[i].get().ptr_next;
+                self.chunks[c].set(sc);
+                return;
+            }
+            cur = s.ptr_next;
+        }
+    }
+
     /// Link slot `i` into its bucket. Caller MUST already hold a masked window covering the write
     /// of the slot itself, so the slot and the index never disagree even for an instant: a
     /// preempting lookup that saw the slot but not the link would report "not resident" for a
@@ -428,10 +497,31 @@ impl Manager {
 
     fn find_by_ptr(&self, p: *mut u8) -> Option<usize> {
         let mut visited = 0u64;
-        let found = (0..self.chunks.len()).find(|&i| {
-            visited += 1;
-            m_get(&self.chunks[i]).backing == p
-        });
+        // A null pointer is never resident, and every free slot holds null — without this guard
+        // the walk below would be asked for the bucket of null and match the first free slot it
+        // found, reporting a "resident" chunk that is not one.
+        let found = if p.is_null() {
+            None
+        } else {
+            let mut cur = self.ptr_buckets[self.ptr_bucket_of(p)].get();
+            let mut hit = None;
+            let mut steps = 0;
+            while cur != NONE && steps <= self.chunks.len() {
+                let i = cur as usize;
+                if i >= self.chunks.len() {
+                    break; // corrupt link; treat as a miss (see find_resident's walk)
+                }
+                visited += 1;
+                steps += 1;
+                let s = m_get(&self.chunks[i]);
+                if s.backing == p {
+                    hit = Some(i);
+                    break;
+                }
+                cur = s.ptr_next;
+            }
+            hit
+        };
         self.stat(|s| {
             s.scan_ptr_calls += 1;
             s.scan_ptr_slots += visited;
@@ -881,6 +971,7 @@ impl Manager {
             // ChunkSlot::EMPTY would have wiped. Same masked window as the clear, so the slot and
             // the index are never separately visible (see index_insert).
             self.index_remove(i, s.asset, s.index);
+            self.ptr_index_remove(i, s.backing);
             self.chunks[i].set(ChunkSlot::EMPTY);
             s
         };
@@ -987,6 +1078,7 @@ impl Manager {
                 ..ChunkSlot::EMPTY
             });
             self.index_insert(idx);
+            self.ptr_index_insert(idx);
         }
         let a = m_get(&self.assets[ai]);
         let ok = match a.source.materialize {
@@ -1003,6 +1095,7 @@ impl Manager {
             {
                 let _m = Masked::enter();
                 self.index_remove(idx, asset, index);
+                self.ptr_index_remove(idx, p);
                 self.chunks[idx].set(ChunkSlot::EMPTY);
             }
             self.free_backing(p, asset);
@@ -1097,6 +1190,7 @@ impl Manager {
                 ..ChunkSlot::EMPTY
             });
             self.index_insert(idx);
+            self.ptr_index_insert(idx);
         }
         let a = m_get(&self.assets[ai]);
         // SAFETY: owner/ctx/dest come from this asset + the slot we just allocated;
@@ -1144,6 +1238,7 @@ impl Manager {
                 return; // changed under us
             }
             self.index_remove(c, s.asset, s.index); // before the clear — EMPTY wipes hash_next
+            self.ptr_index_remove(c, s.backing);
             self.chunks[c].set(ChunkSlot::EMPTY);
             s
         };
@@ -1190,24 +1285,30 @@ impl Manager {
                 }
             }
         };
-        m_set(
-            &self.chunks[idx],
-            ChunkSlot {
+        // ONE masked window over the slot write AND its pointer-index link (see index_insert).
+        // Adopted chunks are absent from the KEY index (they all share `(NONE, 0)`) but present
+        // in the pointer index — `evict_chunk` and `release` reach them by backing pointer.
+        {
+            let recency = self.bump();
+            let generation = self.next_gen();
+            let _m = Masked::enter();
+            self.chunks[idx].set(ChunkSlot {
                 backing: ptr,
                 asset: NONE,
                 index: 0,
                 leases: 0,
                 dirty: false,
                 ready: true, // owner-built object, usable immediately
-                recency: self.bump(),
+                recency,
                 size: size as u32,
-                generation: self.next_gen(),
+                generation,
                 cost,
                 adopt_evict: on_evict,
                 adopt_ctx: ctx,
                 ..ChunkSlot::EMPTY
-            },
-        );
+            });
+            self.ptr_index_insert(idx);
+        }
         self.stat(|s| s.adopts += 1);
         ptr
     }
@@ -1317,6 +1418,7 @@ impl Manager {
             // the asset's backing kind to route slab-vs-heap). Unlink first: index_remove
             // reads `hash_next`, which EMPTY wipes.
             self.index_remove(i, s.asset, s.index);
+            self.ptr_index_remove(i, s.backing);
             self.chunks[i].set(ChunkSlot::EMPTY);
             if let Some(cb) = a.source.on_evict {
                 // SAFETY: owner/ctx come from this asset; valid for the manager lifetime.
@@ -1445,6 +1547,51 @@ pub(crate) unsafe fn debug_assert_index_consistent(h: *mut DelugeResource) {
             "occupied slot {i} appears {seen} times in its bucket"
         );
     }
+
+    // Same two directions for the pointer index. Membership differs: EVERY occupied slot belongs
+    // to it, adopted chunks included, because backing pointers are unique.
+    for b in 0..m.ptr_buckets.len() {
+        let mut cur = m.ptr_buckets[b].get();
+        let mut guard = 0;
+        while cur != NONE {
+            let i = cur as usize;
+            assert!(
+                i < m.chunks.len(),
+                "ptr bucket {b} links to out-of-range slot {i}"
+            );
+            let s = m.chunks[i].get();
+            assert!(
+                !s.backing.is_null(),
+                "ptr bucket {b} links to free slot {i}"
+            );
+            assert_eq!(
+                m.ptr_bucket_of(s.backing),
+                b,
+                "slot {i} is in the wrong ptr bucket"
+            );
+            cur = s.ptr_next;
+            guard += 1;
+            assert!(guard <= m.chunks.len(), "ptr bucket {b} chain is cyclic");
+        }
+    }
+    for i in 0..m.chunks.len() {
+        let s = m.chunks[i].get();
+        if s.backing.is_null() {
+            continue;
+        }
+        let mut cur = m.ptr_buckets[m.ptr_bucket_of(s.backing)].get();
+        let mut seen = 0;
+        while cur != NONE {
+            if cur as usize == i {
+                seen += 1;
+            }
+            cur = m.chunks[cur as usize].get().ptr_next;
+        }
+        assert_eq!(
+            seen, 1,
+            "occupied slot {i} appears {seen} times in its ptr bucket"
+        );
+    }
 }
 
 /// Test-only: does the (indexed) `find_resident` agree with the brute-force scan for this key?
@@ -1538,15 +1685,27 @@ unsafe fn create_inner(
         bucket_cap * core::mem::size_of::<Cell<u32>>(),
         core::mem::align_of::<Cell<u32>>().max(16),
     ) as *mut Cell<u32>;
-    if m.is_null() || assets_raw.is_null() || chunks_raw.is_null() || buckets_raw.is_null() {
+    let ptr_buckets_raw = deluge_alloc(
+        heap,
+        bucket_cap * core::mem::size_of::<Cell<u32>>(),
+        core::mem::align_of::<Cell<u32>>().max(16),
+    ) as *mut Cell<u32>;
+    if m.is_null()
+        || assets_raw.is_null()
+        || chunks_raw.is_null()
+        || buckets_raw.is_null()
+        || ptr_buckets_raw.is_null()
+    {
         deluge_free(heap, m as *mut u8);
         deluge_free(heap, assets_raw as *mut u8);
         deluge_free(heap, chunks_raw as *mut u8);
         deluge_free(heap, buckets_raw as *mut u8);
+        deluge_free(heap, ptr_buckets_raw as *mut u8);
         return ptr::null_mut();
     }
     for i in 0..bucket_cap {
         buckets_raw.add(i).write(Cell::new(NONE));
+        ptr_buckets_raw.add(i).write(Cell::new(NONE));
     }
     for i in 0..asset_cap {
         assets_raw.add(i).write(Cell::new(AssetSlot::EMPTY));
@@ -1559,6 +1718,8 @@ unsafe fn create_inner(
     let assets: &'static [Cell<AssetSlot>] = &*ptr::slice_from_raw_parts(assets_raw, asset_cap);
     let chunks: &'static [Cell<ChunkSlot>] = &*ptr::slice_from_raw_parts(chunks_raw, chunk_cap);
     let buckets: &'static [Cell<u32>] = &*ptr::slice_from_raw_parts(buckets_raw, bucket_cap);
+    let ptr_buckets: &'static [Cell<u32>] =
+        &*ptr::slice_from_raw_parts(ptr_buckets_raw, bucket_cap);
     ptr::write(
         m,
         Manager {
@@ -1567,6 +1728,7 @@ unsafe fn create_inner(
             assets,
             chunks,
             buckets,
+            ptr_buckets,
             tick: Cell::new(0),
             protect: Cell::new(NONE),
             stats: Cell::new(Stats::default()),

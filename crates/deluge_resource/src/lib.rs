@@ -1499,6 +1499,46 @@ mod tests {
         let _ = buf;
     }
 
+    /// A pointer lookup must not walk the whole chunk table either.
+    ///
+    /// `find_by_ptr` backs retain/release/slot_of/chunk_ident/is_ready_by_ptr/mark_ready, so it
+    /// runs far more often than the key lookup. On device it measured 312 slots per call and
+    /// 12-18% of CPU during playback once the key index had removed the larger cost.
+    #[test]
+    fn a_pointer_lookup_does_not_scan_the_chunk_table() {
+        let chunk_cap = 512;
+        let (buf, m, a, _h) = indexed_mgr(chunk_cap, 8 * 1024 * 1024);
+        // Populate enough slots that a linear scan would be obvious in the counter.
+        let ptrs: Vec<*mut u8> = (0..64)
+            .map(|i| {
+                let p = unsafe { deluge_resource_request(m, a, i, 4096) };
+                assert!(!p.is_null());
+                p
+            })
+            .collect();
+
+        unsafe { deluge_resource_stats_reset(m) };
+        // Touch the LAST one: under a linear scan this is the worst case, under the index it is
+        // the same cost as the first.
+        let last = *ptrs.last().unwrap();
+        unsafe { deluge_resource_add_lease(m, last) };
+        unsafe { deluge_resource_release(m, last) };
+        let s = stats_of(m);
+
+        assert!(s.scan_ptr_calls >= 1, "the lookup should have run");
+        assert!(
+            s.scan_ptr_slots < 16 * s.scan_ptr_calls,
+            "a pointer lookup visited {} slots over {} calls — it is still scanning",
+            s.scan_ptr_slots,
+            s.scan_ptr_calls
+        );
+        unsafe { debug_assert_index_consistent(m) };
+        for p in ptrs {
+            unsafe { deluge_resource_release(m, p) };
+        }
+        let _ = buf;
+    }
+
     /// The index must agree with a brute-force scan for every probed key, across churn.
     ///
     /// A false POSITIVE is caught by the manager's own re-validation, but a false NEGATIVE is

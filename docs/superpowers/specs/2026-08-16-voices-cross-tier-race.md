@@ -1,6 +1,8 @@
 # `Sound::voices_` is mutated across tiers without exclusion
 
-**Status:** diagnosed, not fixed. No design chosen yet.
+**Status:** diagnosed, not fixed. No design chosen yet. A device data abort whose signature fits
+this race was seen on 2026-08-16 while browsing samples — see the section below, including why the
+one measurement taken does NOT confirm it.
 **Found:** 2026-08-16, while establishing what removes the voice that E199 asserts on
 (`docs/superpowers/plans/2026-08-16-async-note-on-residency.md`, Task 5).
 **Related:** `2026-08-08-storage-execution-model-end-state-design.md` (tier rules),
@@ -83,6 +85,53 @@ own note-on — which, before the `CLUSTER_ENQUEUE` change, included a ~38 ms sy
 That narrows one window. It does **not** fix any of the three defects: `bypassCulling` is cleared
 every render (`audio_engine.cpp:661`), it is a single global rather than a per-Sound guard, and it
 does nothing for note-ons that do not go through `previewSample`.
+
+## A device fault that FITS this race — but the one measurement did not support it (2026-08-16)
+
+While browsing sample folders on `next`, the device took a data abort:
+
+```
+DABT  PC=201D9ECA  DFAR=7F008084  DFSR=000000F8
+```
+
+`PC` resolves to `Patcher::performPatching` (`patcher.cpp:67`), whose first statement is
+
+```cpp
+PatchCableSet& patch_cable_set = *param_manager.getPatchCableSet();
+```
+
+`DFSR=0xF8` decodes to FS=0x8, a **synchronous external abort**, and `DFAR=0x7F008084` is unmapped.
+So the audio render dereferenced a wild `ParamManager`/patch-cable-set while patching a voice — which
+is what defect 2 above predicts, and the browser exercises it on every detent:
+`previewSample()` → `stopAnyPreviewing()` → `Sound::killAllVoices()` → `voices_.clear()`, all on the
+storage owner while the audio ISR may be mid-render.
+
+### Why this is recorded as UNSUPPORTED rather than confirmed
+
+A detector was added (a flag set while the audio tier iterates `voices_`, checked in `killAllVoices`
+and `freeActiveVoice`) and ~25 s of sample-folder scrolling produced **zero overlap hits** — despite
+the log showing the browser actively previewing (46 `assignClusters fail: acquire LOADING`, 16
+soft-culls), so the mutators certainly ran dozens of times. At the audio render's ~35% duty cycle,
+dozens of mutations should have yielded roughly ten hits.
+
+That measurement is **inconclusive, not exculpatory**, because it lacked a denominator: it counted
+overlaps but not mutations, and not renders that actually reached the voice loop. With no song
+playing, `Sound::render` returns early on an empty `voices_`, so the window may simply not have
+existed during the test — while the fault itself *requires* a voice being patched, i.e. a state the
+test may never have entered.
+
+**To settle it:** count mutations and voice-reaching renders alongside overlaps, and soak with a song
+playing so voices exist throughout.
+
+### Other facts about the fault
+
+- **Intermittent**: one occurrence, not reproduced in two subsequent ~30 s attempts.
+- It happened with an experimental neighbour-preview prefetch present (speculative `AudioFile` loads
+  for adjacent browser entries). That change is NOT in the tree; it is neither convicted nor
+  exonerated, and single trials of an intermittent race have too little power to attribute it either
+  way.
+- The periodic loader dump immediately before the fault showed `loader wait: n 0` — no fills completed
+  in the preceding 2 s — so the card was idle at the moment of the abort.
 
 ## Options not yet evaluated
 

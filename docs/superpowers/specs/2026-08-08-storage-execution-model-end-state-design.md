@@ -181,15 +181,26 @@ gates (27 in `efatfs_fs.rs`, 2 in `sd.rs`).
 
 ## 3. Deleting the gates *is* the feature work
 
-Two user-visible defects are currently tracked as bugs blocked on this arc. They are not separate
-items — they are one cause with two symptoms, and both resolve when the gates go.
+One user-visible defect is currently tracked as a bug blocked on this arc, and one former defect is
+now a residual inefficiency rather than a failure.
 
 | Symptom | Mechanism |
 |---|---|
 | **Saving cannot succeed off-owner on the Rust BSP.** `performSave` runs from plain UI handlers (no `Owner::run` under `gui/ui/save/`); every write entry point rejects off-fiber, so the save fails at its first write. The skipped overwrite prompt is a symptom of the same cause, not a second bug. | the 29 gates |
-| **The #4460 waveform pre-scan can never fill a cold cluster.** `deluge_streaming_fill_chunk_blocking`'s off-fiber branch returns `false` unconditionally, so the scan round-robins forever and churns priority-0 enqueues every `slowRoutine` tick. | the same gates, one layer down |
+| **The #4460 waveform pre-scan cannot fill a cold cluster *synchronously*.** `deluge_streaming_fill_chunk_blocking`'s off-fiber branch cannot suspend a stack, so it always reports not-ready. | the same gates, one layer down |
 
-Neither needs its own fix. Both need Phase 2.
+The save case needs Phase 2. The pre-scan case no longer does.
+
+**Correction (2026-08-16): the pre-scan row was overstated and is now stale.** It previously read
+"can never fill a cold cluster … the scan round-robins forever and churns priority-0 enqueues every
+`slowRoutine` tick". That is no longer true, and the underlying defect was never the gate. The real
+cause was that fire-and-forget enqueues were discarded because the load queue required a lease it did
+not own — fixed in `94d1abc3d` (see the `overview-prescan-dead-on-device` memory). Today
+`streaming_loader.rs:174-198` enqueues the chunk under a **queue-owned** lease and wakes the drain
+*before* the off-fiber branch returns `false`, so the cluster does load asynchronously and the
+consumer's next tick finds it resident. What survives is a shape, not a bug: the off-fiber caller gets
+one wasted tick per cold chunk instead of the data. Phase 2 tidies that away by letting the call
+complete inline; it is not fixing a never-fills failure.
 
 **Correction worth preserving:** the save case was recorded earlier as a data-loss risk. It is not.
 The destructive `unlink` is doubly unreachable — `createJsonFile` fails first and bails, and the
@@ -224,7 +235,7 @@ The failure is visible and loud, not silent.
 |---|---|---|
 | **R5a Phase 0 residue** | Tasks 4/5/6 — the load-while-streaming contention scenario, the baseline margin sweep with Control A re-proven, the 0d deadlock-evidence spike. Newly possible: Lens 1 completes at all only since the `sd_busy()` seam fix. | the gate itself |
 | **R5a Phase 1 — `STREAM_EXEC`** | Device: a second `InterruptExecutor` on SGI 9 at a GIC priority between `AUDIO_SGI_PRIORITY` (20) and thread mode, so audio preempts streaming and streaming preempts the interaction tier. Host: the Phase-0a emulation. **Must carry the mutex-class test Phase 0 explicitly did not prove** (a spin waiting on a lock held by an `HP_EXEC`-resident task) and the self-identifying wedge diagnosis from R5a §3. | Phase 2's correctness |
-| **R5a Phase 2 — collapse I/O-class** | Classify all 69 sites; collapse I/O-class to `embassy_futures::block_on`; leave the 2 progress-class on the fiber as R5b's inheritance. **Delete the 29 gates** — this is the rung where the sync→async bridge stops requiring the fiber. | **save off-owner · pre-scan cold fill** (§3) |
+| **R5a Phase 2 — collapse I/O-class** | Classify all 69 sites; collapse I/O-class to `embassy_futures::block_on`; leave the 2 progress-class on the fiber as R5b's inheritance. **Delete the 29 gates** — this is the rung where the sync→async bridge stops requiring the fiber. | **save off-owner** (§3); the pre-scan's wasted-tick shape follows, but it is no longer broken |
 | **R5a Phase 3 — cleanups** | Delete `SD_BUS` (redundant since C-FatFS: every block transfer already serialises on the FS mutex) · `off_fiber_instant` if Phase 0a made it unnecessary · `RESOURCE_SD`, `RES_ERROR`, `RES_WRPRT` (live `-Wunused` warnings) · four stale C++ comments citing deleted C-FatFS globals · re-examine `deluge_storage_on_owner` and `stats::note_read(on_fiber())`. | warning-clean device build |
 | **R5b — commands** | `Owner::await`; the three `yield_until` sites become commands with dirty-set progress; **delete the fiber**. Needs its own brainstorm → spec → plan. | interaction-class gone |
 | **Optional tail** | SP5 (derive prefetch from published play-cursors, retire the C++ enqueue API) and SP6 (convert/stitch → Rust, zero FFI in the fill task). **Both YAGNI-gated**; the architecture is complete without either. SP6 additionally requires a dual-arch bit-exact spec. | zero-FFI fill task |
@@ -243,7 +254,8 @@ The arc is done when all of these hold:
 - [ ] zero `on_fiber()` rejection gates
 - [ ] `Owner::await` exists; no interaction-tier code touches the FS outside `Owner`
 - [ ] save / load / browse work on device on the Rust BSP
-- [ ] the #4460 pre-scan fills cold clusters on device
+- [ ] the #4460 pre-scan fills cold clusters on device (already works asynchronously since
+      `94d1abc3d`; the criterion is that the off-fiber call completes inline, with no wasted tick)
 - [ ] `SD_BUS`, `off_fiber_instant`, `RESOURCE_SD` gone (`currentlyAccessingCard` already is)
 - [ ] one BSP — RZA1 retired
 - [ ] gates green: Lens 1 margin no-regression with Control A non-vacuous · Lens 2 zero new races ·

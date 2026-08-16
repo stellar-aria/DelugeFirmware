@@ -1140,7 +1140,7 @@ void TimeStretcher::updateClustersForPercLookahead(Sample* sample, uint32_t sour
 		percLookahead_ = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
 	}
 	else {
-		deluge_sample_reserve_move(percLookahead_, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
+		deluge_sample_reserve_move(percLookahead_, sourceId, markerFrame, playDirection, DELUGE_LOAD_ENQUEUE);
 	}
 }
 

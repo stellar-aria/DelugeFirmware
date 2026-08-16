@@ -203,7 +203,7 @@ void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reserv
 		reservation = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, mode);
 	}
 	else {
-		deluge_sample_reserve_move(reservation, markerFrame, playDirection, mode);
+		deluge_sample_reserve_move(reservation, sourceId, markerFrame, playDirection, mode);
 	}
 
 	// A reservation reports success by handing back a valid handle whether or not it managed to load

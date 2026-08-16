@@ -201,7 +201,8 @@ DelugeSampleReservation* deluge_sample_reserve_open(uint32_t source_id, uint64_t
                                                     DelugeLoadMode load_mode);
 
 /// @brief Re-anchor `res` to the cluster containing `marker_frame`, walking in `direction` exactly
-///        as `deluge_sample_reserve_open` does.
+///        as `deluge_sample_reserve_open` does, rebinding it to @p source_id first if that differs
+///        from the Asset it currently holds.
 ///
 /// Guarded: if `marker_frame` maps to the SAME cluster `res` is already anchored on, this is a
 /// no-op — no lease is released or acquired, avoiding per-render-tick lease churn while a marker
@@ -212,8 +213,15 @@ DelugeSampleReservation* deluge_sample_reserve_open(uint32_t source_id, uint64_t
 /// @param marker_frame A sample-frame index (frame 0 == the sample's first audio-data frame).
 /// @param direction    +1 forward, -1 reverse.
 /// @param load_mode    How the covered clusters are (re)loaded — see DelugeLoadMode.
-void deluge_sample_reserve_move(DelugeSampleReservation* res, uint64_t marker_frame, int8_t direction,
-                                DelugeLoadMode load_mode);
+/// @param source_id    The Asset the marker belongs to. Passing a DIFFERENT id than the reservation
+///                     currently holds REBINDS it: every lease on the old Asset is released and the
+///                     window is rebuilt from scratch against the new one. A caller that reuses one
+///                     reservation handle across a change of sample depends on this — without it the
+///                     move would pin the OLD sample's clusters at the new sample's marker, which is
+///                     exactly the sample-preview E199 (see the 2026-08-15 async-note-on-residency
+///                     design doc).
+void deluge_sample_reserve_move(DelugeSampleReservation* res, uint32_t source_id, uint64_t marker_frame,
+                                int8_t direction, DelugeLoadMode load_mode);
 
 /// @brief The Asset id @p res was OPENED for.
 ///

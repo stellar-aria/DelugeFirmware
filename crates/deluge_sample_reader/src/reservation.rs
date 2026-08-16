@@ -217,7 +217,7 @@ impl Reservation {
     /// A resolution failure (manager still unavailable, geometry now missing/malformed) rebuilds
     /// into the same inert shape `open` itself returns for those cases — old leases released, no new
     /// ones taken.
-    pub fn reanchor(&mut self, marker_frame: u64, direction: i8, load_mode: LoadMode) {
+    pub fn reanchor(&mut self, asset: u32, marker_frame: u64, direction: i8, load_mode: LoadMode) {
         // Reuse the manager resolved at `open()` time when we have one (the common case — see the
         // `manager` field's own doc); otherwise retry the singleton lookup, since geometry may have
         // become resolvable since (e.g. streaming boot completing after this reservation opened).
@@ -227,6 +227,23 @@ impl Reservation {
         } else {
             self.manager
         };
+
+        // A DIFFERENT Asset means this handle is being reused for a different sample, so nothing
+        // about the current window survives: its leases pin the OLD sample's clusters, and its head
+        // index is an index into the OLD sample's geometry. Rebind and rebuild from scratch.
+        //
+        // Without this, re-anchoring silently pinned the previous sample's clusters at the new
+        // sample's marker -- reporting healthy coverage the whole time, because the pins it took
+        // were real, just for the wrong sample. That is the sample-preview E199: rapid browser
+        // scrolling reuses one SampleHolder across samples faster than its close path runs, so the
+        // warm hint materialized the wrong Asset's cluster 0 and the note-on found its own cluster 0
+        // cold. Dropping the old leases here is what makes a reused handle safe.
+        let rebinding = asset != self.asset;
+        if rebinding {
+            self.leases = core::array::from_fn(|_| None); // release the old Asset's pins
+            self.asset = asset;
+            self.head_index = None; // the guard below must not compare across geometries
+        }
 
         let geometry = resolve_geometry(manager, self.asset, marker_frame);
         let new_head = geometry.as_ref().map(|g| g.head);
@@ -471,6 +488,7 @@ pub extern "C" fn deluge_sample_reserve_open(
 )]
 pub unsafe extern "C" fn deluge_sample_reserve_move(
     res: *mut DelugeSampleReservation,
+    source_id: u32,
     marker_frame: u64,
     direction: i8,
     load_mode: LoadMode,
@@ -479,7 +497,7 @@ pub unsafe extern "C" fn deluge_sample_reserve_move(
     // validity `deluge_sample_reserve_close` relies on (same address, `Reservation`'s layout
     // underneath).
     let reservation = unsafe { &mut *(res as *mut Reservation) };
-    reservation.reanchor(marker_frame, direction, load_mode);
+    reservation.reanchor(source_id, marker_frame, direction, load_mode);
 }
 
 /// How many clusters `res` covers — see the header doc
@@ -890,7 +908,7 @@ mod tests {
         assert_eq!(res.covered_indices(), &[3, 4]);
 
         let before = h.acquire_generation();
-        res.reanchor(h.frame_in_cluster(3) + 10, 1, LoadMode::Enqueue); // still cluster 3
+        res.reanchor(h.asset, h.frame_in_cluster(3) + 10, 1, LoadMode::Enqueue); // still cluster 3
         assert_eq!(res.covered_indices(), &[3, 4]);
         assert_eq!(
             h.acquire_generation(),
@@ -908,10 +926,43 @@ mod tests {
         let mut res = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
         assert_eq!(res.covered_indices(), &[3, 4]);
 
-        res.reanchor(h.frame_in_cluster(4), 1, LoadMode::Enqueue);
+        res.reanchor(h.asset, h.frame_in_cluster(4), 1, LoadMode::Enqueue);
         assert_eq!(res.covered_indices(), &[4, 5]);
         assert_eq!(h.total_leases_over(&[3]), 0, "old head released");
         assert_eq!(h.total_leases_over(&[4, 5]), 2, "new window pinned");
+    }
+
+    /// Re-anchoring onto a DIFFERENT Asset rebinds the reservation and drops every pin it held on
+    /// the old one.
+    ///
+    /// This is the sample-preview E199, proven on hardware 2026-08-16: a `SampleHolder` reused for
+    /// a different sample took `claimClusterReasonsForMarker`'s move branch, and `reanchor` — which
+    /// used to keep its opening Asset forever — re-anchored the OLD sample's window onto the NEW
+    /// sample's marker. It reported healthy coverage throughout, because the pins it took were
+    /// real; they were simply for the wrong sample, leaving the note-on's own cluster 0 cold.
+    #[test]
+    fn move_to_a_different_asset_rebinds_and_releases_the_old_pins() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let h = TestHarness::with_audio_data_clusters(2..6, 4);
+        let mut res = Reservation::open(h.asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+        assert_eq!(res.covered_indices(), &[3, 4]);
+        assert_eq!(h.total_leases_over(&[3, 4]), 2, "opening window pinned");
+
+        // A different Asset id. It has no registered geometry, so the rebuilt window is inert —
+        // which is exactly right: the reservation must NOT keep reporting the old Asset's clusters.
+        let other_asset = h.asset + 1;
+        res.reanchor(other_asset, h.frame_in_cluster(3), 1, LoadMode::Enqueue);
+
+        assert_eq!(res.asset, other_asset, "rebound to the new Asset");
+        assert_eq!(
+            h.total_leases_over(&[3, 4]),
+            0,
+            "every pin on the OLD Asset released -- the bug left these held for the wrong sample"
+        );
+        assert!(
+            res.covered_indices().is_empty(),
+            "no stale coverage carried across the rebind"
+        );
     }
 
     /// `LoadMode::Now` runs a real synchronous fill (see [`load_cluster`]'s own doc) where

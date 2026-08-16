@@ -48,8 +48,6 @@ SampleHolderForVoice::~SampleHolderForVoice() {
 void SampleHolderForVoice::unassignAllClusterReasons(bool beingDestructed) {
 	SampleHolder::unassignAllClusterReasons(beingDestructed);
 	if (clustersForLoopStart_ != nullptr) {
-		D_PRINTLN("reserve CLOSE loop: res %x destructing %d", (uint32_t)(uintptr_t)clustersForLoopStart_,
-		          (int32_t)beingDestructed);
 		deluge_sample_reserve_close(clustersForLoopStart_);
 		if (!beingDestructed) {
 			clustersForLoopStart_ = nullptr;
@@ -98,7 +96,6 @@ void SampleHolderForVoice::claimClusterReasons(bool reversed, int32_t clusterLoa
 	// Or if no loop start point now, clear out any reasons we had before
 	else {
 		if (clustersForLoopStart_ != nullptr) {
-			D_PRINTLN("reserve CLOSE loop (no loop point): res %x", (uint32_t)(uintptr_t)clustersForLoopStart_);
 			deluge_sample_reserve_close(clustersForLoopStart_);
 			clustersForLoopStart_ = nullptr;
 		}

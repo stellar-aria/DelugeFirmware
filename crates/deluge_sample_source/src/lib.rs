@@ -26,6 +26,21 @@ mod host_critical_section_stubs {
     std::thread_local! {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         static TOKEN: Cell<Option<critical_section::RestoreState>> = const { Cell::new(None) };
+        static FAKE_NOW: Cell<u32> = const { Cell::new(1) };
+    }
+
+    /// The clock `deluge_resource` measures loader service latency with. In the firmware the app
+    /// provides it (`src/deluge/io/debug/resource_clock.cpp`, returning
+    /// `AudioEngine::audioSampleTimer`); a host test binary links the manager without the app, so it
+    /// must supply one or the reference from `Manager::loader_next` fails to link. A monotonic counter
+    /// satisfies the manager's only requirement — successive reads must not go backwards.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_debug_now_frames() -> u32 {
+        FAKE_NOW.with(|c| {
+            let n = c.get().wrapping_add(1);
+            c.set(n);
+            n
+        })
     }
 
     #[unsafe(no_mangle)]

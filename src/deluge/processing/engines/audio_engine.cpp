@@ -1492,12 +1492,6 @@ void previewSample(std::string_view path, bool shouldActuallySound) {
 		display->displayError(error); // Rare, shouldn't cause later problems.
 	}
 
-	// Diagnostic: marks which note-on failures belong to the PREVIEW rather than an ordinary voice.
-	// The crash reporter's stack walk cannot tell them apart once frames go stale, and the two have
-	// different residency histories -- the preview's sample was opened microseconds ago, an ordinary
-	// voice's long before.
-	D_PRINTLN("preview: loadFile -> %d, willSound %d", (int32_t)error, (int32_t)shouldActuallySound);
-
 	if (shouldActuallySound) {
 		char modelStackMemory[MODEL_STACK_MAX_SIZE];
 		ModelStackWithThreeMainThings* modelStack = setupModelStackWithThreeMainThingsButNoNoteRow(

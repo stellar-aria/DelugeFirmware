@@ -16,7 +16,6 @@
  */
 
 #include "model/sample/sample_holder.h"
-#include "OSLikeStuff/scheduler_api.h" // getSystemTime()
 #include "gui/ui/browser/sample_browser.h"
 #include "hid/display/display.h"
 #include "model/sample/sample.h"
@@ -72,8 +71,6 @@ void SampleHolder::beenClonedFrom(SampleHolder const* other, bool reversed) {
 
 void SampleHolder::unassignAllClusterReasons(bool beingDestructed) {
 	if (clustersForStart_ != nullptr) {
-		D_PRINTLN("reserve CLOSE start: res %x destructing %d", (uint32_t)(uintptr_t)clustersForStart_,
-		          (int32_t)beingDestructed);
 		deluge_sample_reserve_close(clustersForStart_);
 		if (!beingDestructed) {
 			clustersForStart_ = nullptr;
@@ -200,43 +197,10 @@ void SampleHolder::claimClusterReasonsForMarker(DelugeSampleReservation*& reserv
 	int32_t bytesPerSample = audioFile->numChannels * ((Sample*)audioFile)->byteDepth;
 	uint64_t markerFrame = (startPlaybackAtByte - ((Sample*)audioFile)->audioDataStartPosBytes) / bytesPerSample;
 	DelugeLoadMode mode = loadModeFor(clusterLoadInstruction);
-	// Timed because DELUGE_LOAD_NOW reads the covered clusters from the card SYNCHRONOUSLY. If that
-	// read is long enough to stall the audio path, the engine sees an inflated render time, decides
-	// it is overloaded, and culls voices -- including the very preview voice this fill was warming,
-	// which is the "preview truncates" symptom. The correlation is already visible (a ~9.6 ms
-	// "Audio routine latency high" landing between this call and a force-cull); this makes the cause
-	// direct rather than inferred.
-	double reserveStart = getSystemTime();
 	if (reservation == nullptr) {
 		reservation = deluge_sample_reserve_open(sourceId, markerFrame, playDirection, mode);
 	}
 	else {
 		deluge_sample_reserve_move(reservation, sourceId, markerFrame, playDirection, mode);
 	}
-	double reserveMs = (getSystemTime() - reserveStart) * 1000.;
-
-	// A reservation reports success by handing back a valid handle whether or not it managed to load
-	// anything, so an outright failure to materialize is silent at this seam. Surface it: leased <
-	// covered means at least one cluster's load failed, and covered == 0 means the geometry would not
-	// even resolve. This matters most for DELUGE_LOAD_NOW, whose whole contract is "resident before
-	// this returns" -- a caller that believes that and gets nothing goes on to fail later, somewhere
-	// with no view of the real cause (see the sample-preview E199: the note-on's own acquire reported
-	// LOADING for a cluster this reservation was supposed to have already materialized).
-	uint32_t covered = deluge_sample_reserve_covered_count(reservation);
-	uint32_t leased = deluge_sample_reserve_leased_count(reservation);
-	// Logged UNCONDITIONALLY, not just on a shortfall: a failure-only log makes silence ambiguous
-	// between "the reservation was fine" and "this never ran for that sample at all", and those two
-	// want opposite fixes. Note `leased == covered` alone does NOT mean resident -- under
-	// DELUGE_LOAD_ENQUEUE a lease is held the moment the chunk is enqueued, unfilled. Only
-	// DELUGE_LOAD_NOW (mode 1) implies materialized, which is why the mode is printed.
-	// The handle is logged so an open/move can be paired with its own close: the reservation is what
-	// pins the warmed region, so the question "what released cluster 0 between materializing it and
-	// the note-on" is answered by which handle closed, and when.
-	D_PRINTLN("reserve: %.3fms res %x resAsset %d asset %d covered %d leased %d mode %d headByte %d cl0 %d cl1 %d "
-	          "audioStart %d",
-	          reserveMs, (uint32_t)(uintptr_t)reservation, (int32_t)deluge_sample_reserve_asset(reservation),
-	          (int32_t)sourceId, (int32_t)covered, (int32_t)leased, (int32_t)mode, (int32_t)startPlaybackAtByte,
-	          (int32_t)deluge_sample_reserve_covered_index(reservation, 0),
-	          (int32_t)deluge_sample_reserve_covered_index(reservation, 1),
-	          (int32_t)((Sample*)audioFile)->audioDataStartPosBytes);
 }

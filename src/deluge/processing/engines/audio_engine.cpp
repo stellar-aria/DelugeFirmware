@@ -20,6 +20,7 @@
 #include "chrono"
 #include "definitions.h"
 #include "definitions_cxx.hpp"
+#include "deluge_resource.h" // deluge_resource_stats (loader instrumentation)
 #include "dsp/reverb/reverb.hpp"
 #include "dsp/timestretch/time_stretcher.h"
 #include "extern.h"
@@ -40,7 +41,8 @@
 #include "libdeluge/app.h"
 #include "libdeluge/audio_io.h"
 #include "libdeluge/signals.h"
-#include "libdeluge/storage_owner.h" // deluge_storage_on_owner
+#include "libdeluge/storage_owner.h"  // deluge_storage_on_owner
+#include "libdeluge/streaming_fill.h" // deluge_streaming_resource_manager()
 #include "libdeluge/system.h"
 #include "libdeluge/worker.h"
 #include "memory/general_memory_allocator.h"
@@ -660,6 +662,46 @@ extern "C" void deluge_app_render(const DelugeStereoSample* in, DelugeStereoSamp
 
 	bypassCulling = false;
 	numRoutines += 1;
+
+	// Periodic loader-instrumentation dump. Every ~2 s of audio time: an integer compare on the
+	// render path, and a print two orders of magnitude rarer than the renders themselves.
+	//
+	// Stats are RESET after each dump so the maxima are PER-INTERVAL. Cumulative maxima proved
+	// misleading — a chunk left enqueued across an idle gap reported a 79-second "latency".
+	//
+	// What these numbers are for (all measured 2026-08-16, see the storage-execution-model design's
+	// Appendix C): `wait` vs `fill` splits a streaming chunk's service latency into the fill task's
+	// scheduling delay (mean 35 ms) versus the card (mean 5.6 ms) — 35 ms is the number the
+	// storage-tier scheduling work has to beat. `depth` is the tripwire for ordering ever mattering
+	// (mean 1.19 today: nothing to order). `scans` guards the chunk-table indexes against a
+	// regression back to the O(table) walks they replaced.
+	{
+		static uint32_t lastLoaderDumpTime = 0;
+		if (audioSampleTimer - lastLoaderDumpTime >= 44100u * 2u) {
+			lastLoaderDumpTime = audioSampleTimer;
+			DelugeResource* mgr = deluge_streaming_resource_manager();
+			if (mgr != nullptr) {
+				DelugeResourceStats st{};
+				deluge_resource_stats(mgr, &st);
+				if (st.queue_wait_samples != 0u || st.loader_depth_polls != 0u) {
+					D_PRINTLN("loader wait: n %d mean %d max %d | fill: n %d mean %d max %d (frames)",
+					          (int32_t)st.queue_wait_samples,
+					          (int32_t)(st.queue_wait_samples != 0u ? st.queue_wait_total / st.queue_wait_samples : 0u),
+					          (int32_t)st.queue_wait_max, (int32_t)st.fill_samples,
+					          (int32_t)(st.fill_samples != 0u ? st.fill_total / st.fill_samples : 0u),
+					          (int32_t)st.fill_max);
+					D_PRINTLN("loader depth: polls %d mean_x100 %d max %d | scans: resident %d/%d ptr %d/%d",
+					          (int32_t)st.loader_depth_polls,
+					          (int32_t)(st.loader_depth_polls != 0u
+					                        ? (st.loader_depth_total * 100u) / st.loader_depth_polls
+					                        : 0u),
+					          (int32_t)st.loader_depth_max, (int32_t)st.scan_resident_calls,
+					          (int32_t)st.scan_resident_slots, (int32_t)st.scan_ptr_calls, (int32_t)st.scan_ptr_slots);
+				}
+				deluge_resource_stats_reset(mgr); // per-interval, not cumulative (see above)
+			}
+		}
+	}
 }
 void renderAudio(size_t numSamples) {
 	std::span renderingBuffer{renderingMemory.data(), numSamples};

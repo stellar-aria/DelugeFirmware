@@ -163,6 +163,10 @@ struct ChunkSlot {
     /// Only meaningful while this slot is indexed — i.e. occupied with `asset != NONE`; see
     /// [`Manager::index_insert`] for why adopted chunks are excluded.
     hash_next: u32,
+    /// `deluge_debug_now_frames()` when this chunk was enqueued for loading, so the service latency
+    /// can be split at `loader_next` and measured again at `mark_ready`. 0 == never enqueued (the
+    /// synchronous `acquire`/`adopt` paths).
+    queued_at: u32,
     /// Next slot in this chunk's `backing`-pointer hash bucket, or `NONE` at the end of the chain.
     /// Unlike `hash_next`, EVERY occupied slot is in this index: backing pointers are unique by
     /// construction, so adopted chunks need no exclusion rule here.
@@ -187,7 +191,15 @@ impl ChunkSlot {
         adopt_ctx: ptr::null_mut(),
         hash_next: NONE,
         ptr_next: NONE,
+        queued_at: 0,
     };
+}
+
+// The audio sample-timer, for measuring loader service latency (how long a chunk waits between
+// being enqueued and its fill completing). Provided by the C++ side; the manager has no clock of its
+// own. See `Stats`'s queue_wait_*/fill_* fields.
+unsafe extern "C" {
+    fn deluge_debug_now_frames() -> u32;
 }
 
 /// Number of cost classes the eviction stats bucket by (`evictions_by_cost[min(cost, COST_BUCKETS-1)]`).
@@ -220,6 +232,29 @@ pub struct Stats {
     pub scan_free_slots: u64,
     pub scan_evict_calls: u64,
     pub scan_evict_slots: u64,
+    /// Loader queue DEPTH sampled inside `loader_next`'s existing scan (so it costs nothing extra):
+    /// how many queued+leased candidates it had to choose between. Measured at **mean 1.19, max 37**
+    /// on 2026-08-16 — with about one candidate at a time there is nothing to order, which is why
+    /// deadline-ordering the queue changed nothing. A mean rising well above 1 is the condition
+    /// under which ordering would start to matter again.
+    pub loader_depth_polls: u64,
+    pub loader_depth_total: u64,
+    pub loader_depth_max: u64,
+    /// Loader service latency in output frames, SPLIT into its two halves.
+    ///
+    /// `queue_wait` is enqueue -> `loader_next` picking it up: the fill task's scheduling delay.
+    /// `fill` is `loader_next` -> `mark_ready`: the read plus convert, i.e. the card.
+    ///
+    /// Measured 2026-08-16: **queue_wait mean 35 ms, fill mean 5.6 ms** — 86% of a streaming chunk's
+    /// latency is waiting to be scheduled, not doing I/O, against the ~186 ms a 32 KB cluster buys.
+    /// This is the acceptance criterion for the storage-tier scheduling work: 35 ms mean is the
+    /// number to beat. See that design's Appendix C.
+    pub queue_wait_samples: u64,
+    pub queue_wait_total: u64,
+    pub queue_wait_max: u64,
+    pub fill_samples: u64,
+    pub fill_total: u64,
+    pub fill_max: u64,
 }
 
 pub struct Manager {
@@ -691,6 +726,8 @@ impl Manager {
             }
             s.queued = true;
             s.queue_priority = priority;
+            // SAFETY: a plain counter read provided by the C++ side; no invariants.
+            s.queued_at = unsafe { deluge_debug_now_frames() };
         });
     }
 
@@ -781,19 +818,29 @@ impl Manager {
         // re-validates under the mask.
         let mut best: Option<usize> = None;
         let mut best_pri = u32::MAX;
+        let mut depth = 0u64; // queued+leased candidates this poll — see Stats::loader_depth_*
         for i in 0..self.chunks.len() {
             let s = m_get(&self.chunks[i]);
             if !s.queued || s.backing.is_null() || s.leases == 0 {
                 continue;
             }
+            depth += 1;
             if best.is_none() || s.queue_priority < best_pri {
                 best = Some(i);
                 best_pri = s.queue_priority;
             }
         }
+        self.stat(|st| {
+            st.loader_depth_polls += 1;
+            st.loader_depth_total += depth;
+            if depth > st.loader_depth_max {
+                st.loader_depth_max = depth;
+            }
+        });
         let Some(i) = best else {
             return ptr::null_mut();
         };
+        let mut waited_for_stats: Option<u64> = None;
         // Winner-commit under one masked window: re-check it is still queued+leased
         // (audio may have released/evicted it since the scan), clear queued, return backing.
         let _m = Masked::enter();
@@ -801,8 +848,27 @@ impl Manager {
         if !s.queued || s.backing.is_null() || s.leases == 0 {
             return ptr::null_mut(); // changed under us — caller retries next poll
         }
+        // Split the service latency here: everything before this point was queue wait, everything
+        // after is the fill. Re-stamping rather than clearing lets `mark_ready` measure the second
+        // half through the same field.
+        if s.queued_at != 0 {
+            // SAFETY: a plain counter read provided by the C++ side; no invariants.
+            let now = unsafe { deluge_debug_now_frames() };
+            waited_for_stats = Some(now.wrapping_sub(s.queued_at) as u64);
+            s.queued_at = now;
+        }
         s.queued = false;
         self.chunks[i].set(s);
+        drop(_m); // release the mask before the stats RMW (it re-enters; keep windows short)
+        if let Some(waited) = waited_for_stats {
+            self.stat(|st| {
+                st.queue_wait_samples += 1;
+                st.queue_wait_total += waited;
+                if waited > st.queue_wait_max {
+                    st.queue_wait_max = waited;
+                }
+            });
+        }
         s.backing
     }
 
@@ -1325,7 +1391,25 @@ impl Manager {
     /// Mark a `request`ed (Loading) chunk ready — the loader / embassy storage task signals the read
     /// completed. No-op if `p` isn't a resident chunk.
     pub(crate) fn mark_ready(&self, p: *mut u8) {
-        self.rmw_by_ptr(p, |s| s.ready = true);
+        let mut filled: Option<u32> = None;
+        self.rmw_by_ptr(p, |s| {
+            s.ready = true;
+            if s.queued_at != 0 {
+                // SAFETY: a plain counter read provided by the C++ side; no invariants.
+                let now = unsafe { deluge_debug_now_frames() };
+                filled = Some(now.wrapping_sub(s.queued_at));
+                s.queued_at = 0;
+            }
+        });
+        if let Some(f) = filled {
+            self.stat(|st| {
+                st.fill_samples += 1;
+                st.fill_total += f as u64;
+                if (f as u64) > st.fill_max {
+                    st.fill_max = f as u64;
+                }
+            });
+        }
     }
 
     /// Live readiness of the chunk at `p` — masked read of its `ready` flag,

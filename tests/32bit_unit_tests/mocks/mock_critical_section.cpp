@@ -26,6 +26,7 @@
 // tests/unit/mocks/hal_mocks.cpp's own deluge_in_interrupt.
 
 #include "libdeluge/system.h"
+#include <cstdint>
 
 extern "C" {
 
@@ -37,5 +38,14 @@ void EXIT_CRITICAL_SECTION() {
 
 bool deluge_in_interrupt() {
 	return false;
+}
+
+/// The clock deluge_resource measures loader service latency with — in the firmware it is
+/// `AudioEngine::audioSampleTimer` (see src/deluge/io/debug/resource_clock.cpp), which these drivers
+/// do not link. A monotonic counter satisfies the manager's only requirement (that successive reads
+/// do not go backwards); no spec asserts on the latency figures it produces.
+uint32_t deluge_debug_now_frames() {
+	static uint32_t now = 1;
+	return ++now;
 }
 }

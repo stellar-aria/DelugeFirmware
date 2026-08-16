@@ -256,6 +256,22 @@ typedef struct DelugeResourceStats {
 	uint64_t scan_free_slots;
 	uint64_t scan_evict_calls;
 	uint64_t scan_evict_slots;
+	// Loader queue depth sampled inside loader_next's existing scan: how many candidates it chose
+	// between. Measured mean 1.19 / max 37 on 2026-08-16 — about one at a time, so there is nothing
+	// to order. A mean well above 1 is when ordering would start to matter.
+	uint64_t loader_depth_polls;
+	uint64_t loader_depth_total;
+	uint64_t loader_depth_max;
+	// Loader service latency in output frames, split: queue_wait = enqueue -> loader_next (the fill
+	// task's scheduling delay); fill = loader_next -> mark_ready (the card). Measured 2026-08-16:
+	// queue_wait mean 35 ms vs fill mean 5.6 ms, i.e. 86% of a chunk's latency is scheduling. 35 ms
+	// is the number the storage-tier scheduling work has to beat.
+	uint64_t queue_wait_samples;
+	uint64_t queue_wait_total;
+	uint64_t queue_wait_max;
+	uint64_t fill_samples;
+	uint64_t fill_total;
+	uint64_t fill_max;
 } DelugeResourceStats;
 
 /// Copy the manager's cumulative counters into `*out`. No-op if either pointer is null.

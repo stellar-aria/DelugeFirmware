@@ -102,6 +102,19 @@ pub(crate) mod stubs {
         static TOKEN: Cell<Option<critical_section::RestoreState>> = const { Cell::new(None) };
         static ENTER_COUNT: Cell<u64> = const { Cell::new(0) };
         static EXIT_COUNT: Cell<u64> = const { Cell::new(0) };
+        static FAKE_NOW: Cell<u32> = const { Cell::new(1) };
+    }
+
+    /// Host stand-in for the C++ audio sample timer the manager uses to measure loader service
+    /// latency. A monotonic counter is enough — the tests never assert on the value, they just need
+    /// the symbol to link.
+    #[unsafe(no_mangle)]
+    extern "C" fn deluge_debug_now_frames() -> u32 {
+        FAKE_NOW.with(|c| {
+            let n = c.get().wrapping_add(1);
+            c.set(n);
+            n
+        })
     }
 
     #[unsafe(no_mangle)]

@@ -209,11 +209,15 @@ LateStartAttemptStatus VoiceSample::attemptLateSampleStart(SamplePlaybackGuide* 
 	// Residency DECISION through the region port. Full mapping + the golden-unreachable divergences:
 	// docs/superpowers/specs/2026-07-24-task5-latestart-tristate-mapping.md. acquire_ex fetches the
 	// start cluster, RETAINS its lease as `pending` while LOADING (so the fill survives the defer/retry),
-	// and on READY pins it as `current` and prefetches the neighbour. Priority 0xFFFFFFFF == the goodToGo
-	// re-acquire below.
+	// and on READY pins it as `current` and prefetches the neighbour.
+	//
+	// Priority 0 == MOST urgent (the loader queue serves the lowest value first). This voice is
+	// already waiting to start -- the note-on deferred rather than dropped because its first cluster
+	// was still loading -- so its cluster is the most urgent load in the system. It previously passed
+	// 0xFFFFFFFF, the LOWEST urgency, which queued a waiting voice behind every speculative prefetch.
 	DelugeSampleRegion region{};
-	DelugeRegionState state0 = deluge_sample_region_acquire_ex(source_, startAtClusterIndex, voiceSource->playDirection,
-	                                                           static_cast<uint32_t>(0xFFFFFFFFU), &region);
+	DelugeRegionState state0 =
+	    deluge_sample_region_acquire_ex(source_, startAtClusterIndex, voiceSource->playDirection, 0u, &region);
 
 	// UNAVAILABLE: neither found nor constructed a chunk (no free RAM, or out of range) -- a FAILURE.
 	if (state0 == DELUGE_REGION_UNAVAILABLE) {
@@ -249,10 +253,12 @@ goodToGo:
 			// port makes idempotent -- acquire_ex drops the duplicate lease get_cluster adds when src->current
 			// already holds the chunk (see the cursor's acquire_ex in deluge_sample_source), so the two
 			// acquires net one lease, and the standing prefetch is already the neighbour so it is not
-			// re-fetched. Same priority (0xFFFFFFFF) as the decision acquire so nothing about residency
-			// changes on the re-acquire. startAtByte >> Cluster::size_magnitude == startAtClusterIndex and
-			// startAtByte & (Cluster::size-1) == the byte-within-cluster, so
-			// setupForPlayPosMovedIntoNewCluster() lands on the correct byte-within-cluster position.
+			// re-fetched. The priority passed below no longer matches the decision acquire's (which is
+			// now 0, most-urgent); it does not need to, because this re-acquire hits the already-pinned
+			// `current` and so enqueues nothing whose ordering the value could affect. startAtByte >>
+			// Cluster::size_magnitude == startAtClusterIndex and startAtByte & (Cluster::size-1) == the
+			// byte-within-cluster, so setupForPlayPosMovedIntoNewCluster() lands on the correct byte-within-cluster
+			// position.
 			if (setupClustersForPlayFromByte(voiceSource, sample, static_cast<int32_t>(startAtByte),
 			                                 static_cast<int32_t>(0xFFFFFFFFU))
 			    != RegionOutcome::Ready) {
@@ -910,11 +916,13 @@ readCachedWindow:
 				// promotes it. UNAVAILABLE means nothing is in flight, so a fresh acquire is needed.
 				if (deluge_sample_region_state(source_, static_cast<uint32_t>(uncachedClusterIndex))
 				    != DELUGE_REGION_LOADING) {
-					// Priority == get_cluster()'s default (0xFFFFFFFF), NOT render()'s priorityRating,
-					// so the loader ordering this resync creates is unaffected by the caller's priority.
+					// Priority 0 == MOST urgent: this resync feeds the render in progress. It previously
+					// passed 0xFFFFFFFF to keep the resync out of the caller's priority ordering, but
+					// that value is the LOWEST urgency in the queue -- the opposite of what data needed
+					// for the current render should get.
 					DelugeSampleRegion region;
 					if (deluge_sample_region_acquire_ex(source_, static_cast<uint32_t>(uncachedClusterIndex),
-					                                    static_cast<int8_t>(playDirection), 0xFFFFFFFFU, &region)
+					                                    static_cast<int8_t>(playDirection), 0u, &region)
 					    == DELUGE_REGION_READY) {
 						// Retain the acquired region and take the reader's own INDEPENDENT lease on it (via
 						// region_.lease), as assignClusters/moveOnToNextCluster do, so unassignAllReasons's

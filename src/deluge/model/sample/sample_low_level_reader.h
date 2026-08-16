@@ -34,6 +34,34 @@ struct DelugeSampleSource; // per-reader residency cursor over the region port (
 class TimeStretcher;
 class SamplePlaybackGuide;
 
+/// @brief The region port's residency tri-state, as a SCOPED enum.
+///
+/// Deliberately not `DelugeRegionState` itself: that is a plain C enum whose `DELUGE_REGION_READY`
+/// is 1, so `if (!state)` compiles at every call site and is silently wrong (`!UNAVAILABLE` is
+/// `false`). A scoped enum makes the compiler find every site that must be updated.
+enum class RegionOutcome : uint8_t {
+	Ready,       ///< The region is resident and pinned; `region_` is set.
+	Loading,     ///< Reserved and enqueued, not yet filled. Retry later; do NOT treat as failure.
+	Unavailable, ///< Out of range, or the port could not reserve at all. A genuine failure.
+};
+
+/// @brief Map the C-ABI tri-state onto RegionOutcome.
+///
+/// Any unrecognised value is treated as Unavailable, the conservative choice: a caller that drops a
+/// voice on an unknown state is safe, one that waits forever is not.
+/// @param state The port's residency state.
+/// @return The corresponding scoped outcome.
+constexpr RegionOutcome regionOutcomeFrom(DelugeRegionState state) {
+	switch (state) {
+	case DELUGE_REGION_READY:
+		return RegionOutcome::Ready;
+	case DELUGE_REGION_LOADING:
+		return RegionOutcome::Loading;
+	default:
+		return RegionOutcome::Unavailable;
+	}
+}
+
 class SampleLowLevelReader {
 public:
 	SampleLowLevelReader() = default;
@@ -176,7 +204,12 @@ private:
 	/// @brief The port geometry for @p sample — the immutable per-sample fields parsed above the port.
 	[[nodiscard]] static DelugeSampleGeometry geometryFor(const Sample& sample);
 
-	bool assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex, int32_t priorityRating);
+	/// @brief Acquire @p clusterIndex's region through the port and adopt it as this reader's `region_`.
+	/// @return Ready once `region_` is populated and pinned; Loading if the chunk is reserved but its
+	///         fill has not landed (the caller decides whether to retry); Unavailable on a genuine
+	///         failure (no cursor, or the port could not reserve at all).
+	RegionOutcome assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
+	                             int32_t priorityRating);
 	bool fillInterpolationBufferForward(SamplePlaybackGuide* guide, Sample* sample, int32_t interpolationBufferSize,
 	                                    bool loopingAtLowLevel, int32_t numSpacesToFill, int32_t priorityRating);
 };

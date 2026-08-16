@@ -181,8 +181,7 @@ bool SampleLowLevelReader::reassessReassessmentLocation(SamplePlaybackGuide* gui
 
 	unassignAllReasons(false); // Can only do this after we've done the above stuff, which references clusters, which
 	                           // this will clear
-	bool success = assignClusters(guide, sample, clusterIndex, priorityRating);
-	if (!success) {
+	if (assignClusters(guide, sample, clusterIndex, priorityRating) != RegionOutcome::Ready) {
 		D_PRINTLN("reassessReassessmentLocation fail");
 		return false;
 	}
@@ -347,8 +346,7 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 
 	int32_t clusterIndex = startPlaybackAtByte >> Cluster::size_magnitude;
 
-	bool success = assignClusters(guide, sample, clusterIndex, priorityRating);
-	if (!success) {
+	if (assignClusters(guide, sample, clusterIndex, priorityRating) != RegionOutcome::Ready) {
 		D_PRINTLN("setupClustersForPlayFromByte fail");
 		D_PRINTLN("byte:  %d", startPlaybackAtByte);
 		return false;
@@ -370,8 +368,8 @@ bool SampleLowLevelReader::setupClustersForPlayFromByte(SamplePlaybackGuide* gui
 }
 
 // Unassign the old ones before you call this.
-bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
-                                          int32_t priorityRating) {
+RegionOutcome SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sample, int32_t clusterIndex,
+                                                   int32_t priorityRating) {
 #if ALPHA_OR_BETA_VERSION
 	// Precondition: callers unassign first, so `region_` is empty on entry. If it isn't, the retain
 	// below overwrites an un-released independent lease -- a silent leak. Catch the violation in dev
@@ -392,7 +390,7 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 		// caller's "setupClustersForPlayFromByte fail" could not distinguish "no source to read through"
 		// from "the chunk would not come resident" — two unrelated causes with different fixes.
 		D_PRINTLN("assignClusters fail: source_ null (source pool exhausted)");
-		return false;
+		return RegionOutcome::Unavailable; // No cursor to load through — this can never become ready.
 	}
 
 	// Acquire the current region's residency through the region port. A `false` return is NotReady --
@@ -402,7 +400,8 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	DelugeRegionState state =
 	    deluge_sample_region_acquire_ex(source_, static_cast<uint32_t>(clusterIndex), guide->playDirection,
 	                                    static_cast<uint32_t>(priorityRating), &region);
-	if (state != DELUGE_REGION_READY) {
+	RegionOutcome outcome = regionOutcomeFrom(state);
+	if (outcome != RegionOutcome::Ready) {
 		// Diagnostic: the port refused. The tri-state form is used here purely so the log can say WHICH
 		// refusal it was — the two collapse to the same `false` through the boolean `acquire`, and they
 		// have opposite fixes. LOADING means the chunk was reserved and enqueued but the fill had not
@@ -436,7 +435,7 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 		          state == DELUGE_REGION_LOADING ? "LOADING" : "UNAVAILABLE", clusterIndex,
 		          (int32_t)guide->playDirection, (int32_t)assetId, (int32_t)sample->stream().resource_asset_id(),
 		          (int32_t)(resident != nullptr), leases);
-		return false;
+		return outcome; // Loading is NOT a failure — the caller decides whether to wait.
 	}
 
 	// Take the reader's single INDEPENDENT hard lease on the acquired chunk, tracked through
@@ -454,7 +453,7 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 	// The region port owns the look-ahead: acquire() above already prefetched the next cluster in
 	// `playDirection`, and moveOnToNextCluster advances through the port, so the port holds the single
 	// prefetch lease (one lease per neighbour).
-	return true;
+	return RegionOutcome::Ready;
 }
 
 bool SampleLowLevelReader::moveOnToNextCluster(SamplePlaybackGuide* guide, Sample* sample, int32_t priorityRating) {

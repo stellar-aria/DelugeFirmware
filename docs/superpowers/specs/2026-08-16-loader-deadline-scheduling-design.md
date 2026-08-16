@@ -147,13 +147,19 @@ measurements we do not have.
 
 ### Explicitly out of scope for the first cut
 
-**Time-stretched voices.** The stretcher consumes through its own readers at a rate that is not
-simply the phase increment, so a deadline computed as above would be wrong for them. Until someone
-measures their true consumption rate they get a fixed stand-in deadline of `audioSampleTimer +
-kStretchAssumedFrames`, where `kStretchAssumedFrames = 4096` — about a quarter of a cluster at 1:1,
-so a stretched voice always sorts ahead of speculative prefetch and behind any voice with a real
-computed deadline nearer than ~93 ms. The number is a placeholder chosen to be safe, not a measured
-one, and the spec says so on purpose: it is a known gap, not a result.
+**Time-stretched voices' true consumption rate.** The stretcher consumes through its own readers at
+a rate that is not simply the phase increment, so their computed deadline will be wrong — in an
+unknown direction, since nobody has measured what the stretcher's real rate is.
+
+They nonetheless use the same computation as everything else, deliberately. The alternative
+considered was a fixed stand-in constant, and it was rejected on two grounds: the reader has no
+`TimeStretcher` available at `deadlineForNextCluster`, so detecting the case would need new plumbing;
+and an unmeasured magic number is not obviously better than a wrong-but-principled computation — it
+just moves the error somewhere harder to notice. A wrong deadline for a stretched voice degrades to
+roughly today's behaviour for that voice, which is the status quo, not a regression.
+
+This is a known gap. Closing it starts with measuring the stretcher's consumption rate, not with
+picking a constant.
 
 **Lookahead depth.** The cursor holds one standing prefetch. Deeper lookahead would absorb more
 scheduling jitter and is the natural follow-up, but it is a separate change with its own memory cost

@@ -58,7 +58,10 @@ private:
 	/// interaction tier), where an off-owner read is refused outright, so this dispatches onto the owner
 	/// via @ref previewCoalescer_ and returns; the render happens in @ref drawSongPreviewImpl.
 	/// @param toStore true to render into PadLEDs::imageStore (behind a scroll), false for the live image.
-	void drawSongPreview(bool toStore = true);
+	/// @return true if the render happened inline (we were already on the owner); false if it was
+	///         dispatched, in which case `imageStore` is NOT yet filled and a scroll that reads it must
+	///         wait for @ref previewTrampoline.
+	[[nodiscard]] bool drawSongPreview(bool toStore = true);
 
 	/// @brief The actual preview read + render. ONLY valid on the storage owner.
 	/// @param toStore As @ref drawSongPreview.
@@ -79,6 +82,18 @@ private:
 	/// Set on every request, cleared as the render begins. Still set when the render finishes means the
 	/// selection moved again mid-read and the coalescer dropped that request, so a catch-up is dispatched.
 	bool previewPending_{false};
+
+	/// @brief Scroll direction owed to a preview whose render was dispatched, or 0 for none.
+	///
+	/// The scroll-in reads `PadLEDs::imageStore`, so it cannot start until the render has actually filled
+	/// it. When @ref drawSongPreview dispatches instead of rendering inline, the direction is parked here
+	/// and @ref previewTrampoline starts the scroll once the fill is done. Starting it eagerly is what
+	/// left the first two columns showing the PREVIOUS entry: `setupScroll` ticks once itself and
+	/// `currentFileChanged` ticked again, so two columns were copied out of an unfilled store.
+	int32_t pendingScrollDirection_{0};
+
+	/// @brief Set up and start the scroll-in from `imageStore`. Call only once it is filled.
+	void beginPreviewScrollIn(int32_t movementDirection);
 
 	bool performingLoad;
 	bool scrollingIntoSlot{};

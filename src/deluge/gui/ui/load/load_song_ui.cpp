@@ -138,7 +138,9 @@ void LoadSongUI::onBrowserOpened() {
 
 void LoadSongUI::folderContentsReady(int32_t entryDirection) {
 
-	drawSongPreview(currentUIMode == UI_MODE_VERTICAL_SCROLL);
+	// Return deliberately ignored: nothing here scrolls out of imageStore, so a dispatched render is
+	// harmless -- previewTrampoline's renderingNeededRegardlessOfUI() repaints once it lands.
+	(void)drawSongPreview(currentUIMode == UI_MODE_VERTICAL_SCROLL);
 
 	PadLEDs::sendOutMainPadColours();
 	PadLEDs::sendOutSidebarColours();
@@ -654,19 +656,29 @@ void LoadSongUI::currentFileChanged(int32_t movementDirection) {
 		PadLEDs::horizontal::renderScroll(); // The scrolling animation will begin while file is being found and
 		                                     // loaded
 
-		drawSongPreview(); // Scrolling continues as the file is read by this function
-
-		currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
-		scrollingIntoSlot = true;
-
-		// Set up another horizontal scroll
-		PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth + kSideBarWidth, false,
-		                                 kDisplayWidth + kSideBarWidth);
-		for (int32_t i = 0; i < kDisplayHeight; i++) {
-			PadLEDs::transitionTakingPlaceOnRow[i] = true;
+		// The scroll-in reads imageStore, so it may only start once the preview has actually filled it.
+		// Off the owner this render is DISPATCHED, so starting the scroll here would copy two columns
+		// (setupScroll ticks once itself, plus the explicit renderScroll) out of an unfilled store --
+		// which is what left every entry's first two columns showing the previous song.
+		if (drawSongPreview()) {
+			beginPreviewScrollIn(movementDirection);
 		}
-		PadLEDs::horizontal::renderScroll();
+		else {
+			pendingScrollDirection_ = movementDirection;
+		}
 	}
+}
+
+void LoadSongUI::beginPreviewScrollIn(int32_t movementDirection) {
+	currentUIMode = UI_MODE_HORIZONTAL_SCROLL;
+	scrollingIntoSlot = true;
+
+	PadLEDs::horizontal::setupScroll(movementDirection, kDisplayWidth + kSideBarWidth, false,
+	                                 kDisplayWidth + kSideBarWidth);
+	for (int32_t i = 0; i < kDisplayHeight; i++) {
+		PadLEDs::transitionTakingPlaceOnRow[i] = true;
+	}
+	PadLEDs::horizontal::renderScroll();
 }
 
 void LoadSongUI::selectEncoderAction(int8_t offset) {
@@ -761,6 +773,14 @@ void LoadSongUI::previewTrampoline(void* self) {
 	auto* ui = static_cast<LoadSongUI*>(self);
 	ui->previewPending_ = false;
 	ui->drawSongPreviewImpl(ui->previewToStore_);
+
+	// imageStore is filled now, so a scroll-in owed by currentFileChanged can finally start. Consume the
+	// direction before starting, so a scroll begun here cannot be started twice if the render re-runs.
+	if (ui->pendingScrollDirection_ != 0) {
+		int32_t direction = ui->pendingScrollDirection_;
+		ui->pendingScrollDirection_ = 0;
+		ui->beginPreviewScrollIn(direction);
+	}
 	// We rendered from the owner, outside the normal UI render pass, so ask for a repaint - otherwise
 	// the pads keep whatever was on them until something else happens to trigger one.
 	renderingNeededRegardlessOfUI();
@@ -776,7 +796,7 @@ void LoadSongUI::previewTrampoline(void* self) {
 	}
 }
 
-void LoadSongUI::drawSongPreview(bool toStore) {
+bool LoadSongUI::drawSongPreview(bool toStore) {
 	// The preview reads the song file, which only the storage owner may do: this is called from the
 	// scroll path on the interaction tier, where the Rust BSP refuses the open outright (and
 	// openXMLFile() reports that refusal as Error::FILE_NOT_FOUND -- which is how every scrolled entry
@@ -785,9 +805,10 @@ void LoadSongUI::drawSongPreview(bool toStore) {
 		previewToStore_ = toStore;
 		previewPending_ = true;
 		previewCoalescer_.request(&LoadSongUI::previewTrampoline, this);
-		return;
+		return false; // imageStore is NOT filled yet -- the caller must not scroll from it
 	}
 	drawSongPreviewImpl(toStore);
+	return true;
 }
 
 void LoadSongUI::drawSongPreviewImpl(bool toStore) {

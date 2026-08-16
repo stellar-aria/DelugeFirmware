@@ -344,6 +344,58 @@ Recorded so the supersession is auditable.
 | Rust BSP work lives in `deluge-sdk` | `~/GitHub/deluge-sdk` is the strategic repo, but the BSP that runs today is in-tree at `src/bsp/rust/` |
 | P1 (preemptive audio) gates only SP-delete | Still true, and still owed |
 
+## Appendix C — measured constraint: the fill task waits ~35 ms to be scheduled
+
+Measured on device 2026-08-16 (Rust BSP, release, RTT capture), instrumenting the resource manager's
+load queue with a timestamp at `loader_enqueue` and again at `loader_next` and `mark_ready`:
+
+Two passes were taken. The first accumulated counters for the whole session; the second reset them
+every 2 s — and that mattered. The cumulative means were inflated by song-load bursts, and the
+cumulative maxima by idle gaps (one reported a 79-second "latency" for a chunk left enqueued while
+playback was stopped). **The per-interval figures are the ones to design against:**
+
+| Phase | steady mean | steady max | song-load burst |
+|---|---|---|---|
+| enqueue → `loader_next` (**scheduling**) | ~700 frames = **16 ms** | ~1100 = 25 ms | up to 11444 = 260 ms |
+| `loader_next` → `mark_ready` (**read + convert**) | ~255 frames = **5.8 ms** | ~500 = 11 ms | ~5717 = 130 ms |
+
+Fill time cross-validated across both passes (247 cumulative vs 239–269 per-interval), which is what
+gives confidence in the split. Scheduling delay did not: 35 ms cumulative against ~16 ms
+per-interval. **Quote the per-interval number.**
+
+**Roughly three quarters of a streaming chunk's service latency is spent waiting for the fill task to
+run**, not doing I/O — 16 ms against 5.8 ms in steady state. The card is fast: 5.8 ms for a 32 KB
+cluster is ~5.7 MB/s. Against the ~186 ms a 32 KB cluster of 44.1 kHz stereo 16-bit audio buys, a
+16 ms scheduling delay is ~9% of the budget consumed before any work starts — and the 260 ms
+song-load burst exceeds a whole cluster's budget on its own.
+
+Two consequences for this design:
+
+1. **The storage tier's fill task needs a scheduling guarantee, not just a priority.** Whatever
+   replaces the current arrangement should bound how long an enqueued fill can go unpolled.
+   **16 ms steady-state mean is the number to beat, and the 260 ms song-load burst is the tail that
+   matters** — it alone exceeds a cluster's entire 186 ms budget, which is consistent with dropouts
+   clustering around load and heavy passages rather than arriving uniformly.
+2. **Deeper lookahead is worth costing separately.** The 380 ms fill maximum says SD stalls are real
+   and unbounded in the tail, so no scheduling guarantee alone removes underruns — the one standing
+   prefetch (one cluster, ~186 ms) cannot absorb a 380 ms stall.
+
+### What this rules out
+
+Three hypotheses were tested and eliminated before arriving here, recorded so they are not retried:
+
+- **Chunk-table scan cost** — real and large (5–27% of CPU), fixed by indexing the manager's
+  `(asset, index)` and backing-pointer lookups on 2026-08-16. Force-culls across a capture fell from
+  195 to 12, and the sample-preview truncation it caused is gone. It was NOT the cause of streaming
+  underruns.
+- **Loader queue ordering (priority inversion)** — the queue was ordered by `Voice::getPriorityRating`
+  rather than by deadline, which looked like a textbook inversion. Measured queue depth is **mean 1.19
+  cumulative, and mean 0.5 per-interval in steady playback**: `loader_next` finds nothing queued at
+  all half the times it polls, so there is routinely not even one candidate to order. See
+  `2026-08-16-loader-deadline-scheduling-design.md` for the full negative result.
+- **Bandwidth** — ~5.9 MB/s measured against ~176 KB/s per streaming voice. Roughly 30 concurrent
+  streams before saturation; normal polyphony is far below it.
+
 ## Appendix B — related documents
 
 - `docs/dev/target_architecture_north_star.md` — the whole-program map this is one track of
@@ -352,3 +404,12 @@ Recorded so the supersession is auditable.
 - `docs/superpowers/specs/2026-08-07-r5a-fiber-io-retirement-design.md` — R5a in detail
 - `docs/superpowers/specs/2026-07-22-rustfs-migration-roadmap-design.md` — the R-ladder as executed
 - `docs/dev/sd_busy_audit.md` — the filesystem-busy seam's 9-site consumer audit
+- `docs/superpowers/specs/2026-08-16-loader-deadline-scheduling-design.md` — the deadline-ordering
+  attempt and why it could not work (Appendix C summarises the outcome)
+- `docs/superpowers/specs/2026-08-16-voices-cross-tier-race.md` — `Sound::voices_` is mutated by the
+  audio tier without exclusion; found while investigating the same dropouts
+
+The measurement is live on `next` — `Stats::queue_wait_*` / `fill_*` / `loader_depth_*`, dumped every
+2 s with a per-interval reset by `audio_engine.cpp`, clocked by
+`src/deluge/io/debug/resource_clock.cpp`. The refactor can therefore check itself against these
+numbers as it lands, rather than re-deriving them.

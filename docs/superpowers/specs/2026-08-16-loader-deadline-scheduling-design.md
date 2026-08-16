@@ -1,10 +1,53 @@
 # Deadline-ordered streaming loader
 
-**Status:** designed, not implemented.
+**Status:** IMPLEMENTED AND DISPROVEN. The mechanism works; the premise did not hold. Do not retry
+without new evidence — see "Outcome" immediately below.
 **Date:** 2026-08-16.
 **Supersedes nothing.** Related: `2026-08-08-storage-execution-model-end-state-design.md` (tier
 rules), `2026-08-15-async-note-on-residency-design.md` (the note-on residency work that exposed
 this), `2026-08-16-voices-cross-tier-race.md` (unrelated defect found in the same investigation).
+
+## Outcome (2026-08-16): the premise was wrong
+
+Implemented on `feat/loader-deadline-scheduling` and measured on device. **It does not reduce
+underruns, and cannot.**
+
+| Run | underruns | window | rate |
+|---|---|---|---|
+| Baseline (before) | 5 | ~40 s | 0.125/s |
+| Deadlines, first attempt (inert) | 6 | ~50 s | 0.12/s |
+| Deadlines working | 5 | ~50 s | 0.10/s |
+
+The first attempt was **inert** for a reason worth recording: the deadline was computed for the chunk
+being *demanded*, which is by definition due now (a demand fetch happens exactly when the previous
+cluster runs out). Every computed offset came out as literally 0 — `deadline offsets: n 138 zeroish
+138 min 0 mean 0 max 0` — so the queue had nothing to order. The fix was to give the PREFETCH its own
+deadline, one cluster's playback ahead; offsets then spread 2730–8192 frames as intended.
+
+With the mechanism demonstrably working, underruns did not move beyond noise. **Measured queue depth
+explains why: mean 1.19, max 37.** With roughly one candidate in the queue at a time there is no
+ordering decision to make, so no ordering policy can help.
+
+The real cause, measured afterwards, is service latency: in steady playback a chunk waits ~**16 ms**
+to be picked up by the fill task against ~5.8 ms to actually read it, and during song load the wait
+bursts to **260 ms** — more than a whole cluster's 186 ms budget. See
+`2026-08-08-storage-execution-model-end-state-design.md` Appendix C. (An earlier cumulative pass put
+the wait at 35 ms; per-interval sampling showed that figure was inflated by the load bursts.)
+
+### What was worth keeping
+
+- `attemptLateSampleStart` was enqueueing a voice that is already *waiting to start* at
+  `0xFFFFFFFF` — the LOWEST urgency in the system. Backwards regardless of ordering policy.
+- The wrap-safe comparison in `loader_next` and its mutation-verified tests are correct and harmless.
+- The deadline arithmetic and its unit spec remain valid groundwork if the `max 37` bursts ever turn
+  out to be where underruns live — which would need depth-at-underrun correlation to establish.
+
+### The reasoning error, for next time
+
+The bandwidth arithmetic in this document (~20× headroom per voice) was evidence *against* the
+priority-inversion hypothesis and was written down without noticing: if a resource has 20× headroom
+and still fails, the failure is not contention for it. The queue-depth measurement that would have
+settled this in ten minutes was deferred in favour of implementing the fix.
 
 ## Problem
 

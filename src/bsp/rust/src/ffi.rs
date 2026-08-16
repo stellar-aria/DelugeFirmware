@@ -61,6 +61,10 @@ pub extern "C" fn deluge_control_poll_resume() -> bool {
 
 // deluge_control_set_pad_columns is implemented in `control` (PIC output queue).
 
+// deluge_control_scroll_horizontal / _row / _done / _vertical are implemented in `control`
+// (PIC output queue) -- they were stubs, which is why pad scroll animations put nothing on the
+// grid and sample-browser waveform previews never appeared at all.
+
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_control_flash_pad(idx: u8) {
     stub_log!("deluge_control_flash_pad");
@@ -69,30 +73,6 @@ pub extern "C" fn deluge_control_flash_pad(idx: u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn deluge_control_flash_pad_colour(idx: u8, colour_idx: i32) {
     stub_log!("deluge_control_flash_pad_colour");
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_control_scroll_horizontal(flags: u8) {
-    stub_log!("deluge_control_scroll_horizontal");
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_control_scroll_vertical(
-    up: bool,
-    colours: *const DelugeColour,
-    count: u8,
-) {
-    stub_log!("deluge_control_scroll_vertical");
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_control_scroll_row(row: u8, colour: DelugeColour) {
-    stub_log!("deluge_control_scroll_row");
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn deluge_control_scroll_done() {
-    stub_log!("deluge_control_scroll_done");
 }
 
 // deluge_control_set_refresh_time is implemented in `control` (PIC output queue).

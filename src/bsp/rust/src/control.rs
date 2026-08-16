@@ -226,6 +226,16 @@ enum PicOut {
     RefreshTime(u8),
     /// "Done sending rows" → trigger the PIC's display refresh.
     Refresh,
+    /// Begin a horizontal scroll animation; `flags` is the app's direction/full-width encoding.
+    ScrollSetup(u8),
+    /// The incoming colour for one row of an in-progress horizontal scroll.
+    ScrollRow { row: u8, colour: [u8; 3] },
+    /// A vertical scroll, carrying the whole incoming row (18 columns).
+    ScrollVertical {
+        up: bool,
+        colours: [[u8; 3]; 18],
+        count: u8,
+    },
 }
 
 /// Max bytes one queued command becomes on the PIC wire (a column-pair =
@@ -264,6 +274,11 @@ pub async fn pad_render() {
             PicOut::Indicator { knob, levels } => pic::set_gold_knob_indicators(knob, levels).await,
             PicOut::RefreshTime(ms) => pic::set_refresh_time(ms).await,
             PicOut::Refresh => pic::done_sending_rows().await,
+            PicOut::ScrollSetup(flags) => pic::setup_horizontal_scroll(flags).await,
+            PicOut::ScrollRow { row, colour } => pic::send_scroll_row(row, colour).await,
+            PicOut::ScrollVertical { up, colours, count } => {
+                pic::vertical_scroll(up, &colours[..(count as usize).min(18)]).await
+            }
         }
     }
 }
@@ -299,6 +314,60 @@ pub extern "C" fn deluge_control_set_pad_columns(idx: u8, colours: *const Deluge
         *dst = [c.r, c.g, c.b];
     }
     enqueue(PicOut::Columns { idx, colours: buf });
+}
+
+/// Begin a horizontal scroll animation on the surface.
+///
+/// The PIC animates a scroll from its own off-screen framebuffer: the app calls this once, then
+/// feeds one colour per row per tick via [`deluge_control_scroll_row`], ending each tick with
+/// [`deluge_control_scroll_done`]. That is why the scroll path does NOT go through
+/// [`deluge_control_set_pad_columns`] — sending one colour per row rather than the whole grid every
+/// ~7 ms is the point of the protocol.
+///
+/// `flags`: bit 0 = scrolling in the positive direction, bit 1 = the scrolled area includes the
+/// sidebar (18 columns, not 16). Forwarded as-is; see the SDK's opcode docs for why the encoding is
+/// arithmetic rather than named constants.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_control_scroll_horizontal(flags: u8) {
+    enqueue(PicOut::ScrollSetup(flags));
+}
+
+/// Supply the incoming colour for one row of an in-progress horizontal scroll (`row` 0-7).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_control_scroll_row(row: u8, colour: DelugeColour) {
+    enqueue(PicOut::ScrollRow {
+        row,
+        colour: [colour.r, colour.g, colour.b],
+    });
+}
+
+/// End a scroll tick: tells the PIC the row data for this step is complete, which is what makes it
+/// refresh. Shares the Refresh command with a normal grid update.
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_control_scroll_done() {
+    enqueue(PicOut::Refresh);
+}
+
+/// Perform a vertical scroll, supplying the whole incoming row. `colours` holds `count` entries, one
+/// per column (the app sends all 18).
+#[unsafe(no_mangle)]
+pub extern "C" fn deluge_control_scroll_vertical(
+    up: bool,
+    colours: *const DelugeColour,
+    count: u8,
+) {
+    let mut buf = [[0u8; 3]; 18];
+    let n = (count as usize).min(18);
+    // SAFETY: the app passes `count` valid DelugeColour entries.
+    let src = unsafe { core::slice::from_raw_parts(colours, n) };
+    for (dst, c) in buf.iter_mut().zip(src) {
+        *dst = [c.r, c.g, c.b];
+    }
+    enqueue(PicOut::ScrollVertical {
+        up,
+        colours: buf,
+        count: n as u8,
+    });
 }
 
 /// Set an indicator LED on/off (board-defined index).

@@ -56,8 +56,27 @@ bool VoiceUnisonPartSource::noteOn(Voice* voice, Source* source, VoiceSamplePlay
 		if (samplesLate != 0u) {
 			return true; // We're finished in this case
 		}
-		return voiceSample->setupClusersForInitialPlay(guide, (Sample*)guide->audioFileHolder->audioFile, 0, false, 1)
-		       == RegionOutcome::Ready;
+		RegionOutcome outcome =
+		    voiceSample->setupClusersForInitialPlay(guide, (Sample*)guide->audioFileHolder->audioFile, 0, false, 1);
+		switch (outcome) {
+		case RegionOutcome::Ready:
+			return true; // Sounds now — unchanged.
+		case RegionOutcome::Loading:
+			// The chunk is reserved and its fill is in flight; it is not loaded YET. Admit the voice and
+			// let the late-start machinery start it as soon as the data lands: a non-zero
+			// pendingSamplesLate makes voice.cpp's tryToStartMidNote fire on the next render, which calls
+			// attemptLateSampleStart -> SUCCESS starts the note, WAIT retries, FAILURE unassigns. 1 sample
+			// is inaudible, and each WAIT advances the position in real time, so the note sounds from
+			// where it would have been.
+			//
+			// Dropping the voice here instead is the old behaviour, and it is what made a still-loading
+			// first cluster fire a false E199.
+			voiceSample->pendingSamplesLate = 1;
+			return true;
+		case RegionOutcome::Unavailable:
+			return false; // Genuinely unplayable — unchanged.
+		}
+		return false; // Unreachable; keeps the compiler happy about the enum switch.
 	}
 
 	if (synthMode != SynthMode::FM
